@@ -53,7 +53,6 @@ export class NewApiAdapter extends BasePlatformAdapter {
     if (raw.includes('=')) {
       candidates.push(raw);
     }
-
     candidates.push(`session=${raw}`);
     candidates.push(`token=${raw}`);
 
@@ -119,7 +118,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return ids;
   }
 
-  private buildUserIdProbeCandidates(token: string): number[] {
+  private buildUserIdProbeCandidates(token: string, mode: 'full' | 'quick' = 'full'): number[] {
     const candidates: number[] = [];
     const push = (value: number | null) => {
       if (typeof value !== 'number' || Number.isNaN(value) || value <= 0) return;
@@ -130,11 +129,44 @@ export class NewApiAdapter extends BasePlatformAdapter {
     for (const guessed of this.extractLikelyUserIds(token)) {
       push(guessed);
     }
-    for (const id of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 50, 100, 8899, 11494]) {
+    const fallbackIds = mode === 'quick'
+      ? [8899, 11494, 100, 50, 20, 15, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+      : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 50, 100, 8899, 11494];
+    for (const id of fallbackIds) {
       push(id);
     }
 
     return candidates;
+  }
+
+  private async fetchJsonRawWithTimeout<T>(
+    url: string,
+    options: UndiciRequestInit | undefined,
+    timeoutMs: number,
+  ): Promise<T | null> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return this.fetchJsonRaw<T>(url, options);
+    }
+
+    const controller = new AbortController();
+    const parentSignal = options?.signal;
+    const onAbort = () => controller.abort();
+    if (parentSignal?.aborted) controller.abort();
+    parentSignal?.addEventListener?.('abort', onAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      return await this.fetchJsonRaw<T>(url, {
+        ...options,
+        signal: controller.signal,
+      });
+    } catch (error: any) {
+      if (error?.name === 'AbortError') return null;
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener?.('abort', onAbort);
+    }
   }
 
   private parseTokenItems(payload: any): any[] {
@@ -569,14 +601,28 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return null;
   }
 
-  private async probeUserIdByCookie(baseUrl: string, token: string): Promise<number | null> {
-    const candidates = this.buildUserIdProbeCandidates(token);
+  private async probeUserIdByCookie(
+    baseUrl: string,
+    token: string,
+    options?: { quick?: boolean; maxDurationMs?: number; perRequestTimeoutMs?: number },
+  ): Promise<number | null> {
+    const quick = options?.quick === true;
+    const candidates = this.buildUserIdProbeCandidates(token, quick ? 'quick' : 'full');
+    const maxDurationMs = Number.isFinite(options?.maxDurationMs as number)
+      ? Math.max(500, Math.trunc(options?.maxDurationMs as number))
+      : (quick ? 8_000 : 20_000);
+    const perRequestTimeoutMs = Number.isFinite(options?.perRequestTimeoutMs as number)
+      ? Math.max(300, Math.trunc(options?.perRequestTimeoutMs as number))
+      : (quick ? 1_500 : 2_500);
+    const deadlineAt = Date.now() + maxDurationMs;
+
     for (const cookie of this.buildCookieCandidates(token)) {
       for (const id of candidates) {
+        if (Date.now() > deadlineAt) return null;
         try {
-          const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self`, {
+          const res = await this.fetchJsonRawWithTimeout<any>(`${baseUrl}/api/user/self`, {
             headers: { Cookie: cookie, 'New-Api-User': String(id) },
-          });
+          }, perRequestTimeoutMs);
           if (res?.success && res?.data) return id;
         } catch {}
       }
@@ -648,7 +694,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     } catch {}
 
     const cookieId = await this.probeUserIdByCookie(baseUrl, accessToken);
-    if (cookieId) return cookieId;
+      if (cookieId) return cookieId;
 
     return null;
   }
@@ -738,7 +784,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
       }
 
       if (directRes?.message?.includes('New-Api-User')) {
-        const userId = platformUserId || await this.probeUserId(baseUrl, token);
+        const userId = platformUserId || await this.probeUserId(baseUrl, token, { quick: true, maxDurationMs: 8_000, perRequestTimeoutMs: 1_500 });
         if (userId) {
           const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self`, {
             headers: this.authHeaders(token, userId),
@@ -772,7 +818,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     }
 
     if (!platformUserId) {
-      const cookieUserId = await this.probeUserIdByCookie(baseUrl, token);
+      const cookieUserId = await this.probeUserIdByCookie(baseUrl, token, { quick: true, maxDurationMs: 8_000, perRequestTimeoutMs: 1_500 });
       if (cookieUserId) {
         const cookieRetry = await this.fetchUserSelfByCookie(baseUrl, token, cookieUserId);
         if (cookieRetry?.success && cookieRetry?.data) {
@@ -788,26 +834,39 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return { tokenType: 'unknown' };
   }
 
-  private async probeUserId(baseUrl: string, accessToken: string): Promise<number | null> {
+  private async probeUserId(
+    baseUrl: string,
+    accessToken: string,
+    options?: { quick?: boolean; maxDurationMs?: number; perRequestTimeoutMs?: number },
+  ): Promise<number | null> {
+    const quick = options?.quick === true;
+    const maxDurationMs = Number.isFinite(options?.maxDurationMs as number)
+      ? Math.max(500, Math.trunc(options?.maxDurationMs as number))
+      : (quick ? 8_000 : 20_000);
+    const perRequestTimeoutMs = Number.isFinite(options?.perRequestTimeoutMs as number)
+      ? Math.max(300, Math.trunc(options?.perRequestTimeoutMs as number))
+      : (quick ? 1_500 : 2_500);
+    const deadlineAt = Date.now() + maxDurationMs;
     const jwtId = this.tryDecodeUserId(accessToken);
     if (jwtId) {
-      const valid = await this.testUserId(baseUrl, accessToken, jwtId);
+      const valid = await this.testUserId(baseUrl, accessToken, jwtId, perRequestTimeoutMs);
       if (valid) return jwtId;
     }
 
-    for (const id of this.buildUserIdProbeCandidates(accessToken)) {
+    for (const id of this.buildUserIdProbeCandidates(accessToken, quick ? 'quick' : 'full')) {
+      if (Date.now() > deadlineAt) return null;
       if (id === jwtId) continue;
-      if (await this.testUserId(baseUrl, accessToken, id)) return id;
+      if (await this.testUserId(baseUrl, accessToken, id, perRequestTimeoutMs)) return id;
     }
 
     return null;
   }
 
-  private async testUserId(baseUrl: string, accessToken: string, userId: number): Promise<boolean> {
+  private async testUserId(baseUrl: string, accessToken: string, userId: number, timeoutMs = 2_500): Promise<boolean> {
     try {
-      const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self`, {
+      const res = await this.fetchJsonRawWithTimeout<any>(`${baseUrl}/api/user/self`, {
         headers: this.authHeaders(accessToken, userId),
-      });
+      }, timeoutMs);
       return res?.success === true && !!res?.data;
     } catch {
       return false;

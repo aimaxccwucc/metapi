@@ -505,6 +505,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     // Try to explain unknown failures: missing user id vs anti-bot challenge page.
     type VerifyFailureReason = 'needs-user-id' | 'shield-blocked' | null;
     const detectVerifyFailureReason = async (): Promise<VerifyFailureReason> => {
+      const deadlineAt = Date.now() + 8_000;
       const parseFailureReason = (bodyText: string, contentType: string): VerifyFailureReason => {
         const text = bodyText || '';
         const ct = (contentType || '').toLowerCase();
@@ -545,6 +546,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         }
 
         for (const headers of headerVariants) {
+          if (Date.now() > deadlineAt) break;
           try {
             const testRes = await fetch(`${site.url}/api/user/self`, withExplicitProxyRequestInit(site.proxyUrl, { headers }));
             const bodyText = await testRes.text();
