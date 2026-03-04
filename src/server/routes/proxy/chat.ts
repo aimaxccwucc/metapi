@@ -24,8 +24,10 @@ import {
   buildSyntheticOpenAiChunks,
 } from './chatFormats.js';
 import {
+  buildMinimalJsonHeadersForCompatibility,
   buildUpstreamEndpointRequest,
   isEndpointDowngradeError,
+  isUnsupportedMediaTypeError,
   resolveUpstreamEndpointCandidates,
 } from './upstreamEndpoint.js';
 import {
@@ -34,6 +36,7 @@ import {
   recordDownstreamCostUsage,
 } from './downstreamPolicy.js';
 import { composeProxyLogMessage } from './logPathMeta.js';
+import { executeEndpointFlow, withUpstreamPath } from './endpointFlow.js';
 
 const MAX_RETRIES = 2;
 const CLAUDE_SSE_EVENT_NAMES = new Set([
@@ -46,10 +49,6 @@ const CLAUDE_SSE_EVENT_NAMES = new Set([
   'ping',
   'error',
 ]);
-
-function withUpstreamPath(path: string, message: string): string {
-  return `[upstream:${path}] ${message}`;
-}
 
 function shouldRetryClaudeMessagesWithNormalizedBody(
   downstreamFormat: DownstreamFormat,
@@ -181,45 +180,13 @@ async function handleChatProxyRequest(
     let startTime = Date.now();
 
     try {
-      let upstream: Awaited<ReturnType<typeof fetch>> | null = null;
-      let successfulUpstreamPath: string | null = null;
-      let finalStatus = 0;
-      let finalErrText = 'unknown error';
-
-      for (let endpointIndex = 0; endpointIndex < endpointCandidates.length; endpointIndex += 1) {
-        const endpointRequest = buildUpstreamEndpointRequest({
-          endpoint: endpointCandidates[endpointIndex],
-          modelName,
-          stream: isStream,
-          tokenValue: selected.tokenValue,
-          sitePlatform: selected.site.platform,
-          siteUrl: selected.site.url,
-          openaiBody: upstreamBody,
-          downstreamFormat,
-          claudeOriginalBody,
-          downstreamHeaders: request.headers as Record<string, unknown>,
-        });
-
-        const targetUrl = `${selected.site.url}${endpointRequest.path}`;
-        startTime = Date.now();
-
-        const response = await fetch(targetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
-          method: 'POST',
-          headers: endpointRequest.headers,
-          body: JSON.stringify(endpointRequest.body),
-        }));
-
-        if (response.ok) {
-          upstream = response;
-          successfulUpstreamPath = endpointRequest.path;
-          break;
-        }
-
-        const rawErrText = await response.text().catch(() => 'unknown error');
-
-        if (shouldRetryClaudeMessagesWithNormalizedBody(downstreamFormat, endpointRequest.path, response.status, rawErrText)) {
-          const normalizedClaudeRequest = buildUpstreamEndpointRequest({
-            endpoint: endpointCandidates[endpointIndex],
+      const endpointResult = await executeEndpointFlow({
+        siteUrl: selected.site.url,
+        proxyUrl: selected.site.proxyUrl,
+        endpointCandidates,
+        buildRequest: (endpoint) => {
+          const endpointRequest = buildUpstreamEndpointRequest({
+            endpoint,
             modelName,
             stream: isStream,
             tokenValue: selected.tokenValue,
@@ -227,76 +194,117 @@ async function handleChatProxyRequest(
             siteUrl: selected.site.url,
             openaiBody: upstreamBody,
             downstreamFormat,
-            claudeOriginalBody: undefined,
+            claudeOriginalBody,
             downstreamHeaders: request.headers as Record<string, unknown>,
           });
-          const normalizedTargetUrl = `${selected.site.url}${normalizedClaudeRequest.path}`;
-          const normalizedResponse = await fetch(normalizedTargetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
+          return {
+            endpoint,
+            path: endpointRequest.path,
+            headers: endpointRequest.headers,
+            body: endpointRequest.body as Record<string, unknown>,
+          };
+        },
+        tryRecover: async (ctx) => {
+          if (shouldRetryClaudeMessagesWithNormalizedBody(
+            downstreamFormat,
+            ctx.request.path,
+            ctx.response.status,
+            ctx.rawErrText,
+          )) {
+            const normalizedClaudeRequest = buildUpstreamEndpointRequest({
+              endpoint: ctx.request.endpoint,
+              modelName,
+              stream: isStream,
+              tokenValue: selected.tokenValue,
+              sitePlatform: selected.site.platform,
+              siteUrl: selected.site.url,
+              openaiBody: upstreamBody,
+              downstreamFormat,
+              claudeOriginalBody: undefined,
+              downstreamHeaders: request.headers as Record<string, unknown>,
+            });
+            const normalizedTargetUrl = `${selected.site.url}${normalizedClaudeRequest.path}`;
+            const normalizedResponse = await fetch(normalizedTargetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
+              method: 'POST',
+              headers: normalizedClaudeRequest.headers,
+              body: JSON.stringify(normalizedClaudeRequest.body),
+            }));
+
+            if (normalizedResponse.ok) {
+              return {
+                upstream: normalizedResponse,
+                upstreamPath: normalizedClaudeRequest.path,
+              };
+            }
+
+            ctx.request = {
+              ...ctx.request,
+              path: normalizedClaudeRequest.path,
+              headers: normalizedClaudeRequest.headers,
+              body: normalizedClaudeRequest.body as Record<string, unknown>,
+            };
+            ctx.response = normalizedResponse;
+            ctx.rawErrText = await normalizedResponse.text().catch(() => 'unknown error');
+          }
+
+          if (!isUnsupportedMediaTypeError(ctx.response.status, ctx.rawErrText)) {
+            return null;
+          }
+
+          const minimalHeaders = buildMinimalJsonHeadersForCompatibility({
+            headers: ctx.request.headers,
+            endpoint: ctx.request.endpoint,
+            stream: isStream,
+          });
+          const normalizedCurrentHeaders = Object.fromEntries(
+            Object.entries(ctx.request.headers).map(([key, value]) => [key.toLowerCase(), value]),
+          );
+          if (JSON.stringify(minimalHeaders) === JSON.stringify(normalizedCurrentHeaders)) {
+            return null;
+          }
+
+          const minimalResponse = await fetch(ctx.targetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
             method: 'POST',
-            headers: normalizedClaudeRequest.headers,
-            body: JSON.stringify(normalizedClaudeRequest.body),
+            headers: minimalHeaders,
+            body: JSON.stringify(ctx.request.body),
           }));
 
-          if (normalizedResponse.ok) {
-            upstream = normalizedResponse;
-            successfulUpstreamPath = normalizedClaudeRequest.path;
-            break;
+          if (minimalResponse.ok) {
+            return {
+              upstream: minimalResponse,
+              upstreamPath: ctx.request.path,
+            };
           }
 
-          const normalizedErrText = await normalizedResponse.text().catch(() => 'unknown error');
-          const shouldDowngradeEndpoint = (
-            endpointIndex < endpointCandidates.length - 1
-            && (
-              isEndpointDowngradeError(normalizedResponse.status, normalizedErrText)
-              || isMessagesRequiredError(normalizedErrText)
-            )
+          ctx.request = {
+            ...ctx.request,
+            headers: minimalHeaders,
+          };
+          ctx.response = minimalResponse;
+          ctx.rawErrText = await minimalResponse.text().catch(() => 'unknown error');
+          return null;
+        },
+        shouldDowngrade: (ctx) => (
+          isEndpointDowngradeError(ctx.response.status, ctx.rawErrText)
+          || isMessagesRequiredError(ctx.rawErrText)
+        ),
+        onDowngrade: (ctx) => {
+          logProxy(
+            selected,
+            requestedModel,
+            'failed',
+            ctx.response.status,
+            Date.now() - startTime,
+            ctx.errText,
+            retryCount,
+            downstreamPath,
           );
+        },
+      });
 
-          if (shouldDowngradeEndpoint) {
-            const errText = withUpstreamPath(
-              normalizedClaudeRequest.path,
-              `normalized-claude-body fallback failed: ${normalizedErrText}`,
-            );
-            logProxy(
-              selected,
-              requestedModel,
-              'failed',
-              normalizedResponse.status,
-              Date.now() - startTime,
-              errText,
-              retryCount,
-              downstreamPath,
-            );
-            continue;
-          }
-
-          finalStatus = normalizedResponse.status;
-          finalErrText = withUpstreamPath(
-            normalizedClaudeRequest.path,
-            `normalized-claude-body fallback failed: ${normalizedErrText}`,
-          );
-          break;
-        }
-
-        const errText = withUpstreamPath(endpointRequest.path, rawErrText);
-        const shouldDowngradeEndpoint = (
-          endpointIndex < endpointCandidates.length - 1
-          && isEndpointDowngradeError(response.status, rawErrText)
-        );
-
-        if (shouldDowngradeEndpoint) {
-          logProxy(selected, requestedModel, 'failed', response.status, Date.now() - startTime, errText, retryCount, downstreamPath);
-          continue;
-        }
-
-        finalStatus = response.status;
-        finalErrText = errText;
-        break;
-      }
-
-      if (!upstream) {
-        const status = finalStatus || 502;
-        const errText = finalErrText || 'unknown error';
+      if (!endpointResult.ok) {
+        const status = endpointResult.status || 502;
+        const errText = endpointResult.errText || 'unknown error';
         tokenRouter.recordFailure(selected.channel.id);
         logProxy(selected, requestedModel, 'failed', status, Date.now() - startTime, errText, retryCount, downstreamPath);
 
@@ -323,6 +331,9 @@ async function handleChatProxyRequest(
           error: { message: errText, type: 'upstream_error' },
         });
       }
+
+      const upstream = endpointResult.upstream;
+      const successfulUpstreamPath = endpointResult.upstreamPath;
 
       if (isStream) {
         reply.hijack();
@@ -451,12 +462,14 @@ async function handleChatProxyRequest(
 
         const decoder = new TextDecoder();
         let sseBuffer = '';
+        let shouldTerminateEarly = false;
 
         const consumeSseBuffer = (incoming: string): string => {
           const pulled = pullSseEventsWithDone(incoming);
           for (const eventBlock of pulled.events) {
             if (eventBlock.data === '[DONE]') {
               writeDone();
+              shouldTerminateEarly = true;
               continue;
             }
 
@@ -486,6 +499,10 @@ async function handleChatProxyRequest(
                     claudeContext,
                   );
                   reply.raw.write(serializeRawSseEvent(claudeEventName, eventBlock.data));
+                  if (claudeContext.doneSent) {
+                    shouldTerminateEarly = true;
+                    break;
+                  }
                   continue;
                 }
               }
@@ -497,6 +514,14 @@ async function handleChatProxyRequest(
                 streamContext,
                 claudeContext,
               ));
+              if (downstreamFormat === 'claude' && claudeContext.doneSent) {
+                shouldTerminateEarly = true;
+                break;
+              }
+              if (downstreamFormat === 'openai' && streamContext.doneSent) {
+                shouldTerminateEarly = true;
+                break;
+              }
               continue;
             }
 
@@ -506,6 +531,10 @@ async function handleChatProxyRequest(
               writeLines(serializeNormalizedStreamEvent('claude', {
                 contentDelta: eventBlock.data,
               }, streamContext, claudeContext));
+              if (claudeContext.doneSent) {
+                shouldTerminateEarly = true;
+                break;
+              }
             }
           }
 
@@ -520,10 +549,16 @@ async function handleChatProxyRequest(
 
             sseBuffer += decoder.decode(value, { stream: true });
             sseBuffer = consumeSseBuffer(sseBuffer);
+            if (shouldTerminateEarly) {
+              await reader.cancel().catch(() => {});
+              break;
+            }
           }
 
-          sseBuffer += decoder.decode();
-          if (sseBuffer.trim().length > 0) {
+          if (!shouldTerminateEarly) {
+            sseBuffer += decoder.decode();
+          }
+          if (!shouldTerminateEarly && sseBuffer.trim().length > 0) {
             sseBuffer = consumeSseBuffer(`${sseBuffer}\n\n`);
           }
         } finally {

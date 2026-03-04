@@ -503,12 +503,21 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     // Try to explain unknown failures: missing user id vs anti-bot challenge page.
+    const normalizedPlatform = String(adapter.platformName || site.platform || '').trim().toLowerCase();
+    // New-API family already runs shield-aware probing inside adapters.
+    // Raw fallback probe below does not include challenge-solving and can
+    // misclassify valid Cookie/Session flows as shield-blocked.
+    const skipRawShieldDetection = normalizedPlatform === 'new-api' || normalizedPlatform === 'anyrouter';
     type VerifyFailureReason = 'needs-user-id' | 'shield-blocked' | null;
     const detectVerifyFailureReason = async (): Promise<VerifyFailureReason> => {
       const parseFailureReason = (bodyText: string, contentType: string): VerifyFailureReason => {
         const text = bodyText || '';
         const ct = (contentType || '').toLowerCase();
-        if (ct.includes('text/html') && /var\s+arg1\s*=|acw_sc__v2|cdn_sec_tc|<script/i.test(text)) {
+        if (
+          !skipRawShieldDetection
+          && ct.includes('text/html')
+          && /var\s+arg1\s*=|acw_sc__v2|cdn_sec_tc|<script/i.test(text)
+        ) {
           return 'shield-blocked';
         }
 
@@ -516,7 +525,9 @@ export async function accountsRoutes(app: FastifyInstance) {
           const body = JSON.parse(text) as any;
           const message = typeof body?.message === 'string' ? body.message : '';
           if (/mismatch|new-api-user|user id/i.test(message)) return 'needs-user-id';
-          if (/shield|challenge|captcha|acw_sc__v2|arg1/i.test(message)) return 'shield-blocked';
+          if (!skipRawShieldDetection && /shield|challenge|captcha|acw_sc__v2|arg1/i.test(message)) {
+            return 'shield-blocked';
+          }
         } catch { }
 
         return null;

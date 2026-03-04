@@ -6,7 +6,13 @@ vi.mock('../../services/modelPricingService.js', () => ({
   fetchModelPricingCatalog: (arg: unknown) => fetchModelPricingCatalogMock(arg),
 }));
 
-import { isEndpointDowngradeError, resolveUpstreamEndpointCandidates } from './upstreamEndpoint.js';
+import {
+  buildMinimalJsonHeadersForCompatibility,
+  buildUpstreamEndpointRequest,
+  isUnsupportedMediaTypeError,
+  isEndpointDowngradeError,
+  resolveUpstreamEndpointCandidates,
+} from './upstreamEndpoint.js';
 
 const baseContext = {
   site: {
@@ -58,6 +64,16 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'responses',
     );
     expect(responsesOrder).toEqual(['responses', 'chat', 'messages']);
+
+    const claudeResponsesOrder = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'claude-haiku-4-5-20251001',
+      'responses',
+    );
+    expect(claudeResponsesOrder).toEqual(['messages', 'chat', 'responses']);
   });
 
   it('prioritizes messages-first for claude-family models on openai downstream', async () => {
@@ -186,6 +202,9 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(isEndpointDowngradeError(404, '{"error":{"message":"Not Found","type":"not_found_error"}}')).toBe(true);
     expect(isEndpointDowngradeError(405, '{"error":{"message":"Method Not Allowed"}}')).toBe(true);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"unsupported endpoint","type":"invalid_request_error"}}')).toBe(true);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"","type":"upstream_error"}}')).toBe(true);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"openai_error","type":"bad_response_status_code"}}')).toBe(true);
+    expect(isEndpointDowngradeError(415, '{"error":{"message":"Unsupported Media Type: Only \\"application/json\\" is allowed"}}')).toBe(true);
   });
 
   it('treats Claude Code CLI-only restriction on responses as downgrade candidate', () => {
@@ -198,5 +217,196 @@ describe('resolveUpstreamEndpointCandidates', () => {
     });
 
     expect(isEndpointDowngradeError(400, upstreamError)).toBe(true);
+  });
+
+  it('detects unsupported media type errors as compatibility retry candidates', () => {
+    expect(isUnsupportedMediaTypeError(415, '{"error":{"message":"Unsupported Media Type"}}')).toBe(true);
+    expect(isUnsupportedMediaTypeError(400, '{"error":{"message":"Only \\"application/json\\" is allowed"}}')).toBe(true);
+    expect(isUnsupportedMediaTypeError(400, '{"error":{"message":"messages is required"}}')).toBe(false);
+  });
+});
+
+describe('buildUpstreamEndpointRequest', () => {
+  it('builds minimal JSON compatibility headers for messages endpoint', () => {
+    const headers = buildMinimalJsonHeadersForCompatibility({
+      endpoint: 'messages',
+      stream: false,
+      headers: {
+        Authorization: 'Bearer sk-demo',
+        'X-Api-Key': 'sk-claude',
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'prompt-caching-2024-07-31',
+        'OpenAI-Beta': 'responses-2025-03-11',
+      },
+    });
+
+    expect(headers).toEqual({
+      authorization: 'Bearer sk-demo',
+      'x-api-key': 'sk-claude',
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'prompt-caching-2024-07-31',
+      'content-type': 'application/json',
+      accept: 'application/json',
+    });
+  });
+
+  it('normalizes single-message OpenAI requests to structured responses input', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'sub2api',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'gpt-5.2',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'hello' }],
+      },
+    ]);
+  });
+
+  it('normalizes downstream responses input string before forwarding upstream', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'sub2api',
+      siteUrl: 'https://example.com',
+      openaiBody: {},
+      downstreamFormat: 'responses',
+      responsesOriginalBody: {
+        model: 'gpt-5.2',
+        input: 'hello',
+        metadata: { trace: 'abc123' },
+      },
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.metadata).toEqual({ trace: 'abc123' });
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'hello' }],
+      },
+    ]);
+  });
+
+  it('applies global responses standardization and drops non-standard fields', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {},
+      downstreamFormat: 'responses',
+      responsesOriginalBody: {
+        model: 'gpt-5.2',
+        input: 'hello',
+        metadata: { trace: 'abc123' },
+        max_completion_tokens: 512,
+        custom_vendor_flag: 'drop-me',
+      },
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.metadata).toEqual({ trace: 'abc123' });
+    expect(request.body.custom_vendor_flag).toBeUndefined();
+    expect(request.body.max_completion_tokens).toBeUndefined();
+    expect(request.body.max_output_tokens).toBe(512);
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'hello' }],
+      },
+    ]);
+  });
+
+  it('backfills responses input from legacy messages payload', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {},
+      downstreamFormat: 'responses',
+      responsesOriginalBody: {
+        model: 'gpt-5.2',
+        messages: [{ role: 'user', content: 'hello from messages' }],
+      },
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'hello from messages' }],
+      },
+    ]);
+  });
+
+  it('backfills responses input from prompt field when input/messages are missing', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {},
+      downstreamFormat: 'responses',
+      responsesOriginalBody: {
+        model: 'gpt-5.2',
+        prompt: 'hello from prompt',
+      },
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'hello from prompt' }],
+      },
+    ]);
+  });
+
+  it('blocks downstream content-type passthrough and forces json content-type upstream', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'gpt-5.2',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+      downstreamHeaders: {
+        'content-type': 'text/plain',
+      },
+    });
+
+    expect(request.headers['content-type']).toBeUndefined();
+    expect(request.headers['Content-Type']).toBe('application/json');
   });
 });

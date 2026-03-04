@@ -296,20 +296,51 @@ const applyAssistantDelta = (
     status: MESSAGE_STATUS.INCOMPLETE,
   };
 
+  const toIncrementalText = (existingText: string, incomingText?: string): string => {
+    if (!incomingText) return '';
+    if (!existingText) return incomingText;
+
+    if (incomingText === existingText) return '';
+    if (incomingText.startsWith(existingText)) {
+      return incomingText.slice(existingText.length);
+    }
+    if (existingText.endsWith(incomingText)) return '';
+
+    const maxOverlap = Math.min(existingText.length, incomingText.length);
+    const MIN_OVERLAP = 8;
+    for (let overlap = maxOverlap; overlap >= MIN_OVERLAP; overlap -= 1) {
+      if (existingText.slice(-overlap) === incomingText.slice(0, overlap)) {
+        return incomingText.slice(overlap);
+      }
+    }
+
+    return incomingText;
+  };
+
   if (delta.reasoningDelta) {
-    next = {
-      ...next,
-      reasoningContent: (next.reasoningContent || '') + delta.reasoningDelta,
-      isThinkingComplete: false,
-    };
+    const existingReasoning = next.reasoningContent || '';
+    const reasoningAppend = toIncrementalText(existingReasoning, delta.reasoningDelta);
+    if (reasoningAppend) {
+      next = {
+        ...next,
+        reasoningContent: existingReasoning + reasoningAppend,
+        isThinkingComplete: false,
+      };
+    }
   }
 
   if (delta.contentDelta) {
+    const existingContent = next.content || '';
+    const contentAppend = toIncrementalText(existingContent, delta.contentDelta);
+    if (!contentAppend) {
+      return replaceMessageAt(messages, targetIndex, next);
+    }
+
     const hasReasoning = Boolean(next.reasoningContent);
     const shouldAutoCollapse = hasReasoning && !next.hasAutoCollapsed;
     next = {
       ...next,
-      content: (next.content || '') + delta.contentDelta,
+      content: existingContent + contentAppend,
       isReasoningExpanded: shouldAutoCollapse ? false : next.isReasoningExpanded,
       hasAutoCollapsed: shouldAutoCollapse || next.hasAutoCollapsed,
     };
@@ -383,21 +414,15 @@ const parseAnyStreamDelta = (eventPayload: any): {
   }
 
   if (typeof eventPayload.type === 'string') {
+    // Responses stream emits a full-text summary again in several "done" events
+    // (output_text.done/content_part.done/output_item.done/response.completed).
+    // Treat those as structural events only; otherwise UI appends duplicate text.
     if (eventPayload.type === 'response.output_item.added' || eventPayload.type === 'response.output_item.done') {
-      const parsed = extractResponsesContent(eventPayload.item || eventPayload.output_item || eventPayload.response || eventPayload);
-      return {
-        contentDelta: parsed.content || undefined,
-        reasoningDelta: parsed.reasoningContent || undefined,
-      };
+      return {};
     }
 
     if (eventPayload.type === 'response.content_part.added' || eventPayload.type === 'response.content_part.done') {
-      const part = eventPayload.part || eventPayload.content_part || eventPayload;
-      const parsed = extractResponsesContent(part);
-      return {
-        contentDelta: parsed.content || undefined,
-        reasoningDelta: parsed.reasoningContent || undefined,
-      };
+      return {};
     }
 
     if (eventPayload.type === 'response.content_part.delta') {
@@ -434,18 +459,10 @@ const parseAnyStreamDelta = (eventPayload: any): {
       return { reasoningDelta: text || undefined };
     }
 
-    if (eventPayload.type === 'response.output_text.done') {
-      const text = typeof eventPayload.text === 'string' ? eventPayload.text : '';
-      return { contentDelta: text || undefined };
-    }
+    if (eventPayload.type === 'response.output_text.done') return {};
 
     if (eventPayload.type === 'response.completed' || eventPayload.type === 'response.failed') {
-      const parsed = extractResponsesContent(eventPayload.response || eventPayload);
-      return {
-        contentDelta: parsed.content || undefined,
-        reasoningDelta: parsed.reasoningContent || undefined,
-        done: true,
-      };
+      return { done: true };
     }
 
     if (eventPayload.type === 'content_block_delta') {

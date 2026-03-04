@@ -765,7 +765,7 @@ export default function Accounts() {
       )}
 
       {/* Accounts Table */}
-      <div className="card" style={{ overflowX: 'auto' }}>
+      <div className="card">
         {accounts.length > 0 ? (
           <table className="data-table accounts-table">
             <thead>

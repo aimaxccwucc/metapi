@@ -1308,11 +1308,24 @@ body {
   font-size: 12px;
 }
 
+.accounts-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.accounts-table th,
+.accounts-table td {
+  white-space: normal;
+  word-break: break-word;
+}
+
 .accounts-actions-col {
-  min-width: 220px;
+  width: 24%;
+  min-width: 0;
 }
 
 .accounts-actions-cell {
+  min-width: 0;
   white-space: normal !important;
 }
 
@@ -1320,7 +1333,12 @@ body {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 2px;
+  gap: 4px 6px;
+  width: 100%;
+}
+
+.accounts-row-actions .btn-link {
+  white-space: nowrap;
 }
 
 .sites-actions-col {
@@ -3125,7 +3143,11 @@ textarea {
   }
 
   .accounts-actions-col {
-    min-width: 180px;
+    width: 28%;
+  }
+
+  .accounts-actions-cell {
+    min-width: 0;
   }
 
   .accounts-table th,
@@ -3190,7 +3212,11 @@ textarea {
   }
 
   .accounts-actions-col {
-    min-width: 150px;
+    width: 30%;
+  }
+
+  .accounts-actions-cell {
+    min-width: 0;
   }
 
   .accounts-table th:nth-child(5),
