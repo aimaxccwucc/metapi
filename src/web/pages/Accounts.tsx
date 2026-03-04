@@ -10,6 +10,16 @@ import { tr } from '../i18n.js';
 import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { SITE_DOCS_URL } from '../docsLink.js';
 
+type VerifiedSnapshot = {
+  siteId: number;
+  accessToken: string;
+  platformUserId?: number;
+  credentialMode: 'auto' | 'session' | 'apikey';
+  tokenType: 'session' | 'apikey';
+  username?: string;
+  apiToken?: string;
+};
+
 export default function Accounts() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -31,6 +41,7 @@ export default function Accounts() {
     credentialMode: 'auto' as 'auto' | 'session' | 'apikey',
   });
   const [verifyResult, setVerifyResult] = useState<any>(null);
+  const [verifiedSnapshot, setVerifiedSnapshot] = useState<VerifiedSnapshot | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [saving, setSaving] = useState(false);
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
@@ -118,15 +129,26 @@ export default function Accounts() {
     if (!tokenForm.siteId || !tokenForm.accessToken) return;
     setVerifying(true);
     setVerifyResult(null);
+    setVerifiedSnapshot(null);
+    const normalizedPlatformUserId = tokenForm.platformUserId ? parseInt(tokenForm.platformUserId, 10) : undefined;
     try {
       const result = await api.verifyToken({
         siteId: tokenForm.siteId,
         accessToken: tokenForm.accessToken,
-        platformUserId: tokenForm.platformUserId ? parseInt(tokenForm.platformUserId) : undefined,
+        platformUserId: normalizedPlatformUserId,
         credentialMode: tokenForm.credentialMode,
       });
       setVerifyResult(result);
       if (result.success) {
+        setVerifiedSnapshot({
+          siteId: tokenForm.siteId,
+          accessToken: tokenForm.accessToken,
+          platformUserId: normalizedPlatformUserId,
+          credentialMode: tokenForm.credentialMode,
+          tokenType: result.tokenType,
+          username: result.userInfo?.username,
+          apiToken: result.apiToken,
+        });
         if (result.tokenType === 'apikey') {
           toast.success(`API Key 验证成功（可用模型 ${result.modelCount || 0} 个）`);
         } else {
@@ -137,6 +159,7 @@ export default function Accounts() {
       }
     } catch (e: any) {
       toast.error(e.message || '验证失败');
+      setVerifiedSnapshot(null);
       setVerifyResult({ success: false, message: e.message });
     } finally {
       setVerifying(false);
@@ -150,20 +173,34 @@ export default function Accounts() {
       return;
     }
     setSaving(true);
+    const normalizedPlatformUserId = tokenForm.platformUserId ? parseInt(tokenForm.platformUserId, 10) : undefined;
+    const payload: any = {
+      siteId: tokenForm.siteId,
+      username: tokenForm.username.trim() || undefined,
+      accessToken: tokenForm.accessToken,
+      platformUserId: normalizedPlatformUserId,
+      refreshToken: isSub2ApiSelected && tokenForm.refreshToken.trim()
+        ? tokenForm.refreshToken.trim()
+        : undefined,
+      tokenExpiresAt: isSub2ApiSelected && tokenForm.tokenExpiresAt.trim()
+        ? Number.parseInt(tokenForm.tokenExpiresAt.trim(), 10)
+        : undefined,
+      credentialMode: tokenForm.credentialMode,
+    };
+    const snapshotMatchesCurrentForm = !!verifiedSnapshot
+      && verifiedSnapshot.siteId === tokenForm.siteId
+      && verifiedSnapshot.accessToken === tokenForm.accessToken
+      && (verifiedSnapshot.platformUserId || undefined) === (normalizedPlatformUserId || undefined)
+      && verifiedSnapshot.credentialMode === tokenForm.credentialMode;
+    if (snapshotMatchesCurrentForm) {
+      payload.preverified = {
+        tokenType: verifiedSnapshot.tokenType,
+        username: verifiedSnapshot.username,
+        apiToken: verifiedSnapshot.apiToken,
+      };
+    }
     try {
-      const result = await api.addAccount({
-        siteId: tokenForm.siteId,
-        username: tokenForm.username.trim() || undefined,
-        accessToken: tokenForm.accessToken,
-        platformUserId: tokenForm.platformUserId ? parseInt(tokenForm.platformUserId) : undefined,
-        refreshToken: isSub2ApiSelected && tokenForm.refreshToken.trim()
-          ? tokenForm.refreshToken.trim()
-          : undefined,
-        tokenExpiresAt: isSub2ApiSelected && tokenForm.tokenExpiresAt.trim()
-          ? Number.parseInt(tokenForm.tokenExpiresAt.trim(), 10)
-          : undefined,
-        credentialMode: tokenForm.credentialMode,
-      });
+      const result = await api.addAccount(payload);
       setShowAdd(false);
       setTokenForm({
         siteId: 0,
@@ -175,6 +212,7 @@ export default function Accounts() {
         credentialMode: 'auto',
       });
       setVerifyResult(null);
+      setVerifiedSnapshot(null);
       if (result.tokenType === 'apikey') {
         toast.success('已添加为 API Key 账号（可用于代理转发）');
       } else {
@@ -183,6 +221,9 @@ export default function Accounts() {
         if (result.apiTokenFound) parts.push('API Key 已自动获取');
         const extra = parts.length ? `（${parts.join('，')}）` : '';
         toast.success(`账号已添加${extra}`);
+      }
+      if (result.queued) {
+        toast.info('账号初始化任务已在后台执行，余额/模型会稍后自动刷新');
       }
       load();
     } catch (e: any) {
@@ -524,6 +565,7 @@ export default function Accounts() {
                   const nextSiteId = Number.parseInt(nextValue, 10) || 0;
                   setTokenForm((f) => ({ ...f, siteId: nextSiteId }));
                   setVerifyResult(null);
+                  setVerifiedSnapshot(null);
                 }}
                 options={[
                   { value: '0', label: '选择站点' },
@@ -537,7 +579,10 @@ export default function Accounts() {
               <input
                 placeholder="账号名称（可选，API Key 模式建议填写）"
                 value={tokenForm.username}
-                onChange={(e) => setTokenForm((f) => ({ ...f, username: e.target.value }))}
+                onChange={(e) => {
+                  setTokenForm((f) => ({ ...f, username: e.target.value }));
+                  setVerifiedSnapshot(null);
+                }}
                 style={inputStyle}
               />
               <ModernSelect
@@ -546,6 +591,7 @@ export default function Accounts() {
                   const nextMode = (nextValue as 'auto' | 'session' | 'apikey') || 'auto';
                   setTokenForm((f) => ({ ...f, credentialMode: nextMode }));
                   setVerifyResult(null);
+                  setVerifiedSnapshot(null);
                 }}
                 options={[
                   { value: 'auto', label: '自动识别（推荐）' },
@@ -562,13 +608,21 @@ export default function Accounts() {
                     : '粘贴 Access Token / Session Cookie / API Key（自动识别）')
               }
                 value={tokenForm.accessToken}
-                onChange={e => { setTokenForm(f => ({ ...f, accessToken: e.target.value.trim() })); setVerifyResult(null); }}
+                onChange={e => {
+                  setTokenForm(f => ({ ...f, accessToken: e.target.value.trim() }));
+                  setVerifyResult(null);
+                  setVerifiedSnapshot(null);
+                }}
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)', height: 72, resize: 'none' as const }} />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <input
                   placeholder="用户 ID（可选）"
                   value={tokenForm.platformUserId}
-                  onChange={e => { setTokenForm(f => ({ ...f, platformUserId: e.target.value.replace(/\D/g, '') })); setVerifyResult(null); }}
+                  onChange={e => {
+                    setTokenForm(f => ({ ...f, platformUserId: e.target.value.replace(/\D/g, '') }));
+                    setVerifyResult(null);
+                    setVerifiedSnapshot(null);
+                  }}
                   style={inputStyle}
                 />
                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
@@ -580,14 +634,20 @@ export default function Accounts() {
                   <input
                     placeholder="Sub2API refresh_token（可选，用于托管自动续期）"
                     value={tokenForm.refreshToken}
-                    onChange={(e) => setTokenForm((f) => ({ ...f, refreshToken: e.target.value.trim() }))}
+                    onChange={(e) => {
+                      setTokenForm((f) => ({ ...f, refreshToken: e.target.value.trim() }));
+                      setVerifiedSnapshot(null);
+                    }}
                     style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
                   />
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     <input
                       placeholder="token_expires_at（可选，毫秒时间戳）"
                       value={tokenForm.tokenExpiresAt}
-                      onChange={(e) => setTokenForm((f) => ({ ...f, tokenExpiresAt: e.target.value.replace(/\D/g, '') }))}
+                      onChange={(e) => {
+                        setTokenForm((f) => ({ ...f, tokenExpiresAt: e.target.value.replace(/\D/g, '') }));
+                        setVerifiedSnapshot(null);
+                      }}
                       style={inputStyle}
                     />
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>

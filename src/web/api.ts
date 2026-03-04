@@ -107,9 +107,17 @@ export const api = {
 
   // Accounts
   getAccounts: () => request('/api/accounts'),
-  addAccount: (data: any) => request('/api/accounts', { method: 'POST', body: JSON.stringify(data) }),
+  addAccount: (data: any) => request('/api/accounts', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    timeoutMs: 120_000,
+  }),
   loginAccount: (data: { siteId: number; username: string; password: string }) => request('/api/accounts/login', { method: 'POST', body: JSON.stringify(data) }),
-  verifyToken: (data: { siteId: number; accessToken: string; platformUserId?: number; credentialMode?: 'auto' | 'session' | 'apikey' }) => request('/api/accounts/verify-token', { method: 'POST', body: JSON.stringify(data) }),
+  verifyToken: (data: { siteId: number; accessToken: string; platformUserId?: number; credentialMode?: 'auto' | 'session' | 'apikey' }) => request('/api/accounts/verify-token', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    timeoutMs: 90_000,
+  }),
   rebindAccountSession: (id: number, data: { accessToken: string; platformUserId?: number }) =>
     request(`/api/accounts/${id}/rebind-session`, { method: 'POST', body: JSON.stringify(data) }),
   updateAccount: (id: number, data: any) => request(`/api/accounts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
