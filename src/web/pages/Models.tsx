@@ -123,6 +123,7 @@ const PAGE_SIZES = [10, 20, 50];
 export default function Models() {
   const cdn = useIconCdn();
   const toast = useToast();
+  const toastInfo = toast.info;
   const [data, setData] = useState<ModelsMarketplaceResponse>({ models: [] });
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -159,9 +160,9 @@ export default function Models() {
       setData(next);
       if (refresh && next.meta?.refreshRequested) {
         if (next.meta.refreshReused) {
-          toast.info(tr('模型广场刷新进行中'));
+          toastInfo(tr('模型广场刷新进行中'));
         } else if (next.meta.refreshQueued) {
-          toast.info(tr('已开始刷新模型广场'));
+          toastInfo(tr('已开始刷新模型广场'));
         }
       }
       return next;
@@ -174,7 +175,7 @@ export default function Models() {
         setLoading(false);
       }
     }
-  }, [toast]);
+  }, [toastInfo]);
 
   const hydrateMarketplaceMetadata = useCallback(async (baseModels: ModelRow[]) => {
     if (!shouldHydrateMarketplaceMetadata(baseModels)) return;
