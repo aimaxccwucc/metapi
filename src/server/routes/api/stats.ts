@@ -11,6 +11,7 @@ import { getPreferredAccountToken, syncTokensFromUpstream } from '../../services
 import { resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { buildModelAnalysis } from '../../services/modelAnalysisService.js';
 import { fallbackTokenCost, fetchModelPricingCatalog } from '../../services/modelPricingService.js';
+import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
 import { getUpstreamModelDescriptionsCached } from '../../services/upstreamModelDescriptionService.js';
 import { getRunningTaskByDedupeKey, startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { parseCheckinRewardAmount } from '../../services/checkinRewardParser.js';
@@ -32,6 +33,7 @@ const MODELS_MARKETPLACE_BASE_TTL_MS = 15_000;
 const MODELS_MARKETPLACE_PRICING_TTL_MS = 90_000;
 const MARKETPLACE_MODEL_TEST_TIMEOUT_MS = 15_000;
 const MARKETPLACE_AUTO_KEY_TIMEOUT_MS = 8_000;
+const MARKETPLACE_MODEL_PROBE_TIMEOUT_MS = 10_000;
 
 type ModelsMarketplaceCacheEntry = {
   expiresAt: number;
@@ -72,6 +74,161 @@ async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, timeoutMe
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+type MarketplaceProbeResult = {
+  available: boolean | null;
+  reason: string;
+  checkedUrl: string | null;
+  statusCode: number | null;
+};
+
+function summarizeProbeError(rawText: string): string {
+  const text = String(rawText || '').trim();
+  if (!text) return '';
+  try {
+    const parsed = JSON.parse(text) as Record<string, any>;
+    const nestedMessage = parsed?.error?.message || parsed?.message || parsed?.error || parsed?.detail;
+    if (typeof nestedMessage === 'string' && nestedMessage.trim()) return nestedMessage.trim();
+  } catch {}
+  return text.slice(0, 320);
+}
+
+function classifyProbeFailureMessage(message: string): 'model_unavailable' | 'credential' | 'inconclusive' {
+  const text = String(message || '').toLowerCase();
+  if (!text) return 'inconclusive';
+  if (
+    /model.*(not found|does not exist|unsupported|invalid)/i.test(text)
+    || /unknown model|no such model|unsupported model/i.test(text)
+    || /模型.*(不存在|未找到|不支持|不可用)/i.test(text)
+    || /当前分组不支持|未开通.*模型|not available for your/i.test(text)
+  ) {
+    return 'model_unavailable';
+  }
+  if (
+    /unauthorized|forbidden|invalid api key|authentication|auth|token|apikey/i.test(text)
+    || /未授权|鉴权|权限|密钥|key 无效|token 无效/i.test(text)
+  ) {
+    return 'credential';
+  }
+  return 'inconclusive';
+}
+
+function buildProbeEndpoints(platform: string): Array<'chat' | 'responses' | 'messages'> {
+  const normalized = String(platform || '').trim().toLowerCase();
+  if (normalized === 'claude') return ['messages', 'chat', 'responses'];
+  return ['chat', 'responses', 'messages'];
+}
+
+function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' | 'responses' | 'messages') {
+  const normalizedBase = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (endpoint === 'responses') {
+    return {
+      url: `${normalizedBase}/v1/responses`,
+      body: {
+        model: modelName,
+        input: 'ping',
+        max_output_tokens: 1,
+        temperature: 0,
+      },
+    };
+  }
+  if (endpoint === 'messages') {
+    return {
+      url: `${normalizedBase}/v1/messages`,
+      body: {
+        model: modelName,
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'ping' }],
+      },
+    };
+  }
+  return {
+    url: `${normalizedBase}/v1/chat/completions`,
+    body: {
+      model: modelName,
+      messages: [{ role: 'user', content: 'ping' }],
+      max_tokens: 1,
+      temperature: 0,
+      stream: false,
+    },
+  };
+}
+
+async function probeModelAvailabilityViaRealtimeCall(input: {
+  baseUrl: string;
+  platform: string;
+  credential: string;
+  modelName: string;
+}): Promise<MarketplaceProbeResult> {
+  const { fetch } = await import('undici');
+  const endpointOrder = buildProbeEndpoints(input.platform);
+  const attemptMessages: string[] = [];
+
+  for (const endpoint of endpointOrder) {
+    const probe = buildProbeRequest(input.baseUrl, input.modelName, endpoint);
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json,text/event-stream,text/plain,*/*',
+    };
+    if (endpoint === 'messages') {
+      headers['x-api-key'] = input.credential;
+      headers['anthropic-version'] = '2023-06-01';
+    } else {
+      headers.Authorization = `Bearer ${input.credential}`;
+    }
+
+    try {
+      const response = await withTimeout(
+        async () => {
+          return await fetch(
+            probe.url,
+            await withSiteProxyRequestInit(probe.url, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(probe.body),
+              signal: AbortSignal.timeout(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS),
+            }),
+          );
+        },
+        MARKETPLACE_MODEL_PROBE_TIMEOUT_MS + 500,
+        `model probe timeout (${Math.round(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS / 1000)}s)`,
+      );
+
+      if (response.ok) {
+        return {
+          available: true,
+          reason: `probe succeeded via ${endpoint} (HTTP ${response.status})`,
+          checkedUrl: probe.url,
+          statusCode: response.status,
+        };
+      }
+
+      const responseText = await response.text();
+      const summarized = summarizeProbeError(responseText) || `HTTP ${response.status}`;
+      const classification = classifyProbeFailureMessage(summarized);
+      if (classification === 'model_unavailable') {
+        return {
+          available: false,
+          reason: `probe rejected model via ${endpoint}: ${summarized}`,
+          checkedUrl: probe.url,
+          statusCode: response.status,
+        };
+      }
+
+      attemptMessages.push(`${endpoint}:${response.status} ${summarized}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || 'unknown error');
+      attemptMessages.push(`${endpoint}: ${message}`);
+    }
+  }
+
+  return {
+    available: null,
+    reason: attemptMessages[0] || 'probe inconclusive',
+    checkedUrl: null,
+    statusCode: null,
+  };
 }
 
 function proxyCostSqlExpression() {
@@ -891,7 +1048,29 @@ export async function statsRoutes(app: FastifyInstance) {
           .map((item) => String(item || '').trim())
           .filter((item) => item.length > 0),
       );
-      const available = normalizedSet.has(modelName);
+      let available = normalizedSet.has(modelName);
+      let reason = available ? 'model found in upstream list' : 'model not found in upstream list';
+      let probeCheckedUrl: string | null = null;
+      let probeStatusCode: number | null = null;
+
+      if (!available) {
+        const probe = await probeModelAvailabilityViaRealtimeCall({
+          baseUrl: site.url,
+          platform: site.platform,
+          credential: modelCredential,
+          modelName,
+        });
+        probeCheckedUrl = probe.checkedUrl;
+        probeStatusCode = probe.statusCode;
+        if (probe.available === true) {
+          available = true;
+          reason = `model accepted by realtime probe: ${probe.reason}`;
+        } else if (probe.available === false) {
+          reason = probe.reason;
+        } else {
+          reason = `${reason}; probe inconclusive: ${probe.reason}`;
+        }
+      }
 
       return {
         success: true,
@@ -902,7 +1081,9 @@ export async function statsRoutes(app: FastifyInstance) {
         siteId: site.id,
         siteName: site.name,
         latencyMs: Date.now() - startedAt,
-        reason: available ? 'model found in upstream list' : 'model not found in upstream list',
+        reason,
+        probeCheckedUrl,
+        probeStatusCode,
         autoKeyCreated,
         autoKeyName,
         autoKeyGroup,
