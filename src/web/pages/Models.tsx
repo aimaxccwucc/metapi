@@ -68,6 +68,12 @@ interface ModelsMarketplaceResponse {
     refreshJobId?: string | null;
   };
 }
+
+type AvailabilityCheckState = {
+  status: 'idle' | 'available' | 'unavailable' | 'error';
+  message?: string;
+  latencyMs?: number;
+};
 function getMetricColor(latency: number) {
   if (latency >= 3000) return 'var(--color-danger)';
   if (latency >= 2000) return 'color-mix(in srgb, var(--color-warning) 30%, var(--color-danger))';
@@ -131,6 +137,8 @@ export default function Models() {
   const [copied, setCopied] = useState<string | null>(null);
   const [filterCollapsed, setFilterCollapsed] = useState(false);
   const [metadataHydrating, setMetadataHydrating] = useState(false);
+  const [availabilityTesting, setAvailabilityTesting] = useState<Record<string, boolean>>({});
+  const [availabilityChecks, setAvailabilityChecks] = useState<Record<string, AvailabilityCheckState>>({});
   const filterPanelPresence = useAnimatedVisibility(!filterCollapsed, 220);
   const latestPrimaryRequestRef = useRef(0);
   const latestMetadataRequestRef = useRef(0);
@@ -312,6 +320,46 @@ export default function Models() {
     navigator.clipboard.writeText(name).catch(() => { });
     setCopied(name);
     setTimeout(() => setCopied(null), 1500);
+  };
+
+  const accountModelKey = (modelName: string, accountId: number) => `${modelName}::${accountId}`;
+
+  const testModelAvailability = async (modelName: string, account: ModelAccountInfo) => {
+    const key = accountModelKey(modelName, account.id);
+    setAvailabilityTesting((prev) => ({ ...prev, [key]: true }));
+    try {
+      const res = await api.testMarketplaceModelAvailability({
+        modelName,
+        accountId: account.id,
+        siteName: account.site,
+      }) as { available?: boolean; reason?: string; latencyMs?: number };
+      const available = res?.available === true;
+      setAvailabilityChecks((prev) => ({
+        ...prev,
+        [key]: {
+          status: available ? 'available' : 'unavailable',
+          message: res?.reason || (available ? '可用' : '不可用'),
+          latencyMs: Number.isFinite(res?.latencyMs as number) ? Number(res?.latencyMs) : undefined,
+        },
+      }));
+      if (available) {
+        toast.success(`${account.site}/${account.username || account.id}: 模型可用`);
+      } else {
+        toast.info(`${account.site}/${account.username || account.id}: 模型不可用`);
+      }
+    } catch (error: any) {
+      const message = String(error?.message || '检测失败');
+      setAvailabilityChecks((prev) => ({
+        ...prev,
+        [key]: {
+          status: 'error',
+          message,
+        },
+      }));
+      toast.error(message);
+    } finally {
+      setAvailabilityTesting((prev) => ({ ...prev, [key]: false }));
+    }
   };
 
   /* ---- loading skeleton ---- */
@@ -656,11 +704,16 @@ export default function Models() {
                           <th style={{ fontWeight: 500 }}>{tr('账号')}</th>
                           <th style={{ fontWeight: 500 }}>{tr('令牌')}</th>
                           <th style={{ fontWeight: 500 }}>{tr('延迟')}</th>
+                          <th style={{ fontWeight: 500 }}>{tr('可用性检测')}</th>
                           <th style={{ fontWeight: 500 }}>{tr('余额')}</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {m.accounts.map(a => (
+                        {m.accounts.map((a) => {
+                          const rowKey = accountModelKey(m.name, a.id);
+                          const checking = !!availabilityTesting[rowKey];
+                          const check = availabilityChecks[rowKey];
+                          return (
                           <tr key={a.id}>
                             <td><span className="badge badge-info">{a.site}</span></td>
                             <td style={{ fontSize: 12 }}>{a.username || `ID:${a.id}`}</td>
@@ -674,9 +727,32 @@ export default function Models() {
                                 <span style={{ color: getMetricColor(a.latency), fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>{a.latency}ms</span>
                               ) : '—'}
                             </td>
+                            <td>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <button
+                                  className="btn btn-ghost"
+                                  style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
+                                  onClick={() => { void testModelAvailability(m.name, a); }}
+                                  disabled={checking}
+                                >
+                                  {checking ? tr('检测中...') : tr('检测')}
+                                </button>
+                                {check && (
+                                  <span
+                                    className={`badge ${check.status === 'available' ? 'badge-success' : (check.status === 'unavailable' ? 'badge-warning' : 'badge-error')}`}
+                                    style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums' }}
+                                    title={check.message || ''}
+                                  >
+                                    {check.status === 'available' ? tr('可用') : (check.status === 'unavailable' ? tr('不可用') : tr('失败'))}
+                                    {check.latencyMs != null ? ` ${check.latencyMs}ms` : ''}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
                             <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>${(a.balance || 0).toFixed(2)}</td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                     </div>
@@ -811,10 +887,15 @@ export default function Models() {
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('账号')}</th>
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('令牌')}</th>
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('延迟')}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('可用性检测')}</th>
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('余额')}</th>
                               </tr></thead>
                               <tbody>
-                                {m.accounts.map(a => (
+                                {m.accounts.map((a) => {
+                                  const rowKey = accountModelKey(m.name, a.id);
+                                  const checking = !!availabilityTesting[rowKey];
+                                  const check = availabilityChecks[rowKey];
+                                  return (
                                   <tr key={a.id} style={{ borderTop: '1px solid var(--color-border-light)' }}>
                                     <td style={{ padding: 8 }}>{a.site}</td>
                                     <td style={{ padding: 8 }}>{a.username || `ID:${a.id}`}</td>
@@ -826,9 +907,32 @@ export default function Models() {
                                     <td style={{ padding: 8, color: a.latency != null ? getMetricColor(a.latency) : 'var(--color-text-muted)' }}>
                                       {a.latency != null ? `${a.latency}ms` : '—'}
                                     </td>
+                                    <td style={{ padding: 8 }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                        <button
+                                          className="btn btn-ghost"
+                                          style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
+                                          onClick={() => { void testModelAvailability(m.name, a); }}
+                                          disabled={checking}
+                                        >
+                                          {checking ? tr('检测中...') : tr('检测')}
+                                        </button>
+                                        {check && (
+                                          <span
+                                            className={`badge ${check.status === 'available' ? 'badge-success' : (check.status === 'unavailable' ? 'badge-warning' : 'badge-error')}`}
+                                            style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums' }}
+                                            title={check.message || ''}
+                                          >
+                                            {check.status === 'available' ? tr('可用') : (check.status === 'unavailable' ? tr('不可用') : tr('失败'))}
+                                            {check.latencyMs != null ? ` ${check.latencyMs}ms` : ''}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
                                     <td style={{ padding: 8 }}>${(a.balance || 0).toFixed(2)}</td>
                                   </tr>
-                                ))}
+                                  );
+                                })}
                               </tbody>
                             </table>
                             </div>

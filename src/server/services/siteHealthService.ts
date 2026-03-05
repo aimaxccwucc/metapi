@@ -3,7 +3,8 @@ import { db, schema } from '../db/index.js';
 import { invalidateSiteProxyCache, withExplicitProxyRequestInit } from './siteProxy.js';
 
 const SITE_HEALTH_TIMEOUT_MS = 6_000;
-const SITE_HEALTH_PATHS = ['/api/status', '/v1/models', '/'];
+// Default to loose reachability: treat site as alive when web entry pages are reachable.
+const SITE_HEALTH_PATHS = ['/', '/login'];
 const SITE_HEALTH_CONCURRENCY = 8;
 
 type SiteReachabilityProbeResult = {

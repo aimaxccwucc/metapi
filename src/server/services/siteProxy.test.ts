@@ -24,6 +24,7 @@ describe('siteProxy', () => {
     db.delete(schema.accounts).run();
     db.delete(schema.sites).run();
     invalidateSiteProxyCache();
+    delete process.env.DEFAULT_SITE_PROXY_URL;
   });
 
   afterAll(() => {
@@ -66,6 +67,24 @@ describe('siteProxy', () => {
       method: 'POST',
     });
 
+    expect('dispatcher' in requestInit).toBe(true);
+  });
+
+  it('falls back to default proxy when site proxy is absent', async () => {
+    process.env.DEFAULT_SITE_PROXY_URL = 'http://127.0.0.1:7897';
+    const { withSiteProxyRequestInit } = await import('./siteProxy.js');
+    const requestInit = withSiteProxyRequestInit('https://no-proxy.example.com/v1/models', {
+      method: 'GET',
+    });
+    expect('dispatcher' in requestInit).toBe(true);
+  });
+
+  it('uses default proxy in explicit proxy helper when argument is empty', async () => {
+    process.env.DEFAULT_SITE_PROXY_URL = 'http://127.0.0.1:7897';
+    const { withExplicitProxyRequestInit } = await import('./siteProxy.js');
+    const requestInit = withExplicitProxyRequestInit('', {
+      method: 'GET',
+    });
     expect('dispatcher' in requestInit).toBe(true);
   });
 });

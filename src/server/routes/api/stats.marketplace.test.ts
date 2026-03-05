@@ -112,4 +112,51 @@ describe('/api/models/marketplace', () => {
       tokens: [],
     });
   });
+
+  it('returns explicit hint when site has no usable key for model availability test', async () => {
+    const site = db.insert(schema.sites).values({
+      name: 'site-no-key',
+      url: 'https://site-no-key.example.com',
+      platform: 'new-api',
+      status: 'active',
+      apiKey: '',
+    }).returning().get();
+
+    const account = db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'bob',
+      accessToken: 'session-token',
+      apiToken: '',
+      status: 'active',
+      balance: 1,
+    }).returning().get();
+
+    db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4o-mini',
+      available: true,
+      latencyMs: 120,
+    }).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'gpt-4o-mini',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json() as {
+      success: boolean;
+      error: string;
+      message: string;
+      siteId: number;
+    };
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('site_missing_api_key');
+    expect(body.message).toContain('请先创建 Key');
+    expect(body.siteId).toBe(site.id);
+  });
 });

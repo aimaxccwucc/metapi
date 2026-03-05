@@ -34,6 +34,10 @@ let siteProxyCache: {
 
 const dispatcherCache = new Map<string, Dispatcher>();
 
+function resolveDefaultSiteProxyUrl(): string | null {
+  return normalizeSiteProxyUrl(process.env.DEFAULT_SITE_PROXY_URL);
+}
+
 function normalizeSiteUrl(value: string): string {
   const trimmed = (value || '').trim();
   if (!trimmed) return '';
@@ -173,7 +177,7 @@ export function withSiteProxyRequestInit(
   requestUrl: string,
   options?: UndiciRequestInit,
 ): UndiciRequestInit {
-  const proxyUrl = resolveSiteProxyUrlByRequestUrl(requestUrl);
+  const proxyUrl = resolveSiteProxyUrlByRequestUrl(requestUrl) || resolveDefaultSiteProxyUrl();
   if (!proxyUrl) return options ?? {};
 
   const dispatcher = getDispatcherByProxyUrl(proxyUrl);
@@ -189,7 +193,7 @@ export function withExplicitProxyRequestInit(
   proxyUrl: string | null | undefined,
   options?: UndiciRequestInit,
 ): UndiciRequestInit {
-  const normalized = normalizeSiteProxyUrl(proxyUrl);
+  const normalized = normalizeSiteProxyUrl(proxyUrl) || resolveDefaultSiteProxyUrl();
   if (!normalized) return options ?? {};
 
   const dispatcher = getDispatcherByProxyUrl(normalized);

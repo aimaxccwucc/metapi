@@ -6,6 +6,9 @@ import {
   refreshModelsAndRebuildRoutes,
   rebuildTokenRoutesFromAvailability,
 } from '../../services/modelService.js';
+import { getAdapter } from '../../services/platforms/index.js';
+import { getPreferredAccountToken, syncTokensFromUpstream } from '../../services/accountTokenService.js';
+import { resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { buildModelAnalysis } from '../../services/modelAnalysisService.js';
 import { fallbackTokenCost, fetchModelPricingCatalog } from '../../services/modelPricingService.js';
 import { getUpstreamModelDescriptionsCached } from '../../services/upstreamModelDescriptionService.js';
@@ -27,6 +30,8 @@ function parseBooleanFlag(raw?: string): boolean {
 
 const MODELS_MARKETPLACE_BASE_TTL_MS = 15_000;
 const MODELS_MARKETPLACE_PRICING_TTL_MS = 90_000;
+const MARKETPLACE_MODEL_TEST_TIMEOUT_MS = 15_000;
+const MARKETPLACE_AUTO_KEY_TIMEOUT_MS = 8_000;
 
 type ModelsMarketplaceCacheEntry = {
   expiresAt: number;
@@ -53,6 +58,20 @@ function writeModelsMarketplaceCache(includePricing: boolean, models: any[]): vo
     expiresAt: Date.now() + ttl,
     models,
   });
+}
+
+async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function proxyCostSqlExpression() {
@@ -745,6 +764,165 @@ export async function statsRoutes(app: FastifyInstance) {
     const refresh = await refreshModelsForAccount(accountId);
     const rebuild = rebuildTokenRoutesFromAvailability();
     return { success: true, refresh, rebuild };
+  });
+
+  app.post<{ Body?: { modelName?: string; accountId?: number; siteName?: string } }>('/api/models/marketplace/test', async (request, reply) => {
+    const modelName = String(request.body?.modelName || '').trim();
+    if (!modelName) {
+      return reply.code(400).send({ success: false, error: 'modelName is required' });
+    }
+
+    const accountIdInput = request.body?.accountId;
+    const accountId = Number.isFinite(accountIdInput) ? Number(accountIdInput) : null;
+    const siteName = String(request.body?.siteName || '').trim();
+
+    const modelRows = db.select()
+      .from(schema.modelAvailability)
+      .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
+      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .where(
+        and(
+          eq(schema.modelAvailability.modelName, modelName),
+          eq(schema.modelAvailability.available, true),
+          eq(schema.accounts.status, 'active'),
+          eq(schema.sites.status, 'active'),
+        ),
+      )
+      .all();
+
+    const candidateRows = modelRows
+      .filter((row) => (accountId == null ? true : row.accounts.id === accountId))
+      .filter((row) => (siteName ? row.sites.name === siteName : true));
+
+    if (candidateRows.length === 0) {
+      return reply.code(404).send({
+        success: false,
+        error: 'no available account for this model',
+      });
+    }
+
+    const targetRow = candidateRows[0];
+    const account = targetRow.accounts;
+    const site = targetRow.sites;
+    const adapter = getAdapter(site.platform);
+    if (!adapter) {
+      return reply.code(400).send({
+        success: false,
+        error: `unsupported platform: ${site.platform}`,
+      });
+    }
+
+    let preferredToken = getPreferredAccountToken(account.id);
+    const fallbackSiteApiKey = (site.apiKey || '').trim();
+    let modelCredential = (
+      (preferredToken?.token || '').trim()
+      || (account.apiToken || '').trim()
+      || fallbackSiteApiKey
+    );
+    const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
+    const accountAccessToken = (account.accessToken || '').trim();
+    let autoKeyCreated = false;
+    let autoKeyName: string | null = null;
+    let autoKeyGroup: string | null = null;
+
+    if (!modelCredential && accountAccessToken) {
+      try {
+        const groups = await withTimeout(
+          () => adapter.getUserGroups(site.url, accountAccessToken, platformUserId),
+          MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
+          `list groups timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
+        );
+        const targetGroup = String(groups.find((item) => String(item || '').trim().length > 0) || 'default').trim() || 'default';
+        const safeModelPart = modelName.replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 32) || 'model';
+        const generatedName = `metapi-auto-${safeModelPart}-${Date.now().toString().slice(-6)}`;
+        const created = await withTimeout(
+          () => adapter.createApiToken(site.url, accountAccessToken, platformUserId, {
+            name: generatedName,
+            group: targetGroup,
+            modelLimitsEnabled: true,
+            modelLimits: modelName,
+          }),
+          MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
+          `create api key timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
+        );
+        if (created) {
+          const upstreamTokens = await withTimeout(
+            () => adapter.getApiTokens(site.url, accountAccessToken, platformUserId),
+            MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
+            `list api keys timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
+          );
+          syncTokensFromUpstream(account.id, upstreamTokens);
+          preferredToken = getPreferredAccountToken(account.id);
+          modelCredential = (
+            (preferredToken?.token || '').trim()
+            || (account.apiToken || '').trim()
+            || fallbackSiteApiKey
+          );
+          autoKeyCreated = !!modelCredential;
+          autoKeyName = generatedName;
+          autoKeyGroup = targetGroup;
+        }
+      } catch {
+        // Keep conservative behavior: fall through to explicit hint below.
+      }
+    }
+
+    if (!modelCredential) {
+      return reply.code(400).send({
+        success: false,
+        error: 'site_missing_api_key',
+        message: '站点未配置可用 API Key，请先创建 Key',
+        accountId: account.id,
+        siteId: site.id,
+        siteName: site.name,
+        autoCreateAttempted: !!accountAccessToken,
+        autoCreateSupported: !!accountAccessToken,
+      });
+    }
+    const startedAt = Date.now();
+    try {
+      const discoveredModels = await withTimeout(
+        () => adapter.getModels(site.url, modelCredential, platformUserId),
+        MARKETPLACE_MODEL_TEST_TIMEOUT_MS,
+        `model test timeout (${Math.round(MARKETPLACE_MODEL_TEST_TIMEOUT_MS / 1000)}s)`,
+      );
+      const normalizedSet = new Set(
+        (Array.isArray(discoveredModels) ? discoveredModels : [])
+          .map((item) => String(item || '').trim())
+          .filter((item) => item.length > 0),
+      );
+      const available = normalizedSet.has(modelName);
+
+      return {
+        success: true,
+        available,
+        modelName,
+        accountId: account.id,
+        accountName: account.username || null,
+        siteId: site.id,
+        siteName: site.name,
+        latencyMs: Date.now() - startedAt,
+        reason: available ? 'model found in upstream list' : 'model not found in upstream list',
+        autoKeyCreated,
+        autoKeyName,
+        autoKeyGroup,
+      };
+    } catch (error) {
+      return reply.code(502).send({
+        success: false,
+        available: false,
+        modelName,
+        accountId: account.id,
+        accountName: account.username || null,
+        siteId: site.id,
+        siteName: site.name,
+        latencyMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error || 'unknown error'),
+        autoKeyCreated,
+        autoKeyName,
+        autoKeyGroup,
+      });
+    }
   });
 
   // Site distribution – per-site aggregate data
