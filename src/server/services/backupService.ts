@@ -546,12 +546,12 @@ function isSettingValueAcceptable(key: string, value: unknown): boolean {
   return true;
 }
 
-function exportAccountsSection(): AccountsBackupSection {
-  const sites = db.select().from(schema.sites).orderBy(asc(schema.sites.id)).all();
-  const accounts = db.select().from(schema.accounts).orderBy(asc(schema.accounts.id)).all();
-  const accountTokens = db.select().from(schema.accountTokens).orderBy(asc(schema.accountTokens.id)).all();
-  const tokenRoutes = db.select().from(schema.tokenRoutes).orderBy(asc(schema.tokenRoutes.id)).all();
-  const routeChannels = db.select().from(schema.routeChannels).orderBy(asc(schema.routeChannels.id)).all();
+async function exportAccountsSection(): Promise<AccountsBackupSection> {
+  const sites = await db.select().from(schema.sites).orderBy(asc(schema.sites.id)).all();
+  const accounts = await db.select().from(schema.accounts).orderBy(asc(schema.accounts.id)).all();
+  const accountTokens = await db.select().from(schema.accountTokens).orderBy(asc(schema.accountTokens.id)).all();
+  const tokenRoutes = await db.select().from(schema.tokenRoutes).orderBy(asc(schema.tokenRoutes.id)).all();
+  const routeChannels = await db.select().from(schema.routeChannels).orderBy(asc(schema.routeChannels.id)).all();
 
   return {
     sites,
@@ -562,8 +562,8 @@ function exportAccountsSection(): AccountsBackupSection {
   };
 }
 
-function exportPreferencesSection(): PreferencesBackupSection {
-  const settings = db.select().from(schema.settings).all()
+async function exportPreferencesSection(): Promise<PreferencesBackupSection> {
+  const settings = (await db.select().from(schema.settings).all())
     .filter((row) => !EXCLUDED_SETTING_KEYS.has(row.key))
     .map((row) => ({
       key: row.key,
@@ -573,14 +573,14 @@ function exportPreferencesSection(): PreferencesBackupSection {
   return { settings };
 }
 
-export function exportBackup(type: BackupExportType): BackupV2 {
+export async function exportBackup(type: BackupExportType): Promise<BackupV2> {
   const now = Date.now();
   if (type === 'accounts') {
     return {
       version: BACKUP_VERSION,
       timestamp: now,
       type: 'accounts',
-      accounts: exportAccountsSection(),
+      accounts: await exportAccountsSection(),
     };
   }
 
@@ -589,15 +589,15 @@ export function exportBackup(type: BackupExportType): BackupV2 {
       version: BACKUP_VERSION,
       timestamp: now,
       type: 'preferences',
-      preferences: exportPreferencesSection(),
+      preferences: await exportPreferencesSection(),
     };
   }
 
   return {
     version: BACKUP_VERSION,
     timestamp: now,
-    accounts: exportAccountsSection(),
-    preferences: exportPreferencesSection(),
+    accounts: await exportAccountsSection(),
+    preferences: await exportPreferencesSection(),
   };
 }
 
@@ -678,20 +678,20 @@ function detectPreferencesSection(data: RawBackupData): PreferencesBackupSection
   return null;
 }
 
-function importAccountsSection(section: AccountsBackupSection) {
-  db.transaction((tx) => {
-    tx.delete(schema.routeChannels).run();
-    tx.delete(schema.tokenRoutes).run();
-    tx.delete(schema.tokenModelAvailability).run();
-    tx.delete(schema.modelAvailability).run();
-    tx.delete(schema.proxyLogs).run();
-    tx.delete(schema.checkinLogs).run();
-    tx.delete(schema.accountTokens).run();
-    tx.delete(schema.accounts).run();
-    tx.delete(schema.sites).run();
+async function importAccountsSection(section: AccountsBackupSection): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.delete(schema.routeChannels).run();
+    await tx.delete(schema.tokenRoutes).run();
+    await tx.delete(schema.tokenModelAvailability).run();
+    await tx.delete(schema.modelAvailability).run();
+    await tx.delete(schema.proxyLogs).run();
+    await tx.delete(schema.checkinLogs).run();
+    await tx.delete(schema.accountTokens).run();
+    await tx.delete(schema.accounts).run();
+    await tx.delete(schema.sites).run();
 
     for (const row of section.sites) {
-      tx.insert(schema.sites).values({
+      await tx.insert(schema.sites).values({
         id: row.id,
         name: row.name,
         url: row.url,
@@ -708,7 +708,7 @@ function importAccountsSection(section: AccountsBackupSection) {
     }
 
     for (const row of section.accounts) {
-      tx.insert(schema.accounts).values({
+      await tx.insert(schema.accounts).values({
         id: row.id,
         siteId: row.siteId,
         username: row.username,
@@ -732,7 +732,7 @@ function importAccountsSection(section: AccountsBackupSection) {
     }
 
     for (const row of section.accountTokens) {
-      tx.insert(schema.accountTokens).values({
+      await tx.insert(schema.accountTokens).values({
         id: row.id,
         accountId: row.accountId,
         name: row.name,
@@ -747,7 +747,7 @@ function importAccountsSection(section: AccountsBackupSection) {
     }
 
     for (const row of section.tokenRoutes) {
-      tx.insert(schema.tokenRoutes).values({
+      await tx.insert(schema.tokenRoutes).values({
         id: row.id,
         modelPattern: row.modelPattern,
         displayName: row.displayName ?? null,
@@ -760,7 +760,7 @@ function importAccountsSection(section: AccountsBackupSection) {
     }
 
     for (const row of section.routeChannels) {
-      tx.insert(schema.routeChannels).values({
+      await tx.insert(schema.routeChannels).values({
         id: row.id,
         routeId: row.routeId,
         accountId: row.accountId,
@@ -782,14 +782,14 @@ function importAccountsSection(section: AccountsBackupSection) {
   });
 }
 
-function importPreferencesSection(section: PreferencesBackupSection): Array<{ key: string; value: unknown }> {
+async function importPreferencesSection(section: PreferencesBackupSection): Promise<Array<{ key: string; value: unknown }>> {
   const applied: Array<{ key: string; value: unknown }> = [];
 
-  db.transaction((tx) => {
+  await db.transaction(async (tx) => {
     for (const row of section.settings) {
       if (!isSettingValueAcceptable(row.key, row.value)) continue;
 
-      tx.insert(schema.settings).values({
+      await tx.insert(schema.settings).values({
         key: row.key,
         value: stringifySettingValue(row.value),
       }).onConflictDoUpdate({
@@ -803,7 +803,7 @@ function importPreferencesSection(section: PreferencesBackupSection): Array<{ ke
   return applied;
 }
 
-export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMergeImportResult {
+export async function importAllApiHubAccountsMerge(data: RawBackupData): Promise<AllApiHubMergeImportResult> {
   if (!isRecord(data)) {
     throw new Error('导入数据格式错误：必须为 JSON 对象');
   }
@@ -813,9 +813,9 @@ export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMerg
     throw new Error('导入数据中没有可识别的 all-api-hub 账号列表（accounts.accounts）');
   }
 
-  const existingSites = db.select().from(schema.sites).orderBy(asc(schema.sites.id)).all();
-  const existingAccounts = db.select().from(schema.accounts).orderBy(asc(schema.accounts.id)).all();
-  const existingTokens = db.select().from(schema.accountTokens).orderBy(asc(schema.accountTokens.id)).all();
+  const existingSites = await db.select().from(schema.sites).orderBy(asc(schema.sites.id)).all();
+  const existingAccounts = await db.select().from(schema.accounts).orderBy(asc(schema.accounts.id)).all();
+  const existingTokens = await db.select().from(schema.accountTokens).orderBy(asc(schema.accountTokens.id)).all();
 
   const siteByKey = new Map<string, SiteRow>();
   for (const site of existingSites) {
@@ -850,7 +850,7 @@ export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMerg
 
   const repairedAccountIds = new Set<number>();
 
-  db.transaction((tx) => {
+  await db.transaction(async (tx) => {
     for (const item of rows) {
       const siteUrl = normalizeSiteBaseUrl(item.site_url);
       if (!siteUrl) {
@@ -866,7 +866,7 @@ export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMerg
       let site = siteByKey.get(siteKey) || null;
       if (!site) {
         const now = new Date().toISOString();
-        site = tx.insert(schema.sites).values({
+        site = await tx.insert(schema.sites).values({
           name: siteName,
           url: siteUrl,
           externalCheckinUrl: importedExternalCheckinUrl,
@@ -878,21 +878,29 @@ export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMerg
           createdAt: now,
           updatedAt: now,
         }).returning().get();
+        if (!site) {
+          result.skippedRows += 1;
+          continue;
+        }
         siteByKey.set(siteKey, site);
         result.sites.created += 1;
       } else {
         if (!site.externalCheckinUrl && importedExternalCheckinUrl) {
-          tx.update(schema.sites).set({
+          await tx.update(schema.sites).set({
             externalCheckinUrl: importedExternalCheckinUrl,
             updatedAt: new Date().toISOString(),
           }).where(eq(schema.sites.id, site.id)).run();
-          const refreshedSite = tx.select().from(schema.sites).where(eq(schema.sites.id, site.id)).get();
+          const refreshedSite = await tx.select().from(schema.sites).where(eq(schema.sites.id, site.id)).get();
           if (refreshedSite) {
             site = refreshedSite;
-            siteByKey.set(siteKey, site);
+            siteByKey.set(siteKey, refreshedSite);
           }
         }
         result.sites.reused += 1;
+      }
+      if (!site) {
+        result.skippedRows += 1;
+        continue;
       }
 
       const accountInfo = isRecord(item.account_info) ? item.account_info : {};
@@ -939,7 +947,7 @@ export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMerg
         if (platformUserId > 0) {
           extraConfigPatch.platformUserId = platformUserId;
         }
-        const created = tx.insert(schema.accounts).values({
+        const created = await tx.insert(schema.accounts).values({
           siteId: site.id,
           username,
           accessToken: accountAccessToken,
@@ -959,9 +967,13 @@ export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMerg
           createdAt,
           updatedAt,
         }).returning().get();
+        if (!created) {
+          result.skippedRows += 1;
+          continue;
+        }
 
         existingAccount = created;
-        indexAccountLookupMaps(existingAccount, accountBySiteUserId, accountBySiteUsername, accountBySiteAccessToken);
+        indexAccountLookupMaps(created, accountBySiteUserId, accountBySiteUsername, accountBySiteAccessToken);
         result.accounts.created += 1;
       } else {
         const shouldUpdate = shouldPreferIncomingByUpdatedAt(existingAccount.updatedAt, updatedAt);
@@ -971,7 +983,7 @@ export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMerg
             source: 'all-api-hub-import',
             ...(platformUserId > 0 ? { platformUserId } : {}),
           });
-          tx.update(schema.accounts).set({
+          await tx.update(schema.accounts).set({
             username: username || existingAccount.username,
             accessToken: accountAccessToken || existingAccount.accessToken,
             balance: importedBalance,
@@ -983,15 +995,19 @@ export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMerg
             updatedAt,
           }).where(eq(schema.accounts.id, existingAccount.id)).run();
 
-          const refreshed = tx.select().from(schema.accounts).where(eq(schema.accounts.id, existingAccount.id)).get();
+          const refreshed = await tx.select().from(schema.accounts).where(eq(schema.accounts.id, existingAccount.id)).get();
           if (refreshed) {
             existingAccount = refreshed;
-            indexAccountLookupMaps(existingAccount, accountBySiteUserId, accountBySiteUsername, accountBySiteAccessToken);
+            indexAccountLookupMaps(refreshed, accountBySiteUserId, accountBySiteUsername, accountBySiteAccessToken);
           }
           result.accounts.updated += 1;
         } else {
           result.accounts.reused += 1;
         }
+      }
+      if (!existingAccount) {
+        result.skippedRows += 1;
+        continue;
       }
 
       const tokenSet = tokenByAccountId.get(existingAccount.id) || new Set<string>();
@@ -1005,7 +1021,7 @@ export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMerg
           result.tokens.reused += 1;
           continue;
         }
-        tx.insert(schema.accountTokens).values({
+        await tx.insert(schema.accountTokens).values({
           accountId: existingAccount.id,
           name: tokenSet.size === 0 ? 'default' : `imported-${tokenSet.size + 1}`,
           token: keyToken,
@@ -1030,14 +1046,14 @@ export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMerg
   });
 
   for (const accountId of repairedAccountIds) {
-    repairDefaultToken(accountId);
+    await repairDefaultToken(accountId);
   }
   result.repairedDefaultTokenAccounts = repairedAccountIds.size;
 
   return result;
 }
 
-export function importBackup(data: RawBackupData): BackupImportResult {
+export async function importBackup(data: RawBackupData): Promise<BackupImportResult> {
   if (!isRecord(data)) {
     throw new Error('导入数据格式错误：必须为 JSON 对象');
   }
@@ -1065,7 +1081,7 @@ export function importBackup(data: RawBackupData): BackupImportResult {
     if (!accountsSection) {
       throw new Error('导入数据格式错误：账号数据结构不正确');
     }
-    importAccountsSection(accountsSection);
+    await importAccountsSection(accountsSection);
     accountsImported = true;
   }
 
@@ -1073,7 +1089,7 @@ export function importBackup(data: RawBackupData): BackupImportResult {
     if (!preferencesSection) {
       throw new Error('导入数据格式错误：设置数据结构不正确');
     }
-    appliedSettings = importPreferencesSection(preferencesSection);
+    appliedSettings = await importPreferencesSection(preferencesSection);
     preferencesImported = true;
   }
 

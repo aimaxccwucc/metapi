@@ -98,11 +98,11 @@ function getSuccessBadgeClass(rate: number | null) {
 
 function resolveMarketplaceDescription(model: ModelRow, metadataHydrating: boolean): string {
   if (model.description && model.description.trim().length > 0) return model.description;
-  if (metadataHydrating) return tr('正在加载模型元数据...');
+  if (metadataHydrating) return tr('姝ｅ湪鍔犺浇妯″瀷鍏冩暟鎹?..');
 
   const hasOtherMetadata = model.tags.length > 0 || model.supportedEndpointTypes.length > 0 || model.pricingSources.length > 0;
-  if (hasOtherMetadata) return tr('上游未提供文字说明，但已同步标签、能力或价格信息。');
-  return tr('当前上游仅返回模型 ID，未返回说明字段（常见于很多站点）。');
+  if (hasOtherMetadata) return tr('上游未提供描述文本，但已同步标签、能力或价格信息。');
+  return tr('当前上游仅返回模型 ID，未返回描述字段。');
 }
 
 function renderGroupPricingValue(pricing: ModelGroupPricing): string {
@@ -206,14 +206,20 @@ export default function Models() {
 
   useEffect(() => {
     let cancelled = false;
+    let metadataTimer: ReturnType<typeof setTimeout> | null = null;
     const bootstrap = async () => {
       const initial = await loadBaseMarketplace(false);
       if (!initial || cancelled) return;
-      void hydrateMarketplaceMetadata(initial.models);
+      metadataTimer = setTimeout(() => {
+        if (!cancelled) {
+          void hydrateMarketplaceMetadata(initial.models);
+        }
+      }, 1200);
     };
     void bootstrap();
     return () => {
       cancelled = true;
+      if (metadataTimer) clearTimeout(metadataTimer);
       latestMetadataRequestRef.current += 1;
     };
   }, [hydrateMarketplaceMetadata, loadBaseMarketplace]);
@@ -222,7 +228,9 @@ export default function Models() {
     void (async () => {
       const refreshed = await loadBaseMarketplace(true);
       if (!refreshed) return;
-      void hydrateMarketplaceMetadata(refreshed.models);
+      setTimeout(() => {
+        void hydrateMarketplaceMetadata(refreshed.models);
+      }, 600);
     })();
   }, [hydrateMarketplaceMetadata, loadBaseMarketplace]);
 
@@ -387,15 +395,15 @@ export default function Models() {
           {/* Brand filter */}
           <div className="filter-panel-section">
             <div className="filter-panel-title">
-              {tr('品牌')}
-              {activeBrand && <button onClick={() => setActiveBrand(null)}>{tr('重置')}</button>}
+              {tr('鍝佺墝')}
+              {activeBrand && <button onClick={() => setActiveBrand(null)}>{tr('閲嶇疆')}</button>}
             </div>
             <div
               className={`filter-item ${!activeBrand ? 'active' : ''}`}
               onClick={() => setActiveBrand(null)}
             >
-              <span className="filter-item-icon" style={{ background: 'var(--color-primary-light)', color: 'var(--color-primary)' }}>✦</span>
-              {tr('全部品牌')}
+              <span className="filter-item-icon" style={{ background: 'var(--color-primary-light)', color: 'var(--color-primary)' }}>✓</span>
+              {tr('鍏ㄩ儴鍝佺墝')}
               <span className="filter-item-count">{data.models.length}</span>
             </div>
             {brandList.list.map(([brandName, { count, brand }]) => (
@@ -423,7 +431,7 @@ export default function Models() {
                 onClick={() => setActiveBrand(activeBrand === '__other__' ? null : '__other__')}
               >
                 <span className="filter-item-icon" style={{ background: 'var(--color-bg)', color: 'var(--color-text-muted)', fontSize: 10, borderRadius: 4 }}>?</span>
-                {tr('其他')}
+                {tr('鍏朵粬')}
                 <span className="filter-item-count">{brandList.otherCount}</span>
               </div>
             )}
@@ -433,7 +441,7 @@ export default function Models() {
           <div className="filter-panel-section">
             <div className="filter-panel-title">
               {tr('供应商')}
-              {activeSite && <button onClick={() => setActiveSite(null)}>{tr('重置')}</button>}
+              {activeSite && <button onClick={() => setActiveSite(null)}>{tr('閲嶇疆')}</button>}
             </div>
             {siteMap.map(([site, count]) => (
               <div
@@ -452,13 +460,13 @@ export default function Models() {
 
           {/* Sort */}
           <div className="filter-panel-section">
-            <div className="filter-panel-title">{tr('排序方式')}</div>
+            <div className="filter-panel-title">{tr('鎺掑簭鏂瑰紡')}</div>
             {[
               { key: 'accountCount' as SortColumn, label: tr('账号数') },
               { key: 'tokenCount' as SortColumn, label: tr('令牌数') },
-              { key: 'avgLatency' as SortColumn, label: tr('延迟') },
+              { key: 'avgLatency' as SortColumn, label: tr('寤惰繜') },
               { key: 'successRate' as SortColumn, label: tr('成功率') },
-              { key: 'name' as SortColumn, label: tr('名称') },
+              { key: 'name' as SortColumn, label: tr('鍚嶇О') },
             ].map(opt => (
               <div
                 key={opt.key}
@@ -487,7 +495,7 @@ export default function Models() {
             style={{ width: '100%', fontSize: 12, padding: '6px 10px', marginTop: 8, justifyContent: 'center', border: '1px solid var(--color-border)' }}
             onClick={() => setFilterCollapsed(true)}
           >
-            {tr('收起')}
+            {tr('鏀惰捣')}
           </button>
         </div>
       )}
@@ -498,7 +506,7 @@ export default function Models() {
         <div className="page-header" style={{ marginBottom: 16 }}>
           <div>
             <h2 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {activeBrand || activeSite || tr('模型广场')}
+              {activeBrand || activeSite || tr('妯″瀷骞垮満')}
               <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500 }}>
                 {tr('共')} {filteredModels.length} {tr('个模型')}
               </span>
@@ -522,13 +530,13 @@ export default function Models() {
               </svg>
             </button>
             {metadataHydrating && (
-              <span className="badge badge-muted" style={{ fontSize: 11 }}>{tr('加载元数据中...')}</span>
+              <span className="badge badge-muted" style={{ fontSize: 11 }}>{tr('鍔犺浇鍏冩暟鎹腑...')}</span>
             )}
             <div className="view-toggle">
-              <button className={`view-toggle-btn ${viewMode === 'card' ? 'active' : ''}`} onClick={() => setViewMode('card')} data-tooltip={tr('卡片视图')} aria-label={tr('卡片视图')}>
+              <button className={`view-toggle-btn ${viewMode === 'card' ? 'active' : ''}`} onClick={() => setViewMode('card')} data-tooltip={tr('鍗＄墖瑙嗗浘')} aria-label={tr('鍗＄墖瑙嗗浘')}>
                 <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
               </button>
-              <button className={`view-toggle-btn ${viewMode === 'table' ? 'active' : ''}`} onClick={() => setViewMode('table')} data-tooltip={tr('表格视图')} aria-label={tr('表格视图')}>
+              <button className={`view-toggle-btn ${viewMode === 'table' ? 'active' : ''}`} onClick={() => setViewMode('table')} data-tooltip={tr('琛ㄦ牸瑙嗗浘')} aria-label={tr('琛ㄦ牸瑙嗗浘')}>
                 <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18M3 6h18M3 18h18M10 3v18M14 3v18" /></svg>
               </button>
             </div>
@@ -544,18 +552,18 @@ export default function Models() {
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder={tr('模糊搜索模型名称')}
+              placeholder={tr('妯＄硦鎼滅储妯″瀷鍚嶇О')}
             />
           </div>
           {/* Quick stats */}
           <div style={{ display: 'flex', gap: 16, fontSize: 12, color: 'var(--color-text-muted)', alignItems: 'center' }}>
             <span data-tooltip={tr('所有模型 accountCount 累计值，同一账号在多个模型中会重复计数')}>
-              {tr('覆盖槽位')} <b style={{ color: 'var(--color-text-primary)' }}>{totalCoverageSlots}</b>
+              {tr('瑕嗙洊妲戒綅')} <b style={{ color: 'var(--color-text-primary)' }}>{totalCoverageSlots}</b>
             </span>
             <span data-tooltip={tr('当前筛选范围内去重后的唯一账号数')}>
-              {tr('去重账号')} <b style={{ color: 'var(--color-text-primary)' }}>{uniqueAccountCount}</b>
+              {tr('鍘婚噸璐﹀彿')} <b style={{ color: 'var(--color-text-primary)' }}>{uniqueAccountCount}</b>
             </span>
-            <span>{tr('平均延迟')} <b style={{ color: getMetricColor(avgLatency) }}>{avgLatency}ms</b></span>
+            <span>{tr('骞冲潎寤惰繜')} <b style={{ color: getMetricColor(avgLatency) }}>{avgLatency}ms</b></span>
           </div>
         </div>
 
@@ -567,14 +575,16 @@ export default function Models() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
               </svg>
             </div>
-            <div className="empty-state-title">{tr('暂无模型数据')}</div>
+            <div className="empty-state-title">{tr('鏆傛棤妯″瀷鏁版嵁')}</div>
             <div className="empty-state-desc">{tr('请先检查站点与账号状态，然后点击刷新。')}</div>
           </div>
         ) : viewMode === 'card' ? (
           /* ====== Card View ====== */
           <div>
-            {paged.map(m => (
-              <div key={m.name} className="model-card" onClick={() => setExpanded(expanded === m.name ? null : m.name)}>
+            {paged.map((m) => {
+              const isExpanded = expanded === m.name;
+              return (
+              <div key={m.name} className="model-card" onClick={() => setExpanded(isExpanded ? null : m.name)}>
                 <div className="model-card-header">
                   <BrandIcon model={m.name} size={44} />
                   <div className="model-card-info">
@@ -586,14 +596,14 @@ export default function Models() {
                       </span>
                       <span>
                         <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" /></svg>
-                        {m.tokenCount} {tr('令牌')}
+                        {m.tokenCount} {tr('浠ょ墝')}
                       </span>
                       <span
                         className={`badge ${getLatencyBadgeClass(m.avgLatency)}`}
                         style={{ fontVariantNumeric: 'tabular-nums' }}
-                        data-tooltip={tr('平均延迟')}
+                        data-tooltip={tr('骞冲潎寤惰繜')}
                       >
-                        {tr('延迟')} {m.avgLatency}ms
+                        {tr('寤惰繜')} {m.avgLatency}ms
                       </span>
                       <span
                         className={`badge ${getSuccessBadgeClass(m.successRate)}`}
@@ -614,10 +624,10 @@ export default function Models() {
                     </button>
                     <button
                       className="model-card-action-btn"
-                      data-tooltip={expanded === m.name ? tr('收起') : tr('展开')}
-                      aria-label={expanded === m.name ? tr('收起') : tr('展开')}
+                      data-tooltip={isExpanded ? tr('鏀惰捣') : tr('灞曞紑')}
+                      aria-label={isExpanded ? tr('鏀惰捣') : tr('灞曞紑')}
                     >
-                      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ transform: expanded === m.name ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>
+                      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                       </svg>
                     </button>
@@ -633,10 +643,10 @@ export default function Models() {
                     <span key={site} className="model-tag model-tag-blue">{site}</span>
                   ))}
                   {m.successRate != null && m.successRate >= 90 && (
-                    <span className="model-tag model-tag-green">{tr('健康')}</span>
+                    <span className="model-tag model-tag-green">{tr('鍋ュ悍')}</span>
                   )}
                   {m.successRate != null && m.successRate < 60 && (
-                    <span className="model-tag model-tag-orange">{tr('风险')}</span>
+                    <span className="model-tag model-tag-orange">{tr('椋庨櫓')}</span>
                   )}
                   {m.avgLatency <= 500 && (
                     <span className="model-tag model-tag-purple">{tr('低延迟')}</span>
@@ -644,33 +654,34 @@ export default function Models() {
                 </div>
 
                 {/* Expand: Account Details */}
-                <div className={`anim-collapse ${expanded === m.name ? 'is-open' : ''}`.trim()} onClick={e => e.stopPropagation()}>
+                {isExpanded ? (
+                <div className="anim-collapse is-open" onClick={e => e.stopPropagation()}>
                   <div className="anim-collapse-inner">
                     <div className="model-card-expand">
                     <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
                       <div className="card" style={{ padding: 10 }}>
-                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('基础信息')}</div>
+                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('鍩虹淇℃伅')}</div>
                         <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.6 }}>
                           {resolveMarketplaceDescription(m, metadataHydrating)}
                         </div>
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
                           {m.tags.length > 0 ? m.tags.map((tag) => (
                             <span key={tag} className="badge badge-info">{tag}</span>
-                          )) : <span className="badge badge-muted">{metadataHydrating ? tr('加载元数据中...') : tr('暂无标签')}</span>}
+                          )) : <span className="badge badge-muted">{metadataHydrating ? tr('鍔犺浇鍏冩暟鎹腑...') : tr('鏆傛棤鏍囩')}</span>}
                         </div>
                       </div>
 
                       <div className="card" style={{ padding: 10 }}>
-                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('接口能力')}</div>
+                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('鎺ュ彛鑳藉姏')}</div>
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           {m.supportedEndpointTypes.length > 0 ? m.supportedEndpointTypes.map((endpoint) => (
                             <span key={endpoint} className="badge badge-success">{endpoint}</span>
-                          )) : <span className="badge badge-muted">{metadataHydrating ? tr('加载元数据中...') : tr('未提供')}</span>}
+                          )) : <span className="badge badge-muted">{metadataHydrating ? tr('鍔犺浇鍏冩暟鎹腑...') : tr('未提供')}</span>}
                         </div>
                       </div>
 
                       <div className="card" style={{ padding: 10 }}>
-                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('分组计费')}</div>
+                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('鍒嗙粍璁¤垂')}</div>
                         {m.pricingSources.length > 0 ? (
                           <div style={{ display: 'grid', gap: 8 }}>
                             {m.pricingSources.map((source) => (
@@ -679,7 +690,7 @@ export default function Models() {
                                 style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 8 }}
                               >
                                 <div style={{ fontSize: 12, marginBottom: 6 }}>
-                                  <strong>{source.siteName}</strong> · {source.username || `ID:${source.accountId}`}
+                                  <strong>{source.siteName}</strong> 路 {source.username || `ID:${source.accountId}`}
                                 </div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                   {Object.entries(source.groupPricing).map(([group, pricing]) => (
@@ -692,7 +703,7 @@ export default function Models() {
                             ))}
                           </div>
                         ) : (
-                          <span className="badge badge-muted">{metadataHydrating ? tr('正在加载价格元数据...') : tr('暂无价格元数据')}</span>
+                          <span className="badge badge-muted">{metadataHydrating ? tr('姝ｅ湪鍔犺浇浠锋牸鍏冩暟鎹?..') : tr('暂无价格元数据')}</span>
                         )}
                       </div>
                     </div>
@@ -758,8 +769,10 @@ export default function Models() {
                     </div>
                   </div>
                 </div>
+                ) : null}
               </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           /* ====== Table View ====== */
@@ -769,7 +782,7 @@ export default function Models() {
                 <tr>
                   <th style={{ width: 44 }} />
                   <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('name'); setSortDir(d => d === 'asc' ? 'desc' : 'asc'); }}>
-                    {tr('模型名称')} {sortBy === 'name' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                    {tr('妯″瀷鍚嶇О')} {sortBy === 'name' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
                   <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('accountCount'); setSortDir(d => d === 'asc' ? 'desc' : 'asc'); }}>
                     {tr('账号数')} {sortBy === 'accountCount' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
@@ -778,18 +791,20 @@ export default function Models() {
                     {tr('令牌数')} {sortBy === 'tokenCount' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
                   <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('avgLatency'); setSortDir(d => d === 'asc' ? 'desc' : 'asc'); }}>
-                    {tr('延迟')} {sortBy === 'avgLatency' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                    {tr('寤惰繜')} {sortBy === 'avgLatency' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
                   <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('successRate'); setSortDir(d => d === 'asc' ? 'desc' : 'asc'); }}>
                     {tr('成功率')} {sortBy === 'successRate' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
-                  <th style={{ width: 60 }}>{tr('操作')}</th>
+                  <th style={{ width: 60 }}>{tr('鎿嶄綔')}</th>
                 </tr>
               </thead>
               <tbody>
-                {paged.map(m => (
+                {paged.map((m) => {
+                  const isExpanded = expanded === m.name;
+                  return (
                   <React.Fragment key={m.name}>
-                    <tr onClick={() => setExpanded(expanded === m.name ? null : m.name)} style={{ cursor: 'pointer' }}>
+                    <tr onClick={() => setExpanded(isExpanded ? null : m.name)} style={{ cursor: 'pointer' }}>
                       <td>
                         <BrandIcon model={m.name} size={28} />
                       </td>
@@ -817,7 +832,7 @@ export default function Models() {
                         </span>
                       </td>
                       <td onClick={e => e.stopPropagation()}>
-                        <button className="model-card-action-btn" data-tooltip={tr('复制')} aria-label={tr('复制')} onClick={() => copyName(m.name)}>
+                        <button className="model-card-action-btn" data-tooltip={tr('澶嶅埗')} aria-label={tr('澶嶅埗')} onClick={() => copyName(m.name)}>
                           {copied === m.name ? (
                             <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="var(--color-success)"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
                           ) : (
@@ -826,35 +841,36 @@ export default function Models() {
                         </button>
                       </td>
                     </tr>
-                    <tr className={expanded === m.name ? 'log-detail-row' : ''}>
+                    {isExpanded ? (
+                    <tr className="log-detail-row">
                       <td colSpan={7} style={{ padding: 0 }}>
-                        <div className={`anim-collapse ${expanded === m.name ? 'is-open' : ''}`.trim()}>
+                        <div className="anim-collapse is-open">
                           <div className="anim-collapse-inner">
                             <div style={{ padding: '12px 16px 12px 54px' }}>
                             <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
                               <div className="card" style={{ padding: 10 }}>
-                                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('基础信息')}</div>
+                                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('鍩虹淇℃伅')}</div>
                                 <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.6 }}>
                                   {resolveMarketplaceDescription(m, metadataHydrating)}
                                 </div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
                                   {m.tags.length > 0 ? m.tags.map((tag) => (
                                     <span key={tag} className="badge badge-info">{tag}</span>
-                                  )) : <span className="badge badge-muted">{metadataHydrating ? tr('加载元数据中...') : tr('暂无标签')}</span>}
+                                  )) : <span className="badge badge-muted">{metadataHydrating ? tr('鍔犺浇鍏冩暟鎹腑...') : tr('鏆傛棤鏍囩')}</span>}
                                 </div>
                               </div>
 
                               <div className="card" style={{ padding: 10 }}>
-                                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('接口能力')}</div>
+                                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('鎺ュ彛鑳藉姏')}</div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                   {m.supportedEndpointTypes.length > 0 ? m.supportedEndpointTypes.map((endpoint) => (
                                     <span key={endpoint} className="badge badge-success">{endpoint}</span>
-                                  )) : <span className="badge badge-muted">{metadataHydrating ? tr('加载元数据中...') : tr('未提供')}</span>}
+                                  )) : <span className="badge badge-muted">{metadataHydrating ? tr('鍔犺浇鍏冩暟鎹腑...') : tr('未提供')}</span>}
                                 </div>
                               </div>
 
                               <div className="card" style={{ padding: 10 }}>
-                                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('分组计费')}</div>
+                                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('鍒嗙粍璁¤垂')}</div>
                                 {m.pricingSources.length > 0 ? (
                                   <div style={{ display: 'grid', gap: 8 }}>
                                     {m.pricingSources.map((source) => (
@@ -863,7 +879,7 @@ export default function Models() {
                                         style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 8 }}
                                       >
                                         <div style={{ fontSize: 12, marginBottom: 6 }}>
-                                          <strong>{source.siteName}</strong> · {source.username || `ID:${source.accountId}`}
+                                          <strong>{source.siteName}</strong> 路 {source.username || `ID:${source.accountId}`}
                                         </div>
                                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                           {Object.entries(source.groupPricing).map(([group, pricing]) => (
@@ -876,7 +892,7 @@ export default function Models() {
                                     ))}
                                   </div>
                                 ) : (
-                                  <span className="badge badge-muted">{metadataHydrating ? tr('正在加载价格元数据...') : tr('暂无价格元数据')}</span>
+                                  <span className="badge badge-muted">{metadataHydrating ? tr('姝ｅ湪鍔犺浇浠锋牸鍏冩暟鎹?..') : tr('暂无价格元数据')}</span>
                                 )}
                               </div>
                             </div>
@@ -940,8 +956,10 @@ export default function Models() {
                         </div>
                       </td>
                     </tr>
+                    ) : null}
                   </React.Fragment>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -974,7 +992,7 @@ export default function Models() {
               <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
             </button>
             <div className="pagination-size">
-              {tr('每页条数')}:
+              {tr('姣忛〉鏉℃暟')}:
               <div style={{ minWidth: 86 }}>
                 <ModernSelect
                   size="sm"
@@ -991,3 +1009,4 @@ export default function Models() {
     </div>
   );
 }
+

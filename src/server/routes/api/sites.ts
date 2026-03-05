@@ -84,8 +84,8 @@ function normalizeOptionalExternalCheckinUrl(input: unknown): {
 export async function sitesRoutes(app: FastifyInstance) {
   // List all sites
   app.get('/api/sites', async () => {
-    const siteRows = db.select().from(schema.sites).all();
-    const accountBalanceRows = db.select({
+    const siteRows = await db.select().from(schema.sites).all();
+    const accountBalanceRows = await db.select({
       siteId: schema.accounts.siteId,
       totalBalance: sql<number>`coalesce(sum(${schema.accounts.balance}), 0)`,
     }).from(schema.accounts)
@@ -143,7 +143,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Invalid globalWeight value. Expected a positive number.' });
     }
 
-    const existingSites = db.select().from(schema.sites).all();
+    const existingSites = await db.select().from(schema.sites).all();
     const maxSortOrder = existingSites.reduce((max, site) => Math.max(max, site.sortOrder || 0), -1);
 
     let detectedPlatform = platform;
@@ -154,7 +154,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (!detectedPlatform) {
       return { error: 'Could not detect platform. Please specify manually.' };
     }
-    const result = db.insert(schema.sites).values({
+    const inserted = await db.insert(schema.sites).values({
       name,
       url: normalizedSiteUrl,
       platform: detectedPlatform,
@@ -165,7 +165,15 @@ export async function sitesRoutes(app: FastifyInstance) {
       isPinned: normalizedPinned ?? false,
       sortOrder: normalizedSortOrder ?? (maxSortOrder + 1),
       globalWeight: normalizedGlobalWeight ?? 1,
-    }).returning().get();
+    }).run();
+    const siteId = Number(inserted.lastInsertRowid || 0);
+    if (siteId <= 0) {
+      return reply.code(500).send({ error: 'Create site failed' });
+    }
+    const result = await db.select().from(schema.sites).where(eq(schema.sites.id, siteId)).get();
+    if (!result) {
+      return reply.code(500).send({ error: 'Create site failed' });
+    }
     invalidateSiteProxyCache();
     return result;
   });
@@ -188,7 +196,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Invalid site id' });
     }
 
-    const existingSite = db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+    const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
     if (!existingSite) {
       return reply.code(404).send({ error: 'Site not found' });
     }
@@ -231,53 +239,55 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.sortOrder !== undefined) updates.sortOrder = normalizedSortOrder;
     if (body.globalWeight !== undefined) updates.globalWeight = normalizedGlobalWeight;
     updates.updatedAt = new Date().toISOString();
-    db.update(schema.sites).set(updates).where(eq(schema.sites.id, id)).run();
+    await db.update(schema.sites).set(updates).where(eq(schema.sites.id, id)).run();
     invalidateSiteProxyCache();
 
     if (body.status !== undefined && normalizedStatus) {
       const now = new Date().toISOString();
       if (normalizedStatus === 'disabled') {
-        db.update(schema.accounts)
+        await db.update(schema.accounts)
           .set({ status: 'disabled', updatedAt: now })
           .where(eq(schema.accounts.siteId, id))
           .run();
 
         try {
-          db.insert(schema.events).values({
+          await db.insert(schema.events).values({
             type: 'status',
             title: '站点已禁用',
             message: `${existingSite.name} 已禁用，关联账号已全部置为禁用`,
             level: 'warning',
             relatedId: id,
             relatedType: 'site',
+            createdAt: new Date().toISOString(),
           }).run();
         } catch {}
       } else {
-        db.update(schema.accounts)
+        await db.update(schema.accounts)
           .set({ status: 'active', updatedAt: now })
           .where(and(eq(schema.accounts.siteId, id), eq(schema.accounts.status, 'disabled')))
           .run();
 
         try {
-          db.insert(schema.events).values({
+          await db.insert(schema.events).values({
             type: 'status',
             title: '站点已启用',
             message: `${existingSite.name} 已启用，关联禁用账号已恢复为活跃`,
             level: 'info',
             relatedId: id,
             relatedType: 'site',
+            createdAt: new Date().toISOString(),
           }).run();
         } catch {}
       }
     }
 
-    return db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+    return await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
   });
 
   // Delete a site
   app.delete<{ Params: { id: string } }>('/api/sites/:id', async (request) => {
     const id = parseInt(request.params.id);
-    db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
+    await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
     invalidateSiteProxyCache();
     return { success: true };
   });

@@ -21,9 +21,19 @@ function normalizeBaseUrl(baseUrl: string): string {
 export class Sub2ApiAdapter extends BasePlatformAdapter {
   readonly platformName = 'sub2api';
 
-  private normalizeTokenKeyForCompare(value?: string | null): string {
+  private stripBearerPrefix(value?: string | null): string {
     const trimmed = (value || '').trim();
-    return trimmed.startsWith('Bearer ') ? trimmed.slice(7).trim() : trimmed;
+    if (!trimmed) return '';
+    return trimmed.replace(/^bearer\s+/i, '').trim();
+  }
+
+  private normalizeTokenKeyForCompare(value?: string | null): string {
+    return this.stripBearerPrefix(value);
+  }
+
+  private buildAuthHeader(accessToken: string): Record<string, string> {
+    const normalized = this.stripBearerPrefix(accessToken);
+    return { Authorization: `Bearer ${normalized}` };
   }
 
   private parseTokenEnabled(status: unknown): boolean {
@@ -141,16 +151,18 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
 
   private async listGroups(baseUrl: string, accessToken: string): Promise<string[]> {
     const endpoints = [
+      '/api/v1/groups/available',
       '/api/v1/groups?page=1&page_size=100',
       '/api/v1/groups',
       '/api/v1/group?page=1&page_size=100',
       '/api/v1/group',
     ];
 
+    const headers = this.buildAuthHeader(accessToken);
     for (const endpoint of endpoints) {
       try {
         const res = await this.fetchJson<any>(`${baseUrl}${endpoint}`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
+          headers,
         });
         const parsed = (() => {
           try {
@@ -193,10 +205,11 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       '/api/v1/api-keys?page=1&page_size=100',
     ];
 
+    const headers = this.buildAuthHeader(accessToken);
     for (const endpoint of endpoints) {
       try {
         const res = await this.fetchJson<any>(`${baseUrl}${endpoint}`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
+          headers,
         });
         const parsed = (() => {
           try {
@@ -235,10 +248,11 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       '/api/v1/api-keys?page=1&page_size=100',
     ];
 
+    const headers = this.buildAuthHeader(accessToken);
     for (const endpoint of endpoints) {
       try {
         const res = await this.fetchJson<any>(`${baseUrl}${endpoint}`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
+          headers,
         });
         const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
         const items = this.parseTokenItems(data);
@@ -384,7 +398,7 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
   }> {
     const endpoint = '/api/v1/auth/me';
     const res = await this.fetchJson<any>(`${baseUrl}${endpoint}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: this.buildAuthHeader(accessToken),
     });
     const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
 
@@ -531,11 +545,12 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     }
 
     const endpoints = ['/api/v1/keys', '/api/v1/api-keys'];
+    const headers = this.buildAuthHeader(accessToken);
     for (const endpoint of endpoints) {
       try {
         const res = await this.fetchJson<any>(`${normalizedBase}${endpoint}`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${accessToken}` },
+          headers,
           body: JSON.stringify(payload),
         });
         this.parseSub2ApiEnvelope<any>(res, endpoint);
@@ -570,11 +585,12 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       `/api/v1/keys/${tokenId}`,
       `/api/v1/api-keys/${tokenId}`,
     ];
+    const headers = this.buildAuthHeader(accessToken);
     for (const endpoint of endpoints) {
       try {
         const res = await this.fetchJson<any>(`${normalizedBase}${endpoint}`, {
           method: 'DELETE',
-          headers: { Authorization: `Bearer ${accessToken}` },
+          headers,
         });
         this.parseSub2ApiEnvelope<any>(res, endpoint);
         return true;

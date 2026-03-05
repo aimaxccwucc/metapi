@@ -35,18 +35,18 @@ describe('/api/models/token-candidates', () => {
     await app.register(routesModule.statsRoutes);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     fetchModelPricingCatalogMock.mockReset();
     fetchModelPricingCatalogMock.mockResolvedValue(null);
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -55,21 +55,21 @@ describe('/api/models/token-candidates', () => {
   });
 
   it('returns modelsWithoutToken for models available in account but not covered by enabled tokens', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'site-a',
       url: 'https://site-a.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'alice',
       accessToken: 'acc-token',
       status: 'active',
     }).returning().get();
 
-    const token = db.insert(schema.accountTokens).values({
+    const token = await db.insert(schema.accountTokens).values({
       accountId: account.id,
       name: 'default',
       token: 'tk-default',
@@ -77,7 +77,7 @@ describe('/api/models/token-candidates', () => {
       isDefault: true,
     }).returning().get();
 
-    db.insert(schema.modelAvailability).values([
+    await db.insert(schema.modelAvailability).values([
       {
         accountId: account.id,
         modelName: 'claude-haiku-4-5-20251001',
@@ -90,7 +90,7 @@ describe('/api/models/token-candidates', () => {
       },
     ]).run();
 
-    db.insert(schema.tokenModelAvailability).values({
+    await db.insert(schema.tokenModelAvailability).values({
       tokenId: token.id,
       modelName: 'claude-haiku-4-5-20251001',
       available: true,
@@ -120,21 +120,21 @@ describe('/api/models/token-candidates', () => {
   });
 
   it('returns modelsMissingTokenGroups when account has partial group token coverage', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'site-b',
       url: 'https://site-b.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'bob',
       accessToken: 'acc-token-b',
       status: 'active',
     }).returning().get();
 
-    const defaultToken = db.insert(schema.accountTokens).values({
+    const defaultToken = await db.insert(schema.accountTokens).values({
       accountId: account.id,
       name: 'default-token',
       token: 'sk-default',
@@ -143,13 +143,13 @@ describe('/api/models/token-candidates', () => {
       isDefault: true,
     }).returning().get();
 
-    db.insert(schema.modelAvailability).values({
+    await db.insert(schema.modelAvailability).values({
       accountId: account.id,
       modelName: 'claude-opus-4-6',
       available: true,
     }).run();
 
-    db.insert(schema.tokenModelAvailability).values({
+    await db.insert(schema.tokenModelAvailability).values({
       tokenId: defaultToken.id,
       modelName: 'claude-opus-4-6',
       available: true,
@@ -202,21 +202,21 @@ describe('/api/models/token-candidates', () => {
   });
 
   it('infers default group from token name when token_group is empty', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'site-c',
       url: 'https://site-c.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'charlie',
       accessToken: 'acc-token-c',
       status: 'active',
     }).returning().get();
 
-    const token = db.insert(schema.accountTokens).values({
+    const token = await db.insert(schema.accountTokens).values({
       accountId: account.id,
       name: 'default',
       token: 'sk-default-c',
@@ -225,13 +225,13 @@ describe('/api/models/token-candidates', () => {
       isDefault: true,
     }).returning().get();
 
-    db.insert(schema.modelAvailability).values({
+    await db.insert(schema.modelAvailability).values({
       accountId: account.id,
       modelName: 'claude-sonnet-4-5-20250929',
       available: true,
     }).run();
 
-    db.insert(schema.tokenModelAvailability).values({
+    await db.insert(schema.tokenModelAvailability).values({
       tokenId: token.id,
       modelName: 'claude-sonnet-4-5-20250929',
       available: true,
@@ -283,21 +283,21 @@ describe('/api/models/token-candidates', () => {
   });
 
   it('marks coverage as uncertain when token group cannot be inferred', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'site-d',
       url: 'https://site-d.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'david',
       accessToken: 'acc-token-d',
       status: 'active',
     }).returning().get();
 
-    const token = db.insert(schema.accountTokens).values({
+    const token = await db.insert(schema.accountTokens).values({
       accountId: account.id,
       name: 'token-1',
       token: 'sk-token-1',
@@ -306,13 +306,13 @@ describe('/api/models/token-candidates', () => {
       isDefault: true,
     }).returning().get();
 
-    db.insert(schema.modelAvailability).values({
+    await db.insert(schema.modelAvailability).values({
       accountId: account.id,
       modelName: 'claude-opus-4-5-20251101',
       available: true,
     }).run();
 
-    db.insert(schema.tokenModelAvailability).values({
+    await db.insert(schema.tokenModelAvailability).values({
       tokenId: token.id,
       modelName: 'claude-opus-4-5-20251101',
       available: true,

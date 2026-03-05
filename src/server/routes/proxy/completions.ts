@@ -22,7 +22,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
     if (!requestedModel) {
       return reply.code(400).send({ error: { message: 'model is required', type: 'invalid_request_error' } });
     }
-    if (!ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+    if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
     const downstreamPolicy = getDownstreamRoutingPolicy(request);
 
     const isStream = body.stream === true;
@@ -31,12 +31,12 @@ export async function completionsProxyRoute(app: FastifyInstance) {
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
-        ? tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
+        ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
+        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
-        selected = tokenRouter.selectChannel(requestedModel, downstreamPolicy);
+        selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
       }
 
       if (!selected) {
@@ -228,7 +228,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
   });
 }
 
-function logProxy(
+async function logProxy(
   selected: any,
   modelRequested: string,
   status: string,
@@ -246,7 +246,7 @@ function logProxy(
       downstreamPath: '/v1/completions',
       errorMessage,
     });
-    db.insert(schema.proxyLogs).values({
+    await db.insert(schema.proxyLogs).values({
       routeId: selected.channel.routeId,
       channelId: selected.channel.id,
       accountId: selected.account.id,
@@ -261,6 +261,7 @@ function logProxy(
       estimatedCost,
       errorMessage: normalizedErrorMessage,
       retryCount,
+      createdAt: new Date().toISOString(),
     }).run();
   } catch (error) {
     console.warn('[proxy/completions] failed to write proxy log', error);

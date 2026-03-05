@@ -27,9 +27,9 @@ describe('sites status cascade', () => {
     await app.register(routesModule.sitesRoutes);
   });
 
-  beforeEach(() => {
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+  beforeEach(async () => {
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -38,13 +38,13 @@ describe('sites status cascade', () => {
   });
 
   it('disables and re-enables related accounts with site status', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'status-site',
       url: 'https://status-site.example.com',
       platform: 'new-api',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'status-user',
       accessToken: 'access-token',
@@ -58,7 +58,7 @@ describe('sites status cascade', () => {
     });
     expect(disableResp.statusCode).toBe(200);
 
-    const disabledAccount = db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    const disabledAccount = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
     expect(disabledAccount?.status).toBe('disabled');
 
     const enableResp = await app.inject({
@@ -68,7 +68,7 @@ describe('sites status cascade', () => {
     });
     expect(enableResp.statusCode).toBe(200);
 
-    const enabledAccount = db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    const enabledAccount = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
     expect(enabledAccount?.status).toBe('active');
   });
 });

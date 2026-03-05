@@ -13,11 +13,11 @@ export async function searchRoutes(app: FastifyInstance) {
     const perCategory = Math.min(Math.ceil(limit / 5), 10);
 
     // Search sites
-    const sites = db.select().from(schema.sites)
+    const sites = (await db.select().from(schema.sites)
       .where(like(schema.sites.name, q))
-      .limit(perCategory).all()
+      .limit(perCategory).all())
       .concat(
-        db.select().from(schema.sites)
+        await db.select().from(schema.sites)
           .where(like(schema.sites.url, q))
           .limit(perCategory).all()
       );
@@ -25,28 +25,28 @@ export async function searchRoutes(app: FastifyInstance) {
     const uniqueSites = [...new Map(sites.map(s => [s.id, s])).values()].slice(0, perCategory);
 
     // Search accounts (join with sites for site name)
-    const accountResults = db.select().from(schema.accounts)
+    const accountResults = await db.select().from(schema.accounts)
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(like(schema.accounts.username, q))
       .limit(perCategory).all();
     const accounts = accountResults.map(r => ({ ...r.accounts, site: r.sites }));
 
     // Search checkin logs (by message)
-    const checkinLogs = db.select().from(schema.checkinLogs)
+    const checkinLogs = (await db.select().from(schema.checkinLogs)
       .innerJoin(schema.accounts, eq(schema.checkinLogs.accountId, schema.accounts.id))
       .where(like(schema.checkinLogs.message, q))
       .orderBy(desc(schema.checkinLogs.createdAt))
-      .limit(perCategory).all()
+      .limit(perCategory).all())
       .map(r => ({ ...r.checkin_logs, account: r.accounts }));
 
     // Search proxy logs (by model name)
-    const proxyLogs = db.select().from(schema.proxyLogs)
+    const proxyLogs = await db.select().from(schema.proxyLogs)
       .where(like(schema.proxyLogs.modelRequested, q))
       .orderBy(desc(schema.proxyLogs.createdAt))
       .limit(perCategory).all();
 
     // Search models (only keep routable items)
-    const modelRows = db.select({
+    const modelRows = await db.select({
       modelName: schema.tokenModelAvailability.modelName,
       tokenId: schema.accountTokens.id,
       accountId: schema.accounts.id,

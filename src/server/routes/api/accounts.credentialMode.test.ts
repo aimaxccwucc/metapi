@@ -39,21 +39,21 @@ describe('accounts credential mode', () => {
     await app.register(routesModule.accountsRoutes);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     verifyTokenMock.mockReset();
     getModelsMock.mockReset();
     getApiTokensMock.mockReset();
     getApiTokensMock.mockResolvedValue([]);
 
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -65,7 +65,7 @@ describe('accounts credential mode', () => {
     verifyTokenMock.mockRejectedValueOnce(new Error('verifyToken should not be called'));
     getModelsMock.mockResolvedValueOnce(['gpt-5-mini', 'gpt-4o-mini']);
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Fast Verify Site',
       url: 'https://fast-verify.example.com',
       platform: 'new-api',
@@ -95,7 +95,7 @@ describe('accounts credential mode', () => {
     verifyTokenMock.mockRejectedValueOnce(new Error('verifyToken should not be called'));
     getModelsMock.mockResolvedValueOnce(['gpt-4o-mini']);
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Proxy Only Site',
       url: 'https://proxy-only.example.com',
       platform: 'new-api',
@@ -116,7 +116,7 @@ describe('accounts credential mode', () => {
     expect(body.tokenType).toBe('apikey');
     expect(body.capabilities?.proxyOnly).toBe(true);
 
-    const accounts = db.select().from(schema.accounts).all();
+    const accounts = await db.select().from(schema.accounts).all();
     expect(accounts).toHaveLength(1);
     expect(accounts[0]?.accessToken || '').toBe('');
     expect((accounts[0]?.apiToken || '').startsWith('sk-')).toBe(true);
@@ -132,7 +132,7 @@ describe('accounts credential mode', () => {
       userInfo: { username: 'sub2-user' },
     });
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Sub2 Site',
       url: 'https://sub2.example.com',
       platform: 'sub2api',
@@ -150,7 +150,7 @@ describe('accounts credential mode', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    const created = db.select().from(schema.accounts).all()[0];
+    const created = (await db.select().from(schema.accounts).all())[0];
     const parsedExtra = JSON.parse(created?.extraConfig || '{}') as {
       credentialMode?: string;
       sub2apiAuth?: {
@@ -164,12 +164,12 @@ describe('accounts credential mode', () => {
   });
 
   it('updates and clears managed refresh token via account update API', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Sub2 Site',
       url: 'https://sub2.example.com',
       platform: 'sub2api',
     }).returning().get();
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'sub2-user',
       accessToken: 'access-token',
@@ -192,7 +192,7 @@ describe('accounts credential mode', () => {
     });
     expect(updateResponse.statusCode).toBe(200);
 
-    const updated = db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    const updated = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
     const parsedUpdated = JSON.parse(updated?.extraConfig || '{}') as {
       sub2apiAuth?: { refreshToken?: string; tokenExpiresAt?: number };
     };
@@ -208,7 +208,7 @@ describe('accounts credential mode', () => {
     });
     expect(clearResponse.statusCode).toBe(200);
 
-    const cleared = db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    const cleared = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
     const parsedCleared = JSON.parse(cleared?.extraConfig || '{}') as {
       sub2apiAuth?: { refreshToken?: string; tokenExpiresAt?: number };
     };

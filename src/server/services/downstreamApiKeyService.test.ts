@@ -29,9 +29,9 @@ describe('downstreamApiKeyService', () => {
     service = serviceModule;
   });
 
-  beforeEach(() => {
-    db.delete(schema.downstreamApiKeys).run();
-    db.delete(schema.tokenRoutes).run();
+  beforeEach(async () => {
+    await db.delete(schema.downstreamApiKeys).run();
+    await db.delete(schema.tokenRoutes).run();
     config.proxyToken = 'sk-global-proxy-token';
   });
 
@@ -39,8 +39,8 @@ describe('downstreamApiKeyService', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('authorizes global proxy token when no managed key matches', () => {
-    const result = service.authorizeDownstreamToken('sk-global-proxy-token');
+  it('authorizes global proxy token when no managed key matches', async () => {
+    const result = await service.authorizeDownstreamToken('sk-global-proxy-token');
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.key).toBeNull();
@@ -49,23 +49,23 @@ describe('downstreamApiKeyService', () => {
     }
   });
 
-  it('rejects managed keys by lifecycle guards (disabled, expired, over budget, over requests)', () => {
+  it('rejects managed keys by lifecycle guards (disabled, expired, over budget, over requests)', async () => {
     const now = Date.now();
 
-    const disabled = db.insert(schema.downstreamApiKeys).values({
+    const disabled = await db.insert(schema.downstreamApiKeys).values({
       name: 'disabled',
       key: 'sk-disabled',
       enabled: false,
     }).returning().get();
 
-    const expired = db.insert(schema.downstreamApiKeys).values({
+    const expired = await db.insert(schema.downstreamApiKeys).values({
       name: 'expired',
       key: 'sk-expired',
       enabled: true,
       expiresAt: new Date(now - 60_000).toISOString(),
     }).returning().get();
 
-    const overBudget = db.insert(schema.downstreamApiKeys).values({
+    const overBudget = await db.insert(schema.downstreamApiKeys).values({
       name: 'over-budget',
       key: 'sk-over-budget',
       enabled: true,
@@ -73,7 +73,7 @@ describe('downstreamApiKeyService', () => {
       usedCost: 1.2,
     }).returning().get();
 
-    const overRequests = db.insert(schema.downstreamApiKeys).values({
+    const overRequests = await db.insert(schema.downstreamApiKeys).values({
       name: 'over-requests',
       key: 'sk-over-requests',
       enabled: true,
@@ -81,10 +81,10 @@ describe('downstreamApiKeyService', () => {
       usedRequests: 10,
     }).returning().get();
 
-    const r1 = service.authorizeDownstreamToken(disabled.key);
-    const r2 = service.authorizeDownstreamToken(expired.key);
-    const r3 = service.authorizeDownstreamToken(overBudget.key);
-    const r4 = service.authorizeDownstreamToken(overRequests.key);
+    const r1 = await service.authorizeDownstreamToken(disabled.key);
+    const r2 = await service.authorizeDownstreamToken(expired.key);
+    const r3 = await service.authorizeDownstreamToken(overBudget.key);
+    const r4 = await service.authorizeDownstreamToken(overRequests.key);
 
     expect(r1.ok).toBe(false);
     expect(r2.ok).toBe(false);
@@ -92,8 +92,8 @@ describe('downstreamApiKeyService', () => {
     expect(r4.ok).toBe(false);
   });
 
-  it('parses policy fields and supports model matching patterns', () => {
-    const row = db.insert(schema.downstreamApiKeys).values({
+  it('parses policy fields and supports model matching patterns', async () => {
+    const row = await db.insert(schema.downstreamApiKeys).values({
       name: 'project-a',
       key: 'sk-project-a',
       enabled: true,
@@ -102,7 +102,7 @@ describe('downstreamApiKeyService', () => {
       siteWeightMultipliers: JSON.stringify({ '1': 2.5, '7': 0.4 }),
     }).returning().get();
 
-    const result = service.authorizeDownstreamToken(row.key);
+    const result = await service.authorizeDownstreamToken(row.key);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
@@ -116,8 +116,8 @@ describe('downstreamApiKeyService', () => {
     expect(service.isModelAllowedByPolicy('gemini-2.0-flash', result.policy)).toBe(false);
   });
 
-  it('treats selected groups as additional allowed model scope (union semantics)', () => {
-    const claudeGroup = db.insert(schema.tokenRoutes).values({
+  it('treats selected groups as additional allowed model scope (union semantics)', async () => {
+    const claudeGroup = await db.insert(schema.tokenRoutes).values({
       modelPattern: 're:^claude-(opus|sonnet)-4-6$',
       enabled: true,
     }).returning().get();
@@ -129,12 +129,12 @@ describe('downstreamApiKeyService', () => {
     };
 
     expect(service.isModelAllowedByPolicy('claude-opus-4-6', policy)).toBe(false);
-    expect(service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
-    expect(service.isModelAllowedByPolicyOrAllowedRoutes('gemini-2.0-flash', policy)).toBe(false);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gemini-2.0-flash', policy)).toBe(false);
   });
 
-  it('authorizes by selected group model pattern only, not arbitrary internal models', () => {
-    const virtualModelGroup = db.insert(schema.tokenRoutes).values({
+  it('authorizes by selected group model pattern only, not arbitrary internal models', async () => {
+    const virtualModelGroup = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'claude-opus-4-6',
       enabled: true,
     }).returning().get();
@@ -145,12 +145,12 @@ describe('downstreamApiKeyService', () => {
       siteWeightMultipliers: {},
     };
 
-    expect(service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
-    expect(service.isModelAllowedByPolicyOrAllowedRoutes('claude-sonnet-4-6', policy)).toBe(false);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-sonnet-4-6', policy)).toBe(false);
   });
 
-  it('authorizes models by selected route display name alias', () => {
-    const aliasRoute = db.insert(schema.tokenRoutes).values({
+  it('authorizes models by selected route display name alias', async () => {
+    const aliasRoute = await db.insert(schema.tokenRoutes).values({
       modelPattern: 're:^claude-(opus|sonnet)-4-5$',
       displayName: 'claude-opus-4-6',
       enabled: true,
@@ -162,14 +162,14 @@ describe('downstreamApiKeyService', () => {
       siteWeightMultipliers: {},
     };
 
-    expect(service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
-    expect(service.isModelAllowedByPolicyOrAllowedRoutes('claude-sonnet-4-5', policy)).toBe(true);
-    expect(service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-5', policy)).toBe(true);
-    expect(service.isModelAllowedByPolicyOrAllowedRoutes('gpt-4o-mini', policy)).toBe(false);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-sonnet-4-5', policy)).toBe(true);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-5', policy)).toBe(true);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gpt-4o-mini', policy)).toBe(false);
   });
 
-  it('accumulates managed key request/cost usage and applies limits', () => {
-    const row = db.insert(schema.downstreamApiKeys).values({
+  it('accumulates managed key request/cost usage and applies limits', async () => {
+    const row = await db.insert(schema.downstreamApiKeys).values({
       name: 'metered-key',
       key: 'sk-metered-key',
       enabled: true,
@@ -179,16 +179,16 @@ describe('downstreamApiKeyService', () => {
       usedCost: 0,
     }).returning().get();
 
-    service.consumeManagedKeyRequest(row.id);
-    service.consumeManagedKeyRequest(row.id);
-    service.recordManagedKeyCostUsage(row.id, 0.4);
-    service.recordManagedKeyCostUsage(row.id, 0.6);
+    await service.consumeManagedKeyRequest(row.id);
+    await service.consumeManagedKeyRequest(row.id);
+    await service.recordManagedKeyCostUsage(row.id, 0.4);
+    await service.recordManagedKeyCostUsage(row.id, 0.6);
 
-    const latest = service.getDownstreamApiKeyById(row.id);
+    const latest = await service.getDownstreamApiKeyById(row.id);
     expect(latest?.usedRequests).toBe(2);
     expect(latest?.usedCost).toBeCloseTo(1);
 
-    const authResult = service.authorizeDownstreamToken(row.key);
+    const authResult = await service.authorizeDownstreamToken(row.key);
     expect(authResult.ok).toBe(false);
   });
 });

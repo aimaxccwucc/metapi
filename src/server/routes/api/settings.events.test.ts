@@ -34,9 +34,9 @@ describe('settings and auth events', () => {
     await app.register(authRoutesModule.authRoutes);
   });
 
-  beforeEach(() => {
-    db.delete(schema.events).run();
-    db.delete(schema.settings).run();
+  beforeEach(async () => {
+    await db.delete(schema.events).run();
+    await db.delete(schema.settings).run();
 
     config.authToken = 'old-admin-token-123';
     config.proxyToken = 'sk-old-proxy-token-123';
@@ -62,7 +62,7 @@ describe('settings and auth events', () => {
 
     expect(response.statusCode).toBe(200);
 
-    const events = db.select().from(schema.events).all();
+    const events = await db.select().from(schema.events).all();
     expect(events.length).toBe(1);
     expect(events[0]).toMatchObject({
       type: 'status',
@@ -178,7 +178,7 @@ describe('settings and auth events', () => {
     expect(updated.routingFallbackUnitCost).toBe(0.25);
     expect(config.routingFallbackUnitCost).toBe(0.25);
 
-    const saved = db.select().from(schema.settings).where(eq(schema.settings.key, 'routing_fallback_unit_cost')).get();
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'routing_fallback_unit_cost')).get();
     expect(saved).toBeTruthy();
     expect(saved?.value).toBe(JSON.stringify(0.25));
 
@@ -206,7 +206,7 @@ describe('settings and auth events', () => {
     expect(body.message).toContain('白名单');
     expect(body.message).toContain('198.51.100.10');
 
-    const saved = db.select().from(schema.settings).where(eq(schema.settings.key, 'admin_ip_allowlist')).get();
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'admin_ip_allowlist')).get();
     expect(saved).toBeFalsy();
   });
 
@@ -224,7 +224,7 @@ describe('settings and auth events', () => {
     const body = response.json() as { adminIpAllowlist?: string[] };
     expect(body.adminIpAllowlist).toEqual(['198.51.100.10', '198.51.100.11']);
 
-    const saved = db.select().from(schema.settings).where(eq(schema.settings.key, 'admin_ip_allowlist')).get();
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'admin_ip_allowlist')).get();
     expect(saved?.value).toBe(JSON.stringify(['198.51.100.10', '198.51.100.11']));
   });
 
@@ -240,7 +240,7 @@ describe('settings and auth events', () => {
 
     expect(response.statusCode).toBe(200);
 
-    const events = db.select().from(schema.events).all();
+    const events = await db.select().from(schema.events).all();
     expect(events.length).toBe(1);
     expect(events[0]).toMatchObject({
       type: 'token',

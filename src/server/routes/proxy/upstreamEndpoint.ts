@@ -66,6 +66,7 @@ const HOP_BY_HOP_HEADERS = new Set([
 
 const BLOCKED_PASSTHROUGH_HEADERS = new Set([
   'host',
+  'content-type',
   'content-length',
   'accept-encoding',
   'cookie',
@@ -382,6 +383,162 @@ function convertOpenAiToolChoiceToResponses(rawToolChoice: unknown): unknown {
   return rawToolChoice;
 }
 
+function toResponsesInputMessageFromText(text: string): Record<string, unknown> {
+  return {
+    type: 'message',
+    role: 'user',
+    content: [{ type: 'input_text', text }],
+  };
+}
+
+function normalizeResponsesMessageItem(item: Record<string, unknown>): Record<string, unknown> {
+  const type = asTrimmedString(item.type).toLowerCase();
+  if (type === 'function_call' || type === 'function_call_output') {
+    return item;
+  }
+
+  const role = asTrimmedString(item.role).toLowerCase();
+  const textContent = normalizeContentText(item.content ?? item.text).trim();
+
+  if (type === 'message') {
+    if (!textContent) return item;
+    const normalizedRole = role || 'user';
+    const textType = normalizedRole === 'assistant' ? 'output_text' : 'input_text';
+    return {
+      ...item,
+      role: normalizedRole,
+      content: [{ type: textType, text: textContent }],
+    };
+  }
+
+  if (role) {
+    if (!textContent) return item;
+    const textType = role === 'assistant' ? 'output_text' : 'input_text';
+    return {
+      type: 'message',
+      role,
+      content: [{ type: textType, text: textContent }],
+    };
+  }
+
+  if (textContent) {
+    return toResponsesInputMessageFromText(textContent);
+  }
+
+  return item;
+}
+
+function normalizeResponsesInputForCompatibility(input: unknown): unknown {
+  if (typeof input === 'string') {
+    const normalized = input.trim();
+    if (!normalized) return input;
+    return [toResponsesInputMessageFromText(normalized)];
+  }
+
+  if (Array.isArray(input)) {
+    return input.map((item) => {
+      if (typeof item === 'string') {
+        const normalized = item.trim();
+        return normalized ? toResponsesInputMessageFromText(normalized) : item;
+      }
+      if (!isRecord(item)) return item;
+      return normalizeResponsesMessageItem(item);
+    });
+  }
+
+  if (isRecord(input)) {
+    return [normalizeResponsesMessageItem(input)];
+  }
+
+  return input;
+}
+
+function normalizeResponsesBodyForCompatibility(
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const nextInput = normalizeResponsesInputForCompatibility(body.input);
+  if (nextInput === body.input) return body;
+  return {
+    ...body,
+    input: nextInput,
+  };
+}
+
+const ALLOWED_RESPONSES_FIELDS = new Set([
+  'model',
+  'input',
+  'instructions',
+  'max_output_tokens',
+  'max_completion_tokens',
+  'temperature',
+  'top_p',
+  'truncation',
+  'tools',
+  'tool_choice',
+  'parallel_tool_calls',
+  'metadata',
+  'reasoning',
+  'store',
+  'stream',
+  'user',
+  'previous_response_id',
+  'text',
+  'audio',
+  'include',
+  'response_format',
+  'service_tier',
+  'stop',
+  'n',
+]);
+
+function sanitizeResponsesBodyForProxy(
+  body: Record<string, unknown>,
+  modelName: string,
+  stream: boolean,
+): Record<string, unknown> {
+  let normalized = normalizeResponsesBodyForCompatibility({
+    ...body,
+    model: modelName,
+    stream,
+  });
+
+  if (normalized.input === undefined) {
+    if (Array.isArray((normalized as Record<string, unknown>).messages)) {
+      const converted = convertOpenAiBodyToResponsesBody(normalized, modelName, stream);
+      normalized = normalizeResponsesBodyForCompatibility(converted);
+    } else {
+      const prompt = asTrimmedString((normalized as Record<string, unknown>).prompt);
+      if (prompt) {
+        normalized = {
+          ...normalized,
+          input: [toResponsesInputMessageFromText(prompt)],
+        };
+      }
+    }
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(normalized)) {
+    if (!ALLOWED_RESPONSES_FIELDS.has(key)) continue;
+    if (key === 'max_completion_tokens') continue;
+    sanitized[key] = value;
+  }
+
+  const maxOutputTokens = toFiniteNumber(normalized.max_output_tokens);
+  if (maxOutputTokens !== null && maxOutputTokens > 0) {
+    sanitized.max_output_tokens = Math.trunc(maxOutputTokens);
+  } else {
+    const maxCompletionTokens = toFiniteNumber(normalized.max_completion_tokens);
+    if (maxCompletionTokens !== null && maxCompletionTokens > 0) {
+      sanitized.max_output_tokens = Math.trunc(maxCompletionTokens);
+    }
+  }
+
+  sanitized.model = modelName;
+  sanitized.stream = stream;
+  return sanitized;
+}
+
 function convertOpenAiBodyToMessagesBody(
   openaiBody: Record<string, unknown>,
   modelName: string,
@@ -632,22 +789,6 @@ function convertOpenAiBodyToResponsesBody(
     });
   }
 
-  let input: unknown = inputItems;
-  if (systemContents.length === 0 && inputItems.length === 1) {
-    const first = inputItems[0];
-    const firstRole = asTrimmedString(first.role).toLowerCase();
-    const firstContent = Array.isArray(first.content) ? first.content : [];
-    if (
-      firstRole === 'user'
-      && firstContent.length === 1
-      && isRecord(firstContent[0])
-      && asTrimmedString(firstContent[0].type).toLowerCase() === 'input_text'
-      && asTrimmedString(firstContent[0].text)
-    ) {
-      input = asTrimmedString(firstContent[0].text);
-    }
-  }
-
   const maxOutputTokens = (
     toFiniteNumber(openaiBody.max_output_tokens)
     ?? toFiniteNumber(openaiBody.max_completion_tokens)
@@ -659,7 +800,7 @@ function convertOpenAiBodyToResponsesBody(
     model: modelName,
     stream,
     max_output_tokens: maxOutputTokens,
-    input,
+    input: inputItems,
   };
 
   if (systemContents.length > 0) {
@@ -681,7 +822,7 @@ function convertOpenAiBodyToResponsesBody(
   const responsesToolChoice = convertOpenAiToolChoiceToResponses(openaiBody.tool_choice);
   if (responsesToolChoice !== undefined) body.tool_choice = responsesToolChoice;
 
-  return body;
+  return normalizeResponsesBodyForCompatibility(body);
 }
 
 function normalizeEndpointTypes(value: unknown): UpstreamEndpoint[] {
@@ -757,6 +898,11 @@ function preferredEndpointOrder(
   // Unknown/generic upstreams: prefer endpoint family that matches the
   // downstream API surface, then degrade progressively.
   if (downstreamFormat === 'responses') {
+    if (preferMessagesForClaudeModel) {
+      // Claude-family models on generic/new-api upstreams are commonly
+      // messages-first even when downstream API is /v1/responses.
+      return ['messages', 'chat', 'responses'];
+    }
     return ['responses', 'chat', 'messages'];
   }
 
@@ -785,9 +931,10 @@ export async function resolveUpstreamEndpointCandidates(
   );
   if (sitePlatform === 'anyrouter') {
     // anyrouter deployments are effectively anthropic-protocol first.
-    return downstreamFormat === 'responses'
-      ? ['responses', 'messages', 'chat']
-      : ['messages', 'chat'];
+    if (downstreamFormat === 'responses') {
+      return ['responses', 'messages', 'chat'];
+    }
+    return ['messages', 'chat', 'responses'];
   }
 
   const preferred = preferredEndpointOrder(
@@ -830,7 +977,7 @@ export async function resolveUpstreamEndpointCandidates(
 
     const shouldIgnoreCatalogOrderingForClaudeMessages = (
       preferMessagesForClaudeModel
-      && downstreamFormat !== 'responses'
+      && (downstreamFormat !== 'responses' || sitePlatform !== 'openai')
     );
     if (shouldIgnoreCatalogOrderingForClaudeMessages) {
       return preferred;
@@ -980,7 +1127,7 @@ export function buildUpstreamEndpointRequest(input: {
     const responsesHeaders = input.downstreamFormat === 'responses'
       ? extractResponsesPassthroughHeaders(input.downstreamHeaders)
       : {};
-    const body = (
+    const rawBody = (
       input.downstreamFormat === 'responses' && input.responsesOriginalBody
         ? {
           ...input.responsesOriginalBody,
@@ -989,6 +1136,7 @@ export function buildUpstreamEndpointRequest(input: {
         }
         : convertOpenAiBodyToResponsesBody(input.openaiBody, input.modelName, input.stream)
     );
+    const body = sanitizeResponsesBodyForProxy(rawBody, input.modelName, input.stream);
 
     const headers = ensureStreamAcceptHeader({
       ...commonHeaders,
@@ -1014,10 +1162,63 @@ export function buildUpstreamEndpointRequest(input: {
   };
 }
 
+function normalizeHeaderMap(headers: Record<string, string>): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(headers)) {
+    const key = rawKey.trim().toLowerCase();
+    if (!key) continue;
+    const value = headerValueToString(rawValue);
+    if (!value) continue;
+    normalized[key] = value;
+  }
+  return normalized;
+}
+
+export function buildMinimalJsonHeadersForCompatibility(input: {
+  headers: Record<string, string>;
+  endpoint: UpstreamEndpoint;
+  stream: boolean;
+}): Record<string, string> {
+  const source = normalizeHeaderMap(input.headers);
+  const minimal: Record<string, string> = {};
+
+  if (source.authorization) minimal.authorization = source.authorization;
+  if (source['x-api-key']) minimal['x-api-key'] = source['x-api-key'];
+
+  if (input.endpoint === 'messages') {
+    for (const [key, value] of Object.entries(source)) {
+      if (!key.startsWith('anthropic-')) continue;
+      minimal[key] = value;
+    }
+    if (!minimal['anthropic-version']) {
+      minimal['anthropic-version'] = '2023-06-01';
+    }
+  }
+
+  minimal['content-type'] = 'application/json';
+  minimal.accept = input.stream ? 'text/event-stream' : 'application/json';
+  return minimal;
+}
+
+export function isUnsupportedMediaTypeError(status: number, upstreamErrorText?: string | null): boolean {
+  if (status < 400) return false;
+  if (status !== 400 && status !== 415) return false;
+  const text = (upstreamErrorText || '').toLowerCase();
+  if (!text) return status === 415;
+
+  return (
+    text.includes('unsupported media type')
+    || text.includes("only 'application/json' is allowed")
+    || text.includes('only "application/json" is allowed')
+    || text.includes('application/json')
+    || text.includes('content-type')
+  );
+}
+
 export function isEndpointDowngradeError(status: number, upstreamErrorText?: string | null): boolean {
   if (status < 400) return false;
   const text = (upstreamErrorText || '').toLowerCase();
-  if (status === 404 || status === 405 || status === 501) return true;
+  if (status === 404 || status === 405 || status === 415 || status === 501) return true;
   if (!text) return false;
 
   let parsedCode = '';
@@ -1046,6 +1247,12 @@ export function isEndpointDowngradeError(status: number, upstreamErrorText?: str
     || text.includes('unrecognized request url')
     || text.includes('no route matched')
     || text.includes('does not exist')
+    || text.includes('openai_error')
+    || text.includes('upstream_error')
+    || text.includes('bad_response_status_code')
+    || text.includes('unsupported media type')
+    || text.includes("only 'application/json' is allowed")
+    || text.includes('only "application/json" is allowed')
     || (status === 400 && text.includes('unsupported'))
     || text.includes('not implemented')
     || text.includes('api not implemented')
@@ -1056,11 +1263,15 @@ export function isEndpointDowngradeError(status: number, upstreamErrorText?: str
     || parsedCode === 'unknown_endpoint'
     || parsedCode === 'unsupported_endpoint'
     || parsedCode === 'bad_response_status_code'
+    || parsedCode === 'openai_error'
+    || parsedCode === 'upstream_error'
     || parsedType === 'not_found_error'
     || parsedType === 'invalid_request_error'
     || parsedType === 'unsupported_endpoint'
     || parsedType === 'unsupported_path'
     || parsedType === 'bad_response_status_code'
+    || parsedType === 'openai_error'
+    || parsedType === 'upstream_error'
     || parsedMessage.includes('unknown endpoint')
     || parsedMessage.includes('unsupported endpoint')
     || parsedMessage.includes('unsupported path')
@@ -1068,6 +1279,11 @@ export function isEndpointDowngradeError(status: number, upstreamErrorText?: str
     || parsedMessage.includes('no route matched')
     || parsedMessage.includes('does not exist')
     || parsedMessage.includes('bad_response_status_code')
+    || parsedMessage === 'openai_error'
+    || parsedMessage === 'upstream_error'
+    || parsedMessage.includes('unsupported media type')
+    || parsedMessage.includes("only 'application/json' is allowed")
+    || parsedMessage.includes('only "application/json" is allowed')
     || (
       status === 400
       && parsedCode === 'invalid_request'

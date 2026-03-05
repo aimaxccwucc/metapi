@@ -10,4 +10,8 @@ describe('resolveLoginErrorMessage', () => {
     expect(resolveLoginErrorMessage(403, 'Invalid token')).toBe('登录令牌无效');
     expect(resolveLoginErrorMessage(401, 'Missing Authorization header')).toBe('登录令牌无效');
   });
+
+  it('returns server error message for 5xx', () => {
+    expect(resolveLoginErrorMessage(500, 'internal error')).toBe('服务端异常，请稍后重试');
+  });
 });

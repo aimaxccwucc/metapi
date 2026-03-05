@@ -144,7 +144,7 @@ function applyRuntimeHealthToExtraConfig(extraConfig: string | null | undefined,
   });
 }
 
-export function setAccountRuntimeHealth(
+export async function setAccountRuntimeHealth(
   accountId: number,
   input: {
     state: RuntimeHealthState;
@@ -152,16 +152,16 @@ export function setAccountRuntimeHealth(
     source?: string | null;
     checkedAt?: string | null;
   },
-): RuntimeHealthInfo | null {
+): Promise<RuntimeHealthInfo | null> {
   try {
     const query = db.select().from(schema.accounts).where(eq(schema.accounts.id, accountId)) as any;
-    const account = typeof query?.get === 'function' ? query.get() : null;
+    const account = typeof query?.get === 'function' ? await query.get() : null;
     if (!account) return null;
 
     const health = buildRuntimeHealthPatch(input);
     const nextExtraConfig = applyRuntimeHealthToExtraConfig(account.extraConfig, health);
 
-    db.update(schema.accounts)
+    await db.update(schema.accounts)
       .set({
         extraConfig: nextExtraConfig,
         updatedAt: new Date().toISOString(),

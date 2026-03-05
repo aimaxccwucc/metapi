@@ -28,16 +28,16 @@ describe('/api/models/marketplace', () => {
     await app.register(routesModule.statsRoutes);
   });
 
-  beforeEach(() => {
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+  beforeEach(async () => {
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -46,14 +46,14 @@ describe('/api/models/marketplace', () => {
   });
 
   it('returns account-level discovered models even when account has no managed tokens', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'site-no-token',
       url: 'https://site-no-token.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'alice',
       accessToken: 'session-token',
@@ -61,14 +61,14 @@ describe('/api/models/marketplace', () => {
       balance: 12.5,
     }).returning().get();
 
-    db.insert(schema.modelAvailability).values({
+    await db.insert(schema.modelAvailability).values({
       accountId: account.id,
       modelName: 'claude-sonnet-4-5-20250929',
       available: true,
       latencyMs: 233,
     }).run();
 
-    const visibleRows = db.select().from(schema.modelAvailability)
+    const visibleRows = await db.select().from(schema.modelAvailability)
       .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(
@@ -114,7 +114,7 @@ describe('/api/models/marketplace', () => {
   });
 
   it('returns explicit hint when site has no usable key for model availability test', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'site-no-key',
       url: 'https://site-no-key.example.com',
       platform: 'new-api',
@@ -122,7 +122,7 @@ describe('/api/models/marketplace', () => {
       apiKey: '',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'bob',
       accessToken: 'session-token',
@@ -131,7 +131,7 @@ describe('/api/models/marketplace', () => {
       balance: 1,
     }).returning().get();
 
-    db.insert(schema.modelAvailability).values({
+    await db.insert(schema.modelAvailability).values({
       accountId: account.id,
       modelName: 'gpt-4o-mini',
       available: true,

@@ -90,7 +90,7 @@ function proxyCostSqlExpression() {
 export async function statsRoutes(app: FastifyInstance) {
   // Dashboard summary
   app.get('/api/stats/dashboard', async () => {
-    const accountRows = db.select().from(schema.accounts)
+    const accountRows = await db.select().from(schema.accounts)
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(eq(schema.sites.status, 'active'))
       .all();
@@ -99,7 +99,7 @@ export async function statsRoutes(app: FastifyInstance) {
     const activeCount = accounts.filter((a) => a.status === 'active').length;
 
     const { localDay: today, startUtc: todayStartUtc, endUtc: todayEndUtc } = getLocalDayRangeUtc();
-    const todayCheckinRows = db.select().from(schema.checkinLogs)
+    const todayCheckinRows = await db.select().from(schema.checkinLogs)
       .innerJoin(schema.accounts, eq(schema.checkinLogs.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(and(
@@ -128,13 +128,13 @@ export async function statsRoutes(app: FastifyInstance) {
     const nowTs = Date.now();
     const last24hDate = formatUtcSqlDateTime(new Date(nowTs - 86400000));
     const last7dDate = getLocalRangeStartUtc(7);
-    const recentProxyLogs = db.select().from(schema.proxyLogs)
+    const recentProxyLogs = (await db.select().from(schema.proxyLogs)
       .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
       .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(and(gte(schema.proxyLogs.createdAt, last7dDate), eq(schema.sites.status, 'active')))
-      .all()
+      .all())
       .map((row) => row.proxy_logs);
-    const totalUsedRow = db.select({
+    const totalUsedRow = await db.select({
       totalUsed: sql<number>`coalesce(sum(${proxyCostSqlExpression()}), 0)`,
     })
       .from(schema.proxyLogs)
@@ -142,7 +142,7 @@ export async function statsRoutes(app: FastifyInstance) {
       .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(eq(schema.sites.status, 'active'))
       .get();
-    const proxy24hRow = db.select({
+    const proxy24hRow = await db.select({
       total: sql<number>`count(*)`,
       success: sql<number>`coalesce(sum(case when ${schema.proxyLogs.status} = 'success' then 1 else 0 end), 0)`,
       failed: sql<number>`coalesce(sum(case when ${schema.proxyLogs.status} = 'failed' then 1 else 0 end), 0)`,
@@ -153,7 +153,7 @@ export async function statsRoutes(app: FastifyInstance) {
       .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(and(gte(schema.proxyLogs.createdAt, last24hDate), eq(schema.sites.status, 'active')))
       .get();
-    const todaySpendRow = db.select({
+    const todaySpendRow = await db.select({
       todaySpend: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.estimatedCost}, 0)), 0)`,
     })
       .from(schema.proxyLogs)
@@ -198,7 +198,7 @@ export async function statsRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { limit?: string; offset?: string } }>('/api/stats/proxy-logs', async (request) => {
     const limit = parseInt(request.query.limit || '50', 10);
     const offset = parseInt(request.query.offset || '0', 10);
-    const rows = db.select().from(schema.proxyLogs)
+    const rows = await db.select().from(schema.proxyLogs)
       .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
       .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .orderBy(desc(schema.proxyLogs.createdAt))
@@ -263,12 +263,12 @@ export async function statsRoutes(app: FastifyInstance) {
       }
     }
 
-    const availability = db.select().from(schema.tokenModelAvailability)
+    const availability = await db.select().from(schema.tokenModelAvailability)
       .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
       .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .all();
-    const accountAvailability = db.select().from(schema.modelAvailability)
+    const accountAvailability = await db.select().from(schema.modelAvailability)
       .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(
@@ -281,7 +281,7 @@ export async function statsRoutes(app: FastifyInstance) {
       .all();
 
     const last7d = getLocalRangeStartUtc(7);
-    const recentLogs = db.select().from(schema.proxyLogs)
+    const recentLogs = await db.select().from(schema.proxyLogs)
       .where(gte(schema.proxyLogs.createdAt, last7d))
       .all();
 
@@ -318,7 +318,7 @@ export async function statsRoutes(app: FastifyInstance) {
 
     const modelMetadataMap = new Map<string, ModelMetadataAggregate>();
     if (includePricing) {
-      const activeAccountRows = db.select().from(schema.accounts)
+      const activeAccountRows = await db.select().from(schema.accounts)
         .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
         .where(and(eq(schema.accounts.status, 'active'), eq(schema.sites.status, 'active')))
         .all();
@@ -525,7 +525,7 @@ export async function statsRoutes(app: FastifyInstance) {
       return name;
     };
 
-    const rows = db.select().from(schema.tokenModelAvailability)
+    const rows = await db.select().from(schema.tokenModelAvailability)
       .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
       .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
@@ -538,7 +538,7 @@ export async function statsRoutes(app: FastifyInstance) {
         ),
       )
       .all();
-    const availableModelRows = db.select({
+    const availableModelRows = await db.select({
       modelName: schema.modelAvailability.modelName,
       accountId: schema.accounts.id,
       username: schema.accounts.username,
@@ -640,7 +640,7 @@ export async function statsRoutes(app: FastifyInstance) {
     const hasPotentialGroupHints = hasAnyTokenGroupSignals || unknownGroupCoverageByAccountModel.size > 0;
 
     if (hasPotentialGroupHints && accountIdsForGroupHints.size > 0) {
-      const accountRows = db.select().from(schema.accounts)
+      const accountRows = await db.select().from(schema.accounts)
         .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
         .where(
           and(
@@ -776,7 +776,7 @@ export async function statsRoutes(app: FastifyInstance) {
     const accountId = Number.isFinite(accountIdInput) ? Number(accountIdInput) : null;
     const siteName = String(request.body?.siteName || '').trim();
 
-    const modelRows = db.select()
+    const modelRows = await db.select()
       .from(schema.modelAvailability)
       .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
@@ -812,7 +812,7 @@ export async function statsRoutes(app: FastifyInstance) {
       });
     }
 
-    let preferredToken = getPreferredAccountToken(account.id);
+    let preferredToken = await getPreferredAccountToken(account.id);
     const fallbackSiteApiKey = (site.apiKey || '').trim();
     let modelCredential = (
       (preferredToken?.token || '').trim()
@@ -851,8 +851,8 @@ export async function statsRoutes(app: FastifyInstance) {
             MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
             `list api keys timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
           );
-          syncTokensFromUpstream(account.id, upstreamTokens);
-          preferredToken = getPreferredAccountToken(account.id);
+          await syncTokensFromUpstream(account.id, upstreamTokens);
+          preferredToken = await getPreferredAccountToken(account.id);
           modelCredential = (
             (preferredToken?.token || '').trim()
             || (account.apiToken || '').trim()
@@ -927,7 +927,7 @@ export async function statsRoutes(app: FastifyInstance) {
 
   // Site distribution – per-site aggregate data
   app.get('/api/stats/site-distribution', async () => {
-    const accountRows = db.select({
+    const accountRows = await db.select({
       siteId: schema.sites.id,
       siteName: schema.sites.name,
       platform: schema.sites.platform,
@@ -940,7 +940,7 @@ export async function statsRoutes(app: FastifyInstance) {
       .groupBy(schema.sites.id, schema.sites.name, schema.sites.platform)
       .all();
 
-    const spendRows = db.select({
+    const spendRows = await db.select({
       siteId: schema.sites.id,
       totalSpend: sql<number>`coalesce(sum(${proxyCostSqlExpression()}), 0)`,
     })
@@ -974,7 +974,7 @@ export async function statsRoutes(app: FastifyInstance) {
     const days = Math.max(1, parseInt(request.query.days || '7', 10));
     const sinceDate = getLocalRangeStartUtc(days);
 
-    const rows = db.select().from(schema.proxyLogs)
+    const rows = await db.select().from(schema.proxyLogs)
       .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
       .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(and(gte(schema.proxyLogs.createdAt, sinceDate), eq(schema.sites.status, 'active')))
@@ -1025,12 +1025,12 @@ export async function statsRoutes(app: FastifyInstance) {
     // Get account IDs belonging to the site (if filtered)
     let accountIds: Set<number> | null = null;
     if (siteId != null && !Number.isNaN(siteId)) {
-      const siteAccounts = db.select().from(schema.accounts)
+      const siteAccounts = await db.select().from(schema.accounts)
         .where(eq(schema.accounts.siteId, siteId)).all();
       accountIds = new Set(siteAccounts.map((a) => a.id));
     }
 
-    const rows = db.select().from(schema.proxyLogs)
+    const rows = await db.select().from(schema.proxyLogs)
       .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
       .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(and(gte(schema.proxyLogs.createdAt, sinceDate), eq(schema.sites.status, 'active')))

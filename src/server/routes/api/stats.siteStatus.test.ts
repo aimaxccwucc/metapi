@@ -28,16 +28,16 @@ describe('stats dashboard filters disabled sites', () => {
     await app.register(routesModule.statsRoutes);
   });
 
-  beforeEach(() => {
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+  beforeEach(async () => {
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -46,21 +46,21 @@ describe('stats dashboard filters disabled sites', () => {
   });
 
   it('excludes disabled-site balances from dashboard totals', async () => {
-    const activeSite = db.insert(schema.sites).values({
+    const activeSite = await db.insert(schema.sites).values({
       name: 'active-site',
       url: 'https://active-site.example.com',
       platform: 'new-api',
     }).returning().get();
 
-    const disabledSite = db.insert(schema.sites).values({
+    const disabledSite = await db.insert(schema.sites).values({
       name: 'disabled-site',
       url: 'https://disabled-site.example.com',
       platform: 'new-api',
     }).returning().get();
 
-    db.run(sql`update sites set status = 'disabled' where id = ${disabledSite.id}`);
+    await db.run(sql`update sites set status = 'disabled' where id = ${disabledSite.id}`);
 
-    db.insert(schema.accounts).values({
+    await db.insert(schema.accounts).values({
       siteId: activeSite.id,
       username: 'active-user',
       accessToken: 'active-token',
@@ -68,7 +68,7 @@ describe('stats dashboard filters disabled sites', () => {
       status: 'active',
     }).run();
 
-    db.insert(schema.accounts).values({
+    await db.insert(schema.accounts).values({
       siteId: disabledSite.id,
       username: 'disabled-user',
       accessToken: 'disabled-token',
@@ -95,13 +95,13 @@ describe('stats dashboard filters disabled sites', () => {
 
   it('treats skipped checkins as successful in dashboard stats', async () => {
     const today = formatLocalDate(new Date());
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'checkin-site',
       url: 'https://checkin-site.example.com',
       platform: 'new-api',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'checkin-user',
       accessToken: 'token',
@@ -109,7 +109,7 @@ describe('stats dashboard filters disabled sites', () => {
       status: 'active',
     }).returning().get();
 
-    db.insert(schema.checkinLogs).values([
+    await db.insert(schema.checkinLogs).values([
       {
         accountId: account.id,
         status: 'success',

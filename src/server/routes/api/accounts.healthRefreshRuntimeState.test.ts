@@ -32,17 +32,17 @@ describe('accounts health refresh runtime state', () => {
     await app.register(routesModule.accountsRoutes);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     refreshBalanceMock.mockReset();
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -51,13 +51,13 @@ describe('accounts health refresh runtime state', () => {
   });
 
   it('keeps degraded runtime state for unsupported checkin after health refresh', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Wind Hub',
       url: 'https://windhub.cc',
       platform: 'done-hub',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'ld6jl3djexjf',
       accessToken: 'token',

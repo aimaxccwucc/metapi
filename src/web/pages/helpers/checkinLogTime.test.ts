@@ -19,4 +19,13 @@ describe('formatCheckinLogTime', () => {
     expect(formatDateLocal('2026-02-25 03:51:58', 'en-US', 'UTC')).toBe('02/25/2026');
     expect(formatDateTimeMinuteLocal('2026-02-25 03:51:58', 'en-US', 'UTC')).toBe('02/25/2026, 03:51');
   });
+
+  it('supports postgres-style timezone offset without colon', () => {
+    expect(formatDateTimeMinuteLocal('2026-03-05 20:14:39+08', 'en-US', 'UTC')).toBe('03/05/2026, 12:14');
+    expect(formatDateTimeMinuteLocal('2026-03-05T20:14:39+0800', 'en-US', 'UTC')).toBe('03/05/2026, 12:14');
+  });
+
+  it('supports unix timestamp strings', () => {
+    expect(formatDateTimeMinuteLocal('1709640000', 'en-US', 'UTC')).toBe('03/05/2024, 12:00');
+  });
 });

@@ -30,15 +30,15 @@ describe('sites health and cleanup routes', () => {
   beforeEach(async () => {
     const taskModule = await import('../../services/backgroundTaskService.js');
     taskModule.__resetBackgroundTasksForTests();
-    db.delete(schema.events).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.events).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -113,7 +113,7 @@ describe('sites health and cleanup routes', () => {
   });
 
   it('persists unreachable site runtime health after refresh', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'unreachable-site',
       url: 'https://unreachable.invalid',
       platform: 'new-api',
@@ -134,7 +134,7 @@ describe('sites health and cleanup routes', () => {
     expect(body.summary.total).toBe(1);
     expect(body.summary.unreachable).toBe(1);
 
-    const refreshedSite = db.select().from(schema.sites).where(eq(schema.sites.id, site.id)).get();
+    const refreshedSite = await db.select().from(schema.sites).where(eq(schema.sites.id, site.id)).get();
     expect(refreshedSite?.healthStatus).toBe('unreachable');
     expect((refreshedSite?.healthReason || '').length).toBeGreaterThan(0);
     expect((refreshedSite?.healthCheckedAt || '').length).toBeGreaterThan(0);

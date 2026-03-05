@@ -26,12 +26,12 @@ describe('TokenRouter downstream policy', () => {
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
   });
 
-  beforeEach(() => {
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+  beforeEach(async () => {
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
     invalidateTokenRouterCache();
   });
 
@@ -40,15 +40,15 @@ describe('TokenRouter downstream policy', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('respects allowedRouteIds when selecting channels', () => {
-    const site = db.insert(schema.sites).values({
+  it('respects allowedRouteIds when selecting channels', async () => {
+    const site = await db.insert(schema.sites).values({
       name: 'site-a',
       url: 'https://a.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'user-a',
       accessToken: 'access-a',
@@ -56,17 +56,17 @@ describe('TokenRouter downstream policy', () => {
       status: 'active',
     }).returning().get();
 
-    const routeAllowed = db.insert(schema.tokenRoutes).values({
+    const routeAllowed = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'claude-opus-4-6',
       enabled: true,
     }).returning().get();
 
-    const routeBlocked = db.insert(schema.tokenRoutes).values({
+    const routeBlocked = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-4o-mini',
       enabled: true,
     }).returning().get();
 
-    db.insert(schema.routeChannels).values({
+    await db.insert(schema.routeChannels).values({
       routeId: routeAllowed.id,
       accountId: account.id,
       tokenId: null,
@@ -75,7 +75,7 @@ describe('TokenRouter downstream policy', () => {
       enabled: true,
     }).run();
 
-    db.insert(schema.routeChannels).values({
+    await db.insert(schema.routeChannels).values({
       routeId: routeBlocked.id,
       accountId: account.id,
       tokenId: null,
@@ -86,12 +86,12 @@ describe('TokenRouter downstream policy', () => {
 
     const router = new TokenRouter();
 
-    const allowedPick = router.selectChannel('claude-opus-4-6', {
+    const allowedPick = await router.selectChannel('claude-opus-4-6', {
       allowedRouteIds: [routeAllowed.id],
       supportedModels: [],
       siteWeightMultipliers: {},
     });
-    const blockedPick = router.selectChannel('gpt-4o-mini', {
+    const blockedPick = await router.selectChannel('gpt-4o-mini', {
       allowedRouteIds: [routeAllowed.id],
       supportedModels: [],
       siteWeightMultipliers: {},
@@ -102,22 +102,22 @@ describe('TokenRouter downstream policy', () => {
     expect(blockedPick).toBeNull();
   });
 
-  it('applies site weight multipliers to probability explanation', () => {
-    const siteHigh = db.insert(schema.sites).values({
+  it('applies site weight multipliers to probability explanation', async () => {
+    const siteHigh = await db.insert(schema.sites).values({
       name: 'high-site',
       url: 'https://high.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
-    const siteLow = db.insert(schema.sites).values({
+    const siteLow = await db.insert(schema.sites).values({
       name: 'low-site',
       url: 'https://low.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
-    const accountHigh = db.insert(schema.accounts).values({
+    const accountHigh = await db.insert(schema.accounts).values({
       siteId: siteHigh.id,
       username: 'user-high',
       accessToken: 'access-high',
@@ -127,7 +127,7 @@ describe('TokenRouter downstream policy', () => {
       balance: 100,
     }).returning().get();
 
-    const accountLow = db.insert(schema.accounts).values({
+    const accountLow = await db.insert(schema.accounts).values({
       siteId: siteLow.id,
       username: 'user-low',
       accessToken: 'access-low',
@@ -137,12 +137,12 @@ describe('TokenRouter downstream policy', () => {
       balance: 100,
     }).returning().get();
 
-    const route = db.insert(schema.tokenRoutes).values({
+    const route = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'claude-sonnet-4-6',
       enabled: true,
     }).returning().get();
 
-    const channelHigh = db.insert(schema.routeChannels).values({
+    const channelHigh = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountHigh.id,
       tokenId: null,
@@ -151,7 +151,7 @@ describe('TokenRouter downstream policy', () => {
       enabled: true,
     }).returning().get();
 
-    const channelLow = db.insert(schema.routeChannels).values({
+    const channelLow = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountLow.id,
       tokenId: null,
@@ -161,7 +161,7 @@ describe('TokenRouter downstream policy', () => {
     }).returning().get();
 
     const router = new TokenRouter();
-    const decision = router.explainSelectionForRoute(
+    const decision = await router.explainSelectionForRoute(
       route.id,
       'claude-sonnet-4-6',
       [],
@@ -183,8 +183,8 @@ describe('TokenRouter downstream policy', () => {
     expect((highCandidate?.probability || 0)).toBeGreaterThan(lowCandidate?.probability || 0);
   });
 
-  it('combines site global weight with downstream site multiplier', () => {
-    const siteGlobalHigh = db.insert(schema.sites).values({
+  it('combines site global weight with downstream site multiplier', async () => {
+    const siteGlobalHigh = await db.insert(schema.sites).values({
       name: 'global-high-site',
       url: 'https://global-high.example.com',
       platform: 'new-api',
@@ -192,7 +192,7 @@ describe('TokenRouter downstream policy', () => {
       globalWeight: 3,
     }).returning().get();
 
-    const siteGlobalLow = db.insert(schema.sites).values({
+    const siteGlobalLow = await db.insert(schema.sites).values({
       name: 'global-low-site',
       url: 'https://global-low.example.com',
       platform: 'new-api',
@@ -200,7 +200,7 @@ describe('TokenRouter downstream policy', () => {
       globalWeight: 1,
     }).returning().get();
 
-    const accountGlobalHigh = db.insert(schema.accounts).values({
+    const accountGlobalHigh = await db.insert(schema.accounts).values({
       siteId: siteGlobalHigh.id,
       username: 'user-global-high',
       accessToken: 'access-global-high',
@@ -210,7 +210,7 @@ describe('TokenRouter downstream policy', () => {
       balance: 100,
     }).returning().get();
 
-    const accountGlobalLow = db.insert(schema.accounts).values({
+    const accountGlobalLow = await db.insert(schema.accounts).values({
       siteId: siteGlobalLow.id,
       username: 'user-global-low',
       accessToken: 'access-global-low',
@@ -220,12 +220,12 @@ describe('TokenRouter downstream policy', () => {
       balance: 100,
     }).returning().get();
 
-    const route = db.insert(schema.tokenRoutes).values({
+    const route = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-5-mini',
       enabled: true,
     }).returning().get();
 
-    const highChannel = db.insert(schema.routeChannels).values({
+    const highChannel = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountGlobalHigh.id,
       tokenId: null,
@@ -234,7 +234,7 @@ describe('TokenRouter downstream policy', () => {
       enabled: true,
     }).returning().get();
 
-    const lowChannel = db.insert(schema.routeChannels).values({
+    const lowChannel = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountGlobalLow.id,
       tokenId: null,
@@ -244,7 +244,7 @@ describe('TokenRouter downstream policy', () => {
     }).returning().get();
 
     const router = new TokenRouter();
-    const decision = router.explainSelectionForRoute(
+    const decision = await router.explainSelectionForRoute(
       route.id,
       'gpt-5-mini',
       [],
@@ -267,15 +267,15 @@ describe('TokenRouter downstream policy', () => {
     expect((highCandidate?.probability || 0)).toBeGreaterThan(lowCandidate?.probability || 0);
   });
 
-  it('supports union semantics between supportedModels and allowedRouteIds', () => {
-    const site = db.insert(schema.sites).values({
+  it('supports union semantics between supportedModels and allowedRouteIds', async () => {
+    const site = await db.insert(schema.sites).values({
       name: 'site-union',
       url: 'https://union.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'user-union',
       accessToken: 'access-union',
@@ -283,17 +283,17 @@ describe('TokenRouter downstream policy', () => {
       status: 'active',
     }).returning().get();
 
-    const claudeGroupRoute = db.insert(schema.tokenRoutes).values({
+    const claudeGroupRoute = await db.insert(schema.tokenRoutes).values({
       modelPattern: 're:^claude-(opus|sonnet)-4-6$',
       enabled: true,
     }).returning().get();
 
-    const gptExactRoute = db.insert(schema.tokenRoutes).values({
+    const gptExactRoute = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-4o-mini',
       enabled: true,
     }).returning().get();
 
-    db.insert(schema.routeChannels).values({
+    await db.insert(schema.routeChannels).values({
       routeId: claudeGroupRoute.id,
       accountId: account.id,
       tokenId: null,
@@ -302,7 +302,7 @@ describe('TokenRouter downstream policy', () => {
       enabled: true,
     }).run();
 
-    db.insert(schema.routeChannels).values({
+    await db.insert(schema.routeChannels).values({
       routeId: gptExactRoute.id,
       accountId: account.id,
       tokenId: null,
@@ -318,8 +318,8 @@ describe('TokenRouter downstream policy', () => {
       siteWeightMultipliers: {},
     };
 
-    const claudePick = router.selectChannel('claude-opus-4-6', policy);
-    const gptPick = router.selectChannel('gpt-4o-mini', policy);
+    const claudePick = await router.selectChannel('claude-opus-4-6', policy);
+    const gptPick = await router.selectChannel('gpt-4o-mini', policy);
 
     expect(claudePick?.channel.routeId).toBe(claudeGroupRoute.id);
     expect(gptPick?.channel.routeId).toBe(gptExactRoute.id);

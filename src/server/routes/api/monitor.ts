@@ -7,8 +7,8 @@ const MONITOR_AUTH_COOKIE = 'meta_monitor_auth';
 const LDOH_BASE_URL = 'https://ldoh.105117.xyz';
 const LDOH_COOKIE_SETTING_KEY = 'monitor_ldoh_cookie';
 
-function upsertSetting(key: string, value: unknown) {
-  db.insert(schema.settings)
+async function upsertSetting(key: string, value: unknown) {
+  await db.insert(schema.settings)
     .values({ key, value: JSON.stringify(value) })
     .onConflictDoUpdate({
       target: schema.settings.key,
@@ -17,8 +17,8 @@ function upsertSetting(key: string, value: unknown) {
     .run();
 }
 
-function getSettingString(key: string): string {
-  const row = db.select().from(schema.settings).where(eq(schema.settings.key, key)).get();
+async function getSettingString(key: string): Promise<string> {
+  const row = await db.select().from(schema.settings).where(eq(schema.settings.key, key)).get();
   if (!row?.value) return '';
   try {
     const parsed = JSON.parse(row.value);
@@ -111,7 +111,7 @@ function resolveLdohProxyPath(request: FastifyRequest): string {
 
 export async function monitorRoutes(app: FastifyInstance) {
   app.get('/api/monitor/config', async () => {
-    const ldohCookie = getSettingString(LDOH_COOKIE_SETTING_KEY);
+    const ldohCookie = await getSettingString(LDOH_COOKIE_SETTING_KEY);
     return {
       ldohCookieConfigured: !!ldohCookie,
       ldohCookieMasked: ldohCookie ? maskCookieValue(ldohCookie) : '',
@@ -121,7 +121,7 @@ export async function monitorRoutes(app: FastifyInstance) {
   app.put<{ Body: { ldohCookie?: string | null } }>('/api/monitor/config', async (request, reply) => {
     const raw = String(request.body?.ldohCookie || '').trim();
     if (!raw) {
-      upsertSetting(LDOH_COOKIE_SETTING_KEY, '');
+      await upsertSetting(LDOH_COOKIE_SETTING_KEY, '');
       return { success: true, message: 'LDOH Cookie 已清空', ldohCookieConfigured: false };
     }
 
@@ -130,7 +130,7 @@ export async function monitorRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: 'Cookie 格式无效，请填写 ld_auth_session 或其值' });
     }
 
-    upsertSetting(LDOH_COOKIE_SETTING_KEY, normalized);
+    await upsertSetting(LDOH_COOKIE_SETTING_KEY, normalized);
     return {
       success: true,
       message: 'LDOH Cookie 已保存',
@@ -151,7 +151,7 @@ export async function monitorRoutes(app: FastifyInstance) {
   const handleLdohProxy = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!ensureMonitorAuth(request, reply)) return;
 
-    const storedCookie = getSettingString(LDOH_COOKIE_SETTING_KEY);
+    const storedCookie = await getSettingString(LDOH_COOKIE_SETTING_KEY);
     if (!storedCookie) {
       return reply.code(400).send('LDOH cookie not configured');
     }

@@ -6,9 +6,11 @@ import { join } from 'node:path';
 
 const verifyTokenMock = vi.fn();
 const undiciFetchMock = vi.fn();
+let adapterPlatformName = 'new-api';
 
 vi.mock('../../services/platforms/index.js', () => ({
   getAdapter: () => ({
+    platformName: adapterPlatformName,
     verifyToken: (...args: unknown[]) => verifyTokenMock(...args),
   }),
 }));
@@ -39,19 +41,20 @@ describe('accounts verify-token shield detection', () => {
     await app.register(routesModule.accountsRoutes);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     verifyTokenMock.mockReset();
     undiciFetchMock.mockReset();
+    adapterPlatformName = 'new-api';
 
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -62,7 +65,7 @@ describe('accounts verify-token shield detection', () => {
   it('returns rebind hint when verify-token reports invalid access token', async () => {
     verifyTokenMock.mockRejectedValueOnce(new Error('invalid access token'));
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'AnyRouter',
       url: 'https://anyrouter.example.com',
       platform: 'new-api',
@@ -84,7 +87,7 @@ describe('accounts verify-token shield detection', () => {
     });
   });
 
-  it('returns shieldBlocked when upstream /api/user/self responds with challenge html', async () => {
+  it('avoids raw shieldBlocked misclassification for new-api when verifyToken returned tokenType unknown', async () => {
     verifyTokenMock.mockResolvedValueOnce({ tokenType: 'unknown' });
     undiciFetchMock.mockResolvedValue({
       text: async () => '<html><script>var arg1="ABC123";</script></html>',
@@ -93,10 +96,79 @@ describe('accounts verify-token shield detection', () => {
       },
     });
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'AnyRouter',
       url: 'https://anyrouter.example.com',
       platform: 'new-api',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts/verify-token',
+      payload: {
+        siteId: site.id,
+        accessToken: 'session-or-cookie-token',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: false,
+      message: 'Token invalid: cannot use it as session cookie or API key',
+    });
+    expect(undiciFetchMock).toHaveBeenCalled();
+  });
+
+  it('uses adapter platformName to skip raw shield detection for newapi alias site platform', async () => {
+    adapterPlatformName = 'new-api';
+    verifyTokenMock.mockResolvedValueOnce({ tokenType: 'unknown' });
+    undiciFetchMock.mockResolvedValue({
+      text: async () => '<html><script>var arg1="ABC123";</script></html>',
+      headers: {
+        get: (name: string) => (name.toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null),
+      },
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'AnyRouter Alias',
+      url: 'https://anyrouter-alias.example.com',
+      platform: 'newapi',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts/verify-token',
+      payload: {
+        siteId: site.id,
+        accessToken: 'session-or-cookie-token',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: false,
+      message: 'Token invalid: cannot use it as session cookie or API key',
+    });
+    expect(response.json()).not.toMatchObject({
+      shieldBlocked: true,
+    });
+    expect(undiciFetchMock).toHaveBeenCalled();
+  });
+
+  it('still returns shieldBlocked for non-new-api platforms when challenge html is detected', async () => {
+    adapterPlatformName = 'one-api';
+    verifyTokenMock.mockResolvedValueOnce({ tokenType: 'unknown' });
+    undiciFetchMock.mockResolvedValue({
+      text: async () => '<html><script>var arg1="ABC123";</script></html>',
+      headers: {
+        get: (name: string) => (name.toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null),
+      },
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Legacy Shielded',
+      url: 'https://legacy-shield.example.com',
+      platform: 'one-api',
     }).returning().get();
 
     const response = await app.inject({

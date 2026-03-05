@@ -176,10 +176,10 @@ export function isModelAllowedByPolicy(model: string, policy: DownstreamRoutingP
   return patterns.some((pattern) => matchesDownstreamModelPattern(model, pattern));
 }
 
-function isModelMatchedByAllowedRoutes(model: string, allowedRouteIds: number[]): boolean {
+async function isModelMatchedByAllowedRoutes(model: string, allowedRouteIds: number[]): Promise<boolean> {
   if (allowedRouteIds.length === 0) return false;
 
-  const routes = db.select({
+  const routes = await db.select({
     id: schema.tokenRoutes.id,
     modelPattern: schema.tokenRoutes.modelPattern,
     displayName: schema.tokenRoutes.displayName,
@@ -198,7 +198,7 @@ function isModelMatchedByAllowedRoutes(model: string, allowedRouteIds: number[])
   });
 }
 
-export function isModelAllowedByPolicyOrAllowedRoutes(model: string, policy: DownstreamRoutingPolicy): boolean {
+export async function isModelAllowedByPolicyOrAllowedRoutes(model: string, policy: DownstreamRoutingPolicy): Promise<boolean> {
   const patterns = normalizeSupportedModelsInput(policy.supportedModels);
   const allowedRouteIds = normalizeAllowedRouteIdsInput(policy.allowedRouteIds);
   const hasPatternRules = patterns.length > 0;
@@ -212,7 +212,7 @@ export function isModelAllowedByPolicyOrAllowedRoutes(model: string, policy: Dow
 
   if (!hasRouteRules) return false;
 
-  return isModelMatchedByAllowedRoutes(model, allowedRouteIds);
+  return await isModelMatchedByAllowedRoutes(model, allowedRouteIds);
 }
 
 export function toDownstreamApiKeyPolicyView(row: DownstreamApiKeyRow): DownstreamApiKeyPolicyView {
@@ -249,26 +249,26 @@ export function toPolicyFromView(view: Pick<DownstreamApiKeyPolicyView, 'support
   };
 }
 
-export function listDownstreamApiKeys(): DownstreamApiKeyPolicyView[] {
-  return db.select().from(schema.downstreamApiKeys)
-    .all()
+export async function listDownstreamApiKeys(): Promise<DownstreamApiKeyPolicyView[]> {
+  return (await db.select().from(schema.downstreamApiKeys)
+    .all())
     .map((row) => toDownstreamApiKeyPolicyView(row))
     .sort((a, b) => b.id - a.id);
 }
 
-export function getDownstreamApiKeyById(id: number): DownstreamApiKeyPolicyView | null {
-  const row = db.select().from(schema.downstreamApiKeys)
+export async function getDownstreamApiKeyById(id: number): Promise<DownstreamApiKeyPolicyView | null> {
+  const row = await db.select().from(schema.downstreamApiKeys)
     .where(eq(schema.downstreamApiKeys.id, id))
     .get();
   if (!row) return null;
   return toDownstreamApiKeyPolicyView(row);
 }
 
-export function getManagedDownstreamApiKeyByToken(token: string): DownstreamApiKeyPolicyView | null {
+export async function getManagedDownstreamApiKeyByToken(token: string): Promise<DownstreamApiKeyPolicyView | null> {
   const normalizedToken = normalizeToken(token);
   if (!normalizedToken) return null;
 
-  const row = db.select().from(schema.downstreamApiKeys)
+  const row = await db.select().from(schema.downstreamApiKeys)
     .where(eq(schema.downstreamApiKeys.key, normalizedToken))
     .get();
 
@@ -280,7 +280,7 @@ export function getDefaultGlobalPolicy(): DownstreamRoutingPolicy {
   return EMPTY_DOWNSTREAM_ROUTING_POLICY;
 }
 
-export function authorizeDownstreamToken(token: string): DownstreamTokenAuthResult {
+export async function authorizeDownstreamToken(token: string): Promise<DownstreamTokenAuthResult> {
   const normalizedToken = normalizeToken(token);
   if (!normalizedToken) {
     return {
@@ -291,7 +291,7 @@ export function authorizeDownstreamToken(token: string): DownstreamTokenAuthResu
     };
   }
 
-  const managed = getManagedDownstreamApiKeyByToken(normalizedToken);
+  const managed = await getManagedDownstreamApiKeyByToken(normalizedToken);
   if (managed) {
     if (!managed.enabled) {
       return {
@@ -359,9 +359,9 @@ export function authorizeDownstreamToken(token: string): DownstreamTokenAuthResu
   };
 }
 
-export function consumeManagedKeyRequest(keyId: number): void {
+export async function consumeManagedKeyRequest(keyId: number): Promise<void> {
   const nowIso = new Date().toISOString();
-  db.update(schema.downstreamApiKeys).set({
+  await db.update(schema.downstreamApiKeys).set({
     // Atomic increment to avoid lost updates under multi-process concurrency.
     usedRequests: sql`coalesce(${schema.downstreamApiKeys.usedRequests}, 0) + 1`,
     lastUsedAt: nowIso,
@@ -369,11 +369,11 @@ export function consumeManagedKeyRequest(keyId: number): void {
   }).where(eq(schema.downstreamApiKeys.id, keyId)).run();
 }
 
-export function recordManagedKeyCostUsage(keyId: number, estimatedCost: number): void {
+export async function recordManagedKeyCostUsage(keyId: number, estimatedCost: number): Promise<void> {
   const cost = Number(estimatedCost);
   if (!Number.isFinite(cost) || cost <= 0) return;
   const nowIso = new Date().toISOString();
-  db.update(schema.downstreamApiKeys).set({
+  await db.update(schema.downstreamApiKeys).set({
     // Atomic increment to avoid lost updates under multi-process concurrency.
     usedCost: sql`coalesce(${schema.downstreamApiKeys.usedCost}, 0) + ${cost}`,
     lastUsedAt: nowIso,

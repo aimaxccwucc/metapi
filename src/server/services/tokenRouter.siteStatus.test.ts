@@ -27,14 +27,14 @@ describe('TokenRouter site status guard', () => {
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
   });
 
-  beforeEach(() => {
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+  beforeEach(async () => {
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
     invalidateTokenRouterCache();
   });
 
@@ -43,15 +43,15 @@ describe('TokenRouter site status guard', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('does not select channels from disabled sites', () => {
-    const site = db.insert(schema.sites).values({
+  it('does not select channels from disabled sites', async () => {
+    const site = await db.insert(schema.sites).values({
       name: 'disabled-site',
       url: 'https://disabled.example.com',
       platform: 'new-api',
     }).returning().get();
-    db.run(sql`update sites set status = 'disabled' where id = ${site.id}`);
+    await db.run(sql`update sites set status = 'disabled' where id = ${site.id}`);
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'disabled-user',
       accessToken: 'access-disabled',
@@ -59,12 +59,12 @@ describe('TokenRouter site status guard', () => {
       status: 'active',
     }).returning().get();
 
-    const route = db.insert(schema.tokenRoutes).values({
+    const route = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-4o-mini',
       enabled: true,
     }).returning().get();
 
-    const channel = db.insert(schema.routeChannels).values({
+    const channel = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: account.id,
       tokenId: null,
@@ -75,10 +75,10 @@ describe('TokenRouter site status guard', () => {
     }).returning().get();
 
     const router = new TokenRouter();
-    const selected = router.selectChannel('gpt-4o-mini');
+    const selected = await router.selectChannel('gpt-4o-mini');
     expect(selected).toBeNull();
 
-    const decision = router.explainSelection('gpt-4o-mini');
+    const decision = await router.explainSelection('gpt-4o-mini');
     expect(decision.matched).toBe(true);
     const candidate = decision.candidates.find((item) => item.channelId === channel.id);
     expect(candidate?.eligible).toBe(false);

@@ -77,7 +77,40 @@ const titleFirstPlatforms = new Set<string>([
   'sub2api',
 ]);
 
+function detectPlatformByUrlHint(url: string): string | undefined {
+  const normalized = (url || '').trim().toLowerCase();
+  if (!normalized) return undefined;
+
+  // Official upstream endpoints.
+  if (normalized.includes('api.openai.com')) return 'openai';
+  if (normalized.includes('api.anthropic.com') || normalized.includes('anthropic.com/v1')) return 'claude';
+  if (
+    normalized.includes('generativelanguage.googleapis.com')
+    || normalized.includes('googleapis.com/v1beta/openai')
+    || normalized.includes('gemini.google.com')
+  ) {
+    return 'gemini';
+  }
+
+  // NewAPI-family forks and common aliases.
+  if (normalized.includes('anyrouter')) return 'anyrouter';
+  if (normalized.includes('donehub') || normalized.includes('done-hub')) return 'done-hub';
+  if (normalized.includes('onehub') || normalized.includes('one-hub')) return 'one-hub';
+  if (normalized.includes('veloera')) return 'veloera';
+  if (normalized.includes('sub2api')) return 'sub2api';
+
+  // CLIProxyAPI default local endpoints.
+  if (normalized.includes('127.0.0.1:8317') || normalized.includes('localhost:8317')) return 'cliproxyapi';
+
+  return undefined;
+}
+
 export async function detectPlatform(url: string): Promise<PlatformAdapter | undefined> {
+  const urlHint = detectPlatformByUrlHint(url);
+  if (urlHint) {
+    return getAdapter(urlHint);
+  }
+
   const titleHint = await detectPlatformByTitle(url);
   if (titleHint && titleFirstPlatforms.has(titleHint)) {
     return getAdapter(titleHint);

@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+﻿import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import ChangeKeyModal from '../components/ChangeKeyModal.js';
 import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import { InlineBrandIcon, getBrand, useIconCdn } from '../components/BrandIcon.js';
+import ModernSelect from '../components/ModernSelect.js';
 import {
   applyRoutingProfilePreset,
   resolveRoutingProfilePreset,
@@ -16,6 +17,7 @@ import { tr } from '../i18n.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
 const ROUTE_BRAND_ICON_PREFIX = 'brand:';
+type DbDialect = 'sqlite' | 'mysql' | 'postgres';
 
 type RuntimeSettings = {
   checkinCron: string;
@@ -64,6 +66,42 @@ type RouteSelectorItem = {
   enabled: boolean;
 };
 
+type DatabaseMigrationSummary = {
+  dialect: DbDialect;
+  connection: string;
+  overwrite: boolean;
+  version: string;
+  timestamp: number;
+  rows: {
+    sites: number;
+    accounts: number;
+    accountTokens: number;
+    tokenRoutes: number;
+    routeChannels: number;
+    settings: number;
+  };
+};
+
+type RuntimeDatabaseState = {
+  active: {
+    dialect: DbDialect;
+    connection: string;
+  };
+  saved: {
+    dialect: DbDialect;
+    connection: string;
+  } | null;
+  restartRequired: boolean;
+};
+
+type ShorthandConnection = {
+  host: string;
+  user: string;
+  password: string;
+  port: string;
+  database: string;
+};
+
 const defaultWeights: RoutingWeights = {
   baseWeightFactor: 0.5,
   valueScoreFactor: 0.5,
@@ -71,6 +109,37 @@ const defaultWeights: RoutingWeights = {
   balanceWeight: 0.3,
   usageWeight: 0.3,
 };
+
+function getDialectDefaults(dialect: DbDialect) {
+  if (dialect === 'mysql') {
+    return { port: '3306', database: 'mysql' };
+  }
+  if (dialect === 'postgres') {
+    return { port: '5432', database: 'postgres' };
+  }
+  return { port: '', database: '' };
+}
+
+function buildShorthandConnectionString(dialect: DbDialect, input: ShorthandConnection): string {
+  if (dialect === 'sqlite') return '';
+  const host = input.host.trim();
+  const user = input.user.trim();
+  const password = input.password;
+  if (!host || !user || !password) return '';
+  const defaults = getDialectDefaults(dialect);
+  const port = (input.port || defaults.port).trim() || defaults.port;
+  const database = (input.database || defaults.database).trim() || defaults.database;
+  const protocol = dialect === 'mysql' ? 'mysql' : 'postgres';
+  return `${protocol}://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(database)}`;
+}
+
+function inferUrlDialect(connectionString: string): 'mysql' | 'postgres' | null {
+  const normalized = (connectionString || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized.startsWith('mysql://')) return 'mysql';
+  if (normalized.startsWith('postgres://') || normalized.startsWith('postgresql://')) return 'postgres';
+  return null;
+}
 
 function isRegexModelPattern(pattern: string): boolean {
   return pattern.trim().toLowerCase().startsWith('re:');
@@ -121,6 +190,23 @@ export default function Settings() {
   const [adminIpAllowlistText, setAdminIpAllowlistText] = useState('');
   const [clearingCache, setClearingCache] = useState(false);
   const [clearingUsage, setClearingUsage] = useState(false);
+  const [migrationDialect, setMigrationDialect] = useState<DbDialect>('postgres');
+  const [migrationConnectionString, setMigrationConnectionString] = useState('');
+  const [connectionMode, setConnectionMode] = useState<'shorthand' | 'advanced'>('shorthand');
+  const [showShorthandOptional, setShowShorthandOptional] = useState(false);
+  const [shorthandConnection, setShorthandConnection] = useState<ShorthandConnection>({
+    host: '',
+    user: '',
+    password: '',
+    port: '5432',
+    database: 'postgres',
+  });
+  const [migrationOverwrite, setMigrationOverwrite] = useState(true);
+  const [testingMigrationConnection, setTestingMigrationConnection] = useState(false);
+  const [migratingDatabase, setMigratingDatabase] = useState(false);
+  const [savingRuntimeDatabase, setSavingRuntimeDatabase] = useState(false);
+  const [migrationSummary, setMigrationSummary] = useState<DatabaseMigrationSummary | null>(null);
+  const [runtimeDatabaseState, setRuntimeDatabaseState] = useState<RuntimeDatabaseState | null>(null);
   const [showChangeKey, setShowChangeKey] = useState(false);
   const [downstreamKeys, setDownstreamKeys] = useState<DownstreamApiKeyItem[]>([]);
   const [downstreamLoading, setDownstreamLoading] = useState(false);
@@ -181,6 +267,29 @@ export default function Settings() {
     });
   }, [groupRouteOptions, selectorGroupSearch]);
 
+  const generatedConnectionString = useMemo(() => (
+    buildShorthandConnectionString(migrationDialect, shorthandConnection)
+  ), [migrationDialect, shorthandConnection]);
+
+  const effectiveMigrationConnectionString = useMemo(() => {
+    if (migrationDialect === 'sqlite') return migrationConnectionString.trim();
+    if (connectionMode === 'advanced') return migrationConnectionString.trim();
+    return generatedConnectionString.trim();
+  }, [connectionMode, generatedConnectionString, migrationConnectionString, migrationDialect]);
+
+  useEffect(() => {
+    const defaults = getDialectDefaults(migrationDialect);
+    if (migrationDialect === 'sqlite') {
+      setConnectionMode('advanced');
+      return;
+    }
+    setShorthandConnection((prev) => ({
+      ...prev,
+      port: defaults.port,
+      database: defaults.database,
+    }));
+  }, [migrationDialect]);
+
   const inputStyle: React.CSSProperties = {
     width: '100%',
     padding: '10px 14px',
@@ -239,11 +348,12 @@ export default function Settings() {
   const loadSettings = async () => {
     setLoading(true);
     try {
-      const [authInfo, runtimeInfo, downstreamInfo, routeRows] = await Promise.all([
+      const [authInfo, runtimeInfo, downstreamInfo, routeRows, runtimeDatabaseInfo] = await Promise.all([
         api.getAuthInfo(),
         api.getRuntimeSettings(),
         api.getDownstreamApiKeys(),
         api.getRoutes(),
+        api.getRuntimeDatabaseConfig(),
       ]);
       setMaskedToken(authInfo.masked || '****');
       setRuntime({
@@ -276,6 +386,23 @@ export default function Settings() {
         displayIcon: row.displayIcon,
         enabled: !!row.enabled,
       })));
+      if (runtimeDatabaseInfo?.active?.dialect) {
+        const preferredDialect = (runtimeDatabaseInfo?.saved?.dialect || runtimeDatabaseInfo.active.dialect) as DbDialect;
+        setMigrationDialect(preferredDialect);
+      }
+      setRuntimeDatabaseState({
+        active: {
+          dialect: (runtimeDatabaseInfo?.active?.dialect || 'sqlite') as DbDialect,
+          connection: String(runtimeDatabaseInfo?.active?.connection || ''),
+        },
+        saved: runtimeDatabaseInfo?.saved
+          ? {
+            dialect: runtimeDatabaseInfo.saved.dialect as DbDialect,
+            connection: String(runtimeDatabaseInfo.saved.connection || ''),
+          }
+          : null,
+        restartRequired: !!runtimeDatabaseInfo?.restartRequired,
+      });
     } catch (err: any) {
       toast.error(err?.message || '加载设置失败');
     } finally {
@@ -303,7 +430,7 @@ export default function Settings() {
         balanceRefreshCron: runtime.balanceRefreshCron,
         siteHealthRefreshCron: runtime.siteHealthRefreshCron,
       });
-      toast.success('定时任务设置已保存');
+      toast.success('Schedule settings saved');
     } catch (err: any) {
       toast.error(err?.message || '保存失败');
     } finally {
@@ -314,7 +441,7 @@ export default function Settings() {
   const saveProxyToken = async () => {
     const suffix = proxyTokenSuffix.trim();
     if (!suffix) {
-      toast.info(tr('请输入 sk- 后的令牌内容'));
+      toast.info('请输入 sk- 后的令牌内容');
       return;
     }
     setSavingToken(true);
@@ -322,7 +449,7 @@ export default function Settings() {
       const res = await api.updateRuntimeSettings({ proxyToken: `${PROXY_TOKEN_PREFIX}${suffix}` });
       setRuntime((prev) => ({ ...prev, proxyTokenMasked: res.proxyTokenMasked || prev.proxyTokenMasked }));
       setProxyTokenSuffix('');
-      toast.success(tr('下游访问令牌已更新'));
+      toast.success('Proxy token updated');
     } catch (err: any) {
       toast.error(err?.message || '保存失败');
     } finally {
@@ -383,7 +510,7 @@ export default function Settings() {
     const name = downstreamCreate.name.trim();
     const rawKey = downstreamCreate.key.trim();
     if (!name) {
-      toast.info('请填写名称');
+      toast.info('Please enter a name');
       return;
     }
     if (!rawKey) {
@@ -391,7 +518,7 @@ export default function Settings() {
       return;
     }
     if (!rawKey.startsWith(PROXY_TOKEN_PREFIX)) {
-      toast.info('API Key 必须以 sk- 开头');
+      toast.info('API Key must start with sk-');
       return;
     }
 
@@ -410,10 +537,10 @@ export default function Settings() {
 
       if (editingDownstreamId) {
         await api.updateDownstreamApiKey(editingDownstreamId, payload);
-        toast.success('下游 API Key 已更新');
+        toast.success('Downstream API Key updated');
       } else {
         await api.createDownstreamApiKey(payload);
-        toast.success('下游 API Key 已创建');
+        toast.success('Downstream API Key created');
       }
       setDownstreamModalOpen(false);
       resetDownstreamForm();
@@ -462,7 +589,7 @@ export default function Settings() {
     await runDownstreamOp(item.id, async () => {
       await api.updateDownstreamApiKey(item.id, { enabled: !item.enabled });
       await loadDownstreamKeys();
-      toast.success(item.enabled ? '已禁用' : '已启用');
+      toast.success(item.enabled ? 'Disabled' : 'Enabled');
     });
   };
 
@@ -470,12 +597,12 @@ export default function Settings() {
     await runDownstreamOp(item.id, async () => {
       await api.resetDownstreamApiKeyUsage(item.id);
       await loadDownstreamKeys();
-      toast.success('已重置用量');
+      toast.success('Usage reset');
     });
   };
 
   const deleteDownstreamKey = async (item: DownstreamApiKeyItem) => {
-    if (!window.confirm(`确认删除 API Key：${item.name}？`)) return;
+    if (!window.confirm('Confirm delete API Key?')) return;
     await runDownstreamOp(item.id, async () => {
       await api.deleteDownstreamApiKey(item.id);
       if (editingDownstreamId === item.id) {
@@ -483,7 +610,7 @@ export default function Settings() {
         resetDownstreamForm();
       }
       await loadDownstreamKeys();
-      toast.success('已删除');
+      toast.success('Deleted');
     });
   };
 
@@ -494,7 +621,7 @@ export default function Settings() {
         routingWeights: runtime.routingWeights,
         routingFallbackUnitCost: runtime.routingFallbackUnitCost,
       });
-      toast.success('路由权重已保存');
+      toast.success('Routing weights saved');
     } catch (err: any) {
       toast.error(err?.message || '保存失败');
     } finally {
@@ -526,7 +653,7 @@ export default function Settings() {
           ? res.currentAdminIp
           : prev.currentAdminIp,
       }));
-      toast.success('安全设置已保存');
+      toast.success('Security settings saved');
     } catch (err: any) {
       toast.error(err?.message || '保存失败');
     } finally {
@@ -561,6 +688,105 @@ export default function Settings() {
     }
   };
 
+  const handleTestExternalDatabaseConnection = async () => {
+    if (!effectiveMigrationConnectionString) {
+      toast.info('Please fill target database connection first');
+      return;
+    }
+
+    const inferredDialect = inferUrlDialect(effectiveMigrationConnectionString);
+    if (migrationDialect === 'sqlite' && inferredDialect) {
+      toast.error(`当前选择 SQLite，但连接串是 ${inferredDialect.toUpperCase()} URL，请先切换方言`);
+      return;
+    }
+
+    setTestingMigrationConnection(true);
+    try {
+      const res = await api.testExternalDatabaseConnection({
+        dialect: migrationDialect,
+        connectionString: effectiveMigrationConnectionString,
+        overwrite: migrationOverwrite,
+      });
+      toast.success(`Connection success: ${res.connection || migrationDialect}`);
+    } catch (err: any) {
+      toast.error(err?.message || 'Target database connection failed');
+    } finally {
+      setTestingMigrationConnection(false);
+    }
+  };
+
+  const handleMigrateToExternalDatabase = async () => {
+    if (!effectiveMigrationConnectionString) {
+      toast.info('Please fill target database connection first');
+      return;
+    }
+
+    const inferredDialect = inferUrlDialect(effectiveMigrationConnectionString);
+    if (migrationDialect === 'sqlite' && inferredDialect) {
+      toast.error(`当前选择 SQLite，但连接串是 ${inferredDialect.toUpperCase()} URL，请先切换方言`);
+      return;
+    }
+
+    const warning = migrationOverwrite
+      ? 'Confirm migration and overwrite existing data in target database?'
+      : 'Confirm migration to target database? If target has data, migration may fail.';
+    if (!window.confirm(warning)) return;
+
+    setMigratingDatabase(true);
+    try {
+      const res = await api.migrateExternalDatabase({
+        dialect: migrationDialect,
+        connectionString: effectiveMigrationConnectionString,
+        overwrite: migrationOverwrite,
+      });
+      setMigrationSummary(res);
+      toast.success(res?.message || 'Database migration completed');
+    } catch (err: any) {
+      toast.error(err?.message || 'Database migration failed');
+    } finally {
+      setMigratingDatabase(false);
+    }
+  };
+
+  const handleSaveRuntimeDatabaseConfig = async () => {
+    if (!effectiveMigrationConnectionString) {
+      toast.info('Please fill target database connection first');
+      return;
+    }
+
+    const inferredDialect = inferUrlDialect(effectiveMigrationConnectionString);
+    if (migrationDialect === 'sqlite' && inferredDialect) {
+      toast.error(`当前选择 SQLite，但连接串是 ${inferredDialect.toUpperCase()} URL，请先切换方言`);
+      return;
+    }
+
+    setSavingRuntimeDatabase(true);
+    try {
+      const res = await api.updateRuntimeDatabaseConfig({
+        dialect: migrationDialect,
+        connectionString: effectiveMigrationConnectionString,
+      });
+      setRuntimeDatabaseState({
+        active: {
+          dialect: (res?.active?.dialect || 'sqlite') as DbDialect,
+          connection: String(res?.active?.connection || ''),
+        },
+        saved: res?.saved
+          ? {
+            dialect: res.saved.dialect as DbDialect,
+            connection: String(res.saved.connection || ''),
+          }
+          : null,
+        restartRequired: !!res?.restartRequired,
+      });
+      toast.success(res?.message || 'Runtime database config saved');
+    } catch (err: any) {
+      toast.error(err?.message || 'Runtime database config save failed');
+    } finally {
+      setSavingRuntimeDatabase(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="animate-fade-in">
@@ -573,7 +799,7 @@ export default function Settings() {
   return (
     <div className="animate-fade-in">
       <div className="page-header">
-        <h2 className="page-title">{tr('系统设置')}</h2>
+        <h2 className="page-title">系统设置</h2>
       </div>
 
       <div style={{ maxWidth: 720, display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -628,9 +854,9 @@ export default function Settings() {
         </div>
 
         <div className="card animate-slide-up stagger-3" style={{ padding: 20 }}>
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>{tr('下游访问令牌（PROXY_TOKEN）')}</div>
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>下游访问令牌（PROXY_TOKEN）</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-            {tr('用于下游站点或客户端访问本服务代理接口。前缀 sk- 固定不可修改，只需填写后缀。')}
+            用于下游站点或客户端访问本服务代理接口。前缀 sk- 固定不可修改，只需填写后缀。
           </div>
           <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 10 }}>
             当前：{runtime.proxyTokenMasked || '未设置'}
@@ -661,7 +887,7 @@ export default function Settings() {
               type="password"
               value={proxyTokenSuffix}
               onChange={(e) => setProxyTokenSuffix(normalizeProxyTokenSuffix(e.target.value))}
-              placeholder={tr('请输入 sk- 后的令牌内容')}
+              placeholder="请输入 sk- 后的令牌内容"
               style={{
                 flex: 1,
                 border: 'none',
@@ -675,7 +901,7 @@ export default function Settings() {
             />
           </div>
           <button onClick={saveProxyToken} disabled={savingToken} className="btn btn-primary">
-            {savingToken ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : tr('更新下游访问令牌')}
+            {savingToken ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '更新下游访问令牌'}
           </button>
         </div>
 
@@ -752,7 +978,7 @@ export default function Settings() {
           </div>
           <div style={{ marginBottom: 12, maxWidth: 280 }}>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
-              无实测/配置/目录价时默认单价
+                无实测/配置/目录价时默认单价
             </div>
             <input
               type="number"
@@ -852,6 +1078,165 @@ export default function Settings() {
         </div>
 
         <div className="card animate-slide-up stagger-6" style={{ padding: 20 }}>
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>数据库迁移（SQLite / MySQL / PostgreSQL）</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+            可先测试连接，再迁移数据；迁移完成后可保存为运行数据库配置（重启容器后生效）。
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 10, marginBottom: 10, alignItems: 'center' }}>
+            <ModernSelect
+              value={migrationDialect}
+              onChange={(value) => setMigrationDialect(value as DbDialect)}
+              options={[
+                { value: 'postgres', label: 'PostgreSQL' },
+                { value: 'mysql', label: 'MySQL' },
+                { value: 'sqlite', label: 'SQLite' },
+              ]}
+            />
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+              {migrationDialect !== 'sqlite' && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-border)' }}
+                  onClick={() => setConnectionMode((prev) => (prev === 'shorthand' ? 'advanced' : 'shorthand'))}
+                >
+                  {connectionMode === 'shorthand' ? '高级输入连接串' : '使用半自动简写'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {migrationDialect === 'sqlite' ? (
+            <input
+              value={migrationConnectionString}
+              onChange={(e) => setMigrationConnectionString(e.target.value)}
+              placeholder="./data/target.db or file:///abs/path.db"
+              style={{ ...inputStyle, fontFamily: 'var(--font-mono)', marginBottom: 10 }}
+            />
+          ) : connectionMode === 'advanced' ? (
+            <input
+              value={migrationConnectionString}
+              onChange={(e) => setMigrationConnectionString(e.target.value)}
+              placeholder={migrationDialect === 'mysql'
+                ? 'mysql://user:pass@host:3306/db'
+                : 'postgres://user:pass@host:5432/db'}
+              style={{ ...inputStyle, fontFamily: 'var(--font-mono)', marginBottom: 10 }}
+            />
+          ) : (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 8 }}>
+                <input
+                  value={shorthandConnection.host}
+                  onChange={(e) => setShorthandConnection((prev) => ({ ...prev, host: e.target.value }))}
+                  placeholder="Host (required)"
+                  style={inputStyle}
+                />
+                <input
+                  value={shorthandConnection.user}
+                  onChange={(e) => setShorthandConnection((prev) => ({ ...prev, user: e.target.value }))}
+                  placeholder="User (required)"
+                  style={inputStyle}
+                />
+                <input
+                  value={shorthandConnection.password}
+                  onChange={(e) => setShorthandConnection((prev) => ({ ...prev, password: e.target.value }))}
+                  placeholder="Password (required)"
+                  type="password"
+                  style={inputStyle}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                <button
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-border)' }}
+                  onClick={() => setShowShorthandOptional((prev) => !prev)}
+                >
+                  {showShorthandOptional ? '收起端口/库名' : '展开端口/库名'}
+                </button>
+              </div>
+              {showShorthandOptional && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 8 }}>
+                  <input
+                    value={shorthandConnection.port}
+                    onChange={(e) => setShorthandConnection((prev) => ({ ...prev, port: e.target.value }))}
+                    placeholder={getDialectDefaults(migrationDialect).port}
+                    style={inputStyle}
+                  />
+                  <input
+                    value={shorthandConnection.database}
+                    onChange={(e) => setShorthandConnection((prev) => ({ ...prev, database: e.target.value }))}
+                    placeholder={getDialectDefaults(migrationDialect).database}
+                    style={inputStyle}
+                  />
+                </div>
+              )}
+              <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)' }}>
+                {generatedConnectionString || 'Fill host/user/password to generate connection string'}
+              </code>
+            </div>
+          )}
+
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: 12, color: 'var(--color-text-secondary)' }}>
+            <input
+              type="checkbox"
+              checked={migrationOverwrite}
+              onChange={(e) => setMigrationOverwrite(e.target.checked)}
+              style={{ width: 14, height: 14, accentColor: 'var(--color-primary)' }}
+            />
+            允许覆盖目标数据库现有数据
+          </label>
+
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+            <button
+              onClick={handleTestExternalDatabaseConnection}
+              disabled={testingMigrationConnection || migratingDatabase || savingRuntimeDatabase}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+            >
+              {testingMigrationConnection ? <><span className="spinner spinner-sm" /> 测试中...</> : '测试连接'}
+            </button>
+            <button
+              onClick={handleMigrateToExternalDatabase}
+              disabled={migratingDatabase || testingMigrationConnection || savingRuntimeDatabase}
+              className="btn btn-primary"
+            >
+              {migratingDatabase ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 迁移中...</> : '开始迁移'}
+            </button>
+            <button
+              onClick={handleSaveRuntimeDatabaseConfig}
+              disabled={savingRuntimeDatabase || migratingDatabase || testingMigrationConnection}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+            >
+              {savingRuntimeDatabase ? <><span className="spinner spinner-sm" /> 保存中...</> : '保存为运行数据库（重启后生效）'}
+            </button>
+          </div>
+
+          {runtimeDatabaseState && (
+            <div style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 10, fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.8, marginBottom: migrationSummary ? 12 : 0 }}>
+              <div>当前运行：{runtimeDatabaseState.active.dialect}（{runtimeDatabaseState.active.connection || '(empty)' }）</div>
+              <div>
+                已保存待生效：
+                {runtimeDatabaseState.saved
+                  ? ` ${runtimeDatabaseState.saved.dialect}（${runtimeDatabaseState.saved.connection}）`
+                  : ' 未保存'}
+              </div>
+              {runtimeDatabaseState.restartRequired && (
+                <div style={{ color: 'var(--color-warning)' }}>检测到待生效数据库配置，请重启容器使其生效。</div>
+              )}
+            </div>
+          )}
+
+          {migrationSummary && (
+            <div style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 10, fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.8 }}>
+              <div>目标：{migrationSummary.dialect}（{migrationSummary.connection}）</div>
+              <div>版本：{migrationSummary.version}，时间：{new Date(migrationSummary.timestamp).toLocaleString()}</div>
+              <div>迁移结果：站点 {migrationSummary.rows.sites} / 账号 {migrationSummary.rows.accounts} / 令牌 {migrationSummary.rows.accountTokens} / 路由 {migrationSummary.rows.tokenRoutes} / 通道 {migrationSummary.rows.routeChannels} / 设置 {migrationSummary.rows.settings}</div>
+            </div>
+          )}
+        </div>
+
+        <div className="card animate-slide-up stagger-6" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>维护工具</div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button onClick={handleClearCache} disabled={clearingCache} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
@@ -869,10 +1254,10 @@ export default function Settings() {
             登录会话默认 12 小时自动过期。可选配置管理端 IP 白名单（每行一个 IP）。
           </div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>
-            {tr('当前识别到的管理端 IP（由服务端判定）：')}
+            当前识别到的管理端 IP（由服务端判定）：
           </div>
           <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 10 }}>
-            {runtime.currentAdminIp || tr('未知')}
+            {runtime.currentAdminIp || '未知'}
           </code>
           <textarea
             value={adminIpAllowlistText}
@@ -913,7 +1298,7 @@ export default function Settings() {
                   <input
                     value={downstreamCreate.name}
                     onChange={(e) => setDownstreamCreate((prev) => ({ ...prev, name: e.target.value }))}
-                    placeholder="名称（例如：cc-project）"
+                    placeholder="Name (e.g. cc-project)"
                     style={inputStyle}
                   />
                   <input
@@ -1119,7 +1504,7 @@ export default function Settings() {
                       <input
                         value={selectorGroupSearch}
                         onChange={(e) => setSelectorGroupSearch(e.target.value)}
-                        placeholder="搜索群组（名称/匹配规则）"
+                        placeholder="Search groups (name / pattern)"
                         style={{ ...inputStyle, padding: '8px 10px', fontSize: 12, marginBottom: 8 }}
                       />
                       <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1238,3 +1623,4 @@ export default function Settings() {
     </div>
   );
 }
+

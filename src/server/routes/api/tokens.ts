@@ -12,8 +12,8 @@ function isExactModelPattern(modelPattern: string): boolean {
   return !/[\*\?\[]/.test(normalized);
 }
 
-function getDefaultTokenId(accountId: number): number | null {
-  const token = db.select().from(schema.accountTokens)
+async function getDefaultTokenId(accountId: number): Promise<number | null> {
+  const token = await db.select().from(schema.accountTokens)
     .where(and(eq(schema.accountTokens.accountId, accountId), eq(schema.accountTokens.enabled, true), eq(schema.accountTokens.isDefault, true)))
     .get();
   return token?.id ?? null;
@@ -35,8 +35,8 @@ function isModelAliasEquivalent(left: string, right: string): boolean {
   return !!a && !!b && a === b;
 }
 
-function tokenSupportsModel(tokenId: number, modelName: string): boolean {
-  const rows = db.select().from(schema.tokenModelAvailability)
+async function tokenSupportsModel(tokenId: number, modelName: string): Promise<boolean> {
+  const rows = await db.select().from(schema.tokenModelAvailability)
     .where(
       and(
         eq(schema.tokenModelAvailability.tokenId, tokenId),
@@ -51,15 +51,15 @@ function tokenSupportsModel(tokenId: number, modelName: string): boolean {
   });
 }
 
-function checkTokenBelongsToAccount(tokenId: number, accountId: number): boolean {
-  const row = db.select().from(schema.accountTokens)
+async function checkTokenBelongsToAccount(tokenId: number, accountId: number): Promise<boolean> {
+  const row = await db.select().from(schema.accountTokens)
     .where(and(eq(schema.accountTokens.id, tokenId), eq(schema.accountTokens.accountId, accountId)))
     .get();
   return !!row;
 }
 
-function getPatternTokenCandidates(modelPattern: string): Array<{ tokenId: number; accountId: number; sourceModel: string }> {
-  const rows = db.select().from(schema.tokenModelAvailability)
+async function getPatternTokenCandidates(modelPattern: string): Promise<Array<{ tokenId: number; accountId: number; sourceModel: string }>> {
+  const rows = await db.select().from(schema.tokenModelAvailability)
     .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
     .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
@@ -88,7 +88,7 @@ function getPatternTokenCandidates(modelPattern: string): Array<{ tokenId: numbe
   return result;
 }
 
-function getMatchedExactRouteChannelCandidates(modelPattern: string): Array<{
+async function getMatchedExactRouteChannelCandidates(modelPattern: string): Promise<Array<{
   tokenId: number | null;
   accountId: number;
   sourceModel: string;
@@ -96,17 +96,17 @@ function getMatchedExactRouteChannelCandidates(modelPattern: string): Array<{
   weight: number;
   enabled: boolean;
   manualOverride: boolean;
-}> {
-  const matchedRoutes = db.select().from(schema.tokenRoutes)
+}>> {
+  const matchedRoutes = (await db.select().from(schema.tokenRoutes)
     .where(eq(schema.tokenRoutes.enabled, true))
-    .all()
+    .all())
     .filter((route) => isExactModelPattern(route.modelPattern) && matchesModelPattern(route.modelPattern, modelPattern));
 
   if (matchedRoutes.length === 0) return [];
   const routeMap = new Map<number, typeof matchedRoutes[number]>();
   for (const route of matchedRoutes) routeMap.set(route.id, route);
 
-  const channels = db.select().from(schema.routeChannels)
+  const channels = await db.select().from(schema.routeChannels)
     .where(inArray(schema.routeChannels.routeId, matchedRoutes.map((route) => route.id)))
     .all();
 
@@ -121,9 +121,9 @@ function getMatchedExactRouteChannelCandidates(modelPattern: string): Array<{
   })).filter((candidate) => candidate.sourceModel.length > 0);
 }
 
-function populateRouteChannelsByModelPattern(routeId: number, modelPattern: string): number {
-  const routeCandidates = getMatchedExactRouteChannelCandidates(modelPattern);
-  const availabilityCandidates = getPatternTokenCandidates(modelPattern).map((candidate) => ({
+async function populateRouteChannelsByModelPattern(routeId: number, modelPattern: string): Promise<number> {
+  const routeCandidates = await getMatchedExactRouteChannelCandidates(modelPattern);
+  const availabilityCandidates = (await getPatternTokenCandidates(modelPattern)).map((candidate) => ({
     tokenId: candidate.tokenId,
     accountId: candidate.accountId,
     sourceModel: candidate.sourceModel,
@@ -135,7 +135,7 @@ function populateRouteChannelsByModelPattern(routeId: number, modelPattern: stri
   const candidates = [...routeCandidates, ...availabilityCandidates];
   if (candidates.length === 0) return 0;
 
-  const existingChannels = db.select().from(schema.routeChannels)
+  const existingChannels = await db.select().from(schema.routeChannels)
     .where(eq(schema.routeChannels.routeId, routeId))
     .all();
   const existingPairs = new Set<string>(
@@ -152,7 +152,7 @@ function populateRouteChannelsByModelPattern(routeId: number, modelPattern: stri
     const tokenId = typeof candidate.tokenId === 'number' && Number.isFinite(candidate.tokenId) ? candidate.tokenId : 0;
     const pairKey = `${candidate.accountId}::${tokenId}::${candidate.sourceModel.trim().toLowerCase()}`;
     if (existingPairs.has(pairKey)) continue;
-    db.insert(schema.routeChannels).values({
+    await db.insert(schema.routeChannels).values({
       routeId,
       accountId: candidate.accountId,
       tokenId: candidate.tokenId,
@@ -328,11 +328,11 @@ function parseBatchRouteWideDecisionRouteIds(
 export async function tokensRoutes(app: FastifyInstance) {
   // List all routes
   app.get('/api/routes', async () => {
-    const routes = db.select().from(schema.tokenRoutes).all();
+    const routes = await db.select().from(schema.tokenRoutes).all();
     if (routes.length === 0) return [];
 
     const routeIds = routes.map((route) => route.id);
-    const channelRows = db.select().from(schema.routeChannels)
+    const channelRows = await db.select().from(schema.routeChannels)
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .leftJoin(schema.accountTokens, eq(schema.routeChannels.tokenId, schema.accountTokens.id))
@@ -372,7 +372,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: 'model 不能为空' });
     }
 
-    const decision = tokenRouter.explainSelection(model);
+    const decision = await tokenRouter.explainSelection(model);
     return { success: true, decision };
   });
 
@@ -382,9 +382,9 @@ export async function tokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: parsed.message });
     }
 
-    const decisions: Record<string, ReturnType<typeof tokenRouter.explainSelection>> = {};
+    const decisions: Record<string, Awaited<ReturnType<typeof tokenRouter.explainSelection>>> = {};
     for (const model of parsed.models) {
-      decisions[model] = tokenRouter.explainSelection(model);
+      decisions[model] = await tokenRouter.explainSelection(model);
     }
 
     return { success: true, decisions };
@@ -396,11 +396,11 @@ export async function tokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: parsed.message });
     }
 
-    const decisions: Record<string, Record<string, ReturnType<typeof tokenRouter.explainSelection>>> = {};
+    const decisions: Record<string, Record<string, Awaited<ReturnType<typeof tokenRouter.explainSelectionForRoute>>>> = {};
     for (const item of parsed.items) {
       const routeKey = String(item.routeId);
       if (!decisions[routeKey]) decisions[routeKey] = {};
-      decisions[routeKey][item.model] = tokenRouter.explainSelectionForRoute(item.routeId, item.model);
+      decisions[routeKey][item.model] = await tokenRouter.explainSelectionForRoute(item.routeId, item.model);
     }
 
     return { success: true, decisions };
@@ -412,9 +412,9 @@ export async function tokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: parsed.message });
     }
 
-    const decisions: Record<string, ReturnType<typeof tokenRouter.explainSelection>> = {};
+    const decisions: Record<string, Awaited<ReturnType<typeof tokenRouter.explainSelectionRouteWide>>> = {};
     for (const routeId of parsed.routeIds) {
-      decisions[String(routeId)] = tokenRouter.explainSelectionRouteWide(routeId);
+      decisions[String(routeId)] = await tokenRouter.explainSelectionRouteWide(routeId);
     }
 
     return { success: true, decisions };
@@ -423,15 +423,23 @@ export async function tokensRoutes(app: FastifyInstance) {
   // Create a route
   app.post<{ Body: { modelPattern: string; displayName?: string; displayIcon?: string; modelMapping?: string; enabled?: boolean } }>('/api/routes', async (request) => {
     const body = request.body;
-    const route = db.insert(schema.tokenRoutes).values({
+    const insertedRoute = await db.insert(schema.tokenRoutes).values({
       modelPattern: body.modelPattern,
       displayName: body.displayName,
       displayIcon: body.displayIcon,
       modelMapping: body.modelMapping,
       enabled: body.enabled ?? true,
-    }).returning().get();
+    }).run();
+    const routeId = Number(insertedRoute.lastInsertRowid || 0);
+    if (routeId <= 0) {
+      return { success: false, message: '创建路由失败' };
+    }
+    const route = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, routeId)).get();
+    if (!route) {
+      return { success: false, message: '创建路由失败' };
+    }
 
-    populateRouteChannelsByModelPattern(route.id, body.modelPattern);
+    await populateRouteChannelsByModelPattern(route.id, body.modelPattern);
     invalidateTokenRouterCache();
     return route;
   });
@@ -449,15 +457,15 @@ export async function tokensRoutes(app: FastifyInstance) {
     if (body.enabled !== undefined) updates.enabled = body.enabled;
     updates.updatedAt = new Date().toISOString();
 
-    db.update(schema.tokenRoutes).set(updates).where(eq(schema.tokenRoutes.id, id)).run();
+    await db.update(schema.tokenRoutes).set(updates).where(eq(schema.tokenRoutes.id, id)).run();
     invalidateTokenRouterCache();
-    return db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, id)).get();
+    return await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, id)).get();
   });
 
   // Delete a route
   app.delete<{ Params: { id: string } }>('/api/routes/:id', async (request) => {
     const id = parseInt(request.params.id, 10);
-    db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, id)).run();
+    await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, id)).run();
     invalidateTokenRouterCache();
     return { success: true };
   });
@@ -467,7 +475,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     const routeId = parseInt(request.params.id, 10);
     const body = request.body;
 
-    const route = db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, routeId)).get();
+    const route = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, routeId)).get();
     if (!route) {
       return reply.code(404).send({ success: false, message: '路由不存在' });
     }
@@ -475,19 +483,19 @@ export async function tokensRoutes(app: FastifyInstance) {
     const sourceModel = typeof body.sourceModel === 'string'
       ? body.sourceModel.trim()
       : (isExactModelPattern(route.modelPattern) ? route.modelPattern.trim() : '');
-    const effectiveTokenId = body.tokenId ?? getDefaultTokenId(body.accountId);
+    const effectiveTokenId = body.tokenId ?? await getDefaultTokenId(body.accountId);
 
-    if (body.tokenId && !checkTokenBelongsToAccount(body.tokenId, body.accountId)) {
+    if (body.tokenId && !await checkTokenBelongsToAccount(body.tokenId, body.accountId)) {
       return reply.code(400).send({ success: false, message: '令牌不存在或不属于当前账号' });
     }
 
-    if (isExactModelPattern(route.modelPattern) && effectiveTokenId && !tokenSupportsModel(effectiveTokenId, route.modelPattern)) {
+    if (isExactModelPattern(route.modelPattern) && effectiveTokenId && !await tokenSupportsModel(effectiveTokenId, route.modelPattern)) {
       return reply.code(400).send({ success: false, message: '该令牌不支持当前模型' });
     }
 
-    const duplicate = db.select().from(schema.routeChannels)
+    const duplicate = (await db.select().from(schema.routeChannels)
       .where(eq(schema.routeChannels.routeId, routeId))
-      .all()
+      .all())
       .some((channel) =>
         channel.accountId === body.accountId
         && (channel.tokenId ?? null) === (body.tokenId ?? null)
@@ -497,14 +505,22 @@ export async function tokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: '该来源模型的通道已存在' });
     }
 
-    const created = db.insert(schema.routeChannels).values({
+    const insertedChannel = await db.insert(schema.routeChannels).values({
       routeId,
       accountId: body.accountId,
       tokenId: body.tokenId,
       sourceModel: sourceModel || null,
       priority: body.priority ?? 0,
       weight: body.weight ?? 10,
-    }).returning().get();
+    }).run();
+    const channelId = Number(insertedChannel.lastInsertRowid || 0);
+    if (channelId <= 0) {
+      return reply.code(500).send({ success: false, message: '创建通道失败' });
+    }
+    const created = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
+    if (!created) {
+      return reply.code(500).send({ success: false, message: '创建通道失败' });
+    }
     invalidateTokenRouterCache();
     return created;
   });
@@ -517,7 +533,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     }
 
     const channelIds = Array.from(new Set(parsed.updates.map((update) => update.id)));
-    const existingChannels = db.select().from(schema.routeChannels)
+    const existingChannels = await db.select().from(schema.routeChannels)
       .where(inArray(schema.routeChannels.id, channelIds))
       .all();
     if (existingChannels.length !== channelIds.length) {
@@ -527,13 +543,13 @@ export async function tokensRoutes(app: FastifyInstance) {
     }
 
     for (const update of parsed.updates) {
-      db.update(schema.routeChannels).set({
+      await db.update(schema.routeChannels).set({
         priority: update.priority,
         manualOverride: true,
       }).where(eq(schema.routeChannels.id, update.id)).run();
     }
 
-    const updatedChannels = db.select().from(schema.routeChannels)
+    const updatedChannels = await db.select().from(schema.routeChannels)
       .where(inArray(schema.routeChannels.id, channelIds))
       .all();
     invalidateTokenRouterCache();
@@ -545,28 +561,28 @@ export async function tokensRoutes(app: FastifyInstance) {
     const channelId = parseInt(request.params.channelId, 10);
     const body = request.body as Record<string, unknown>;
 
-    const channel = db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
+    const channel = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
     if (!channel) {
       return reply.code(404).send({ success: false, message: '通道不存在' });
     }
 
-    const route = db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, channel.routeId)).get();
+    const route = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, channel.routeId)).get();
     if (!route) {
       return reply.code(404).send({ success: false, message: '路由不存在' });
     }
 
     if (body.tokenId !== undefined && body.tokenId !== null) {
       const tokenId = Number(body.tokenId);
-      if (!Number.isFinite(tokenId) || !checkTokenBelongsToAccount(tokenId, channel.accountId)) {
+      if (!Number.isFinite(tokenId) || !await checkTokenBelongsToAccount(tokenId, channel.accountId)) {
         return reply.code(400).send({ success: false, message: '令牌不存在或不属于通道账号' });
       }
     }
 
     const nextTokenId = body.tokenId === undefined
-      ? (channel.tokenId ?? getDefaultTokenId(channel.accountId))
-      : (body.tokenId === null ? getDefaultTokenId(channel.accountId) : Number(body.tokenId));
+      ? (channel.tokenId ?? await getDefaultTokenId(channel.accountId))
+      : (body.tokenId === null ? await getDefaultTokenId(channel.accountId) : Number(body.tokenId));
 
-    if (isExactModelPattern(route.modelPattern) && nextTokenId && !tokenSupportsModel(nextTokenId, route.modelPattern)) {
+    if (isExactModelPattern(route.modelPattern) && nextTokenId && !await tokenSupportsModel(nextTokenId, route.modelPattern)) {
       return reply.code(400).send({ success: false, message: '该令牌不支持当前模型' });
     }
 
@@ -580,15 +596,15 @@ export async function tokensRoutes(app: FastifyInstance) {
       if (body[key] !== undefined) updates[key] = body[key];
     }
 
-    db.update(schema.routeChannels).set(updates).where(eq(schema.routeChannels.id, channelId)).run();
+    await db.update(schema.routeChannels).set(updates).where(eq(schema.routeChannels.id, channelId)).run();
     invalidateTokenRouterCache();
-    return db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
+    return await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
   });
 
   // Delete a channel
   app.delete<{ Params: { channelId: string } }>('/api/channels/:channelId', async (request) => {
     const channelId = parseInt(request.params.channelId, 10);
-    db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).run();
+    await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).run();
     invalidateTokenRouterCache();
     return { success: true };
   });

@@ -52,15 +52,15 @@ describe('TokenRouter selection scoring', () => {
     originalRoutingFallbackUnitCost = config.routingFallbackUnitCost;
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     idSeed = 0;
     mockedCatalogRoutingCost.mockReset();
     mockedCatalogRoutingCost.mockReturnValue(null);
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
     invalidateTokenRouterCache();
   });
 
@@ -71,16 +71,16 @@ describe('TokenRouter selection scoring', () => {
     delete process.env.DATA_DIR;
   });
 
-  function createRoute(modelPattern: string) {
-    return db.insert(schema.tokenRoutes).values({
+  async function createRoute(modelPattern: string) {
+    return await db.insert(schema.tokenRoutes).values({
       modelPattern,
       enabled: true,
     }).returning().get();
   }
 
-  function createSite(namePrefix: string) {
+  async function createSite(namePrefix: string) {
     const id = nextId();
-    return db.insert(schema.sites).values({
+    return await db.insert(schema.sites).values({
       name: `${namePrefix}-${id}`,
       url: `https://${namePrefix}-${id}.example.com`,
       platform: 'new-api',
@@ -88,9 +88,9 @@ describe('TokenRouter selection scoring', () => {
     }).returning().get();
   }
 
-  function createAccount(siteId: number, usernamePrefix: string) {
+  async function createAccount(siteId: number, usernamePrefix: string) {
     const id = nextId();
-    return db.insert(schema.accounts).values({
+    return await db.insert(schema.accounts).values({
       siteId,
       username: `${usernamePrefix}-${id}`,
       accessToken: `access-${id}`,
@@ -99,8 +99,8 @@ describe('TokenRouter selection scoring', () => {
     }).returning().get();
   }
 
-  function createToken(accountId: number, name: string) {
-    return db.insert(schema.accountTokens).values({
+  async function createToken(accountId: number, name: string) {
+    return await db.insert(schema.accountTokens).values({
       accountId,
       name,
       token: `token-${name}-${nextId()}`,
@@ -109,7 +109,7 @@ describe('TokenRouter selection scoring', () => {
     }).returning().get();
   }
 
-  it('normalizes probability across channels on the same site', () => {
+  it('normalizes probability across channels on the same site', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
       valueScoreFactor: 0,
@@ -118,18 +118,18 @@ describe('TokenRouter selection scoring', () => {
       usageWeight: 0,
     };
 
-    const route = createRoute('claude-haiku-4-5-20251001');
+    const route = await createRoute('claude-haiku-4-5-20251001');
 
-    const siteA = createSite('site-a');
-    const accountA = createAccount(siteA.id, 'user-a');
-    const tokenA1 = createToken(accountA.id, 'a-1');
-    const tokenA2 = createToken(accountA.id, 'a-2');
+    const siteA = await createSite('site-a');
+    const accountA = await createAccount(siteA.id, 'user-a');
+    const tokenA1 = await createToken(accountA.id, 'a-1');
+    const tokenA2 = await createToken(accountA.id, 'a-2');
 
-    const siteB = createSite('site-b');
-    const accountB = createAccount(siteB.id, 'user-b');
-    const tokenB = createToken(accountB.id, 'b-1');
+    const siteB = await createSite('site-b');
+    const accountB = await createAccount(siteB.id, 'user-b');
+    const tokenB = await createToken(accountB.id, 'b-1');
 
-    const channelA1 = db.insert(schema.routeChannels).values({
+    const channelA1 = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountA.id,
       tokenId: tokenA1.id,
@@ -138,7 +138,7 @@ describe('TokenRouter selection scoring', () => {
       enabled: true,
     }).returning().get();
 
-    const channelA2 = db.insert(schema.routeChannels).values({
+    const channelA2 = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountA.id,
       tokenId: tokenA2.id,
@@ -147,7 +147,7 @@ describe('TokenRouter selection scoring', () => {
       enabled: true,
     }).returning().get();
 
-    const channelB = db.insert(schema.routeChannels).values({
+    const channelB = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountB.id,
       tokenId: tokenB.id,
@@ -156,7 +156,7 @@ describe('TokenRouter selection scoring', () => {
       enabled: true,
     }).returning().get();
 
-    const decision = new TokenRouter().explainSelection('claude-haiku-4-5-20251001');
+    const decision = await new TokenRouter().explainSelection('claude-haiku-4-5-20251001');
     const probMap = new Map(decision.candidates.map((candidate) => [candidate.channelId, candidate.probability]));
 
     const probA1 = probMap.get(channelA1.id) ?? 0;
@@ -169,7 +169,7 @@ describe('TokenRouter selection scoring', () => {
     expect(probA1 + probA2).toBeCloseTo(probB, 1);
   });
 
-  it('uses observed channel cost from real routing results when scoring cost priority', () => {
+  it('uses observed channel cost from real routing results when scoring cost priority', async () => {
     config.routingWeights = {
       baseWeightFactor: 0.35,
       valueScoreFactor: 0.65,
@@ -178,12 +178,12 @@ describe('TokenRouter selection scoring', () => {
       usageWeight: 0,
     };
 
-    const route = createRoute('claude-opus-4-6');
+    const route = await createRoute('claude-opus-4-6');
 
-    const siteCheap = createSite('cheap-site');
-    const accountCheap = createAccount(siteCheap.id, 'cheap-user');
-    const tokenCheap = createToken(accountCheap.id, 'cheap-token');
-    db.insert(schema.routeChannels).values({
+    const siteCheap = await createSite('cheap-site');
+    const accountCheap = await createAccount(siteCheap.id, 'cheap-user');
+    const tokenCheap = await createToken(accountCheap.id, 'cheap-token');
+    await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountCheap.id,
       tokenId: tokenCheap.id,
@@ -195,10 +195,10 @@ describe('TokenRouter selection scoring', () => {
       totalCost: 0.01,
     }).run();
 
-    const siteExpensive = createSite('expensive-site');
-    const accountExpensive = createAccount(siteExpensive.id, 'expensive-user');
-    const tokenExpensive = createToken(accountExpensive.id, 'exp-token');
-    db.insert(schema.routeChannels).values({
+    const siteExpensive = await createSite('expensive-site');
+    const accountExpensive = await createAccount(siteExpensive.id, 'expensive-user');
+    const tokenExpensive = await createToken(accountExpensive.id, 'exp-token');
+    await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountExpensive.id,
       tokenId: tokenExpensive.id,
@@ -210,7 +210,7 @@ describe('TokenRouter selection scoring', () => {
       totalCost: 0.1,
     }).run();
 
-    const decision = new TokenRouter().explainSelection('claude-opus-4-6');
+    const decision = await new TokenRouter().explainSelection('claude-opus-4-6');
     const cheapCandidate = decision.candidates.find((candidate) => candidate.siteName.startsWith('cheap-site'));
     const expensiveCandidate = decision.candidates.find((candidate) => candidate.siteName.startsWith('expensive-site'));
 
@@ -221,7 +221,7 @@ describe('TokenRouter selection scoring', () => {
     expect(expensiveCandidate?.reason || '').toContain('成本=实测');
   });
 
-  it('uses runtime-configured fallback unit cost when observed and configured costs are missing', () => {
+  it('uses runtime-configured fallback unit cost when observed and configured costs are missing', async () => {
     config.routingWeights = {
       baseWeightFactor: 0.35,
       valueScoreFactor: 0.65,
@@ -231,12 +231,12 @@ describe('TokenRouter selection scoring', () => {
     };
     config.routingFallbackUnitCost = 0.02;
 
-    const route = createRoute('claude-sonnet-4-6');
+    const route = await createRoute('claude-sonnet-4-6');
 
-    const siteFallback = createSite('fallback-site');
-    const accountFallback = createAccount(siteFallback.id, 'fallback-user');
-    const tokenFallback = createToken(accountFallback.id, 'fallback-token');
-    db.insert(schema.routeChannels).values({
+    const siteFallback = await createSite('fallback-site');
+    const accountFallback = await createAccount(siteFallback.id, 'fallback-user');
+    const tokenFallback = await createToken(accountFallback.id, 'fallback-token');
+    await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountFallback.id,
       tokenId: tokenFallback.id,
@@ -248,10 +248,10 @@ describe('TokenRouter selection scoring', () => {
       totalCost: 0,
     }).run();
 
-    const siteObserved = createSite('observed-site');
-    const accountObserved = createAccount(siteObserved.id, 'observed-user');
-    const tokenObserved = createToken(accountObserved.id, 'observed-token');
-    db.insert(schema.routeChannels).values({
+    const siteObserved = await createSite('observed-site');
+    const accountObserved = await createAccount(siteObserved.id, 'observed-user');
+    const tokenObserved = await createToken(accountObserved.id, 'observed-token');
+    await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountObserved.id,
       tokenId: tokenObserved.id,
@@ -263,7 +263,7 @@ describe('TokenRouter selection scoring', () => {
       totalCost: 2, // unit cost 0.2
     }).run();
 
-    const decision = new TokenRouter().explainSelection('claude-sonnet-4-6');
+    const decision = await new TokenRouter().explainSelection('claude-sonnet-4-6');
     const fallbackCandidate = decision.candidates.find((candidate) => candidate.siteName.startsWith('fallback-site'));
     const observedCandidate = decision.candidates.find((candidate) => candidate.siteName.startsWith('observed-site'));
 
@@ -273,7 +273,7 @@ describe('TokenRouter selection scoring', () => {
     expect(fallbackCandidate?.reason || '').toContain('成本=默认:0.020000');
   });
 
-  it('penalizes fallback-cost channels when fallback unit cost is set very high', () => {
+  it('penalizes fallback-cost channels when fallback unit cost is set very high', async () => {
     config.routingWeights = {
       baseWeightFactor: 0.35,
       valueScoreFactor: 0.65,
@@ -283,10 +283,10 @@ describe('TokenRouter selection scoring', () => {
     };
     config.routingFallbackUnitCost = 1000;
 
-    const route = createRoute('gpt-5-nano');
+    const route = await createRoute('gpt-5-nano');
 
-    const siteFallback = createSite('fallback-high-balance');
-    const accountFallback = db.insert(schema.accounts).values({
+    const siteFallback = await createSite('fallback-high-balance');
+    const accountFallback = await db.insert(schema.accounts).values({
       siteId: siteFallback.id,
       username: `fallback-high-balance-${nextId()}`,
       accessToken: `access-${nextId()}`,
@@ -294,8 +294,8 @@ describe('TokenRouter selection scoring', () => {
       status: 'active',
       balance: 10_000,
     }).returning().get();
-    const tokenFallback = createToken(accountFallback.id, 'fallback-token');
-    db.insert(schema.routeChannels).values({
+    const tokenFallback = await createToken(accountFallback.id, 'fallback-token');
+    await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountFallback.id,
       tokenId: tokenFallback.id,
@@ -307,8 +307,8 @@ describe('TokenRouter selection scoring', () => {
       totalCost: 0,
     }).run();
 
-    const siteObserved = createSite('observed-low-balance');
-    const accountObserved = db.insert(schema.accounts).values({
+    const siteObserved = await createSite('observed-low-balance');
+    const accountObserved = await db.insert(schema.accounts).values({
       siteId: siteObserved.id,
       username: `observed-low-balance-${nextId()}`,
       accessToken: `access-${nextId()}`,
@@ -316,8 +316,8 @@ describe('TokenRouter selection scoring', () => {
       status: 'active',
       balance: 0,
     }).returning().get();
-    const tokenObserved = createToken(accountObserved.id, 'observed-token');
-    db.insert(schema.routeChannels).values({
+    const tokenObserved = await createToken(accountObserved.id, 'observed-token');
+    await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountObserved.id,
       tokenId: tokenObserved.id,
@@ -329,7 +329,7 @@ describe('TokenRouter selection scoring', () => {
       totalCost: 10, // observed unit cost = 1
     }).run();
 
-    const decision = new TokenRouter().explainSelection('gpt-5-nano');
+    const decision = await new TokenRouter().explainSelection('gpt-5-nano');
     const fallbackCandidate = decision.candidates.find((candidate) => candidate.siteName.startsWith('fallback-high-balance'));
     const observedCandidate = decision.candidates.find((candidate) => candidate.siteName.startsWith('observed-low-balance'));
 
@@ -340,7 +340,7 @@ describe('TokenRouter selection scoring', () => {
     expect(fallbackCandidate?.reason || '').toContain('成本=默认:1000.000000');
   });
 
-  it('uses cached catalog routing cost when observed and configured costs are missing', () => {
+  it('uses cached catalog routing cost when observed and configured costs are missing', async () => {
     config.routingWeights = {
       baseWeightFactor: 0.35,
       valueScoreFactor: 0.65,
@@ -350,12 +350,12 @@ describe('TokenRouter selection scoring', () => {
     };
     config.routingFallbackUnitCost = 100;
 
-    const route = createRoute('claude-sonnet-4-5-20250929');
+    const route = await createRoute('claude-sonnet-4-5-20250929');
 
-    const siteCatalog = createSite('catalog-site');
-    const accountCatalog = createAccount(siteCatalog.id, 'catalog-user');
-    const tokenCatalog = createToken(accountCatalog.id, 'catalog-token');
-    db.insert(schema.routeChannels).values({
+    const siteCatalog = await createSite('catalog-site');
+    const accountCatalog = await createAccount(siteCatalog.id, 'catalog-user');
+    const tokenCatalog = await createToken(accountCatalog.id, 'catalog-token');
+    await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountCatalog.id,
       tokenId: tokenCatalog.id,
@@ -367,10 +367,10 @@ describe('TokenRouter selection scoring', () => {
       totalCost: 0,
     }).run();
 
-    const siteFallback = createSite('fallback-site');
-    const accountFallback = createAccount(siteFallback.id, 'fallback-user');
-    const tokenFallback = createToken(accountFallback.id, 'fallback-token');
-    db.insert(schema.routeChannels).values({
+    const siteFallback = await createSite('fallback-site');
+    const accountFallback = await createAccount(siteFallback.id, 'fallback-user');
+    const tokenFallback = await createToken(accountFallback.id, 'fallback-token');
+    await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: accountFallback.id,
       tokenId: tokenFallback.id,
@@ -388,7 +388,7 @@ describe('TokenRouter selection scoring', () => {
       return 0.2;
     });
 
-    const decision = new TokenRouter().explainSelection('claude-sonnet-4-5-20250929');
+    const decision = await new TokenRouter().explainSelection('claude-sonnet-4-5-20250929');
     const catalogCandidate = decision.candidates.find((candidate) => candidate.siteName.startsWith('catalog-site'));
     const fallbackCandidate = decision.candidates.find((candidate) => candidate.siteName.startsWith('fallback-site'));
 

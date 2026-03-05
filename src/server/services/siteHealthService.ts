@@ -89,7 +89,7 @@ function normalizeHealthReason(reason: string): string {
 }
 
 export async function executeRefreshSiteReachability() {
-  const siteRows = db.select().from(schema.sites).all();
+  const siteRows = await db.select().from(schema.sites).all();
   if (siteRows.length === 0) {
     return {
       summary: {
@@ -102,7 +102,7 @@ export async function executeRefreshSiteReachability() {
     };
   }
 
-  const accountCountRows = db.select({
+  const accountCountRows = await db.select({
     siteId: schema.accounts.siteId,
     count: sql<number>`count(*)`,
   }).from(schema.accounts).groupBy(schema.accounts.siteId).all();
@@ -135,9 +135,9 @@ export async function executeRefreshSiteReachability() {
   });
   await Promise.all(workers);
 
-  db.transaction((tx) => {
+  await db.transaction(async (tx) => {
     for (const item of results) {
-      tx.update(schema.sites)
+      await tx.update(schema.sites)
         .set({
           healthStatus: toHealthStatus(item.alive),
           healthReason: normalizeHealthReason(item.reason),
@@ -167,9 +167,9 @@ export async function executeCleanupUnreachableSites(dryRun = false) {
   const removedSiteIds: number[] = [];
 
   if (!dryRun && unreachableSites.length > 0) {
-    db.transaction((tx) => {
+    await db.transaction(async (tx) => {
       for (const item of unreachableSites) {
-        tx.delete(schema.sites).where(eq(schema.sites.id, item.siteId)).run();
+        await tx.delete(schema.sites).where(eq(schema.sites.id, item.siteId)).run();
         removedSiteIds.push(item.siteId);
       }
     });

@@ -35,18 +35,18 @@ describe('accounts rebind-session api', () => {
     await app.register(routesModule.accountsRoutes);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     verifyTokenMock.mockReset();
 
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -57,13 +57,13 @@ describe('accounts rebind-session api', () => {
   it('rejects rebinding when token is not verified as session', async () => {
     verifyTokenMock.mockResolvedValueOnce({ tokenType: 'unknown' });
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Rebind Site',
       url: 'https://rebind.example.com',
       platform: 'new-api',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'linuxdo_1001',
       accessToken: 'old-access-token',
@@ -83,7 +83,7 @@ describe('accounts rebind-session api', () => {
       success: false,
     });
 
-    const latest = db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    const latest = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
     expect(latest?.accessToken).toBe('old-access-token');
     expect(latest?.status).toBe('expired');
   });
@@ -91,13 +91,13 @@ describe('accounts rebind-session api', () => {
   it('returns rebind hint when verify reports invalid access token', async () => {
     verifyTokenMock.mockRejectedValueOnce(new Error('无权进行此操作，access token 无效'));
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Rebind Site',
       url: 'https://rebind.example.com',
       platform: 'new-api',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'linuxdo_1001',
       accessToken: 'old-access-token',
@@ -126,13 +126,13 @@ describe('accounts rebind-session api', () => {
       apiToken: 'sk-rebound-token',
     });
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Rebind Site',
       url: 'https://rebind.example.com',
       platform: 'new-api',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'linuxdo_1001',
       accessToken: 'old-access-token',
@@ -153,10 +153,141 @@ describe('accounts rebind-session api', () => {
     expect(body.success).toBe(true);
     expect(body.apiTokenFound).toBe(true);
 
-    const latest = db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    const latest = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
     expect(latest?.accessToken).toBe('new-session-token');
     expect(latest?.apiToken).toBe('sk-rebound-token');
     expect(latest?.username).toBe('linuxdo_1002');
     expect(latest?.status).toBe('active');
+  });
+
+  it('stores managed sub2api refresh token fields when provided during rebind', async () => {
+    verifyTokenMock.mockResolvedValueOnce({
+      tokenType: 'session',
+      userInfo: { username: 'sub2_user' },
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Sub2 Rebind Site',
+      url: 'https://sub2.example.com',
+      platform: 'sub2api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'sub2_user',
+      accessToken: 'old-access-token',
+      status: 'expired',
+      extraConfig: JSON.stringify({
+        sub2apiAuth: {
+          refreshToken: 'old-refresh-token',
+          tokenExpiresAt: 1750000000000,
+        },
+      }),
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/accounts/${account.id}/rebind-session`,
+      payload: {
+        accessToken: 'new-session-token',
+        refreshToken: 'new-refresh-token',
+        tokenExpiresAt: 1760000000000,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const latest = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    const parsedExtra = JSON.parse(String(latest?.extraConfig || '{}')) as {
+      sub2apiAuth?: { refreshToken?: string; tokenExpiresAt?: number };
+    };
+    expect(parsedExtra.sub2apiAuth?.refreshToken).toBe('new-refresh-token');
+    expect(parsedExtra.sub2apiAuth?.tokenExpiresAt).toBe(1760000000000);
+  });
+
+  it('keeps existing sub2api refresh token when rebind payload refreshToken is empty', async () => {
+    verifyTokenMock.mockResolvedValueOnce({
+      tokenType: 'session',
+      userInfo: { username: 'sub2_user' },
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Sub2 Rebind Site',
+      url: 'https://sub2.example.com',
+      platform: 'sub2api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'sub2_user',
+      accessToken: 'old-access-token',
+      status: 'expired',
+      extraConfig: JSON.stringify({
+        sub2apiAuth: {
+          refreshToken: 'kept-refresh-token',
+          tokenExpiresAt: 1750000000000,
+        },
+      }),
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/accounts/${account.id}/rebind-session`,
+      payload: {
+        accessToken: 'new-session-token',
+        refreshToken: '',
+        tokenExpiresAt: 1760000000000,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const latest = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    const parsedExtra = JSON.parse(String(latest?.extraConfig || '{}')) as {
+      sub2apiAuth?: { refreshToken?: string; tokenExpiresAt?: number };
+    };
+    expect(parsedExtra.sub2apiAuth?.refreshToken).toBe('kept-refresh-token');
+    expect(parsedExtra.sub2apiAuth?.tokenExpiresAt).toBe(1760000000000);
+  });
+
+  it('ignores managed sub2api refresh token fields for non-sub2api rebind', async () => {
+    verifyTokenMock.mockResolvedValueOnce({
+      tokenType: 'session',
+      userInfo: { username: 'linuxdo_1003' },
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Rebind Site',
+      url: 'https://rebind.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'linuxdo_1001',
+      accessToken: 'old-access-token',
+      status: 'expired',
+      extraConfig: JSON.stringify({ platformUserId: 1001 }),
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/accounts/${account.id}/rebind-session`,
+      payload: {
+        accessToken: 'new-session-token',
+        refreshToken: 'should-be-ignored',
+        tokenExpiresAt: 1760000000000,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const latest = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    const parsedExtra = JSON.parse(String(latest?.extraConfig || '{}')) as {
+      sub2apiAuth?: { refreshToken?: string; tokenExpiresAt?: number };
+      platformUserId?: number;
+    };
+    expect(parsedExtra.platformUserId).toBe(1001);
+    expect(parsedExtra.sub2apiAuth).toBeUndefined();
   });
 });

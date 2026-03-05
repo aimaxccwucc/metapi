@@ -32,16 +32,16 @@ describe('stats dashboard today reward fallback', () => {
     await app.register(routesModule.statsRoutes);
   });
 
-  beforeEach(() => {
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+  beforeEach(async () => {
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -51,12 +51,12 @@ describe('stats dashboard today reward fallback', () => {
 
   it('uses today income value for dashboard todayReward when reward text is empty', async () => {
     const today = formatLocalDate(new Date());
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'stats-site',
       url: 'https://stats-site.example.com',
       platform: 'new-api',
     }).returning().get();
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'stats-user',
       accessToken: 'token',
@@ -71,7 +71,7 @@ describe('stats dashboard today reward fallback', () => {
       }),
     }).returning().get();
 
-    db.insert(schema.checkinLogs).values({
+    await db.insert(schema.checkinLogs).values({
       accountId: account.id,
       status: 'success',
       message: 'checked in',
@@ -90,12 +90,12 @@ describe('stats dashboard today reward fallback', () => {
   });
 
   it('counts dashboard today spend only inside local-day range', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'stats-spend-site',
       url: 'https://stats-spend.example.com',
       platform: 'new-api',
     }).returning().get();
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'stats-spend-user',
       accessToken: 'token',
@@ -109,7 +109,7 @@ describe('stats dashboard today reward fallback', () => {
     const inRange = formatUtcSqlDateTime(new Date(startDate.getTime() + 60_000));
     const afterEnd = formatUtcSqlDateTime(new Date(endDate.getTime() + 60_000));
 
-    db.insert(schema.proxyLogs).values([
+    await db.insert(schema.proxyLogs).values([
       {
         accountId: account.id,
         status: 'success',

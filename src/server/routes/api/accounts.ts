@@ -115,8 +115,8 @@ function normalizeManagedTokenExpiresAt(input: unknown): number | undefined {
   return undefined;
 }
 
-function getNextAccountSortOrder(): number {
-  const rows = db.select({ sortOrder: schema.accounts.sortOrder }).from(schema.accounts).all();
+async function getNextAccountSortOrder(): Promise<number> {
+  const rows = await db.select({ sortOrder: schema.accounts.sortOrder }).from(schema.accounts).all();
   const max = rows.reduce((currentMax, row) => Math.max(currentMax, row.sortOrder || 0), -1);
   return max + 1;
 }
@@ -192,7 +192,7 @@ async function refreshRuntimeHealthForRow(row: AccountWithSiteRow): Promise<Acco
 
   try {
     await refreshBalance(accountId);
-    const refreshedAccount = db.select().from(schema.accounts)
+    const refreshedAccount = await db.select().from(schema.accounts)
       .where(eq(schema.accounts.id, accountId))
       .get();
     const runtimeHealth = buildRuntimeHealthForAccount({
@@ -228,7 +228,7 @@ async function refreshRuntimeHealthForRow(row: AccountWithSiteRow): Promise<Acco
 }
 
 async function executeRefreshAccountRuntimeHealth(accountId?: number) {
-  const rows = db.select().from(schema.accounts)
+  const rows = await db.select().from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .all();
 
@@ -278,13 +278,13 @@ function buildAccountKeyRepairTaskDetailMessage(results: Awaited<ReturnType<type
 export async function accountsRoutes(app: FastifyInstance) {
   // List all accounts (with site info)
   app.get('/api/accounts', async () => {
-    const rows = db.select().from(schema.accounts)
+    const rows = await db.select().from(schema.accounts)
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id)).all();
 
     const { localDay, startUtc, endUtc } = getLocalDayRangeUtc();
 
     // Aggregate today's spend per account from proxy logs
-    const todaySpendRows = db.select({
+    const todaySpendRows = await db.select({
       accountId: schema.proxyLogs.accountId,
       totalSpend: sql<number>`coalesce(sum(${schema.proxyLogs.estimatedCost}), 0)`,
     }).from(schema.proxyLogs)
@@ -298,7 +298,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     // Aggregate today's checkin rewards per account
-    const todayCheckins = db.select({
+    const todayCheckins = await db.select({
       accountId: schema.checkinLogs.accountId,
       reward: schema.checkinLogs.reward,
       message: schema.checkinLogs.message,
@@ -352,7 +352,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     const { siteId, username, password } = request.body;
 
     // Get site info
-    const site = db.select().from(schema.sites).where(eq(schema.sites.id, siteId)).get();
+    const site = await db.select().from(schema.sites).where(eq(schema.sites.id, siteId)).get();
     if (!site) return { success: false, message: 'site not found' };
 
     // Get platform adapter
@@ -383,7 +383,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     } catch { }
 
     const preferredApiToken = apiTokens.find((token) => token.enabled !== false && token.key)?.key || apiToken || null;
-    const existing = db.select().from(schema.accounts)
+    const existing = await db.select().from(schema.accounts)
       .where(and(eq(schema.accounts.siteId, siteId), eq(schema.accounts.username, username)))
       .get();
 
@@ -403,7 +403,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     // Create or update account
     let accountId = existing?.id;
     if (existing) {
-      db.update(schema.accounts).set({
+      await db.update(schema.accounts).set({
         accessToken: loginResult.accessToken,
         apiToken: preferredApiToken || undefined,
         checkinEnabled: true,
@@ -412,7 +412,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         updatedAt: new Date().toISOString(),
       }).where(eq(schema.accounts.id, existing.id)).run();
     } else {
-      const created = db.insert(schema.accounts).values({
+      const inserted = await db.insert(schema.accounts).values({
         siteId,
         username,
         accessToken: loginResult.accessToken,
@@ -420,23 +420,24 @@ export async function accountsRoutes(app: FastifyInstance) {
         checkinEnabled: true,
         extraConfig,
         isPinned: false,
-        sortOrder: getNextAccountSortOrder(),
-      }).returning().get();
-      accountId = created.id;
+        sortOrder: await getNextAccountSortOrder(),
+      }).run();
+      const insertedId = Number(inserted.lastInsertRowid || 0);
+      accountId = insertedId > 0 ? insertedId : undefined;
     }
 
-    const result = db.select().from(schema.accounts).where(eq(schema.accounts.id, accountId!)).get();
+    const result = await db.select().from(schema.accounts).where(eq(schema.accounts.id, accountId!)).get();
     if (!result) {
       return { success: false, message: 'account create failed' };
     }
 
     if (apiTokens.length > 0) {
       try {
-        syncTokensFromUpstream(result.id, apiTokens);
+        await syncTokensFromUpstream(result.id, apiTokens);
       } catch { }
     } else if (preferredApiToken) {
       try {
-        ensureDefaultTokenForAccount(result.id, preferredApiToken, { name: 'default', source: 'sync' });
+        await ensureDefaultTokenForAccount(result.id, preferredApiToken, { name: 'default', source: 'sync' });
       } catch { }
     }
 
@@ -444,10 +445,10 @@ export async function accountsRoutes(app: FastifyInstance) {
     try { await refreshBalance(result.id); } catch { }
     try {
       await refreshModelsForAccount(result.id);
-      rebuildTokenRoutesFromAvailability();
+      await rebuildTokenRoutesFromAvailability();
     } catch { }
 
-    const account = db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
+    const account = await db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
     return {
       success: true,
       account,
@@ -462,7 +463,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     const { siteId, platformUserId } = request.body;
     const accessToken = (request.body.accessToken || '').trim();
     const credentialMode = resolveRequestedCredentialMode(request.body.credentialMode);
-    const site = db.select().from(schema.sites).where(eq(schema.sites.id, siteId)).get();
+    const site = await db.select().from(schema.sites).where(eq(schema.sites.id, siteId)).get();
     if (!site) return { success: false, message: 'site not found' };
 
     if (!accessToken) {
@@ -532,13 +533,22 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     // Try to explain unknown failures: missing user id vs anti-bot challenge page.
+    const normalizedPlatform = String(adapter.platformName || site.platform || '').trim().toLowerCase();
+    // New-API family already runs shield-aware probing inside adapters.
+    // Raw fallback probe below does not include challenge-solving and can
+    // misclassify valid Cookie/Session flows as shield-blocked.
+    const skipRawShieldDetection = normalizedPlatform === 'new-api' || normalizedPlatform === 'anyrouter';
     type VerifyFailureReason = 'needs-user-id' | 'shield-blocked' | null;
     const detectVerifyFailureReason = async (): Promise<VerifyFailureReason> => {
       const deadlineAt = Date.now() + 8_000;
       const parseFailureReason = (bodyText: string, contentType: string): VerifyFailureReason => {
         const text = bodyText || '';
         const ct = (contentType || '').toLowerCase();
-        if (ct.includes('text/html') && /var\s+arg1\s*=|acw_sc__v2|cdn_sec_tc|<script/i.test(text)) {
+        if (
+          !skipRawShieldDetection
+          && ct.includes('text/html')
+          && /var\s+arg1\s*=|acw_sc__v2|cdn_sec_tc|<script/i.test(text)
+        ) {
           return 'shield-blocked';
         }
 
@@ -546,7 +556,9 @@ export async function accountsRoutes(app: FastifyInstance) {
           const body = JSON.parse(text) as any;
           const message = typeof body?.message === 'string' ? body.message : '';
           if (/mismatch|new-api-user|user id/i.test(message)) return 'needs-user-id';
-          if (/shield|challenge|captcha|acw_sc__v2|arg1/i.test(message)) return 'shield-blocked';
+          if (!skipRawShieldDetection && /shield|challenge|captcha|acw_sc__v2|arg1/i.test(message)) {
+            return 'shield-blocked';
+          }
         } catch { }
 
         return null;
@@ -614,7 +626,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post<{ Params: { id: string }; Body: { accessToken: string; platformUserId?: number } }>(
+  app.post<{ Params: { id: string }; Body: { accessToken: string; platformUserId?: number; refreshToken?: string; tokenExpiresAt?: number | string } }>(
     '/api/accounts/:id/rebind-session',
     async (request, reply) => {
       const accountId = Number.parseInt(request.params.id, 10);
@@ -627,7 +639,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         return reply.code(400).send({ success: false, message: '请提供新的 Session Token' });
       }
 
-      const row = db.select()
+      const row = await db.select()
         .from(schema.accounts)
         .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
         .where(eq(schema.accounts.id, accountId))
@@ -692,13 +704,25 @@ export async function accountsRoutes(app: FastifyInstance) {
       if (resolvedPlatformUserId) {
         extraConfigPatch.platformUserId = resolvedPlatformUserId;
       }
+      if ((site.platform || '').toLowerCase() === 'sub2api') {
+        const existingManagedAuth = getSub2ApiAuthFromExtraConfig(account.extraConfig);
+        const requestedRefreshToken = normalizeManagedRefreshToken(request.body?.refreshToken);
+        const requestedTokenExpiresAt = normalizeManagedTokenExpiresAt(request.body?.tokenExpiresAt);
+        const nextRefreshToken = requestedRefreshToken || existingManagedAuth?.refreshToken;
+        const nextTokenExpiresAt = requestedTokenExpiresAt ?? existingManagedAuth?.tokenExpiresAt;
+        if (nextRefreshToken) {
+          extraConfigPatch.sub2apiAuth = nextTokenExpiresAt
+            ? { refreshToken: nextRefreshToken, tokenExpiresAt: nextTokenExpiresAt }
+            : { refreshToken: nextRefreshToken };
+        }
+      }
       updates.extraConfig = mergeAccountExtraConfig(account.extraConfig, extraConfigPatch);
 
-      db.update(schema.accounts).set(updates).where(eq(schema.accounts.id, accountId)).run();
+      await db.update(schema.accounts).set(updates).where(eq(schema.accounts.id, accountId)).run();
 
       if (nextApiToken) {
         try {
-          ensureDefaultTokenForAccount(accountId, nextApiToken, { name: 'default', source: 'sync' });
+          await ensureDefaultTokenForAccount(accountId, nextApiToken, { name: 'default', source: 'sync' });
         } catch {}
       }
 
@@ -707,10 +731,10 @@ export async function accountsRoutes(app: FastifyInstance) {
       } catch {}
       try {
         await refreshModelsForAccount(accountId);
-        rebuildTokenRoutesFromAvailability();
+        await rebuildTokenRoutesFromAvailability();
       } catch {}
 
-      const latest = db.select().from(schema.accounts).where(eq(schema.accounts.id, accountId)).get();
+      const latest = await db.select().from(schema.accounts).where(eq(schema.accounts.id, accountId)).get();
       return {
         success: true,
         account: latest,
@@ -725,7 +749,7 @@ export async function accountsRoutes(app: FastifyInstance) {
   // Add an account (manual credential input)
   app.post<{ Body: { siteId: number; username?: string; accessToken: string; apiToken?: string; platformUserId?: number; checkinEnabled?: boolean; credentialMode?: AccountCredentialMode; refreshToken?: string; tokenExpiresAt?: number | string; allowUnverified?: boolean; preverified?: { tokenType?: 'session' | 'apikey'; username?: string; apiToken?: string } } }>('/api/accounts', async (request, reply) => {
     const body = request.body;
-    const site = db.select().from(schema.sites).where(eq(schema.sites.id, body.siteId)).get();
+    const site = await db.select().from(schema.sites).where(eq(schema.sites.id, body.siteId)).get();
     if (!site) {
       return reply.code(400).send({ success: false, message: 'site not found' });
     }
@@ -851,7 +875,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
     const extraConfig = mergeAccountExtraConfig(undefined, extraConfigPatch);
 
-    const result = db.insert(schema.accounts).values({
+    const inserted = await db.insert(schema.accounts).values({
       siteId: body.siteId,
       username: username || undefined,
       accessToken,
@@ -859,8 +883,16 @@ export async function accountsRoutes(app: FastifyInstance) {
       checkinEnabled: tokenType === 'session' ? (isUnverifiedBinding ? false : (body.checkinEnabled ?? true)) : false,
       extraConfig,
       isPinned: false,
-      sortOrder: getNextAccountSortOrder(),
-    }).returning().get();
+      sortOrder: await getNextAccountSortOrder(),
+    }).run();
+    const insertedId = Number(inserted.lastInsertRowid || 0);
+    if (insertedId <= 0) {
+      return reply.code(500).send({ success: false, message: '创建账号失败' });
+    }
+    const result = await db.select().from(schema.accounts).where(eq(schema.accounts.id, insertedId)).get();
+    if (!result) {
+      return reply.code(500).send({ success: false, message: '创建账号失败' });
+    }
 
     if (isUnverifiedBinding) {
       setAccountRuntimeHealth(result.id, {
@@ -872,7 +904,7 @@ export async function accountsRoutes(app: FastifyInstance) {
 
     if (apiToken) {
       try {
-        ensureDefaultTokenForAccount(result.id, apiToken, { name: 'default', source: 'manual' });
+        await ensureDefaultTokenForAccount(result.id, apiToken, { name: 'default', source: 'manual' });
       } catch { }
     }
 
@@ -894,7 +926,7 @@ export async function accountsRoutes(app: FastifyInstance) {
           try {
             const syncedTokens = await adapter.getApiTokens(site.url, accessToken, resolvedPlatformUserId);
             if (syncedTokens.length > 0) {
-              syncTokensFromUpstream(accountId, syncedTokens);
+              await syncTokensFromUpstream(accountId, syncedTokens);
             }
           } catch { }
         }
@@ -912,7 +944,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       initializationQueued = true;
     }
 
-    const account = db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
+    const account = await db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
     const finalCredentialMode = account ? resolveStoredCredentialMode(account) : resolvedCredentialMode;
     const capabilities = account
       ? buildCapabilitiesForAccount(account)
@@ -935,7 +967,7 @@ export async function accountsRoutes(app: FastifyInstance) {
   app.put<{ Params: { id: string }; Body: any }>('/api/accounts/:id', async (request, reply) => {
     const id = parseInt(request.params.id);
     const body = request.body as Record<string, unknown>;
-    const row = db.select()
+    const row = await db.select()
       .from(schema.accounts)
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(eq(schema.accounts.id, id))
@@ -992,28 +1024,28 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     updates.updatedAt = new Date().toISOString();
-    db.update(schema.accounts).set(updates).where(eq(schema.accounts.id, id)).run();
+    await db.update(schema.accounts).set(updates).where(eq(schema.accounts.id, id)).run();
 
     if (typeof updates.apiToken === 'string' && updates.apiToken.trim()) {
       try {
-        ensureDefaultTokenForAccount(id, updates.apiToken, { name: 'default', source: 'manual' });
+        await ensureDefaultTokenForAccount(id, updates.apiToken, { name: 'default', source: 'manual' });
       } catch { }
     }
 
     try {
       await refreshModelsForAccount(id);
-      rebuildTokenRoutesFromAvailability();
+      await rebuildTokenRoutesFromAvailability();
     } catch { }
 
-    return db.select().from(schema.accounts).where(eq(schema.accounts.id, id)).get();
+    return await db.select().from(schema.accounts).where(eq(schema.accounts.id, id)).get();
   });
 
   // Delete an account
   app.delete<{ Params: { id: string } }>('/api/accounts/:id', async (request) => {
     const id = parseInt(request.params.id);
-    db.delete(schema.accounts).where(eq(schema.accounts.id, id)).run();
+    await db.delete(schema.accounts).where(eq(schema.accounts.id, id)).run();
     try {
-      rebuildTokenRoutesFromAvailability();
+      await rebuildTokenRoutesFromAvailability();
     } catch { }
     return { success: true };
   });

@@ -64,12 +64,12 @@ function isCacheFresh(loadedAt: number, nowMs: number): boolean {
   return nowMs - loadedAt < resolveTokenRouterCacheTtlMs();
 }
 
-function loadEnabledRoutes(nowMs = Date.now()): RouteRow[] {
+async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
   if (isCacheFresh(routeCacheSnapshot.loadedAt, nowMs)) {
     return routeCacheSnapshot.routes;
   }
 
-  const routes = db.select().from(schema.tokenRoutes)
+  const routes = await db.select().from(schema.tokenRoutes)
     .where(eq(schema.tokenRoutes.enabled, true))
     .all();
   routeCacheSnapshot = {
@@ -79,13 +79,13 @@ function loadEnabledRoutes(nowMs = Date.now()): RouteRow[] {
   return routes;
 }
 
-function loadRouteMatch(route: RouteRow, nowMs = Date.now()): RouteMatch {
+async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<RouteMatch> {
   const cached = routeMatchCache.get(route.id);
   if (cached && isCacheFresh(cached.loadedAt, nowMs)) {
     return cached.match;
   }
 
-  const channels = db
+  const channels = await db
     .select()
     .from(schema.routeChannels)
     .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
@@ -369,10 +369,10 @@ export class TokenRouter {
    * Find matching route and select a channel for the given model.
    * Returns null if no route/channel available.
    */
-  selectChannel(requestedModel: string, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): SelectedChannel | null {
+  async selectChannel(requestedModel: string, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<SelectedChannel | null> {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
 
-    const match = this.findRoute(requestedModel, downstreamPolicy);
+    const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
 
     const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
@@ -443,14 +443,14 @@ export class TokenRouter {
   /**
    * Select next channel for failover (exclude already-tried channels).
    */
-  selectNextChannel(
+  async selectNextChannel(
     requestedModel: string,
     excludeChannelIds: number[],
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
-  ): SelectedChannel | null {
+  ): Promise<SelectedChannel | null> {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
 
-    const match = this.findRoute(requestedModel, downstreamPolicy);
+    const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
 
     const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
@@ -514,27 +514,27 @@ export class TokenRouter {
     return null;
   }
 
-  explainSelection(
+  async explainSelection(
     requestedModel: string,
     excludeChannelIds: number[] = [],
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
-  ): RouteDecisionExplanation {
-    const match = this.findRoute(requestedModel, downstreamPolicy);
+  ): Promise<RouteDecisionExplanation> {
+    const match = await this.findRoute(requestedModel, downstreamPolicy);
     return this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
   }
 
-  explainSelectionForRoute(
+  async explainSelectionForRoute(
     routeId: number,
     requestedModel: string,
     excludeChannelIds: number[] = [],
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
-  ): RouteDecisionExplanation {
-    const match = this.findRouteById(routeId, downstreamPolicy);
+  ): Promise<RouteDecisionExplanation> {
+    const match = await this.findRouteById(routeId, downstreamPolicy);
     return this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
   }
 
-  explainSelectionRouteWide(routeId: number, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): RouteDecisionExplanation {
-    const match = this.findRouteById(routeId, downstreamPolicy);
+  async explainSelectionRouteWide(routeId: number, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<RouteDecisionExplanation> {
+    const match = await this.findRouteById(routeId, downstreamPolicy);
     const fallbackRequestedModel = match?.route.modelPattern || `route:${routeId}`;
     return this.explainSelectionFromMatch(match, fallbackRequestedModel, {
       bypassSourceModelCheck: true,
@@ -720,14 +720,14 @@ export class TokenRouter {
   /**
    * Record success for a channel.
    */
-  recordSuccess(channelId: number, latencyMs: number, cost: number) {
-    const ch = db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
+  async recordSuccess(channelId: number, latencyMs: number, cost: number) {
+    const ch = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
     if (!ch) return;
     const nowIso = new Date().toISOString();
     const nextSuccessCount = (ch.successCount ?? 0) + 1;
     const nextTotalLatencyMs = (ch.totalLatencyMs ?? 0) + latencyMs;
     const nextTotalCost = (ch.totalCost ?? 0) + cost;
-    db.update(schema.routeChannels).set({
+    await db.update(schema.routeChannels).set({
       successCount: nextSuccessCount,
       totalLatencyMs: nextTotalLatencyMs,
       totalCost: nextTotalCost,
@@ -749,15 +749,15 @@ export class TokenRouter {
   /**
    * Record failure and set cooldown.
    */
-  recordFailure(channelId: number) {
-    const ch = db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
+  async recordFailure(channelId: number) {
+    const ch = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
     if (!ch) return;
     const failCount = (ch.failCount ?? 0) + 1;
     // Exponential backoff cooldown: 30s, 60s, 120s, 240s, max 5min
     const cooldownSec = Math.min(30 * Math.pow(2, failCount - 1), 300);
     const cooldownUntil = new Date(Date.now() + cooldownSec * 1000).toISOString();
     const nowIso = new Date().toISOString();
-    db.update(schema.routeChannels).set({
+    await db.update(schema.routeChannels).set({
       failCount,
       lastFailAt: nowIso,
       cooldownUntil,
@@ -773,8 +773,8 @@ export class TokenRouter {
   /**
    * Get all available models (aggregated from all routes).
    */
-  getAvailableModels(): string[] {
-    const routes = loadEnabledRoutes();
+  async getAvailableModels(): Promise<string[]> {
+    const routes = await loadEnabledRoutes();
     const exposed = routes
       .map((route) => getExposedModelNameForRoute(route).trim())
       .filter((name) => name.length > 0);
@@ -783,8 +783,8 @@ export class TokenRouter {
 
   // --- Private methods ---
 
-  private findRoute(model: string, downstreamPolicy: DownstreamRoutingPolicy): RouteMatch | null {
-    let routes = loadEnabledRoutes();
+  private async findRoute(model: string, downstreamPolicy: DownstreamRoutingPolicy): Promise<RouteMatch | null> {
+    let routes = await loadEnabledRoutes();
 
     const supportedPatterns = Array.isArray(downstreamPolicy.supportedModels)
       ? downstreamPolicy.supportedModels
@@ -803,22 +803,22 @@ export class TokenRouter {
 
     if (!matchedRoute) return null;
 
-    return this.loadRouteMatch(matchedRoute);
+    return await this.loadRouteMatch(matchedRoute);
   }
 
-  private findRouteById(routeId: number, downstreamPolicy: DownstreamRoutingPolicy): RouteMatch | null {
+  private async findRouteById(routeId: number, downstreamPolicy: DownstreamRoutingPolicy): Promise<RouteMatch | null> {
     if (downstreamPolicy.allowedRouteIds.length > 0 && !downstreamPolicy.allowedRouteIds.includes(routeId)) {
       return null;
     }
 
-    const route = loadEnabledRoutes().find((item) => item.id === routeId);
+    const route = (await loadEnabledRoutes()).find((item) => item.id === routeId);
     if (!route) return null;
 
-    return this.loadRouteMatch(route);
+    return await this.loadRouteMatch(route);
   }
 
-  private loadRouteMatch(route: typeof schema.tokenRoutes.$inferSelect): RouteMatch {
-    return loadRouteMatch(route);
+  private async loadRouteMatch(route: typeof schema.tokenRoutes.$inferSelect): Promise<RouteMatch> {
+    return await loadRouteMatch(route);
   }
 
   private resolveChannelTokenValue(candidate: {

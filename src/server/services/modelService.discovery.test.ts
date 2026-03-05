@@ -36,17 +36,17 @@ describe('refreshModelsForAccount credential discovery', () => {
     refreshModelsForAccount = modelService.refreshModelsForAccount;
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     getApiTokenMock.mockReset();
     getModelsMock.mockReset();
 
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(() => {
@@ -59,14 +59,14 @@ describe('refreshModelsForAccount credential discovery', () => {
       token === 'session-token' ? ['claude-sonnet-4-5-20250929', 'claude-opus-4-6'] : []
     ));
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'site-a',
       url: 'https://site-a.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'alice',
       accessToken: 'session-token',
@@ -84,7 +84,7 @@ describe('refreshModelsForAccount credential discovery', () => {
       discoveredByCredential: true,
     });
 
-    const rows = db.select().from(schema.modelAvailability)
+    const rows = await db.select().from(schema.modelAvailability)
       .where(eq(schema.modelAvailability.accountId, account.id))
       .all();
     expect(rows.map((row) => row.modelName).sort()).toEqual([
@@ -92,7 +92,7 @@ describe('refreshModelsForAccount credential discovery', () => {
       'claude-sonnet-4-5-20250929',
     ]);
 
-    const tokenRows = db.select().from(schema.tokenModelAvailability).all();
+    const tokenRows = await db.select().from(schema.tokenModelAvailability).all();
     expect(tokenRows).toHaveLength(0);
   });
 });

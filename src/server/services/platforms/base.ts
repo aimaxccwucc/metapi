@@ -185,7 +185,7 @@ export abstract class BasePlatformAdapter implements PlatformAdapter {
         ...options?.headers,
       },
     };
-    const proxiedRequestOptions = withSiteProxyRequestInit(url, requestOptions);
+    const proxiedRequestOptions = await withSiteProxyRequestInit(url, requestOptions);
     const res = await fetch(url, proxiedRequestOptions);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}: ${await res.text()}`);

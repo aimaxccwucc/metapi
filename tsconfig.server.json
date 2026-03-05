@@ -4,7 +4,9 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "dist/server",
-    "rootDir": "src/server"
+    "rootDir": "src/server",
+    "noImplicitAny": false
   },
-  "include": ["src/server/**/*"]
+  "include": ["src/server/**/*.ts"],
+  "exclude": ["src/server/**/*.test.ts"]
 }

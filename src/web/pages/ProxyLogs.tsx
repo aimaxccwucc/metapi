@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { ModelBadge } from '../components/BrandIcon.js';
@@ -59,7 +59,7 @@ export default function ProxyLogs() {
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState<number | null>(null);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(100);
+  const [pageSize, setPageSize] = useState(50);
   const toast = useToast();
 
   const load = useCallback(async () => {
@@ -77,7 +77,7 @@ export default function ProxyLogs() {
   useEffect(() => { load(); }, [load]);
 
   /* ---- derived ---- */
-  const filtered = logs.filter(log => {
+  const filtered = useMemo(() => logs.filter(log => {
     if (statusFilter === 'success' && log.status !== 'success') return false;
     if (statusFilter === 'failed' && log.status === 'success') return false;
     if (search) {
@@ -86,20 +86,36 @@ export default function ProxyLogs() {
         (log.modelActual || '').toLowerCase().includes(q);
     }
     return true;
-  });
+  }), [logs, statusFilter, search]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(page, totalPages);
-  const paged = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const paged = useMemo(
+    () => filtered.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filtered, safePage, pageSize],
+  );
 
   useEffect(() => { setPage(1); }, [statusFilter, search, pageSize]);
 
   /* ---- stats ---- */
-  const totalCount = logs.length;
-  const successCount = logs.filter(l => l.status === 'success').length;
-  const failedCount = totalCount - successCount;
-  const totalCost = logs.reduce((s, l) => s + (l.estimatedCost || 0), 0);
-  const totalTokensAll = logs.reduce((s, l) => s + (l.totalTokens || 0), 0);
+  const summary = useMemo(() => {
+    let successCount = 0;
+    let totalCost = 0;
+    let totalTokensAll = 0;
+    for (const log of logs) {
+      if (log.status === 'success') successCount += 1;
+      totalCost += log.estimatedCost || 0;
+      totalTokensAll += log.totalTokens || 0;
+    }
+    const totalCount = logs.length;
+    return {
+      totalCount,
+      successCount,
+      failedCount: totalCount - successCount,
+      totalCost,
+      totalTokensAll,
+    };
+  }, [logs]);
 
   return (
     <div className="animate-fade-in">
@@ -108,10 +124,10 @@ export default function ProxyLogs() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <h2 className="page-title">{tr('使用日志')}</h2>
           <span className="kpi-chip kpi-chip-success">
-            消耗总额 ${totalCost.toFixed(4)}
+            消耗总额 ${summary.totalCost.toFixed(4)}
           </span>
           <span className="kpi-chip kpi-chip-warning">
-            {totalTokensAll.toLocaleString()} tokens
+            {summary.totalTokensAll.toLocaleString()} tokens
           </span>
         </div>
         <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', padding: '6px 14px' }}>
@@ -126,9 +142,9 @@ export default function ProxyLogs() {
       <div className="toolbar" style={{ marginBottom: 12 }}>
         <div className="pill-tabs">
           {([
-            { key: 'all' as StatusFilter, label: '全部', count: totalCount },
-            { key: 'success' as StatusFilter, label: '成功', count: successCount },
-            { key: 'failed' as StatusFilter, label: '失败', count: failedCount },
+            { key: 'all' as StatusFilter, label: '全部', count: summary.totalCount },
+            { key: 'success' as StatusFilter, label: '成功', count: summary.successCount },
+            { key: 'failed' as StatusFilter, label: '失败', count: summary.failedCount },
           ]).map(tab => (
             <button
               key={tab.key}
@@ -244,9 +260,10 @@ export default function ProxyLogs() {
                       )}
                     </td>
                   </tr>
+                  {expanded === log.id && (
                   <tr style={{ background: 'var(--color-bg)' }}>
                     <td colSpan={9} style={{ padding: 0 }}>
-                      <div className={`anim-collapse ${expanded === log.id ? 'is-open' : ''}`.trim()}>
+                      <div className="anim-collapse is-open">
                         <div className="anim-collapse-inner">
                           <div className="animate-fade-in" style={{
                           padding: '14px 20px 14px 40px',
@@ -328,6 +345,7 @@ export default function ProxyLogs() {
                       </div>
                     </td>
                   </tr>
+                  )}
                 </React.Fragment>
               )})}
             </tbody>

@@ -15,16 +15,17 @@ export async function reportTokenExpired(params: {
   const detailText = params.detail ? appendSessionTokenRebindHint(params.detail) : '';
   const detail = detailText ? ` (${detailText})` : '';
 
-  db.insert(schema.events).values({
+  await db.insert(schema.events).values({
     type: 'token',
     title: 'Token 已失效',
     message: `${accountLabel} @ ${siteLabel} 的 Token 无效或已过期${detail}`,
     level: 'error',
     relatedId: params.accountId,
     relatedType: 'account',
+    createdAt: new Date().toISOString(),
   }).run();
 
-  db.update(schema.accounts).set({
+  await db.update(schema.accounts).set({
     status: 'expired',
     updatedAt: new Date().toISOString(),
   }).where(eq(schema.accounts.id, params.accountId)).run();
@@ -43,12 +44,13 @@ export async function reportTokenExpired(params: {
 }
 
 export async function reportProxyAllFailed(params: { model: string; reason: string }) {
-  db.insert(schema.events).values({
+  await db.insert(schema.events).values({
     type: 'proxy',
     title: '代理全部失败',
     message: `模型=${params.model}, 原因=${params.reason}`,
     level: 'error',
     relatedType: 'route',
+    createdAt: new Date().toISOString(),
   }).run();
 
   await sendNotification(

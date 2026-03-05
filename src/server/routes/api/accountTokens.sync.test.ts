@@ -35,18 +35,18 @@ describe('account tokens sync routes with site status', () => {
     return seedId;
   };
 
-  const seedAccount = (input: { siteStatus?: 'active' | 'disabled'; accountStatus?: string; accessToken?: string | null }) => {
+  const seedAccount = async (input: { siteStatus?: 'active' | 'disabled'; accountStatus?: string; accessToken?: string | null }) => {
     const id = nextSeed();
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: `site-${id}`,
       url: `https://site-${id}.example.com`,
       platform: 'new-api',
     }).returning().get();
     if (input.siteStatus === 'disabled') {
-      db.run(sql`update sites set status = 'disabled' where id = ${site.id}`);
+      await db.run(sql`update sites set status = 'disabled' where id = ${site.id}`);
     }
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: `user-${id}`,
       accessToken: input.accessToken ?? `access-token-${id}`,
@@ -70,7 +70,7 @@ describe('account tokens sync routes with site status', () => {
     await app.register(routesModule.accountTokensRoutes);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     getApiTokensMock.mockReset();
     getApiTokenMock.mockReset();
     createApiTokenMock.mockReset();
@@ -78,14 +78,14 @@ describe('account tokens sync routes with site status', () => {
     deleteApiTokenMock.mockReset();
     seedId = 0;
 
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -94,7 +94,7 @@ describe('account tokens sync routes with site status', () => {
   });
 
   it('returns skipped for single-account sync when site is disabled', async () => {
-    const { account } = seedAccount({ siteStatus: 'disabled' });
+    const { account } = await seedAccount({ siteStatus: 'disabled' });
 
     const response = await app.inject({
       method: 'POST',
@@ -113,7 +113,7 @@ describe('account tokens sync routes with site status', () => {
   });
 
   it('returns skipped when upstream has no api tokens', async () => {
-    const { account } = seedAccount({ siteStatus: 'active' });
+    const { account } = await seedAccount({ siteStatus: 'active' });
     getApiTokensMock.mockResolvedValue([]);
     getApiTokenMock.mockResolvedValue(null);
 
@@ -130,7 +130,7 @@ describe('account tokens sync routes with site status', () => {
       reason: 'no_upstream_tokens',
     });
 
-    const tokenRows = db.select()
+    const tokenRows = await db.select()
       .from(schema.accountTokens)
       .where(eq(schema.accountTokens.accountId, account.id))
       .all();
@@ -138,8 +138,8 @@ describe('account tokens sync routes with site status', () => {
   });
 
   it('sync-all skips disabled-site accounts and syncs active-site accounts', async () => {
-    const disabled = seedAccount({ siteStatus: 'disabled' });
-    const active = seedAccount({ siteStatus: 'active' });
+    const disabled = await seedAccount({ siteStatus: 'disabled' });
+    const active = await seedAccount({ siteStatus: 'active' });
 
     getApiTokensMock.mockResolvedValue([
       { name: 'default', key: 'sk-synced-token', enabled: true },
@@ -186,7 +186,7 @@ describe('account tokens sync routes with site status', () => {
       synced: true,
     });
 
-    const syncedDefaultToken = db.select()
+    const syncedDefaultToken = await db.select()
       .from(schema.accountTokens)
       .where(and(eq(schema.accountTokens.accountId, active.account.id), eq(schema.accountTokens.isDefault, true)))
       .get();
@@ -194,7 +194,7 @@ describe('account tokens sync routes with site status', () => {
   });
 
   it('creates token via upstream api and syncs into local store when manual token is omitted', async () => {
-    const { account, site } = seedAccount({ siteStatus: 'active' });
+    const { account, site } = await seedAccount({ siteStatus: 'active' });
     createApiTokenMock.mockResolvedValue(true);
     getApiTokensMock.mockResolvedValue([
       { name: 'created-from-upstream', key: 'sk-created-upstream-token', enabled: true },
@@ -220,7 +220,7 @@ describe('account tokens sync routes with site status', () => {
     expect(createApiTokenMock.mock.calls[0][0]).toBe(site.url);
     expect(createApiTokenMock.mock.calls[0][1]).toBe(account.accessToken);
 
-    const tokenRows = db.select()
+    const tokenRows = await db.select()
       .from(schema.accountTokens)
       .where(eq(schema.accountTokens.accountId, account.id))
       .all();
@@ -232,7 +232,7 @@ describe('account tokens sync routes with site status', () => {
   });
 
   it('passes token creation options to upstream adapter', async () => {
-    const { account } = seedAccount({ siteStatus: 'active' });
+    const { account } = await seedAccount({ siteStatus: 'active' });
     createApiTokenMock.mockResolvedValue(true);
     getApiTokensMock.mockResolvedValue([
       { name: 'custom-token', key: 'sk-created-upstream-token', enabled: true },
@@ -265,7 +265,7 @@ describe('account tokens sync routes with site status', () => {
   });
 
   it('returns 400 when limited token misses remainQuota', async () => {
-    const { account } = seedAccount({ siteStatus: 'active' });
+    const { account } = await seedAccount({ siteStatus: 'active' });
 
     const response = await app.inject({
       method: 'POST',
@@ -286,7 +286,7 @@ describe('account tokens sync routes with site status', () => {
   });
 
   it('returns 502 when upstream token creation fails', async () => {
-    const { account } = seedAccount({ siteStatus: 'active' });
+    const { account } = await seedAccount({ siteStatus: 'active' });
     createApiTokenMock.mockResolvedValue(false);
 
     const response = await app.inject({
@@ -306,7 +306,7 @@ describe('account tokens sync routes with site status', () => {
   });
 
   it('fetches account token groups from upstream', async () => {
-    const { account } = seedAccount({ siteStatus: 'active' });
+    const { account } = await seedAccount({ siteStatus: 'active' });
     getUserGroupsMock.mockResolvedValue(['default', 'vip']);
 
     const response = await app.inject({
@@ -323,8 +323,8 @@ describe('account tokens sync routes with site status', () => {
   });
 
   it('deletes upstream token before removing local token', async () => {
-    const { account, site } = seedAccount({ siteStatus: 'active' });
-    const token = db.insert(schema.accountTokens).values({
+    const { account, site } = await seedAccount({ siteStatus: 'active' });
+    const token = await db.insert(schema.accountTokens).values({
       accountId: account.id,
       name: 'upstream-token',
       token: 'sk-upstream-token',
@@ -345,13 +345,13 @@ describe('account tokens sync routes with site status', () => {
     expect(deleteApiTokenMock.mock.calls[0][1]).toBe(account.accessToken);
     expect(deleteApiTokenMock.mock.calls[0][2]).toBe('sk-upstream-token');
 
-    const removed = db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, token.id)).get();
+    const removed = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, token.id)).get();
     expect(removed).toBeUndefined();
   });
 
   it('keeps local token when upstream deletion fails', async () => {
-    const { account } = seedAccount({ siteStatus: 'active' });
-    const token = db.insert(schema.accountTokens).values({
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const token = await db.insert(schema.accountTokens).values({
       accountId: account.id,
       name: 'upstream-token',
       token: 'sk-upstream-token',
@@ -372,7 +372,7 @@ describe('account tokens sync routes with site status', () => {
       message: '站点删除令牌失败，本地未删除',
     });
 
-    const existing = db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, token.id)).get();
+    const existing = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, token.id)).get();
     expect(existing).toBeDefined();
   });
 });

@@ -36,6 +36,18 @@ describe('DoneHubAdapter', () => {
         return;
       }
 
+      if (req.url === '/api/user/self') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          data: {
+            quota: 20_000_000,
+            used_quota: 30_000_000,
+          },
+        }));
+        return;
+      }
+
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
     });
@@ -72,5 +84,13 @@ describe('DoneHubAdapter', () => {
     expect(tokens).toEqual([
       { key: 'donehub-token-key', name: 'sys_playground', enabled: true },
     ]);
+  });
+
+  it('treats quota as remaining balance and sums used quota for total', async () => {
+    const adapter = new DoneHubAdapter();
+    const balance = await adapter.getBalance(baseUrl, 'token');
+    expect(balance.balance).toBe(40);
+    expect(balance.used).toBe(60);
+    expect(balance.quota).toBe(100);
   });
 });

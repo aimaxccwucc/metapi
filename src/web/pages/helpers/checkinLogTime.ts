@@ -4,10 +4,23 @@ function parseServerUtcDate(value: string | null | undefined): { date: Date | nu
   const raw = String(value).trim();
   if (!raw) return { date: null, raw };
 
+  if (/^\d{10,13}$/.test(raw)) {
+    const asNumber = Number(raw);
+    if (Number.isFinite(asNumber)) {
+      const epochMs = raw.length === 13 ? asNumber : asNumber * 1000;
+      const date = new Date(epochMs);
+      if (!Number.isNaN(date.getTime())) {
+        return { date, raw };
+      }
+    }
+  }
+
   let normalized = raw;
   if (!normalized.includes('T') && normalized.includes(' ')) {
     normalized = normalized.replace(' ', 'T');
   }
+  normalized = normalized.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+  normalized = normalized.replace(/([+-]\d{2})$/, '$1:00');
 
   const hasTimeZone = /[zZ]$|[+-]\d{2}:\d{2}$/.test(normalized);
   if (!hasTimeZone) {

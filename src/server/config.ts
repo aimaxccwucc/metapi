@@ -21,6 +21,15 @@ function parseCsvList(value: string | undefined): string[] {
     .filter((item) => item.length > 0);
 }
 
+function parseDbType(value: string | undefined): 'sqlite' | 'mysql' | 'postgres' {
+  const normalized = (value || 'sqlite').trim().toLowerCase();
+  if (normalized === 'mysql') return 'mysql';
+  if (normalized === 'postgres' || normalized === 'postgresql') return 'postgres';
+  return 'sqlite';
+}
+
+const dataDir = process.env.DATA_DIR || './data';
+
 export const config = {
   authToken: process.env.AUTH_TOKEN || 'change-me-admin-token',
   proxyToken: process.env.PROXY_TOKEN || 'change-me-proxy-sk-token',
@@ -48,7 +57,9 @@ export const config = {
   notifyCooldownSec: Math.max(0, Math.trunc(parseNumber(process.env.NOTIFY_COOLDOWN_SEC, 300))),
   adminIpAllowlist: parseCsvList(process.env.ADMIN_IP_ALLOWLIST),
   port: Math.trunc(parseNumber(process.env.PORT, 4000)),
-  dataDir: process.env.DATA_DIR || './data',
+  dataDir,
+  dbType: parseDbType(process.env.DB_TYPE),
+  dbUrl: (process.env.DB_URL || '').trim(),
   routingFallbackUnitCost: Math.max(1e-6, parseNumber(process.env.ROUTING_FALLBACK_UNIT_COST, 1)),
   tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(process.env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
   proxyLogRetentionDays: Math.max(0, Math.trunc(parseNumber(process.env.PROXY_LOG_RETENTION_DAYS, 30))),

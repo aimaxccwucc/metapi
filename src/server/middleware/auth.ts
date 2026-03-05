@@ -75,14 +75,14 @@ export async function proxyAuthMiddleware(request: FastifyRequest, reply: Fastif
     return;
   }
 
-  const authResult = authorizeDownstreamToken(token);
+  const authResult = await authorizeDownstreamToken(token);
   if (!authResult.ok) {
     reply.code(authResult.statusCode).send({ error: authResult.error });
     return;
   }
 
   if (authResult.source === 'managed' && authResult.key) {
-    consumeManagedKeyRequest(authResult.key.id);
+    await consumeManagedKeyRequest(authResult.key.id);
   }
 
   proxyAuthContextByRequest.set(request, {

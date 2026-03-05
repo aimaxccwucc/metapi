@@ -21,18 +21,18 @@ export async function authRoutes(app: FastifyInstance) {
     }
 
     // Save to settings table
-    const existing = db.select().from(schema.settings).where(eq(schema.settings.key, 'auth_token')).get();
+    const existing = await db.select().from(schema.settings).where(eq(schema.settings.key, 'auth_token')).get();
     if (existing) {
-      db.update(schema.settings).set({ value: JSON.stringify(newToken) }).where(eq(schema.settings.key, 'auth_token')).run();
+      await db.update(schema.settings).set({ value: JSON.stringify(newToken) }).where(eq(schema.settings.key, 'auth_token')).run();
     } else {
-      db.insert(schema.settings).values({ key: 'auth_token', value: JSON.stringify(newToken) }).run();
+      await db.insert(schema.settings).values({ key: 'auth_token', value: JSON.stringify(newToken) }).run();
     }
 
     // Update runtime config
     config.authToken = newToken;
 
     try {
-      db.insert(schema.events).values({
+      await db.insert(schema.events).values({
         type: 'token',
         title: '管理员登录令牌已更新',
         message: '管理员登录 Token 已被修改，请使用新 Token 登录。',

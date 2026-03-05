@@ -132,7 +132,7 @@ async function repairSingleAccount(row: AccountWithSiteRow): Promise<AccountKeyR
     };
   }
 
-  const localTokens = db.select()
+  const localTokens = await db.select()
     .from(schema.accountTokens)
     .where(eq(schema.accountTokens.accountId, account.id))
     .all();
@@ -143,7 +143,7 @@ async function repairSingleAccount(row: AccountWithSiteRow): Promise<AccountKeyR
     const accountApiToken = normalizeToken(account.apiToken);
     const changed = !enabledTokens.some((token) => token.isDefault) || (accountApiToken !== localDefault.token);
     if (changed) {
-      repairDefaultToken(account.id);
+      await repairDefaultToken(account.id);
       return {
         ...base,
         status: 'repaired',
@@ -159,7 +159,7 @@ async function repairSingleAccount(row: AccountWithSiteRow): Promise<AccountKeyR
 
   const fallbackApiToken = normalizeToken(account.apiToken);
   if (fallbackApiToken) {
-    ensureDefaultTokenForAccount(account.id, fallbackApiToken, {
+    await ensureDefaultTokenForAccount(account.id, fallbackApiToken, {
       name: 'default',
       source: 'legacy',
       enabled: true,
@@ -233,7 +233,7 @@ async function repairSingleAccount(row: AccountWithSiteRow): Promise<AccountKeyR
       };
     }
 
-    const synced = syncTokensFromUpstream(account.id, upstreamTokens);
+    const synced = await syncTokensFromUpstream(account.id, upstreamTokens);
     return {
       ...base,
       status: 'synced',
@@ -252,14 +252,14 @@ async function repairSingleAccount(row: AccountWithSiteRow): Promise<AccountKeyR
 }
 
 export async function repairAllAccountKeys(): Promise<AccountKeyRepairResult> {
-  const rows = db.select()
+  const rows = await db.select()
     .from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-    .all();
+    .all() as AccountWithSiteRow[];
 
   const results: AccountKeyRepairExecutionResult[] = [];
 
-  await runPerKeySequential({
+  await runPerKeySequential<AccountWithSiteRow>({
     items: rows,
     getKey: (row) => getOriginKey(row.sites.url),
     worker: async (row) => {

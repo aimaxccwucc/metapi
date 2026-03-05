@@ -8,6 +8,10 @@ export default defineConfig(({ mode }) => {
   const proxyTarget = resolveDevProxyTarget(env);
   console.log(`[vite] dev proxy target: ${proxyTarget}`);
 
+  const frontendPort = Number.parseInt(env.FRONTEND_PORT || env.VITE_FRONTEND_PORT || '', 10);
+  const resolvedFrontendPort = Number.isFinite(frontendPort) && frontendPort > 0 ? frontendPort : 5173;
+  const frontendHost = (env.VITE_DEV_HOST || '127.0.0.1').trim() || '127.0.0.1';
+
   return {
     root: 'src/web',
     plugins: [react(), tailwindcss()],
@@ -16,6 +20,8 @@ export default defineConfig(({ mode }) => {
       emptyOutDir: true,
     },
     server: {
+      host: frontendHost,
+      port: resolvedFrontendPort,
       proxy: {
         '^/api($|/)': {
           target: proxyTarget,

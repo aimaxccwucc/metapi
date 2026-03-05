@@ -126,7 +126,7 @@ export async function checkinRoutes(app: FastifyInstance) {
       query = query.where(eq(schema.checkinLogs.accountId, parseInt(request.query.accountId, 10))) as any;
     }
 
-    const rows = query.all();
+    const rows = await query.all();
     return rows.map((row: any) => {
       const source = row?.checkin_logs || row;
       const failureReason = classifyFailureReason({
@@ -144,7 +144,7 @@ export async function checkinRoutes(app: FastifyInstance) {
   app.put<{ Body: { cron: string } }>('/api/checkin/schedule', async (request) => {
     try {
       updateCheckinCron(request.body.cron);
-      db.insert(schema.settings).values({ key: 'checkin_cron', value: JSON.stringify(request.body.cron) })
+      await db.insert(schema.settings).values({ key: 'checkin_cron', value: JSON.stringify(request.body.cron) })
         .onConflictDoUpdate({ target: schema.settings.key, set: { value: JSON.stringify(request.body.cron) } }).run();
       return { success: true, cron: request.body.cron };
     } catch (err: any) {

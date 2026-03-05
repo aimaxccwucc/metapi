@@ -49,6 +49,32 @@ function levelLabel(level: string) {
 function eventStatusLabel(row: ProgramEvent) {
   const text = `${row.title || ''} ${row.message || ''}`.toLowerCase();
 
+  const parseCount = (pattern: RegExp): number | undefined => {
+    const match = text.match(pattern);
+    if (!match?.[1]) return undefined;
+    const value = Number.parseInt(match[1], 10);
+    return Number.isFinite(value) ? value : undefined;
+  };
+
+  const summary = {
+    success: parseCount(/成功[^\d]{0,6}(\d+)/i) ?? parseCount(/success(?:ful)?[^\d]{0,6}(\d+)/i),
+    skipped: parseCount(/跳过[^\d]{0,6}(\d+)/i) ?? parseCount(/skipped?[^\d]{0,6}(\d+)/i),
+    failed: parseCount(/失败[^\d]{0,6}(\d+)/i) ?? parseCount(/failed[^\d]{0,6}(\d+)/i),
+  };
+
+  if (summary.failed !== undefined || summary.success !== undefined || summary.skipped !== undefined) {
+    if ((summary.failed ?? 0) > 0) {
+      return { label: '失败', cls: 'badge-error' };
+    }
+    if ((summary.success ?? 0) > 0) {
+      return { label: '成功', cls: 'badge-success' };
+    }
+    if ((summary.skipped ?? 0) > 0) {
+      return { label: '跳过', cls: 'badge-warning' };
+    }
+    return { label: '成功', cls: 'badge-success' };
+  }
+
   if (text.includes('失败') || text.includes('failed') || text.includes('error')) {
     return { label: '失败', cls: 'badge-error' };
   }

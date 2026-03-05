@@ -39,7 +39,7 @@ async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, timeoutMe
 }
 
 export async function refreshModelsForAccount(accountId: number) {
-  const row = db.select().from(schema.accounts)
+  const row = await db.select().from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(eq(schema.accounts.id, accountId))
     .get();
@@ -52,17 +52,17 @@ export async function refreshModelsForAccount(accountId: number) {
   const site = row.sites;
   const adapter = getAdapter(site.platform);
 
-  const accountTokens = db.select()
+  const accountTokens = await db.select()
     .from(schema.accountTokens)
     .where(eq(schema.accountTokens.accountId, accountId))
     .all();
 
-  db.delete(schema.modelAvailability)
+  await db.delete(schema.modelAvailability)
     .where(eq(schema.modelAvailability.accountId, accountId))
     .run();
 
   for (const token of accountTokens) {
-    db.delete(schema.tokenModelAvailability)
+    await db.delete(schema.tokenModelAvailability)
       .where(eq(schema.tokenModelAvailability.tokenId, token.id))
       .run();
   }
@@ -87,7 +87,7 @@ export async function refreshModelsForAccount(accountId: number) {
       );
       if (discoveredApiToken) {
         ensureDefaultTokenForAccount(account.id, discoveredApiToken, { name: 'default', source: 'sync' });
-        db.update(schema.accounts).set({
+        await db.update(schema.accounts).set({
           apiToken: discoveredApiToken,
           updatedAt: new Date().toISOString(),
         }).where(eq(schema.accounts.id, account.id)).run();
@@ -95,7 +95,7 @@ export async function refreshModelsForAccount(accountId: number) {
     } catch {}
   }
 
-  let enabledTokens = db.select()
+  let enabledTokens = await db.select()
     .from(schema.accountTokens)
     .where(and(eq(schema.accountTokens.accountId, account.id), eq(schema.accountTokens.enabled, true)))
     .all();
@@ -105,7 +105,7 @@ export async function refreshModelsForAccount(accountId: number) {
     const fallback = discoveredApiToken || account.apiToken || null;
     if (fallback) {
       ensureDefaultTokenForAccount(account.id, fallback, { name: 'default', source: 'legacy' });
-      enabledTokens = db.select()
+      enabledTokens = await db.select()
         .from(schema.accountTokens)
         .where(and(eq(schema.accountTokens.accountId, account.id), eq(schema.accountTokens.enabled, true)))
         .all();
@@ -182,7 +182,7 @@ export async function refreshModelsForAccount(accountId: number) {
     const latencyMs = Date.now() - startedAt;
     const checkedAt = new Date().toISOString();
 
-    db.insert(schema.tokenModelAvailability).values(
+    await db.insert(schema.tokenModelAvailability).values(
       models.map((modelName) => ({
         tokenId: token.id,
         modelName,
@@ -198,7 +198,7 @@ export async function refreshModelsForAccount(accountId: number) {
 
   if (accountModels.size > 0) {
     const checkedAt = new Date().toISOString();
-    db.insert(schema.modelAvailability).values(
+    await db.insert(schema.modelAvailability).values(
       Array.from(accountModels).map((modelName) => ({
         accountId: account.id,
         modelName,
@@ -220,11 +220,11 @@ export async function refreshModelsForAccount(accountId: number) {
 }
 
 async function refreshModelsForAllActiveAccounts() {
-  const accounts = db.select({ id: schema.accounts.id }).from(schema.accounts)
+  const accounts = await db.select({ id: schema.accounts.id }).from(schema.accounts)
     .where(eq(schema.accounts.status, 'active'))
     .all();
 
-  const results = [];
+  const results: any[] = [];
   for (let offset = 0; offset < accounts.length; offset += MODEL_REFRESH_BATCH_SIZE) {
     const batch = accounts.slice(offset, offset + MODEL_REFRESH_BATCH_SIZE);
     const batchResults = await Promise.all(batch.map(async (account) => refreshModelsForAccount(account.id)));
@@ -233,8 +233,8 @@ async function refreshModelsForAllActiveAccounts() {
   return results;
 }
 
-export function rebuildTokenRoutesFromAvailability() {
-  const tokenRows = db.select().from(schema.tokenModelAvailability)
+export async function rebuildTokenRoutesFromAvailability() {
+  const tokenRows = await db.select().from(schema.tokenModelAvailability)
     .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
     .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
@@ -255,8 +255,8 @@ export function rebuildTokenRoutesFromAvailability() {
     modelTokens.get(modelName)!.set(row.account_tokens.id, row.accounts.id);
   }
 
-  const routes = db.select().from(schema.tokenRoutes).all();
-  const channels = db.select().from(schema.routeChannels).all();
+  const routes = await db.select().from(schema.tokenRoutes).all();
+  const channels = await db.select().from(schema.routeChannels).all();
 
   let createdRoutes = 0;
   let createdChannels = 0;
@@ -266,10 +266,15 @@ export function rebuildTokenRoutesFromAvailability() {
   for (const [modelName, tokenAccountMap] of modelTokens.entries()) {
     let route = routes.find((r) => r.modelPattern === modelName);
     if (!route) {
-      route = db.insert(schema.tokenRoutes).values({
+      const inserted = await db.insert(schema.tokenRoutes).values({
         modelPattern: modelName,
         enabled: true,
-      }).returning().get();
+      }).run();
+      const insertedId = Number(inserted.lastInsertRowid || 0);
+      route = insertedId > 0
+        ? await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, insertedId)).get()
+        : undefined;
+      if (!route) continue;
       routes.push(route);
       createdRoutes++;
     }
@@ -281,7 +286,7 @@ export function rebuildTokenRoutesFromAvailability() {
       const exists = routeChannels.some((channel) => channel.tokenId === tokenId);
       if (exists) continue;
 
-      const created = db.insert(schema.routeChannels).values({
+      const inserted = await db.insert(schema.routeChannels).values({
         routeId: route.id,
         accountId,
         tokenId,
@@ -289,7 +294,11 @@ export function rebuildTokenRoutesFromAvailability() {
         weight: 10,
         enabled: true,
         manualOverride: false,
-      }).returning().get();
+      }).run();
+      const insertedId = Number(inserted.lastInsertRowid || 0);
+      if (insertedId <= 0) continue;
+      const created = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, insertedId)).get();
+      if (!created) continue;
       channels.push(created);
       createdChannels++;
     }
@@ -300,9 +309,9 @@ export function rebuildTokenRoutesFromAvailability() {
       }
 
       if (!channel.tokenId) {
-        const preferred = getPreferredAccountToken(channel.accountId);
+        const preferred = await getPreferredAccountToken(channel.accountId);
         if (preferred && desiredTokenIds.has(preferred.id)) {
-          db.update(schema.routeChannels)
+          await db.update(schema.routeChannels)
             .set({ tokenId: preferred.id })
             .where(eq(schema.routeChannels.id, channel.id))
             .run();
@@ -311,7 +320,7 @@ export function rebuildTokenRoutesFromAvailability() {
       }
 
       if (!channel.manualOverride) {
-        db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
+        await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
         removedChannels++;
       }
     }
@@ -329,7 +338,7 @@ export function rebuildTokenRoutesFromAvailability() {
       removedChannels += routeChannelCount;
     }
 
-    const deleted = db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).run().changes;
+    const deleted = (await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).run()).changes;
     if (deleted > 0) {
       removedRoutes += deleted;
     }
@@ -348,6 +357,6 @@ export function rebuildTokenRoutesFromAvailability() {
 
 export async function refreshModelsAndRebuildRoutes() {
   const refresh = await refreshModelsForAllActiveAccounts();
-  const rebuild = rebuildTokenRoutesFromAvailability();
+  const rebuild = await rebuildTokenRoutesFromAvailability();
   return { refresh, rebuild };
 }

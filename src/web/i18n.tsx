@@ -463,6 +463,9 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     };
 
     walk(root);
+    if (language !== 'en') {
+      return;
+    }
 
     const observer = new MutationObserver((records) => {
       for (const record of records) {

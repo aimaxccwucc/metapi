@@ -26,9 +26,9 @@ describe('sites proxy url settings', () => {
     await app.register(routesModule.sitesRoutes);
   });
 
-  beforeEach(() => {
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+  beforeEach(async () => {
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {

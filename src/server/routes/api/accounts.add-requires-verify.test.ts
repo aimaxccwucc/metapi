@@ -36,20 +36,20 @@ describe('accounts add requires token verification success', () => {
     await app.register(routesModule.accountsRoutes);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     verifyTokenMock.mockReset();
     getApiTokensMock.mockReset();
     getApiTokensMock.mockResolvedValue([]);
 
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -60,7 +60,7 @@ describe('accounts add requires token verification success', () => {
   it('rejects binding when token verification is not successful', async () => {
     verifyTokenMock.mockResolvedValueOnce({ tokenType: 'unknown' });
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Verify Site',
       url: 'https://verify.example.com',
       platform: 'new-api',
@@ -79,13 +79,13 @@ describe('accounts add requires token verification success', () => {
     expect(response.json()).toMatchObject({
       success: false,
     });
-    expect(db.select().from(schema.accounts).all()).toHaveLength(0);
+    expect(await db.select().from(schema.accounts).all()).toHaveLength(0);
   });
 
   it('returns rebind hint when token verify reports invalid access token', async () => {
     verifyTokenMock.mockRejectedValueOnce(new Error('无权进行此操作，access token 无效'));
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Verify Site',
       url: 'https://verify.example.com',
       platform: 'new-api',
@@ -105,7 +105,7 @@ describe('accounts add requires token verification success', () => {
       success: false,
       message: '无权进行此操作，access token 无效，请在中转站重新生成系统访问令牌后重新绑定账号',
     });
-    expect(db.select().from(schema.accounts).all()).toHaveLength(0);
+    expect(await db.select().from(schema.accounts).all()).toHaveLength(0);
   });
 
   it('allows binding when token verification succeeds as api key', async () => {
@@ -114,7 +114,7 @@ describe('accounts add requires token verification success', () => {
       models: ['gpt-4o-mini'],
     });
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'API Key Site',
       url: 'https://apikey.example.com',
       platform: 'new-api',
@@ -134,7 +134,7 @@ describe('accounts add requires token verification success', () => {
     expect(body.tokenType).toBe('apikey');
     expect(body.apiTokenFound).toBe(true);
 
-    const accounts = db.select().from(schema.accounts).all();
+    const accounts = await db.select().from(schema.accounts).all();
     expect(accounts).toHaveLength(1);
     expect((accounts[0]?.apiToken || '').startsWith('sk-')).toBe(true);
   });

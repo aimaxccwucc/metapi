@@ -80,9 +80,9 @@ function setTaskStatus(task: BackgroundTask, patch: Partial<BackgroundTask>) {
   return next;
 }
 
-function appendTaskEvent(level: 'info' | 'warning' | 'error', title: string, message: string, taskId: string) {
+async function appendTaskEvent(level: 'info' | 'warning' | 'error', title: string, message: string, taskId: string) {
   try {
-    db.insert(schema.events).values({
+    await db.insert(schema.events).values({
       type: 'status',
       title,
       message,

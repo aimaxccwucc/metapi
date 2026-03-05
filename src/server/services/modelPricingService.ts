@@ -259,7 +259,7 @@ async function fetchJson(url: string, options?: UndiciRequestInit): Promise<unkn
 
   try {
     const response = await fetch(url, {
-      ...withSiteProxyRequestInit(url, {
+      ...(await withSiteProxyRequestInit(url, {
         ...options,
         signal: controller.signal,
         body: options?.body ?? undefined,
@@ -267,7 +267,7 @@ async function fetchJson(url: string, options?: UndiciRequestInit): Promise<unkn
           'Content-Type': 'application/json',
           ...options?.headers,
         },
-      }),
+      })),
     });
 
     if (!response.ok) {

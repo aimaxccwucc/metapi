@@ -216,6 +216,59 @@ describe('Sub2ApiAdapter', () => {
     expect(result.success).toBe(false);
   });
 
+  it('accepts bearer-prefixed access tokens when verifying session tokens', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/auth/me') {
+        const auth = req.headers.authorization || '';
+        if (auth !== 'Bearer jwt-token') {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ code: 401, message: 'unauthorized' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: { id: 1, username: 'testuser', email: 'test@example.com', balance: 5.0 },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.verifyToken(baseUrl, 'Bearer jwt-token');
+    expect(result.tokenType).toBe('session');
+    expect(result.userInfo?.username).toBe('testuser');
+  });
+
+  it('lists api keys when access token includes Bearer prefix', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/keys?page=1&page_size=100') {
+        const auth = req.headers.authorization || '';
+        if (auth !== 'Bearer jwt-token') {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ code: 401, message: 'unauthorized' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: {
+            items: [
+              { id: 11, key: 'sk-active', name: 'default', status: 'active' },
+            ],
+          },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const tokens = await adapter.getApiTokens(baseUrl, 'Bearer jwt-token');
+    expect(tokens).toEqual([{ key: 'sk-active', name: 'default', enabled: true }]);
+  });
+
   it('lists api keys from /api/v1/keys and picks active key as default api token', async () => {
     await startServer((req, res) => {
       if (req.url === '/api/v1/keys?page=1&page_size=100') {
@@ -264,6 +317,27 @@ describe('Sub2ApiAdapter', () => {
 
     const groups = await adapter.getUserGroups(baseUrl, 'jwt-token');
     expect(groups).toEqual(['1', '2']);
+  });
+
+  it('fetches user groups from /api/v1/groups/available', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/groups/available') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: [
+            { id: 5, name: 'basic' },
+            { id: 6, name: 'pro' },
+          ],
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const groups = await adapter.getUserGroups(baseUrl, 'jwt-token');
+    expect(groups).toEqual(['5', '6']);
   });
 
   it('falls back to infer groups from /api/v1/keys when group endpoint is unavailable', async () => {

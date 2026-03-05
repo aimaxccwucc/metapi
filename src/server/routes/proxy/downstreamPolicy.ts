@@ -7,15 +7,15 @@ export function getDownstreamRoutingPolicy(request: FastifyRequest): DownstreamR
   return getProxyAuthContext(request)?.policy || EMPTY_DOWNSTREAM_ROUTING_POLICY;
 }
 
-export function ensureModelAllowedForDownstreamKey(
+export async function ensureModelAllowedForDownstreamKey(
   request: FastifyRequest,
   reply: FastifyReply,
   requestedModel: string,
-): boolean {
+): Promise<boolean> {
   const authContext = getProxyAuthContext(request);
   if (!authContext) return true;
 
-  if (isModelAllowedByPolicyOrAllowedRoutes(requestedModel, authContext.policy)) {
+  if (await isModelAllowedByPolicyOrAllowedRoutes(requestedModel, authContext.policy)) {
     return true;
   }
 
@@ -31,5 +31,5 @@ export function ensureModelAllowedForDownstreamKey(
 export function recordDownstreamCostUsage(request: FastifyRequest, estimatedCost: number): void {
   const authContext = getProxyAuthContext(request);
   if (!authContext || authContext.keyId === null) return;
-  recordManagedKeyCostUsage(authContext.keyId, estimatedCost);
+  void recordManagedKeyCostUsage(authContext.keyId, estimatedCost);
 }

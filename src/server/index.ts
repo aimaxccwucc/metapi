@@ -23,56 +23,86 @@ import { startProxyLogRetentionService, stopProxyLogRetentionService } from './s
 import { buildStartupSummaryLines } from './services/startupInfo.js';
 import { existsSync } from 'fs';
 import { normalize, resolve, sep } from 'path';
-import { db, schema } from './db/index.js';
+import { eq, isNull, or } from 'drizzle-orm';
+import { db, runtimeDbDialect, schema, switchRuntimeDatabase, type RuntimeDbDialect } from './db/index.js';
 
-// Load runtime config overrides from settings
-try {
-  const rows = db.select().from(schema.settings).all();
-  const settingsMap = new Map(rows.map((row) => [row.key, row.value]));
+function toSettingsMap(rows: Array<{ key: string; value: string }>) {
+  return new Map(rows.map((row) => [row.key, row.value]));
+}
 
-  const parseSetting = <T>(key: string): T | undefined => {
-    const raw = settingsMap.get(key);
-    if (!raw) return undefined;
-    try {
-      return JSON.parse(raw) as T;
-    } catch {
-      return undefined;
-    }
-  };
+function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
+  const raw = settingsMap.get(key);
+  if (typeof raw !== 'string' || !raw) return undefined;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
+}
 
-  const toStringList = (value: unknown): string[] => {
-    if (Array.isArray(value)) {
-      return value
-        .map((item) => (typeof item === 'string' ? item.trim() : ''))
-        .filter((item) => item.length > 0);
-    }
-    if (typeof value === 'string') {
-      return value
-        .split(',')
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0);
-    }
-    return [];
-  };
+function toStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item) => item.length > 0);
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  }
+  return [];
+}
 
-  const authToken = parseSetting<string>('auth_token');
+function normalizeSavedDbType(value: unknown): RuntimeDbDialect | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'sqlite') return 'sqlite';
+  if (normalized === 'mysql') return 'mysql';
+  if (normalized === 'postgres' || normalized === 'postgresql') return 'postgres';
+  return null;
+}
+
+function validateSavedDbUrl(dialect: RuntimeDbDialect, value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  if (dialect === 'sqlite') return normalized;
+  if (dialect === 'mysql' && normalized.startsWith('mysql://')) return normalized;
+  if (dialect === 'postgres' && (normalized.startsWith('postgres://') || normalized.startsWith('postgresql://'))) return normalized;
+  return null;
+}
+
+function extractSavedRuntimeDatabaseConfig(settingsMap: Map<string, string>): { dialect: RuntimeDbDialect; dbUrl: string } | null {
+  const rawType = parseSettingFromMap<unknown>(settingsMap, 'db_type');
+  const rawUrl = parseSettingFromMap<unknown>(settingsMap, 'db_url');
+  const dialect = normalizeSavedDbType(rawType);
+  if (!dialect) return null;
+  const dbUrl = validateSavedDbUrl(dialect, rawUrl);
+  if (!dbUrl) return null;
+  return { dialect, dbUrl };
+}
+
+function applyRuntimeSettings(settingsMap: Map<string, string>) {
+  const authToken = parseSettingFromMap<string>(settingsMap, 'auth_token');
   if (typeof authToken === 'string' && authToken) config.authToken = authToken;
 
-  const proxyToken = parseSetting<string>('proxy_token');
+  const proxyToken = parseSettingFromMap<string>(settingsMap, 'proxy_token');
   if (typeof proxyToken === 'string' && proxyToken) config.proxyToken = proxyToken;
 
-  const checkinCron = parseSetting<string>('checkin_cron');
+  const checkinCron = parseSettingFromMap<string>(settingsMap, 'checkin_cron');
   if (typeof checkinCron === 'string' && checkinCron) config.checkinCron = checkinCron;
 
-  const balanceRefreshCron = parseSetting<string>('balance_refresh_cron');
+  const balanceRefreshCron = parseSettingFromMap<string>(settingsMap, 'balance_refresh_cron');
   if (typeof balanceRefreshCron === 'string' && balanceRefreshCron) config.balanceRefreshCron = balanceRefreshCron;
 
-  const siteHealthRefreshCron = parseSetting<string>('site_health_refresh_cron');
+  const siteHealthRefreshCron = parseSettingFromMap<string>(settingsMap, 'site_health_refresh_cron');
   if (typeof siteHealthRefreshCron === 'string' && siteHealthRefreshCron) {
     config.siteHealthRefreshCron = siteHealthRefreshCron;
   }
 
-  const routingWeights = parseSetting<Partial<typeof config.routingWeights>>('routing_weights');
+  const routingWeights = parseSettingFromMap<Partial<typeof config.routingWeights>>(settingsMap, 'routing_weights');
   if (routingWeights && typeof routingWeights === 'object') {
     config.routingWeights = {
       ...config.routingWeights,
@@ -80,64 +110,98 @@ try {
     };
   }
 
-  const routingFallbackUnitCost = parseSetting<number>('routing_fallback_unit_cost');
+  const routingFallbackUnitCost = parseSettingFromMap<number>(settingsMap, 'routing_fallback_unit_cost');
   if (typeof routingFallbackUnitCost === 'number' && Number.isFinite(routingFallbackUnitCost) && routingFallbackUnitCost > 0) {
     config.routingFallbackUnitCost = Math.max(1e-6, routingFallbackUnitCost);
   }
 
-  const webhookUrl = parseSetting<string>('webhook_url');
+  const webhookUrl = parseSettingFromMap<string>(settingsMap, 'webhook_url');
   if (typeof webhookUrl === 'string') config.webhookUrl = webhookUrl;
 
-  const barkUrl = parseSetting<string>('bark_url');
+  const barkUrl = parseSettingFromMap<string>(settingsMap, 'bark_url');
   if (typeof barkUrl === 'string') config.barkUrl = barkUrl;
 
-  const serverChanKey = parseSetting<string>('serverchan_key');
+  const serverChanKey = parseSettingFromMap<string>(settingsMap, 'serverchan_key');
   if (typeof serverChanKey === 'string') config.serverChanKey = serverChanKey;
 
-  const telegramEnabled = parseSetting<boolean>('telegram_enabled');
+  const telegramEnabled = parseSettingFromMap<boolean>(settingsMap, 'telegram_enabled');
   if (typeof telegramEnabled === 'boolean') config.telegramEnabled = telegramEnabled;
 
-  const telegramBotToken = parseSetting<string>('telegram_bot_token');
+  const telegramBotToken = parseSettingFromMap<string>(settingsMap, 'telegram_bot_token');
   if (typeof telegramBotToken === 'string') config.telegramBotToken = telegramBotToken;
 
-  const telegramChatId = parseSetting<string>('telegram_chat_id');
+  const telegramChatId = parseSettingFromMap<string>(settingsMap, 'telegram_chat_id');
   if (typeof telegramChatId === 'string') config.telegramChatId = telegramChatId;
 
-  const smtpEnabled = parseSetting<boolean>('smtp_enabled');
+  const smtpEnabled = parseSettingFromMap<boolean>(settingsMap, 'smtp_enabled');
   if (typeof smtpEnabled === 'boolean') config.smtpEnabled = smtpEnabled;
 
-  const smtpHost = parseSetting<string>('smtp_host');
+  const smtpHost = parseSettingFromMap<string>(settingsMap, 'smtp_host');
   if (typeof smtpHost === 'string') config.smtpHost = smtpHost;
 
-  const smtpPort = parseSetting<number>('smtp_port');
+  const smtpPort = parseSettingFromMap<number>(settingsMap, 'smtp_port');
   if (typeof smtpPort === 'number' && Number.isFinite(smtpPort) && smtpPort > 0) {
     config.smtpPort = smtpPort;
   }
 
-  const smtpSecure = parseSetting<boolean>('smtp_secure');
+  const smtpSecure = parseSettingFromMap<boolean>(settingsMap, 'smtp_secure');
   if (typeof smtpSecure === 'boolean') config.smtpSecure = smtpSecure;
 
-  const smtpUser = parseSetting<string>('smtp_user');
+  const smtpUser = parseSettingFromMap<string>(settingsMap, 'smtp_user');
   if (typeof smtpUser === 'string') config.smtpUser = smtpUser;
 
-  const smtpPass = parseSetting<string>('smtp_pass');
+  const smtpPass = parseSettingFromMap<string>(settingsMap, 'smtp_pass');
   if (typeof smtpPass === 'string') config.smtpPass = smtpPass;
 
-  const smtpFrom = parseSetting<string>('smtp_from');
+  const smtpFrom = parseSettingFromMap<string>(settingsMap, 'smtp_from');
   if (typeof smtpFrom === 'string') config.smtpFrom = smtpFrom;
 
-  const smtpTo = parseSetting<string>('smtp_to');
+  const smtpTo = parseSettingFromMap<string>(settingsMap, 'smtp_to');
   if (typeof smtpTo === 'string') config.smtpTo = smtpTo;
 
-  const notifyCooldownSec = parseSetting<number>('notify_cooldown_sec');
+  const notifyCooldownSec = parseSettingFromMap<number>(settingsMap, 'notify_cooldown_sec');
   if (typeof notifyCooldownSec === 'number' && Number.isFinite(notifyCooldownSec) && notifyCooldownSec >= 0) {
     config.notifyCooldownSec = Math.trunc(notifyCooldownSec);
   }
 
-  const adminIpAllowlist = parseSetting<string[] | string>('admin_ip_allowlist');
+  const adminIpAllowlist = parseSettingFromMap<string[] | string>(settingsMap, 'admin_ip_allowlist');
   if (adminIpAllowlist !== undefined) {
     config.adminIpAllowlist = toStringList(adminIpAllowlist);
   }
+}
+
+// Load runtime config overrides from settings
+try {
+  const initialRows = await db.select().from(schema.settings).all();
+  const initialMap = toSettingsMap(initialRows);
+  const savedDbConfig = extractSavedRuntimeDatabaseConfig(initialMap);
+  const activeDbUrl = (config.dbUrl || '').trim();
+  if (savedDbConfig && (savedDbConfig.dialect !== runtimeDbDialect || savedDbConfig.dbUrl !== activeDbUrl)) {
+    try {
+      await switchRuntimeDatabase(savedDbConfig.dialect, savedDbConfig.dbUrl);
+      console.log(`Loaded runtime DB config from settings: ${savedDbConfig.dialect}`);
+    } catch (error) {
+      console.warn(`Failed to switch runtime DB from settings: ${(error as Error)?.message || 'unknown error'}`);
+    }
+  }
+
+  const finalRows = await db.select().from(schema.settings).all();
+  const finalMap = toSettingsMap(finalRows);
+  applyRuntimeSettings(finalMap);
+
+  const repairedAt = new Date().toISOString();
+  await db.update(schema.events)
+    .set({ createdAt: repairedAt })
+    .where(or(isNull(schema.events.createdAt), eq(schema.events.createdAt, '')))
+    .run();
+  await db.update(schema.proxyLogs)
+    .set({ createdAt: repairedAt })
+    .where(or(isNull(schema.proxyLogs.createdAt), eq(schema.proxyLogs.createdAt, '')))
+    .run();
+  await db.update(schema.checkinLogs)
+    .set({ createdAt: repairedAt })
+    .where(or(isNull(schema.checkinLogs.createdAt), eq(schema.checkinLogs.createdAt, '')))
+    .run();
 
   console.log('Loaded runtime settings overrides');
 } catch { /* first run, table may not exist */ }
@@ -226,7 +290,7 @@ if (existsSync(webDir)) {
 }
 
 // Start scheduler
-startScheduler();
+await startScheduler();
 startProxyLogRetentionService();
 app.addHook('onClose', async () => {
   stopProxyLogRetentionService();

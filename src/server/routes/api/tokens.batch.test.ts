@@ -19,24 +19,24 @@ describe('PUT /api/channels/batch', () => {
     return seedId;
   };
 
-  const seedChannel = (options: { priority: number; weight: number; manualOverride?: boolean }) => {
+  const seedChannel = async (options: { priority: number; weight: number; manualOverride?: boolean }) => {
     const id = nextId();
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: `site-${id}`,
       url: `https://example.com/${id}`,
       platform: 'new-api',
     }).returning().get();
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       accessToken: `access-token-${id}`,
       apiToken: `api-token-${id}`,
     }).returning().get();
-    const route = db.insert(schema.tokenRoutes).values({
+    const route = await db.insert(schema.tokenRoutes).values({
       modelPattern: `gpt-4o-${id}`,
       enabled: true,
     }).returning().get();
 
-    return db.insert(schema.routeChannels).values({
+    return await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: account.id,
       priority: options.priority,
@@ -59,12 +59,12 @@ describe('PUT /api/channels/batch', () => {
     await app.register(routesModule.tokensRoutes);
   });
 
-  beforeEach(() => {
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+  beforeEach(async () => {
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
@@ -112,8 +112,8 @@ describe('PUT /api/channels/batch', () => {
   });
 
   it('updates priorities in batch, sets manualOverride, and keeps weight unchanged', async () => {
-    const channelA = seedChannel({ priority: 9, weight: 17, manualOverride: false });
-    const channelB = seedChannel({ priority: 8, weight: 23, manualOverride: false });
+    const channelA = await seedChannel({ priority: 9, weight: 17, manualOverride: false });
+    const channelB = await seedChannel({ priority: 8, weight: 23, manualOverride: false });
 
     const res = await app.inject({
       method: 'PUT',
@@ -145,8 +145,8 @@ describe('PUT /api/channels/batch', () => {
     expect(returnedA?.manualOverride).toBe(true);
     expect(returnedB?.manualOverride).toBe(true);
 
-    const dbA = db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelA.id)).get();
-    const dbB = db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelB.id)).get();
+    const dbA = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelA.id)).get();
+    const dbB = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelB.id)).get();
     expect(dbA?.priority).toBe(3);
     expect(dbB?.priority).toBe(0);
     expect(dbA?.weight).toBe(17);

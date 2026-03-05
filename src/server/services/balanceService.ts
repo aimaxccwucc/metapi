@@ -217,7 +217,7 @@ async function refreshSub2ApiManagedSession(params: {
       tokenExpiresAt: refreshed.tokenExpiresAt,
     },
   });
-  db.update(schema.accounts)
+  await db.update(schema.accounts)
     .set({
       accessToken: refreshed.accessToken,
       extraConfig: nextExtraConfig,
@@ -320,7 +320,7 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   const loginResult = await adapter.login(site.url, relogin.username, password);
   if (!loginResult.success || !loginResult.accessToken) return null;
 
-  db.update(schema.accounts)
+  await db.update(schema.accounts)
     .set({
       accessToken: loginResult.accessToken,
       status: account.status === 'expired' ? 'active' : account.status,
@@ -398,7 +398,7 @@ async function trySwitchToApiKeyMode(params: {
 }
 
 export async function refreshBalance(accountId: number) {
-  const rows = db
+  const rows = await db
     .select()
     .from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
@@ -572,7 +572,7 @@ export async function refreshBalance(accountId: number) {
     updates.extraConfig = nextExtraConfig;
   }
 
-  db.update(schema.accounts)
+  await db.update(schema.accounts)
     .set(updates)
     .where(eq(schema.accounts.id, accountId))
     .run();
@@ -591,7 +591,7 @@ export async function refreshBalance(accountId: number) {
 }
 
 export async function refreshAllBalances() {
-  const rows = db
+  const rows = await db
     .select()
     .from(schema.accounts)
     .where(eq(schema.accounts.status, 'active'))

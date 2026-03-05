@@ -34,9 +34,9 @@ type CheckinRetryState = {
   updatedAt: string;
 };
 
-function resolveCronSetting(settingKey: string, fallback: string): string {
+async function resolveCronSetting(settingKey: string, fallback: string): Promise<string> {
   try {
-    const row = db.select().from(schema.settings).where(eq(schema.settings.key, settingKey)).get();
+    const row = await db.select().from(schema.settings).where(eq(schema.settings.key, settingKey)).get();
     if (row?.value) {
       const parsed = JSON.parse(row.value);
       if (typeof parsed === 'string' && cron.validate(parsed)) {
@@ -278,7 +278,7 @@ function createDailySummaryTask(cronExpr: string) {
   return cron.schedule(cronExpr, async () => {
     console.log(`[Scheduler] Sending daily summary at ${new Date().toISOString()}`);
     try {
-      const metrics = collectDailySummaryMetrics();
+      const metrics = await collectDailySummaryMetrics();
       const { title, message } = buildDailySummaryNotification(metrics);
       await sendNotification(title, message, 'info', {
         bypassThrottle: true,
@@ -312,12 +312,12 @@ function createSiteHealthTask(cronExpr: string) {
   });
 }
 
-export function startScheduler() {
-  const activeCheckinCron = resolveCronSetting('checkin_cron', config.checkinCron);
-  const activeCheckinRetryCron = resolveCronSetting('checkin_retry_cron', CHECKIN_RETRY_DEFAULT_CRON);
-  const activeBalanceCron = resolveCronSetting('balance_refresh_cron', config.balanceRefreshCron);
-  const activeDailySummaryCron = resolveCronSetting('daily_summary_cron', DAILY_SUMMARY_DEFAULT_CRON);
-  const activeSiteHealthCron = resolveCronSetting('site_health_refresh_cron', config.siteHealthRefreshCron);
+export async function startScheduler() {
+  const activeCheckinCron = await resolveCronSetting('checkin_cron', config.checkinCron);
+  const activeCheckinRetryCron = await resolveCronSetting('checkin_retry_cron', CHECKIN_RETRY_DEFAULT_CRON);
+  const activeBalanceCron = await resolveCronSetting('balance_refresh_cron', config.balanceRefreshCron);
+  const activeDailySummaryCron = await resolveCronSetting('daily_summary_cron', DAILY_SUMMARY_DEFAULT_CRON);
+  const activeSiteHealthCron = await resolveCronSetting('site_health_refresh_cron', config.siteHealthRefreshCron);
   config.checkinCron = activeCheckinCron;
   config.balanceRefreshCron = activeBalanceCron;
   config.siteHealthRefreshCron = activeSiteHealthCron;

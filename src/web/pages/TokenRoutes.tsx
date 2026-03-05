@@ -801,7 +801,12 @@ export default function TokenRoutes() {
       normalizeMissingTokenModels((candidateRows?.modelsWithoutToken || {}) as MissingTokenModelsByName),
     );
     setEndpointTypesByModel(candidateRows?.endpointTypesByModel || {});
-    void loadRouteDecisions(normalizedRoutes, { force: true });
+    const decisionPlaceholder: Record<number, RouteDecision | null> = {};
+    for (const route of normalizedRoutes) {
+      decisionPlaceholder[route.id] = null;
+    }
+    setDecisionByRoute(decisionPlaceholder);
+    setDecisionAutoSkipped(normalizedRoutes.length > 0);
   };
 
   useEffect(() => {
@@ -1156,30 +1161,9 @@ export default function TokenRoutes() {
     setVisibleRouteCount(getInitialVisibleCount(filteredRoutes.length, ROUTE_RENDER_CHUNK));
   }, [filteredRoutes.length]);
 
-  useEffect(() => {
-    const initialVisible = getInitialVisibleCount(filteredRoutes.length, ROUTE_RENDER_CHUNK);
-    if (initialVisible >= filteredRoutes.length) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-
-    const pump = () => {
-      if (cancelled) return;
-      setVisibleRouteCount((current) => {
-        if (current >= filteredRoutes.length) return current;
-        const next = getNextVisibleCount(current, filteredRoutes.length, ROUTE_RENDER_CHUNK);
-        if (next < filteredRoutes.length) {
-          timer = setTimeout(pump, 16);
-        }
-        return next;
-      });
-    };
-
-    timer = setTimeout(pump, 16);
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [filteredRoutes.length]);
+  const handleLoadMoreRoutes = () => {
+    setVisibleRouteCount((current) => getNextVisibleCount(current, filteredRoutes.length, ROUTE_RENDER_CHUNK));
+  };
 
   const visibleRoutes = useMemo(
     () => filteredRoutes.slice(0, visibleRouteCount),
@@ -2274,8 +2258,18 @@ export default function TokenRoutes() {
             })}
 
             {filteredRoutes.length > 0 && visibleRouteCount < filteredRoutes.length && (
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', textAlign: 'center', padding: '4px 0 10px' }}>
-                {tr('正在渲染路由')} {visibleRouteCount} / {filteredRoutes.length}
+              <div style={{ textAlign: 'center', padding: '8px 0 14px', display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'center' }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  {tr('当前已加载路由')} {visibleRouteCount} / {filteredRoutes.length}
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-border)', padding: '7px 14px', fontSize: 12 }}
+                  onClick={handleLoadMoreRoutes}
+                >
+                  {tr('加载更多路由')}
+                </button>
               </div>
             )}
 

@@ -32,6 +32,10 @@
     "start": "node dist/server/index.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/server/db/migrate.ts",
+    "smoke:db": "tsx scripts/dev/db-smoke.ts",
+    "smoke:db:sqlite": "tsx scripts/dev/db-smoke.ts --db-type sqlite",
+    "smoke:db:mysql": "tsx scripts/dev/db-smoke.ts --db-type mysql",
+    "smoke:db:postgres": "tsx scripts/dev/db-smoke.ts --db-type postgres",
     "test": "vitest run --root .",
     "test:watch": "vitest --root ."
   },
@@ -48,8 +52,10 @@
     "fastify": "^5.7.4",
     "minimatch": "^10.2.4",
     "minimist": "^1.2.8",
+    "mysql2": "^3.15.3",
     "node-cron": "^3.0.3",
     "nodemailer": "^8.0.1",
+    "pg": "^8.16.3",
     "undici": "^6.20.1"
   },
   "devDependencies": {
@@ -58,6 +64,7 @@
     "@types/node": "^22.10.1",
     "@types/node-cron": "^3.0.11",
     "@types/nodemailer": "^7.0.11",
+    "@types/pg": "^8.15.6",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",

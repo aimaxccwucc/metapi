@@ -587,7 +587,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
         body: options?.body ?? undefined,
         headers,
       };
-      const proxiedRequestOptions = withSiteProxyRequestInit(url, requestOptions);
+      const proxiedRequestOptions = await withSiteProxyRequestInit(url, requestOptions);
       const res = await fetch(url, proxiedRequestOptions);
       const text = await res.text();
       const getSetCookie = (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie;

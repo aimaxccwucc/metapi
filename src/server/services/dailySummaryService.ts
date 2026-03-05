@@ -27,10 +27,10 @@ function round6(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
-export function collectDailySummaryMetrics(now = new Date()): DailySummaryMetrics {
+export async function collectDailySummaryMetrics(now = new Date()): Promise<DailySummaryMetrics> {
   const { localDay, startUtc, endUtc } = getLocalDayRangeUtc(now);
 
-  const accountRows = db.select().from(schema.accounts)
+  const accountRows = await db.select().from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(eq(schema.sites.status, 'active'))
     .all();
@@ -39,7 +39,7 @@ export function collectDailySummaryMetrics(now = new Date()): DailySummaryMetric
   const activeAccounts = accounts.filter((account) => account.status === 'active').length;
   const lowBalanceAccounts = accounts.filter((account) => (account.balance || 0) < 1).length;
 
-  const todayCheckinRows = db.select().from(schema.checkinLogs)
+  const todayCheckinRows = await db.select().from(schema.checkinLogs)
     .innerJoin(schema.accounts, eq(schema.checkinLogs.accountId, schema.accounts.id))
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(and(
@@ -67,7 +67,7 @@ export function collectDailySummaryMetrics(now = new Date()): DailySummaryMetric
     parsedRewardCountByAccount[accountId] = (parsedRewardCountByAccount[accountId] || 0) + 1;
   }
 
-  const todayProxyRows = db.select().from(schema.proxyLogs)
+  const todayProxyRows = await db.select().from(schema.proxyLogs)
     .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
     .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(and(

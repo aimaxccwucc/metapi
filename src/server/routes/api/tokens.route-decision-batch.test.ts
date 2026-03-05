@@ -20,15 +20,15 @@ describe('POST /api/routes/decision/batch', () => {
     return seedId;
   };
 
-  const seedRoutableChannel = () => {
+  const seedRoutableChannel = async () => {
     const id = nextId();
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: `site-${id}`,
       url: `https://site-${id}.example.com`,
       platform: 'new-api',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: `user-${id}`,
       accessToken: `access-token-${id}`,
@@ -36,12 +36,12 @@ describe('POST /api/routes/decision/batch', () => {
       status: 'active',
     }).returning().get();
 
-    const route = db.insert(schema.tokenRoutes).values({
+    const route = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-4o-mini',
       enabled: true,
     }).returning().get();
 
-    db.insert(schema.routeChannels).values({
+    await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: account.id,
       tokenId: null,
@@ -67,12 +67,12 @@ describe('POST /api/routes/decision/batch', () => {
     await app.register(routesModule.tokensRoutes);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     seedId = 0;
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
     invalidateTokenRouterCache();
   });
 
@@ -107,13 +107,13 @@ describe('POST /api/routes/decision/batch', () => {
   });
 
   it('returns decisions scoped by route id to avoid wildcard channel mismatch', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'wildcard-site',
       url: 'https://wildcard-site.example.com',
       platform: 'new-api',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'wildcard-user',
       accessToken: 'wildcard-access',
@@ -121,12 +121,12 @@ describe('POST /api/routes/decision/batch', () => {
       status: 'active',
     }).returning().get();
 
-    const exactRoute = db.insert(schema.tokenRoutes).values({
+    const exactRoute = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'claude-opus-4-6',
       enabled: true,
     }).returning().get();
 
-    db.insert(schema.routeChannels).values({
+    await db.insert(schema.routeChannels).values({
       routeId: exactRoute.id,
       accountId: account.id,
       tokenId: null,
@@ -136,12 +136,12 @@ describe('POST /api/routes/decision/batch', () => {
       enabled: true,
     }).run();
 
-    const wildcardRoute = db.insert(schema.tokenRoutes).values({
+    const wildcardRoute = await db.insert(schema.tokenRoutes).values({
       modelPattern: 're:^claude-(opus|sonnet)-4-6$',
       enabled: true,
     }).returning().get();
 
-    const wildcardChannel = db.insert(schema.routeChannels).values({
+    const wildcardChannel = await db.insert(schema.routeChannels).values({
       routeId: wildcardRoute.id,
       accountId: account.id,
       tokenId: null,
@@ -173,13 +173,13 @@ describe('POST /api/routes/decision/batch', () => {
   });
 
   it('returns route-wide wildcard probabilities normalized to 100 across all channels', async () => {
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'route-wide-site',
       url: 'https://route-wide-site.example.com',
       platform: 'new-api',
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'route-wide-user',
       accessToken: 'route-wide-access',
@@ -187,12 +187,12 @@ describe('POST /api/routes/decision/batch', () => {
       status: 'active',
     }).returning().get();
 
-    const route = db.insert(schema.tokenRoutes).values({
+    const route = await db.insert(schema.tokenRoutes).values({
       modelPattern: 're:^claude-(opus|sonnet)-4-6$',
       enabled: true,
     }).returning().get();
 
-    const channelA = db.insert(schema.routeChannels).values({
+    const channelA = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: account.id,
       tokenId: null,
@@ -202,7 +202,7 @@ describe('POST /api/routes/decision/batch', () => {
       enabled: true,
     }).returning().get();
 
-    const channelB = db.insert(schema.routeChannels).values({
+    const channelB = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: account.id,
       tokenId: null,

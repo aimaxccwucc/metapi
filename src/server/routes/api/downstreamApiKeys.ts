@@ -28,7 +28,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
   app.get('/api/downstream-keys', async () => {
     return {
       success: true,
-      items: listDownstreamApiKeys(),
+      items: await listDownstreamApiKeys(),
     };
   });
 
@@ -66,7 +66,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     const nowIso = new Date().toISOString();
 
     try {
-      const inserted = db.insert(schema.downstreamApiKeys).values({
+      const insertedResult = await db.insert(schema.downstreamApiKeys).values({
         name: normalized.name,
         key: normalized.key,
         description: normalized.description,
@@ -81,7 +81,17 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
         siteWeightMultipliers: toPersistenceJson(normalized.siteWeightMultipliers),
         createdAt: nowIso,
         updatedAt: nowIso,
-      }).returning().get();
+      }).run();
+      const insertedId = Number(insertedResult.lastInsertRowid || 0);
+      if (insertedId <= 0) {
+        return reply.code(500).send({ success: false, message: '创建失败' });
+      }
+      const inserted = await db.select().from(schema.downstreamApiKeys)
+        .where(eq(schema.downstreamApiKeys.id, insertedId))
+        .get();
+      if (!inserted) {
+        return reply.code(500).send({ success: false, message: '创建失败' });
+      }
 
       return {
         success: true,
@@ -115,7 +125,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: 'id 无效' });
     }
 
-    const existing = db.select().from(schema.downstreamApiKeys)
+    const existing = await db.select().from(schema.downstreamApiKeys)
       .where(eq(schema.downstreamApiKeys.id, id))
       .get();
 
@@ -154,7 +164,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
 
     const nowIso = new Date().toISOString();
     try {
-      db.update(schema.downstreamApiKeys).set({
+      await db.update(schema.downstreamApiKeys).set({
         name: normalized.name,
         key: normalized.key,
         description: normalized.description,
@@ -192,7 +202,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       return reply.code(404).send({ success: false, message: 'API key 不存在' });
     }
 
-    db.update(schema.downstreamApiKeys).set({
+    await db.update(schema.downstreamApiKeys).set({
       usedCost: 0,
       usedRequests: 0,
       updatedAt: new Date().toISOString(),
@@ -215,7 +225,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       return reply.code(404).send({ success: false, message: 'API key 不存在' });
     }
 
-    db.delete(schema.downstreamApiKeys)
+    await db.delete(schema.downstreamApiKeys)
       .where(eq(schema.downstreamApiKeys.id, id))
       .run();
 

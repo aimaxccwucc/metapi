@@ -26,26 +26,26 @@ describe('backupService', () => {
     backupService = serviceModule;
   });
 
-  beforeEach(() => {
-    db.delete(schema.routeChannels).run();
-    db.delete(schema.tokenRoutes).run();
-    db.delete(schema.tokenModelAvailability).run();
-    db.delete(schema.modelAvailability).run();
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.checkinLogs).run();
-    db.delete(schema.accountTokens).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
-    db.delete(schema.settings).run();
+  beforeEach(async () => {
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.checkinLogs).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
+    await db.delete(schema.settings).run();
   });
 
   afterAll(() => {
     delete process.env.DATA_DIR;
   });
 
-  it('preserves extended fields in full backup import/export roundtrip', () => {
+  it('preserves extended fields in full backup import/export roundtrip', async () => {
     const now = new Date().toISOString();
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'roundtrip-site',
       url: 'https://roundtrip.example.com',
       platform: 'new-api',
@@ -58,7 +58,7 @@ describe('backupService', () => {
       updatedAt: now,
     }).returning().get();
 
-    const account = db.insert(schema.accounts).values({
+    const account = await db.insert(schema.accounts).values({
       siteId: site.id,
       username: 'roundtrip-user',
       accessToken: 'session-token',
@@ -77,7 +77,7 @@ describe('backupService', () => {
       updatedAt: now,
     }).returning().get();
 
-    const accountToken = db.insert(schema.accountTokens).values({
+    const accountToken = await db.insert(schema.accountTokens).values({
       accountId: account.id,
       name: 'default',
       token: 'sk-roundtrip-token',
@@ -88,7 +88,7 @@ describe('backupService', () => {
       updatedAt: now,
     }).returning().get();
 
-    const route = db.insert(schema.tokenRoutes).values({
+    const route = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-*',
       displayName: 'gpt-route',
       displayIcon: 'icon-gpt',
@@ -98,7 +98,7 @@ describe('backupService', () => {
       updatedAt: now,
     }).returning().get();
 
-    db.insert(schema.routeChannels).values({
+    await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: account.id,
       tokenId: accountToken.id,
@@ -116,16 +116,16 @@ describe('backupService', () => {
       cooldownUntil: now,
     }).run();
 
-    const exported = backupService.exportBackup('all');
-    const result = backupService.importBackup(exported as unknown as Record<string, unknown>);
+    const exported = await backupService.exportBackup('all');
+    const result = await backupService.importBackup(exported as unknown as Record<string, unknown>);
 
     expect(result.allImported).toBe(true);
     expect(result.sections.accounts).toBe(true);
 
-    const restoredSite = db.select().from(schema.sites).where(eq(schema.sites.id, site.id)).get();
-    const restoredAccount = db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
-    const restoredRoute = db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).get();
-    const restoredChannel = db.select().from(schema.routeChannels).where(eq(schema.routeChannels.routeId, route.id)).get();
+    const restoredSite = await db.select().from(schema.sites).where(eq(schema.sites.id, site.id)).get();
+    const restoredAccount = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    const restoredRoute = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).get();
+    const restoredChannel = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.routeId, route.id)).get();
 
     expect(restoredSite?.proxyUrl).toBe('http://127.0.0.1:8080');
     expect(restoredSite?.isPinned).toBe(true);
@@ -140,7 +140,7 @@ describe('backupService', () => {
     expect(restoredChannel?.sourceModel).toBe('gpt-4o');
   });
 
-  it('imports ALL-API-Hub style payload with accounts and preferences', () => {
+  it('imports ALL-API-Hub style payload with accounts and preferences', async () => {
     const payload = {
       timestamp: Date.now(),
       accounts: {
@@ -180,15 +180,15 @@ describe('backupService', () => {
       },
     } as Record<string, unknown>;
 
-    const result = backupService.importBackup(payload);
+    const result = await backupService.importBackup(payload);
     expect(result.allImported).toBe(true);
     expect(result.sections.accounts).toBe(true);
     expect(result.sections.preferences).toBe(true);
     expect(result.appliedSettings.length).toBeGreaterThan(0);
 
-    const sites = db.select().from(schema.sites).all();
-    const accounts = db.select().from(schema.accounts).all();
-    const settings = db.select().from(schema.settings).all();
+    const sites = await db.select().from(schema.sites).all();
+    const accounts = await db.select().from(schema.accounts).all();
+    const settings = await db.select().from(schema.settings).all();
 
     expect(sites.length).toBe(1);
     expect(accounts.length).toBe(1);
@@ -196,7 +196,7 @@ describe('backupService', () => {
     expect(settings.some((row) => row.key === 'legacy_preferences_ref_v2')).toBe(true);
   });
 
-  it('merges ALL-API-Hub accounts without overwriting existing data', () => {
+  it('merges ALL-API-Hub accounts without overwriting existing data', async () => {
     const existingSite = db.insert(schema.sites).values({
       name: 'existing-site',
       url: 'https://same.example.com',
@@ -287,7 +287,7 @@ describe('backupService', () => {
       },
     } as Record<string, unknown>;
 
-    const result = backupService.importAllApiHubAccountsMerge(payload);
+    const result = await backupService.importAllApiHubAccountsMerge(payload);
 
     expect(result.importedRows).toBe(2);
     expect(result.skippedRows).toBe(1);
@@ -321,7 +321,7 @@ describe('backupService', () => {
     expect(defaultTokens.length).toBe(1);
   });
 
-  it('fills existing site external checkin url from import data when empty', () => {
+  it('fills existing site external checkin url from import data when empty', async () => {
     const existingSite = db.insert(schema.sites).values({
       name: 'existing',
       url: 'https://welfare-fill.example.com',
@@ -373,7 +373,7 @@ describe('backupService', () => {
       },
     } as Record<string, unknown>;
 
-    const result = backupService.importAllApiHubAccountsMerge(payload);
+    const result = await backupService.importAllApiHubAccountsMerge(payload);
     expect(result.importedRows).toBe(1);
 
     const refreshed = db.select().from(schema.sites).where(eq(schema.sites.id, existingSite.id)).get();

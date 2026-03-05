@@ -233,7 +233,7 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
       };
     }
 
-    const synced = syncTokensFromUpstream(accountId, tokens);
+    const synced = await syncTokensFromUpstream(accountId, tokens);
     return {
       ...base,
       status: 'synced',
@@ -255,7 +255,7 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
   }
 }
 
-function appendTokenSyncEvent(result: SyncExecutionResult) {
+async function appendTokenSyncEvent(result: SyncExecutionResult) {
   const title = result.status === 'synced'
     ? '令牌同步成功'
     : (result.status === 'skipped' ? '令牌同步跳过' : '令牌同步失败');
@@ -267,19 +267,20 @@ function appendTokenSyncEvent(result: SyncExecutionResult) {
     : (result.message || result.reason || 'sync skipped');
 
   try {
-    db.insert(schema.events).values({
+    await db.insert(schema.events).values({
       type: 'token',
       title,
       message: `${result.accountName} @ ${result.siteName}: ${detail}`,
       level,
       relatedId: result.accountId,
       relatedType: 'account',
+      createdAt: new Date().toISOString(),
     }).run();
   } catch {}
 }
 
 async function executeSyncAllAccountTokens() {
-  const rows = db.select().from(schema.accounts)
+  const rows = await db.select().from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(eq(schema.accounts.status, 'active'))
     .all();
@@ -331,7 +332,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     modelLimits?: string;
   } }>('/api/account-tokens', async (request, reply) => {
     const body = request.body;
-    const row = db.select()
+    const row = await db.select()
       .from(schema.accounts)
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(eq(schema.accounts.id, body.accountId))
@@ -343,11 +344,11 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     const tokenValue = (body.token || '').trim();
     if (tokenValue) {
       const now = new Date().toISOString();
-      const existing = db.select().from(schema.accountTokens)
+      const existing = await db.select().from(schema.accountTokens)
         .where(eq(schema.accountTokens.accountId, body.accountId))
         .all();
 
-      const created = db.insert(schema.accountTokens).values({
+      const inserted = await db.insert(schema.accountTokens).values({
         accountId: body.accountId,
         name: (body.name || '').trim() || (existing.length === 0 ? 'default' : `token-${existing.length + 1}`),
         token: tokenValue,
@@ -357,12 +358,20 @@ export async function accountTokensRoutes(app: FastifyInstance) {
         isDefault: body.isDefault ?? false,
         createdAt: now,
         updatedAt: now,
-      }).returning().get();
+      }).run();
+      const createdId = Number(inserted.lastInsertRowid || 0);
+      if (createdId <= 0) {
+        return reply.code(500).send({ success: false, message: '创建令牌失败' });
+      }
+      const created = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, createdId)).get();
+      if (!created) {
+        return reply.code(500).send({ success: false, message: '创建令牌失败' });
+      }
 
       if (body.isDefault || (existing.length === 0 && (body.enabled ?? true))) {
-        setDefaultToken(created.id);
+        await setDefaultToken(created.id);
       } else if (existing.every((token) => !token.isDefault) && (body.enabled ?? true)) {
-        setDefaultToken(created.id);
+        await setDefaultToken(created.id);
       }
 
       return { success: true, token: created };
@@ -445,12 +454,12 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       return reply.code(502).send({ success: false, message: syncResult.message || '站点未返回可用令牌' });
     }
 
-    const preferred = db.select().from(schema.accountTokens)
+    const preferred = await db.select().from(schema.accountTokens)
       .where(and(eq(schema.accountTokens.accountId, account.id), eq(schema.accountTokens.isDefault, true)))
       .get();
-    const token = preferred || db.select().from(schema.accountTokens)
+    const token = preferred || (await db.select().from(schema.accountTokens)
       .where(eq(schema.accountTokens.accountId, account.id))
-      .all()
+      .all())
       .slice(-1)[0] || null;
 
     return {
@@ -467,7 +476,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: '令牌 ID 无效' });
     }
 
-    const existing = db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, tokenId)).get();
+    const existing = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, tokenId)).get();
     if (!existing) {
       return reply.code(404).send({ success: false, message: '令牌不存在' });
     }
@@ -491,9 +500,9 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     if (body.source !== undefined) updates.source = body.source;
     if (body.isDefault !== undefined) updates.isDefault = body.isDefault;
 
-    db.update(schema.accountTokens).set(updates).where(eq(schema.accountTokens.id, tokenId)).run();
+    await db.update(schema.accountTokens).set(updates).where(eq(schema.accountTokens.id, tokenId)).run();
 
-    const latest = db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, tokenId)).get();
+    const latest = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, tokenId)).get();
     if (!latest) {
       return reply.code(500).send({ success: false, message: '更新失败' });
     }
@@ -529,7 +538,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: '令牌 ID 无效' });
     }
 
-    const row = db.select()
+    const row = await db.select()
       .from(schema.accountTokens)
       .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
@@ -555,7 +564,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: '账号 ID 无效' });
     }
 
-    const row = db.select()
+    const row = await db.select()
       .from(schema.accounts)
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(eq(schema.accounts.id, accountId))
@@ -593,7 +602,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: '令牌 ID 无效' });
     }
 
-    const row = db.select()
+    const row = await db.select()
       .from(schema.accountTokens)
       .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
@@ -622,7 +631,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       }
     }
 
-    db.delete(schema.accountTokens).where(eq(schema.accountTokens.id, tokenId)).run();
+    await db.delete(schema.accountTokens).where(eq(schema.accountTokens.id, tokenId)).run();
 
     if (existing.isDefault) {
       repairDefaultToken(existing.accountId);
@@ -637,7 +646,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: '账号 ID 无效' });
     }
 
-    const row = db.select().from(schema.accounts)
+    const row = await db.select().from(schema.accounts)
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(eq(schema.accounts.id, accountId))
       .get();
@@ -707,7 +716,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: '账号 ID 无效' });
     }
 
-    const row = db.select()
+    const row = await db.select()
       .from(schema.accountTokens)
       .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))

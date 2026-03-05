@@ -13,12 +13,12 @@ export function getProxyLogRetentionCutoffUtc(nowMs = Date.now()): string | null
   return formatUtcSqlDateTime(new Date(nowMs - days * DAY_MS));
 }
 
-export function cleanupExpiredProxyLogs(nowMs = Date.now()): {
+export async function cleanupExpiredProxyLogs(nowMs = Date.now()): Promise<{
   enabled: boolean;
   retentionDays: number;
   cutoffUtc: string | null;
   deleted: number;
-} {
+}> {
   const retentionDays = Math.max(0, Math.trunc(config.proxyLogRetentionDays));
   const cutoffUtc = getProxyLogRetentionCutoffUtc(nowMs);
   if (!cutoffUtc) {
@@ -30,9 +30,9 @@ export function cleanupExpiredProxyLogs(nowMs = Date.now()): {
     };
   }
 
-  const deleted = db.delete(schema.proxyLogs)
+  const deleted = (await db.delete(schema.proxyLogs)
     .where(lt(schema.proxyLogs.createdAt, cutoffUtc))
-    .run()
+    .run())
     .changes;
 
   return {
@@ -48,9 +48,9 @@ export function startProxyLogRetentionService(): void {
 
   const intervalMinutes = Math.max(1, Math.trunc(config.proxyLogRetentionPruneIntervalMinutes));
   const intervalMs = intervalMinutes * 60 * 1000;
-  const runCleanup = () => {
+  const runCleanup = async () => {
     try {
-      const result = cleanupExpiredProxyLogs();
+      const result = await cleanupExpiredProxyLogs();
       if (!result.enabled || result.deleted <= 0) return;
       console.info(`[proxy-log-retention] deleted ${result.deleted} logs before ${result.cutoffUtc}`);
     } catch (error) {
@@ -58,8 +58,8 @@ export function startProxyLogRetentionService(): void {
     }
   };
 
-  runCleanup();
-  retentionTimer = setInterval(runCleanup, intervalMs);
+  void runCleanup();
+  retentionTimer = setInterval(() => { void runCleanup(); }, intervalMs);
   retentionTimer.unref?.();
 }
 

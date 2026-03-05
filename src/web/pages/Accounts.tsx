@@ -46,7 +46,7 @@ export default function Accounts() {
   const [saving, setSaving] = useState(false);
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [rebindTarget, setRebindTarget] = useState<any | null>(null);
-  const [rebindForm, setRebindForm] = useState({ accessToken: '', platformUserId: '' });
+  const [rebindForm, setRebindForm] = useState({ accessToken: '', platformUserId: '', refreshToken: '', tokenExpiresAt: '' });
   const [rebindVerifyResult, setRebindVerifyResult] = useState<any>(null);
   const [rebindVerifying, setRebindVerifying] = useState(false);
   const [rebindSaving, setRebindSaving] = useState(false);
@@ -72,6 +72,7 @@ export default function Accounts() {
   const toast = useToast();
   if (rebindTarget) lastRebindTargetRef.current = rebindTarget;
   const activeRebindTarget = rebindTarget || lastRebindTargetRef.current;
+  const isRebindSub2Api = ((activeRebindTarget?.site?.platform || '').toLowerCase() === 'sub2api');
 
   const load = async () => {
     const [accountsResult, sitesResult] = await Promise.allSettled([
@@ -487,6 +488,8 @@ export default function Accounts() {
     setRebindForm({
       accessToken: '',
       platformUserId: extractPlatformUserId(account),
+      refreshToken: '',
+      tokenExpiresAt: '',
     });
     setRebindVerifyResult(null);
     setRebindFocusTrigger((value) => value + 1);
@@ -494,7 +497,7 @@ export default function Accounts() {
 
   const closeRebindPanel = () => {
     setRebindTarget(null);
-    setRebindForm({ accessToken: '', platformUserId: '' });
+    setRebindForm({ accessToken: '', platformUserId: '', refreshToken: '', tokenExpiresAt: '' });
     setRebindVerifyResult(null);
     setRebindVerifying(false);
     setRebindSaving(false);
@@ -548,11 +551,18 @@ export default function Accounts() {
       toast.error('请先验证新的 Session Token 成功');
       return;
     }
+    const isSub2ApiRebindTarget = ((rebindTarget?.site?.platform || '').toLowerCase() === 'sub2api');
     setRebindSaving(true);
     try {
       await api.rebindAccountSession(rebindTarget.id, {
         accessToken: rebindForm.accessToken.trim(),
         platformUserId: rebindForm.platformUserId ? Number.parseInt(rebindForm.platformUserId, 10) : undefined,
+        refreshToken: isSub2ApiRebindTarget && rebindForm.refreshToken.trim()
+          ? rebindForm.refreshToken.trim()
+          : undefined,
+        tokenExpiresAt: isSub2ApiRebindTarget && rebindForm.tokenExpiresAt.trim()
+          ? Number.parseInt(rebindForm.tokenExpiresAt, 10)
+          : undefined,
       });
       toast.success('账号重新绑定成功，状态已恢复');
       closeRebindPanel();
@@ -921,6 +931,27 @@ export default function Accounts() {
               style={inputStyle}
             />
           </div>
+          {isRebindSub2Api && (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 220px', gap: 10, marginBottom: 4 }}>
+                <input
+                  placeholder="Sub2API refresh_token（可选）"
+                  value={rebindForm.refreshToken}
+                  onChange={(e) => setRebindForm((prev) => ({ ...prev, refreshToken: e.target.value.trim() }))}
+                  style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+                />
+                <input
+                  placeholder="token_expires_at（可选）"
+                  value={rebindForm.tokenExpiresAt}
+                  onChange={(e) => setRebindForm((prev) => ({ ...prev, tokenExpiresAt: e.target.value.replace(/\D/g, '') }))}
+                  style={inputStyle}
+                />
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
+                留空将保持原有 refresh_token 不变。配置后可用于托管自动续期。
+              </div>
+            </>
+          )}
 
           {rebindVerifyResult && rebindVerifyResult.success && rebindVerifyResult.tokenType === 'session' && (
             <div className="alert alert-success animate-scale-in" style={{ marginBottom: 10 }}>
@@ -1029,7 +1060,7 @@ export default function Accounts() {
       )}
 
       {/* Accounts Table */}
-      <div className="card" style={{ overflowX: 'auto' }}>
+      <div className="card">
         {accounts.length > 0 ? (
           <table className="data-table accounts-table">
             <thead>

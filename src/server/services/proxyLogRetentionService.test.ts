@@ -32,10 +32,10 @@ describe('proxyLogRetentionService', () => {
     originalRetentionDays = config.proxyLogRetentionDays;
   });
 
-  beforeEach(() => {
-    db.delete(schema.proxyLogs).run();
-    db.delete(schema.accounts).run();
-    db.delete(schema.sites).run();
+  beforeEach(async () => {
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(() => {
@@ -43,15 +43,15 @@ describe('proxyLogRetentionService', () => {
     delete process.env.DATA_DIR;
   });
 
-  function seedAccount(platform = 'new-api') {
-    const site = db.insert(schema.sites).values({
+  async function seedAccount(platform = 'new-api') {
+    const site = await db.insert(schema.sites).values({
       name: `retention-site-${platform}`,
       url: `https://retention-${platform}.example.com`,
       platform,
       status: 'active',
     }).returning().get();
 
-    return db.insert(schema.accounts).values({
+    return await db.insert(schema.accounts).values({
       siteId: site.id,
       username: `retention-${platform}`,
       accessToken: `access-${platform}`,
@@ -60,11 +60,11 @@ describe('proxyLogRetentionService', () => {
     }).returning().get();
   }
 
-  it('deletes proxy logs older than retention days', () => {
+  it('deletes proxy logs older than retention days', async () => {
     config.proxyLogRetentionDays = 7;
-    const account = seedAccount('new-api');
+    const account = await seedAccount('new-api');
 
-    db.insert(schema.proxyLogs).values([
+    await db.insert(schema.proxyLogs).values([
       {
         accountId: account.id,
         modelRequested: 'gpt-4o-mini',
@@ -79,19 +79,19 @@ describe('proxyLogRetentionService', () => {
       },
     ]).run();
 
-    const result = cleanupExpiredProxyLogs(Date.parse('2026-03-04T00:00:00Z'));
+    const result = await cleanupExpiredProxyLogs(Date.parse('2026-03-04T00:00:00Z'));
     expect(result.deleted).toBe(1);
 
-    const rows = db.select().from(schema.proxyLogs).all();
+    const rows = await db.select().from(schema.proxyLogs).all();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.createdAt).toBe('2026-03-01 12:00:00');
   });
 
-  it('skips cleanup when retention is disabled', () => {
+  it('skips cleanup when retention is disabled', async () => {
     config.proxyLogRetentionDays = 0;
-    const account = seedAccount('new-api');
+    const account = await seedAccount('new-api');
 
-    db.insert(schema.proxyLogs).values({
+    await db.insert(schema.proxyLogs).values({
       accountId: account.id,
       modelRequested: 'gpt-4o-mini',
       status: 'success',
@@ -101,10 +101,10 @@ describe('proxyLogRetentionService', () => {
     const cutoff = getProxyLogRetentionCutoffUtc(Date.parse('2026-03-04T00:00:00Z'));
     expect(cutoff).toBeNull();
 
-    const result = cleanupExpiredProxyLogs(Date.parse('2026-03-04T00:00:00Z'));
+    const result = await cleanupExpiredProxyLogs(Date.parse('2026-03-04T00:00:00Z'));
     expect(result.deleted).toBe(0);
 
-    const rows = db.select().from(schema.proxyLogs).all();
+    const rows = await db.select().from(schema.proxyLogs).all();
     expect(rows).toHaveLength(1);
   });
 });
