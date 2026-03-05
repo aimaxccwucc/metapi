@@ -2,6 +2,8 @@ import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
 import { and, eq, sql } from 'drizzle-orm';
 import { detectSite } from '../../services/siteDetector.js';
+import { startBackgroundTask } from '../../services/backgroundTaskService.js';
+import { executeCleanupUnreachableSites, executeRefreshSiteReachability } from '../../services/siteHealthService.js';
 import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services/siteProxy.js';
 
 function normalizeSiteStatus(input: unknown): 'active' | 'disabled' | null {
@@ -36,6 +38,17 @@ function normalizeGlobalWeight(input: unknown): number | null {
   const parsed = Number(input);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return Math.max(0.01, Math.min(100, Number(parsed.toFixed(3))));
+}
+
+function normalizeSiteBaseUrl(input: unknown): string {
+  const trimmed = typeof input === 'string' ? input.trim() : '';
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
 }
 
 function normalizeOptionalExternalCheckinUrl(input: unknown): {
@@ -104,6 +117,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     globalWeight?: number;
   } }>('/api/sites', async (request, reply) => {
     const { name, url, platform, apiKey, proxyUrl, externalCheckinUrl, status, isPinned, sortOrder, globalWeight } = request.body;
+    const normalizedSiteUrl = normalizeSiteBaseUrl(url);
     const normalizedStatus = normalizeSiteStatus(status);
     if (status !== undefined && !normalizedStatus) {
       return reply.code(400).send({ error: 'Invalid site status. Expected active or disabled.' });
@@ -134,7 +148,7 @@ export async function sitesRoutes(app: FastifyInstance) {
 
     let detectedPlatform = platform;
     if (!detectedPlatform) {
-      const detected = await detectSite(url);
+      const detected = await detectSite(normalizedSiteUrl);
       detectedPlatform = detected?.platform;
     }
     if (!detectedPlatform) {
@@ -142,7 +156,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     }
     const result = db.insert(schema.sites).values({
       name,
-      url: url.replace(/\/+$/, ''),
+      url: normalizedSiteUrl,
       platform: detectedPlatform,
       apiKey,
       proxyUrl: parsedProxyUrl.proxyUrl,
@@ -207,7 +221,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     }
 
     if (body.name !== undefined) updates.name = body.name;
-    if (body.url !== undefined) updates.url = body.url.replace(/\/+$/, '');
+    if (body.url !== undefined) updates.url = normalizeSiteBaseUrl(body.url);
     if (body.platform !== undefined) updates.platform = body.platform;
     if (body.apiKey !== undefined) updates.apiKey = body.apiKey;
     if (parsedProxyUrl.present) updates.proxyUrl = parsedProxyUrl.proxyUrl;
@@ -272,5 +286,74 @@ export async function sitesRoutes(app: FastifyInstance) {
   app.post<{ Body: { url: string } }>('/api/sites/detect', async (request) => {
     const result = await detectSite(request.body.url);
     return result || { error: 'Could not detect platform' };
+  });
+
+  app.post<{ Body?: { wait?: boolean } }>('/api/sites/health/refresh', async (request) => {
+    if (request.body?.wait) {
+      const result = await executeRefreshSiteReachability();
+      return { success: true, ...result };
+    }
+
+    const { task, reused } = startBackgroundTask(
+      {
+        type: 'status',
+        title: '检测站点存活状态',
+        dedupeKey: 'refresh-all-site-reachability',
+        notifyOnFailure: true,
+        successMessage: (currentTask) => {
+          const summary = (currentTask.result as { summary?: { alive: number; unreachable: number } })?.summary;
+          if (!summary) return '站点存活检测已完成';
+          return `站点存活检测完成：可达 ${summary.alive}，不可达 ${summary.unreachable}`;
+        },
+        failureMessage: (currentTask) => `站点存活检测失败：${currentTask.error || 'unknown error'}`,
+      },
+      async () => executeRefreshSiteReachability(),
+    );
+
+    return {
+      success: true,
+      queued: true,
+      reused,
+      jobId: task.id,
+      status: task.status,
+      message: reused ? '站点存活检测进行中，请稍后查看任务中心' : '已开始检测站点存活状态，请稍后查看任务中心',
+    };
+  });
+
+  app.post<{ Body?: { wait?: boolean; dryRun?: boolean } }>('/api/sites/cleanup-unreachable', async (request) => {
+    const dryRun = request.body?.dryRun === true;
+    if (request.body?.wait) {
+      const result = await executeCleanupUnreachableSites(dryRun);
+      return { success: true, ...result };
+    }
+
+    const dedupeKey = dryRun ? 'cleanup-unreachable-sites-dryrun' : 'cleanup-unreachable-sites';
+    const title = dryRun ? '预检失活站点（不删除）' : '移除失活站点及账号';
+
+    const { task, reused } = startBackgroundTask(
+      {
+        type: 'status',
+        title,
+        dedupeKey,
+        notifyOnFailure: true,
+        successMessage: (currentTask) => {
+          const summary = (currentTask.result as { summary?: { unreachableSites: number; removedSites: number; removedAccounts: number; dryRun: boolean } })?.summary;
+          if (!summary) return `${title}已完成`;
+          if (summary.dryRun) return `预检完成：不可达站点 ${summary.unreachableSites}`;
+          return `移除完成：站点 ${summary.removedSites}，账号 ${summary.removedAccounts}`;
+        },
+        failureMessage: (currentTask) => `${title}失败：${currentTask.error || 'unknown error'}`,
+      },
+      async () => executeCleanupUnreachableSites(dryRun),
+    );
+
+    return {
+      success: true,
+      queued: true,
+      reused,
+      jobId: task.id,
+      status: task.status,
+      message: reused ? `${title}进行中，请稍后查看任务中心` : `已开始${title}，请稍后查看任务中心`,
+    };
   });
 }

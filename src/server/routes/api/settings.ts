@@ -3,9 +3,9 @@ import cron from 'node-cron';
 import { config } from '../../config.js';
 import { db, schema } from '../../db/index.js';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
-import { updateBalanceRefreshCron, updateCheckinCron } from '../../services/checkinScheduler.js';
+import { updateBalanceRefreshCron, updateCheckinCron, updateSiteHealthRefreshCron } from '../../services/checkinScheduler.js';
 import { sendNotification } from '../../services/notifyService.js';
-import { exportBackup, importBackup, type BackupExportType } from '../../services/backupService.js';
+import { exportBackup, importAllApiHubAccountsMerge, importBackup, type BackupExportType } from '../../services/backupService.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { extractClientIp, isIpAllowed } from '../../middleware/auth.js';
 
@@ -15,6 +15,7 @@ interface RuntimeSettingsBody {
   proxyToken?: string;
   checkinCron?: string;
   balanceRefreshCron?: string;
+  siteHealthRefreshCron?: string;
   webhookUrl?: string;
   barkUrl?: string;
   webhookEnabled?: boolean;
@@ -122,6 +123,12 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       if (typeof value !== 'string' || !value || !cron.validate(value)) return;
       config.balanceRefreshCron = value;
       updateBalanceRefreshCron(value);
+      return;
+    }
+    case 'site_health_refresh_cron': {
+      if (typeof value !== 'string' || !value || !cron.validate(value)) return;
+      config.siteHealthRefreshCron = value;
+      updateSiteHealthRefreshCron(value);
       return;
     }
     case 'proxy_token': {
@@ -248,6 +255,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
   return {
     checkinCron: config.checkinCron,
     balanceRefreshCron: config.balanceRefreshCron,
+    siteHealthRefreshCron: config.siteHealthRefreshCron,
     routingFallbackUnitCost: config.routingFallbackUnitCost,
     routingWeights: config.routingWeights,
     webhookUrl: config.webhookUrl,
@@ -361,6 +369,17 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       updateBalanceRefreshCron(body.balanceRefreshCron);
       upsertSetting('balance_refresh_cron', body.balanceRefreshCron);
+    }
+
+    if (body.siteHealthRefreshCron !== undefined) {
+      if (!cron.validate(body.siteHealthRefreshCron)) {
+        return reply.code(400).send({ success: false, message: '站点健康检测 Cron 表达式无效' });
+      }
+      if (body.siteHealthRefreshCron !== config.siteHealthRefreshCron) {
+        changedLabels.push(`站点健康检测 Cron（${config.siteHealthRefreshCron} -> ${body.siteHealthRefreshCron}）`);
+      }
+      updateSiteHealthRefreshCron(body.siteHealthRefreshCron);
+      upsertSetting('site_health_refresh_cron', body.siteHealthRefreshCron);
     }
 
     if (body.proxyToken !== undefined) {
@@ -618,6 +637,27 @@ export async function settingsRoutes(app: FastifyInstance) {
       return {
         success: true,
         message: '导入完成',
+        ...result,
+      };
+    } catch (err: any) {
+      return reply.code(400).send({
+        success: false,
+        message: err?.message || '导入失败',
+      });
+    }
+  });
+
+  app.post<{ Body: { data?: Record<string, unknown> } }>('/api/settings/backup/import-all-api-hub-merge', async (request, reply) => {
+    const payload = request.body?.data;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return reply.code(400).send({ success: false, message: '导入数据格式错误：需要 JSON 对象' });
+    }
+
+    try {
+      const result = importAllApiHubAccountsMerge(payload);
+      return {
+        success: true,
+        message: 'all-api-hub 账号已合并导入',
         ...result,
       };
     } catch (err: any) {

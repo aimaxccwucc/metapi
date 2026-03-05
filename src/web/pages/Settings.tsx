@@ -20,6 +20,7 @@ const ROUTE_BRAND_ICON_PREFIX = 'brand:';
 type RuntimeSettings = {
   checkinCron: string;
   balanceRefreshCron: string;
+  siteHealthRefreshCron: string;
   routingFallbackUnitCost: number;
   routingWeights: RoutingWeights;
   proxyTokenMasked?: string;
@@ -105,6 +106,7 @@ export default function Settings() {
   const [runtime, setRuntime] = useState<RuntimeSettings>({
     checkinCron: '0 8 * * *',
     balanceRefreshCron: '0 * * * *',
+    siteHealthRefreshCron: '*/15 * * * *',
     routingFallbackUnitCost: 1,
     routingWeights: defaultWeights,
   });
@@ -247,6 +249,7 @@ export default function Settings() {
       setRuntime({
         checkinCron: runtimeInfo.checkinCron || '0 8 * * *',
         balanceRefreshCron: runtimeInfo.balanceRefreshCron || '0 * * * *',
+        siteHealthRefreshCron: runtimeInfo.siteHealthRefreshCron || '*/15 * * * *',
         routingFallbackUnitCost: Number(runtimeInfo.routingFallbackUnitCost) > 0
           ? Number(runtimeInfo.routingFallbackUnitCost)
           : 1,
@@ -298,6 +301,7 @@ export default function Settings() {
       await api.updateRuntimeSettings({
         checkinCron: runtime.checkinCron,
         balanceRefreshCron: runtime.balanceRefreshCron,
+        siteHealthRefreshCron: runtime.siteHealthRefreshCron,
       });
       toast.success('定时任务设置已保存');
     } catch (err: any) {
@@ -590,7 +594,7 @@ export default function Settings() {
 
         <div className="card animate-slide-up stagger-2" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>定时任务</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
             <div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>签到 Cron</div>
               <input
@@ -604,6 +608,14 @@ export default function Settings() {
               <input
                 value={runtime.balanceRefreshCron}
                 onChange={(e) => setRuntime((prev) => ({ ...prev, balanceRefreshCron: e.target.value }))}
+                style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+              />
+            </div>
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>站点健康检测 Cron</div>
+              <input
+                value={runtime.siteHealthRefreshCron}
+                onChange={(e) => setRuntime((prev) => ({ ...prev, siteHealthRefreshCron: e.target.value }))}
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
               />
             </div>

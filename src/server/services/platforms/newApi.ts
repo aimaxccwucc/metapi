@@ -6,10 +6,49 @@ import { withSiteProxyRequestInit } from '../siteProxy.js';
 export class NewApiAdapter extends BasePlatformAdapter {
   readonly platformName: string = 'new-api';
 
+  private async detectByStatus(url: string): Promise<boolean> {
+    const res = await this.fetchJson<any>(`${url}/api/status`);
+    return res?.success === true && typeof res?.data?.system_name === 'string';
+  }
+
+  private async detectByModelsHeader(url: string): Promise<boolean> {
+    const { fetch } = await import('undici');
+    const probeTimeoutsMs = [5000, 15000];
+
+    for (const timeoutMs of probeTimeoutsMs) {
+      try {
+        const res = await fetch(`${url}/v1/models`, {
+          method: 'GET',
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+
+        const newApiVersion = (res.headers.get('x-new-api-version') || '').trim();
+        if (newApiVersion.length > 0) return true;
+
+        // Many New-API forks expose OneAPI request id header even when version
+        // header is stripped by edge/CDN.
+        const oneApiRequestId = (res.headers.get('x-oneapi-request-id') || '').trim();
+        if (oneApiRequestId.length > 0) return true;
+
+        // Probe succeeded without expected fingerprints; stop retrying.
+        return false;
+      } catch {
+        // Retry with a longer timeout for transient edge/network instability.
+      }
+    }
+
+    return false;
+  }
+
   async detect(url: string): Promise<boolean> {
     try {
-      const res = await this.fetchJson<any>(`${url}/api/status`);
-      return res?.success === true && typeof res?.data?.system_name === 'string';
+      if (await this.detectByStatus(url)) return true;
+    } catch {
+      // Ignore and fall through to header-based fallback.
+    }
+
+    try {
+      return await this.detectByModelsHeader(url);
     } catch {
       return false;
     }

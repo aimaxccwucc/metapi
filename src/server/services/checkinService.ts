@@ -17,6 +17,9 @@ import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
+const CHECKIN_TRANSIENT_RETRY_DELAYS_MS = process.env.NODE_ENV === 'test'
+  ? [0, 0]
+  : [800, 1800];
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
@@ -75,6 +78,60 @@ function shouldAttemptAutoRelogin(message?: string | null): boolean {
   return false;
 }
 
+function shouldRetryTransientCheckinFailure(message?: string | null): boolean {
+  if (!message) return false;
+  if (isTokenExpiredError({ message })) return false;
+  if (isCloudflareChallenge(message)) return false;
+  if (isAlreadyCheckedInMessage(message)) return false;
+  if (isUnsupportedCheckinMessage(message)) return false;
+  if (isManualVerificationRequiredMessage(message)) return false;
+
+  const text = message.toLowerCase();
+  return (
+    text.includes('fetch failed') ||
+    text.includes('network error') ||
+    text.includes('socket hang up') ||
+    text.includes('connection reset') ||
+    text.includes('connection aborted') ||
+    text.includes('econnreset') ||
+    text.includes('etimedout') ||
+    text.includes('eai_again') ||
+    text.includes('enotfound') ||
+    text.includes('timeout') ||
+    text.includes('timed out') ||
+    text.includes('bad gateway') ||
+    text.includes('gateway timeout') ||
+    text.includes('service unavailable') ||
+    text.includes('temporarily unavailable') ||
+    text.includes('http 500') ||
+    text.includes('http 502') ||
+    text.includes('http 503') ||
+    text.includes('http 504')
+  );
+}
+
+async function sleep(ms: number) {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function checkinWithTransientRetry(
+  adapter: any,
+  siteUrl: string,
+  accessToken: string,
+  platformUserId?: number,
+) {
+  let result = await adapter.checkin(siteUrl, accessToken, platformUserId);
+  for (const delayMs of CHECKIN_TRANSIENT_RETRY_DELAYS_MS) {
+    if (result.success || !shouldRetryTransientCheckinFailure(result.message)) {
+      break;
+    }
+    await sleep(delayMs);
+    result = await adapter.checkin(siteUrl, accessToken, platformUserId);
+  }
+  return result;
+}
+
 function inferRewardFromBalanceDelta(previousBalance: unknown, latestBalance: unknown): number {
   const before = typeof previousBalance === 'number' && Number.isFinite(previousBalance)
     ? previousBalance
@@ -112,6 +169,71 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
     .run();
 
   return result.accessToken;
+}
+
+function collectApiKeyCandidates(account: typeof schema.accounts.$inferSelect): string[] {
+  const candidates: string[] = [];
+  const push = (value: unknown) => {
+    if (typeof value !== 'string') return;
+    const normalized = value.trim();
+    if (!normalized) return;
+    if (!candidates.includes(normalized)) candidates.push(normalized);
+  };
+
+  push(account.apiToken);
+
+  try {
+    const rows = db.select()
+      .from(schema.accountTokens)
+      .where(and(
+        eq(schema.accountTokens.accountId, account.id),
+        eq(schema.accountTokens.enabled, true),
+      ))
+      .all();
+    rows
+      .slice()
+      .sort((a, b) => Number(b.isDefault || false) - Number(a.isDefault || false))
+      .forEach((row) => push((row as any)?.token));
+  } catch {}
+
+  return candidates;
+}
+
+async function trySwitchToApiKeyMode(params: {
+  account: typeof schema.accounts.$inferSelect;
+  site: typeof schema.sites.$inferSelect;
+  adapter: ReturnType<typeof getAdapter>;
+  platformUserId?: number;
+}): Promise<boolean> {
+  if (!params.adapter) return false;
+
+  for (const apiKey of collectApiKeyCandidates(params.account)) {
+    try {
+      const models = await params.adapter.getModels(params.site.url, apiKey, params.platformUserId);
+      if (!Array.isArray(models) || models.length === 0) continue;
+
+      db.update(schema.accounts)
+        .set({
+          accessToken: '',
+          apiToken: apiKey,
+          checkinEnabled: false,
+          status: 'active',
+          extraConfig: mergeAccountExtraConfig(params.account.extraConfig, { credentialMode: 'apikey' }),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.accounts.id, params.account.id))
+        .run();
+
+      setAccountRuntimeHealth(params.account.id, {
+        state: 'degraded',
+        reason: 'Session Token 已过期，已自动切换为 API Key 代理模式',
+        source: 'auth',
+      });
+      return true;
+    } catch {}
+  }
+
+  return false;
 }
 
 export async function checkinAccount(accountId: number, options?: { skipEvent?: boolean }) {
@@ -169,13 +291,47 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
 
   let activeAccessToken = account.accessToken;
-  let result = await adapter.checkin(site.url, activeAccessToken, platformUserId);
+  let result = await checkinWithTransientRetry(adapter, site.url, activeAccessToken, platformUserId);
 
   if (!result.success && shouldAttemptAutoRelogin(result.message)) {
     const refreshedAccessToken = await tryAutoRelogin(account, site);
     if (refreshedAccessToken) {
       activeAccessToken = refreshedAccessToken;
-      result = await adapter.checkin(site.url, activeAccessToken, platformUserId);
+      result = await checkinWithTransientRetry(adapter, site.url, activeAccessToken, platformUserId);
+    }
+
+    if (!result.success && shouldAttemptAutoRelogin(result.message)) {
+      const switched = await trySwitchToApiKeyMode({
+        account,
+        site,
+        adapter,
+        platformUserId,
+      });
+      if (switched) {
+        const skipMessage = 'Session Token 已过期，已自动切换为 API Key 代理模式，签到已跳过';
+        db.insert(schema.checkinLogs).values({
+          accountId: account.id,
+          status: 'skipped',
+          message: skipMessage,
+        }).run();
+        if (!options?.skipEvent) {
+          db.insert(schema.events).values({
+            type: 'checkin',
+            title: 'checkin skipped',
+            message: `${account.username || 'ID:' + accountId} @ ${site.name}: ${skipMessage}`,
+            level: 'info',
+            relatedId: accountId,
+            relatedType: 'account',
+          }).run();
+        }
+        return {
+          success: true,
+          status: 'skipped' as const,
+          skipped: true,
+          reason: 'session_token_expired_switched_to_apikey',
+          message: skipMessage,
+        };
+      }
     }
   }
 

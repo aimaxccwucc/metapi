@@ -1,6 +1,6 @@
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { appendSessionTokenRebindHint, isTokenExpiredError } from './alertRules.js';
 import { reportTokenExpired } from './alertService.js';
 import {
@@ -332,6 +332,71 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   return loginResult.accessToken;
 }
 
+function collectApiKeyCandidates(account: typeof schema.accounts.$inferSelect): string[] {
+  const candidates: string[] = [];
+  const push = (value: unknown) => {
+    if (typeof value !== 'string') return;
+    const normalized = value.trim();
+    if (!normalized) return;
+    if (!candidates.includes(normalized)) candidates.push(normalized);
+  };
+
+  push(account.apiToken);
+
+  try {
+    const rows = db.select()
+      .from(schema.accountTokens)
+      .where(and(
+        eq(schema.accountTokens.accountId, account.id),
+        eq(schema.accountTokens.enabled, true),
+      ))
+      .all();
+    rows
+      .slice()
+      .sort((a, b) => Number(b.isDefault || false) - Number(a.isDefault || false))
+      .forEach((row) => push((row as any)?.token));
+  } catch {}
+
+  return candidates;
+}
+
+async function trySwitchToApiKeyMode(params: {
+  account: typeof schema.accounts.$inferSelect;
+  site: typeof schema.sites.$inferSelect;
+  adapter: ReturnType<typeof getAdapter>;
+  platformUserId?: number;
+}): Promise<boolean> {
+  if (!params.adapter) return false;
+
+  for (const apiKey of collectApiKeyCandidates(params.account)) {
+    try {
+      const models = await params.adapter.getModels(params.site.url, apiKey, params.platformUserId);
+      if (!Array.isArray(models) || models.length === 0) continue;
+
+      db.update(schema.accounts)
+        .set({
+          accessToken: '',
+          apiToken: apiKey,
+          checkinEnabled: false,
+          status: 'active',
+          extraConfig: mergeAccountExtraConfig(params.account.extraConfig, { credentialMode: 'apikey' }),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.accounts.id, params.account.id))
+        .run();
+
+      setAccountRuntimeHealth(params.account.id, {
+        state: 'degraded',
+        reason: 'Session Token 已过期，已自动切换为 API Key 代理模式',
+        source: 'auth',
+      });
+      return true;
+    } catch {}
+  }
+
+  return false;
+}
+
 export async function refreshBalance(accountId: number) {
   const rows = db
     .select()
@@ -385,6 +450,22 @@ export async function refreshBalance(accountId: number) {
   }
 
   const readBalance = async (token: string) => adapter.getBalance(site.url, token, platformUserId);
+  const tryApiKeyFallback = async (err: any): Promise<BalanceInfo | null> => {
+    const message = err?.message || '';
+    if (!shouldAttemptAutoRelogin(message)) return null;
+    const switched = await trySwitchToApiKeyMode({
+      account,
+      site,
+      adapter,
+      platformUserId,
+    });
+    if (!switched) return null;
+    return {
+      balance: account.balance ?? 0,
+      used: account.balanceUsed ?? 0,
+      quota: account.quota ?? 0,
+    };
+  };
   const handleBalanceError = async (err: any) => {
     const message = appendSessionTokenRebindHint(err?.message || 'unknown error');
     setAccountRuntimeHealth(account.id, {
@@ -424,6 +505,8 @@ export async function refreshBalance(accountId: number) {
         activeExtraConfig = refreshed.extraConfig;
         balanceInfo = await readBalance(activeAccessToken);
       } catch (retryErr: any) {
+        const fallback = await tryApiKeyFallback(retryErr);
+        if (fallback) return fallback;
         await handleBalanceError(retryErr);
       }
     } else if (shouldAttemptAutoRelogin(message)) {
@@ -433,9 +516,13 @@ export async function refreshBalance(accountId: number) {
         try {
           balanceInfo = await readBalance(activeAccessToken);
         } catch (retryErr: any) {
+          const fallback = await tryApiKeyFallback(retryErr);
+          if (fallback) return fallback;
           await handleBalanceError(retryErr);
         }
       } else {
+        const fallback = await tryApiKeyFallback(err);
+        if (fallback) return fallback;
         await handleBalanceError(err);
       }
     } else {

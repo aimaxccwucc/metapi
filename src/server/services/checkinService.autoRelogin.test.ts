@@ -353,4 +353,71 @@ describe('checkinService auto relogin', () => {
     expect(refreshBalanceMock).not.toHaveBeenCalled();
     expect(notifyMock).not.toHaveBeenCalled();
   });
+
+  it('retries transient fetch failures and succeeds', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 16,
+          username: 'linuxdo_10001',
+          accessToken: 'token',
+          status: 'active',
+          extraConfig: null,
+        },
+        sites: {
+          id: 16,
+          name: 'demo',
+          url: 'https://example.com',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.checkin
+      .mockResolvedValueOnce({ success: false, message: 'fetch failed' })
+      .mockResolvedValueOnce({ success: false, message: 'fetch failed' })
+      .mockResolvedValueOnce({ success: true, message: 'checked in' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(16);
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe('success');
+    expect(adapterMock.checkin).toHaveBeenCalledTimes(3);
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it('retries transient fetch failures and reports failure when exhausted', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 17,
+          username: 'linuxdo_10002',
+          accessToken: 'token',
+          status: 'active',
+          extraConfig: null,
+        },
+        sites: {
+          id: 17,
+          name: 'demo',
+          url: 'https://example.com',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.checkin
+      .mockResolvedValueOnce({ success: false, message: 'fetch failed' })
+      .mockResolvedValueOnce({ success: false, message: 'fetch failed' })
+      .mockResolvedValueOnce({ success: false, message: 'fetch failed' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(17);
+
+    expect(result.success).toBe(false);
+    expect(result.status).toBe('failed');
+    expect(adapterMock.checkin).toHaveBeenCalledTimes(3);
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    expect(notifyMock.mock.calls[0]?.[0]).toBe('checkin failed');
+  });
 });

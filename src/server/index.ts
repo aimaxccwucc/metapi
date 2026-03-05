@@ -67,6 +67,11 @@ try {
   const balanceRefreshCron = parseSetting<string>('balance_refresh_cron');
   if (typeof balanceRefreshCron === 'string' && balanceRefreshCron) config.balanceRefreshCron = balanceRefreshCron;
 
+  const siteHealthRefreshCron = parseSetting<string>('site_health_refresh_cron');
+  if (typeof siteHealthRefreshCron === 'string' && siteHealthRefreshCron) {
+    config.siteHealthRefreshCron = siteHealthRefreshCron;
+  }
+
   const routingWeights = parseSetting<Partial<typeof config.routingWeights>>('routing_weights');
   if (routingWeights && typeof routingWeights === 'object') {
     config.routingWeights = {
@@ -140,6 +145,32 @@ try {
 const app = Fastify({ logger: true });
 
 await app.register(cors);
+
+// Be tolerant of empty JSON bodies and missing content-type on internal admin APIs.
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (request, body, done) => {
+  const raw = typeof body === 'string' ? body.trim() : '';
+  if (!raw) {
+    done(null, {});
+    return;
+  }
+  try {
+    done(null, JSON.parse(raw));
+  } catch (error) {
+    done(error as Error, undefined);
+  }
+});
+
+app.addHook('onRequest', async (request) => {
+  const method = request.method.toUpperCase();
+  if (!(method === 'POST' || method === 'PUT' || method === 'PATCH')) return;
+  if (!request.url.startsWith('/api/')) return;
+
+  const headers = request.headers as Record<string, unknown>;
+  const hasContentType = typeof headers['content-type'] === 'string' && headers['content-type'].trim().length > 0;
+  if (!hasContentType) {
+    headers['content-type'] = 'application/json';
+  }
+});
 
 // Auth middleware for /api routes
 app.addHook('onRequest', async (request, reply) => {

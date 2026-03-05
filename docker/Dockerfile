@@ -3,13 +3,16 @@ FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
 
-RUN apt-get update \
+# Use CN mirrors + retries to reduce build failures on international network.
+RUN sed -i 's|http://deb.debian.org|http://mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
+  && apt-get -o Acquire::Retries=5 update \
   && apt-get install -y --no-install-recommends python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHON=/usr/bin/python3
 
 COPY package.json package-lock.json ./
+RUN npm config set registry https://registry.npmmirror.com
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 
 COPY . .

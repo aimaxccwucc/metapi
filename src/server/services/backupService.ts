@@ -1,6 +1,8 @@
-import { asc } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import cron from 'node-cron';
 import { db, schema } from '../db/index.js';
+import { getPlatformUserIdFromExtraConfig, mergeAccountExtraConfig, type AccountCredentialMode } from './accountExtraConfig.js';
+import { repairDefaultToken } from './accountTokenService.js';
 
 const BACKUP_VERSION = '2.0';
 
@@ -56,6 +58,25 @@ interface BackupImportResult {
     preferences: boolean;
   };
   appliedSettings: Array<{ key: string; value: unknown }>;
+}
+
+interface AllApiHubMergeImportResult {
+  importedRows: number;
+  skippedRows: number;
+  sites: {
+    created: number;
+    reused: number;
+  };
+  accounts: {
+    created: number;
+    updated: number;
+    reused: number;
+  };
+  tokens: {
+    created: number;
+    reused: number;
+  };
+  repairedDefaultTokenAccounts: number;
 }
 
 const EXCLUDED_SETTING_KEYS = new Set<string>([
@@ -125,6 +146,213 @@ function normalizeLegacyPlatform(raw: string): string {
   return 'new-api';
 }
 
+function normalizeSiteBaseUrl(input: unknown): string {
+  const trimmed = typeof input === 'string' ? input.trim() : '';
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
+}
+
+function normalizeOptionalExternalCheckinUrl(input: unknown): string | null {
+  const trimmed = typeof input === 'string' ? input.trim() : '';
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
+
+function resolveLegacyExternalCheckinUrl(item: Record<string, unknown>): string | null {
+  const checkin = isRecord(item.checkIn) ? item.checkIn : null;
+  const customCheckin = isRecord(checkin?.customCheckIn) ? checkin.customCheckIn : null;
+
+  const candidates: unknown[] = [
+    customCheckin?.url,
+    customCheckin?.redeemUrl,
+    item.externalCheckinUrl,
+    item.external_checkin_url,
+    item.checkinUrl,
+    item.checkin_url,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeOptionalExternalCheckinUrl(candidate);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function normalizeKeyToken(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw.trim();
+}
+
+function normalizeLegacyAuthType(raw: unknown): string {
+  return asString(raw).toLowerCase();
+}
+
+function resolveCredentialModeForLegacyImport(authType: string, accessToken: string, keyCandidates: string[]): AccountCredentialMode {
+  if (authType === 'api_key' || authType === 'apikey') return 'apikey';
+  if (authType === 'cookie' || authType === 'access_token') return 'session';
+
+  const hasSessionLikeToken = accessToken.length > 0 && !keyCandidates.includes(accessToken);
+  if (hasSessionLikeToken) return 'session';
+  return keyCandidates.length > 0 ? 'apikey' : 'auto';
+}
+
+function collectLegacyKeyCandidates(item: Record<string, unknown>, accountInfo: Record<string, unknown>, accountAccessToken: string, authType: string): string[] {
+  const candidates = new Set<string>();
+  const add = (value: unknown) => {
+    const normalized = normalizeKeyToken(value);
+    if (!normalized) return;
+    candidates.add(normalized);
+  };
+
+  const appendArrayTokens = (value: unknown) => {
+    if (!Array.isArray(value)) return;
+    for (const tokenRow of value) {
+      if (!isRecord(tokenRow)) continue;
+      add(tokenRow.key);
+      add(tokenRow.token);
+      add(tokenRow.value);
+    }
+  };
+
+  add(item.apiKey);
+  add(item.api_key);
+  add(item.key);
+  add(item.token);
+  add(item.defaultApiKey);
+  add(item.default_api_key);
+  add(accountInfo.apiKey);
+  add(accountInfo.api_key);
+  add(accountInfo.key);
+  add(accountInfo.token);
+  add(accountInfo.defaultApiKey);
+  add(accountInfo.default_api_key);
+
+  appendArrayTokens(item.apiTokens);
+  appendArrayTokens(item.accountTokens);
+  appendArrayTokens(item.tokens);
+  appendArrayTokens(accountInfo.apiTokens);
+  appendArrayTokens(accountInfo.accountTokens);
+  appendArrayTokens(accountInfo.tokens);
+
+  if (authType === 'api_key' || authType === 'apikey') {
+    add(accountAccessToken);
+  }
+
+  return Array.from(candidates);
+}
+
+function collectAllApiHubAccounts(data: RawBackupData): Array<Record<string, unknown>> {
+  const rows: Array<Record<string, unknown>> = [];
+
+  const pushRows = (source: unknown) => {
+    if (!Array.isArray(source)) return;
+    for (const row of source) {
+      if (!isRecord(row)) continue;
+      rows.push(row);
+    }
+  };
+
+  if (isRecord(data.accounts) && Array.isArray(data.accounts.accounts)) {
+    pushRows(data.accounts.accounts);
+  }
+
+  if (Array.isArray(data.accounts)) {
+    pushRows(data.accounts);
+  }
+
+  if (isRecord(data.data)) {
+    if (isRecord(data.data.accounts) && Array.isArray(data.data.accounts.accounts)) {
+      pushRows(data.data.accounts.accounts);
+    }
+    if (Array.isArray(data.data.accounts)) {
+      pushRows(data.data.accounts);
+    }
+  }
+
+  return rows;
+}
+
+function buildSiteLookupKey(platform: string, siteUrl: string): string {
+  return `${platform.trim().toLowerCase()}::${normalizeSiteBaseUrl(siteUrl)}`;
+}
+
+function buildAccountLookupKey(siteId: number, value: string | number): string {
+  return `${siteId}::${String(value).trim().toLowerCase()}`;
+}
+
+function shouldPreferIncomingByUpdatedAt(existingUpdatedAt: string | null | undefined, incomingUpdatedAt: string): boolean {
+  const incomingTime = Date.parse(incomingUpdatedAt);
+  if (!Number.isFinite(incomingTime)) return false;
+
+  const existingTime = Date.parse(existingUpdatedAt || '');
+  if (!Number.isFinite(existingTime)) return true;
+  return incomingTime >= existingTime;
+}
+
+function maxSortOrder(rows: Array<{ sortOrder: number | null }>): number {
+  return rows.reduce((max, row) => Math.max(max, row.sortOrder || 0), -1);
+}
+
+function indexAccountLookupMaps(
+  account: AccountRow,
+  userIdIndex: Map<string, AccountRow>,
+  usernameIndex: Map<string, AccountRow>,
+  accessTokenIndex: Map<string, AccountRow>,
+) {
+  const userId = getPlatformUserIdFromExtraConfig(account.extraConfig);
+  if (userId && userId > 0) {
+    userIdIndex.set(buildAccountLookupKey(account.siteId, userId), account);
+  }
+
+  const username = asString(account.username);
+  if (username) {
+    usernameIndex.set(buildAccountLookupKey(account.siteId, username), account);
+  }
+
+  const accessToken = asString(account.accessToken);
+  if (accessToken) {
+    accessTokenIndex.set(buildAccountLookupKey(account.siteId, accessToken), account);
+  }
+}
+
+function resolveExistingAccountByImportRow(
+  siteId: number,
+  platformUserId: number,
+  username: string,
+  accessToken: string,
+  userIdIndex: Map<string, AccountRow>,
+  usernameIndex: Map<string, AccountRow>,
+  accessTokenIndex: Map<string, AccountRow>,
+): AccountRow | null {
+  if (platformUserId > 0) {
+    const byUserId = userIdIndex.get(buildAccountLookupKey(siteId, platformUserId));
+    if (byUserId) return byUserId;
+  }
+
+  if (username) {
+    const byUsername = usernameIndex.get(buildAccountLookupKey(siteId, username));
+    if (byUsername) return byUsername;
+  }
+
+  if (accessToken) {
+    const byAccessToken = accessTokenIndex.get(buildAccountLookupKey(siteId, accessToken));
+    if (byAccessToken) return byAccessToken;
+  }
+
+  return null;
+}
+
 function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupSection | null {
   const accountsContainer = isRecord(data.accounts) ? data.accounts : null;
   const rows = Array.isArray(accountsContainer?.accounts) ? accountsContainer.accounts : null;
@@ -149,6 +377,7 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
 
     const platform = normalizeLegacyPlatform(asString(item.site_type));
     const siteName = asString(item.site_name) || siteUrl;
+    const importedExternalCheckinUrl = resolveLegacyExternalCheckinUrl(item);
     const siteKey = `${platform}::${siteUrl}`;
 
     let siteId = siteIdByKey.get(siteKey) || 0;
@@ -159,10 +388,13 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         id: siteId,
         name: siteName,
         url: siteUrl,
-        externalCheckinUrl: null,
+        externalCheckinUrl: importedExternalCheckinUrl,
         platform,
         proxyUrl: null,
         status: 'active',
+        healthStatus: 'unknown',
+        healthReason: null,
+        healthCheckedAt: null,
         isPinned: false,
         sortOrder: sites.length,
         globalWeight: 1,
@@ -291,7 +523,7 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 function isSettingValueAcceptable(key: string, value: unknown): boolean {
-  if (key === 'checkin_cron' || key === 'balance_refresh_cron') {
+  if (key === 'checkin_cron' || key === 'balance_refresh_cron' || key === 'site_health_refresh_cron') {
     return typeof value === 'string' && cron.validate(value);
   }
 
@@ -569,6 +801,240 @@ function importPreferencesSection(section: PreferencesBackupSection): Array<{ ke
   });
 
   return applied;
+}
+
+export function importAllApiHubAccountsMerge(data: RawBackupData): AllApiHubMergeImportResult {
+  if (!isRecord(data)) {
+    throw new Error('导入数据格式错误：必须为 JSON 对象');
+  }
+
+  const rows = collectAllApiHubAccounts(data);
+  if (rows.length === 0) {
+    throw new Error('导入数据中没有可识别的 all-api-hub 账号列表（accounts.accounts）');
+  }
+
+  const existingSites = db.select().from(schema.sites).orderBy(asc(schema.sites.id)).all();
+  const existingAccounts = db.select().from(schema.accounts).orderBy(asc(schema.accounts.id)).all();
+  const existingTokens = db.select().from(schema.accountTokens).orderBy(asc(schema.accountTokens.id)).all();
+
+  const siteByKey = new Map<string, SiteRow>();
+  for (const site of existingSites) {
+    siteByKey.set(buildSiteLookupKey(site.platform, site.url), site);
+  }
+
+  const accountBySiteUserId = new Map<string, AccountRow>();
+  const accountBySiteUsername = new Map<string, AccountRow>();
+  const accountBySiteAccessToken = new Map<string, AccountRow>();
+  for (const account of existingAccounts) {
+    indexAccountLookupMaps(account, accountBySiteUserId, accountBySiteUsername, accountBySiteAccessToken);
+  }
+
+  const tokenByAccountId = new Map<number, Set<string>>();
+  for (const token of existingTokens) {
+    const set = tokenByAccountId.get(token.accountId) || new Set<string>();
+    set.add(token.token);
+    tokenByAccountId.set(token.accountId, set);
+  }
+
+  let nextSiteSortOrder = maxSortOrder(existingSites) + 1;
+  let nextAccountSortOrder = maxSortOrder(existingAccounts) + 1;
+
+  const result: AllApiHubMergeImportResult = {
+    importedRows: 0,
+    skippedRows: 0,
+    sites: { created: 0, reused: 0 },
+    accounts: { created: 0, updated: 0, reused: 0 },
+    tokens: { created: 0, reused: 0 },
+    repairedDefaultTokenAccounts: 0,
+  };
+
+  const repairedAccountIds = new Set<number>();
+
+  db.transaction((tx) => {
+    for (const item of rows) {
+      const siteUrl = normalizeSiteBaseUrl(item.site_url);
+      if (!siteUrl) {
+        result.skippedRows += 1;
+        continue;
+      }
+
+      const platform = normalizeLegacyPlatform(asString(item.site_type));
+      const siteName = asString(item.site_name) || siteUrl;
+      const importedExternalCheckinUrl = resolveLegacyExternalCheckinUrl(item);
+      const siteKey = buildSiteLookupKey(platform, siteUrl);
+
+      let site = siteByKey.get(siteKey) || null;
+      if (!site) {
+        const now = new Date().toISOString();
+        site = tx.insert(schema.sites).values({
+          name: siteName,
+          url: siteUrl,
+          externalCheckinUrl: importedExternalCheckinUrl,
+          platform,
+          status: 'active',
+          isPinned: false,
+          sortOrder: nextSiteSortOrder++,
+          globalWeight: 1,
+          createdAt: now,
+          updatedAt: now,
+        }).returning().get();
+        siteByKey.set(siteKey, site);
+        result.sites.created += 1;
+      } else {
+        if (!site.externalCheckinUrl && importedExternalCheckinUrl) {
+          tx.update(schema.sites).set({
+            externalCheckinUrl: importedExternalCheckinUrl,
+            updatedAt: new Date().toISOString(),
+          }).where(eq(schema.sites.id, site.id)).run();
+          const refreshedSite = tx.select().from(schema.sites).where(eq(schema.sites.id, site.id)).get();
+          if (refreshedSite) {
+            site = refreshedSite;
+            siteByKey.set(siteKey, site);
+          }
+        }
+        result.sites.reused += 1;
+      }
+
+      const accountInfo = isRecord(item.account_info) ? item.account_info : {};
+      const cookieAuth = isRecord(item.cookieAuth) ? item.cookieAuth : {};
+      const authType = normalizeLegacyAuthType(item.authType);
+      const accountAccessToken =
+        asString(accountInfo.access_token)
+        || asString(cookieAuth.sessionCookie)
+        || asString(item.access_token);
+      if (!accountAccessToken) {
+        result.skippedRows += 1;
+        continue;
+      }
+
+      const platformUserId = asNumber(accountInfo.id, 0);
+      const username = asString(accountInfo.username)
+        || asString(item.username)
+        || (platformUserId > 0 ? `user-${platformUserId}` : `account-${site.id}-${result.importedRows + result.skippedRows + 1}`);
+      const createdAt = toIsoString(item.created_at);
+      const updatedAt = toIsoString(item.updated_at);
+      const checkin = isRecord(item.checkIn) ? item.checkIn : {};
+      const importedBalance = normalizeLegacyQuota(accountInfo.quota);
+      const importedUsed = normalizeLegacyQuota(accountInfo.today_quota_consumption);
+      const importedQuota = importedBalance + importedUsed;
+
+      const keyCandidates = collectLegacyKeyCandidates(item, accountInfo, accountAccessToken, authType);
+      const credentialMode = resolveCredentialModeForLegacyImport(authType, accountAccessToken, keyCandidates);
+
+      let existingAccount = resolveExistingAccountByImportRow(
+        site.id,
+        platformUserId,
+        username,
+        accountAccessToken,
+        accountBySiteUserId,
+        accountBySiteUsername,
+        accountBySiteAccessToken,
+      );
+
+      if (!existingAccount) {
+        const extraConfigPatch: Record<string, unknown> = {
+          credentialMode,
+          source: 'all-api-hub-import',
+        };
+        if (platformUserId > 0) {
+          extraConfigPatch.platformUserId = platformUserId;
+        }
+        const created = tx.insert(schema.accounts).values({
+          siteId: site.id,
+          username,
+          accessToken: accountAccessToken,
+          apiToken: keyCandidates[0] || null,
+          balance: importedBalance,
+          balanceUsed: importedUsed,
+          quota: importedQuota > 0 ? importedQuota : importedBalance,
+          unitCost: null,
+          valueScore: 0,
+          status: asBoolean(item.disabled, false) ? 'disabled' : 'active',
+          isPinned: false,
+          sortOrder: nextAccountSortOrder++,
+          checkinEnabled: asBoolean(checkin.autoCheckInEnabled, true),
+          lastCheckinAt: null,
+          lastBalanceRefresh: null,
+          extraConfig: JSON.stringify(extraConfigPatch),
+          createdAt,
+          updatedAt,
+        }).returning().get();
+
+        existingAccount = created;
+        indexAccountLookupMaps(existingAccount, accountBySiteUserId, accountBySiteUsername, accountBySiteAccessToken);
+        result.accounts.created += 1;
+      } else {
+        const shouldUpdate = shouldPreferIncomingByUpdatedAt(existingAccount.updatedAt, updatedAt);
+        if (shouldUpdate) {
+          const mergedExtraConfig = mergeAccountExtraConfig(existingAccount.extraConfig, {
+            credentialMode,
+            source: 'all-api-hub-import',
+            ...(platformUserId > 0 ? { platformUserId } : {}),
+          });
+          tx.update(schema.accounts).set({
+            username: username || existingAccount.username,
+            accessToken: accountAccessToken || existingAccount.accessToken,
+            balance: importedBalance,
+            balanceUsed: importedUsed,
+            quota: importedQuota > 0 ? importedQuota : importedBalance,
+            status: asBoolean(item.disabled, false) ? 'disabled' : 'active',
+            checkinEnabled: asBoolean(checkin.autoCheckInEnabled, existingAccount.checkinEnabled ?? true),
+            extraConfig: mergedExtraConfig,
+            updatedAt,
+          }).where(eq(schema.accounts.id, existingAccount.id)).run();
+
+          const refreshed = tx.select().from(schema.accounts).where(eq(schema.accounts.id, existingAccount.id)).get();
+          if (refreshed) {
+            existingAccount = refreshed;
+            indexAccountLookupMaps(existingAccount, accountBySiteUserId, accountBySiteUsername, accountBySiteAccessToken);
+          }
+          result.accounts.updated += 1;
+        } else {
+          result.accounts.reused += 1;
+        }
+      }
+
+      const tokenSet = tokenByAccountId.get(existingAccount.id) || new Set<string>();
+      if (keyCandidates.length === 0 && existingAccount.apiToken) {
+        keyCandidates.push(existingAccount.apiToken);
+      }
+
+      for (const keyToken of keyCandidates) {
+        if (!keyToken) continue;
+        if (tokenSet.has(keyToken)) {
+          result.tokens.reused += 1;
+          continue;
+        }
+        tx.insert(schema.accountTokens).values({
+          accountId: existingAccount.id,
+          name: tokenSet.size === 0 ? 'default' : `imported-${tokenSet.size + 1}`,
+          token: keyToken,
+          tokenGroup: 'default',
+          source: 'legacy',
+          enabled: true,
+          isDefault: false,
+          createdAt: updatedAt,
+          updatedAt,
+        }).run();
+        tokenSet.add(keyToken);
+        result.tokens.created += 1;
+      }
+      tokenByAccountId.set(existingAccount.id, tokenSet);
+
+      if (tokenSet.size > 0 || existingAccount.apiToken) {
+        repairedAccountIds.add(existingAccount.id);
+      }
+
+      result.importedRows += 1;
+    }
+  });
+
+  for (const accountId of repairedAccountIds) {
+    repairDefaultToken(accountId);
+  }
+  result.repairedDefaultTokenAccounts = repairedAccountIds.size;
+
+  return result;
 }
 
 export function importBackup(data: RawBackupData): BackupImportResult {

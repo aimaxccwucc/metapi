@@ -12,6 +12,9 @@ type ParsedSummary = {
   hasAccounts: boolean;
   hasPreferences: boolean;
   hasLegacyData: boolean;
+  allApiHubLike: boolean;
+  allApiHubRowsCount: number;
+  allApiHubEstimatedSites: number;
   sitesCount: number;
   accountsCount: number;
   tokensCount: number;
@@ -19,6 +22,38 @@ type ParsedSummary = {
   channelsCount: number;
   settingsCount: number;
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function collectAllApiHubRows(data: any): any[] {
+  const rows: any[] = [];
+  const pushRows = (source: unknown) => {
+    if (!Array.isArray(source)) return;
+    for (const row of source) {
+      if (!isRecord(row)) continue;
+      rows.push(row);
+    }
+  };
+
+  if (isRecord(data?.accounts) && Array.isArray(data.accounts.accounts)) {
+    pushRows(data.accounts.accounts);
+  }
+  if (Array.isArray(data?.accounts)) {
+    pushRows(data.accounts);
+  }
+  if (isRecord(data?.data)) {
+    if (isRecord(data.data.accounts) && Array.isArray(data.data.accounts.accounts)) {
+      pushRows(data.data.accounts.accounts);
+    }
+    if (Array.isArray(data.data.accounts)) {
+      pushRows(data.data.accounts);
+    }
+  }
+
+  return rows;
+}
 
 function downloadJsonFile(data: unknown, filename: string) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -45,6 +80,9 @@ function parseImportSummary(raw: string): ParsedSummary | null {
         hasAccounts: false,
         hasPreferences: false,
         hasLegacyData: false,
+        allApiHubLike: false,
+        allApiHubRowsCount: 0,
+        allApiHubEstimatedSites: 0,
         sitesCount: 0,
         accountsCount: 0,
         tokensCount: 0,
@@ -63,6 +101,15 @@ function parseImportSummary(raw: string): ParsedSummary | null {
 
     const legacyAccounts = Boolean(data.data?.accounts || Array.isArray(data.accounts));
     const legacyPrefs = Boolean(data.data?.preferences);
+    const allApiHubRows = collectAllApiHubRows(data);
+    const allApiHubLike = allApiHubRows.length > 0;
+    const allApiHubEstimatedSites = allApiHubLike
+      ? new Set(
+        allApiHubRows
+          .map((row) => (typeof row?.site_url === 'string' ? row.site_url.trim() : ''))
+          .filter((url) => url.length > 0),
+      ).size
+      : 0;
 
     const hasAccounts = Boolean(
       data.type === 'accounts'
@@ -89,6 +136,9 @@ function parseImportSummary(raw: string): ParsedSummary | null {
       hasAccounts,
       hasPreferences,
       hasLegacyData: legacyAccounts || legacyPrefs,
+      allApiHubLike,
+      allApiHubRowsCount: allApiHubRows.length,
+      allApiHubEstimatedSites,
       sitesCount: toCount(accountsSection?.sites),
       accountsCount: toCount(accountsSection?.accounts),
       tokensCount: toCount(accountsSection?.accountTokens),
@@ -104,6 +154,9 @@ function parseImportSummary(raw: string): ParsedSummary | null {
       hasAccounts: false,
       hasPreferences: false,
       hasLegacyData: false,
+      allApiHubLike: false,
+      allApiHubRowsCount: 0,
+      allApiHubEstimatedSites: 0,
       sitesCount: 0,
       accountsCount: 0,
       tokensCount: 0,
@@ -118,6 +171,7 @@ export default function ImportExport() {
   const toast = useToast();
   const [exportingType, setExportingType] = useState<BackupType | ''>('');
   const [importing, setImporting] = useState(false);
+  const [importingAllApiHubMerge, setImportingAllApiHubMerge] = useState(false);
   const [importData, setImportData] = useState('');
   const [selectedFileName, setSelectedFileName] = useState('');
   const [dragOver, setDragOver] = useState(false);
@@ -200,6 +254,16 @@ export default function ImportExport() {
     setImporting(true);
     try {
       const parsed = JSON.parse(importData);
+      const allApiHubRows = collectAllApiHubRows(parsed);
+      if (allApiHubRows.length > 0) {
+        const mergeResult = await api.importAllApiHubMerge(parsed);
+        toast.success(
+          `已自动按 all-api-hub 合并导入：账号 ${mergeResult.importedRows}，跳过 ${mergeResult.skippedRows}，站点新增 ${mergeResult.sites?.created || 0}，账号新增 ${mergeResult.accounts?.created || 0}`,
+        );
+        setImportData('');
+        setSelectedFileName('');
+        return;
+      }
       const result = await api.importBackup(parsed);
       const sections: string[] = [];
       if (result?.sections?.accounts) sections.push('账号与路由');
@@ -211,6 +275,31 @@ export default function ImportExport() {
       toast.error(err?.message || '导入失败');
     } finally {
       setImporting(false);
+    }
+  };
+
+  const handleImportAllApiHubMerge = async () => {
+    if (!importData.trim()) {
+      toast.error('请先选择或粘贴 JSON 备份内容');
+      return;
+    }
+    if (!window.confirm('将按站点/账号/Key 去重合并导入 all-api-hub 账号，且不会覆盖现有路由。确认继续？')) {
+      return;
+    }
+
+    setImportingAllApiHubMerge(true);
+    try {
+      const parsed = JSON.parse(importData);
+      const result = await api.importAllApiHubMerge(parsed);
+      toast.success(
+        `合并导入完成：账号 ${result.importedRows}，跳过 ${result.skippedRows}，站点新增 ${result.sites?.created || 0}，账号新增 ${result.accounts?.created || 0}，Key 新增 ${result.tokens?.created || 0}`,
+      );
+      setImportData('');
+      setSelectedFileName('');
+    } catch (err: any) {
+      toast.error(err?.message || 'all-api-hub 合并导入失败');
+    } finally {
+      setImportingAllApiHubMerge(false);
     }
   };
 
@@ -385,6 +474,11 @@ export default function ImportExport() {
                       </div>
                     ) : null}
                     {summary.hasLegacyData ? <div>检测到兼容结构：将按兼容模式导入。</div> : null}
+                    {summary.allApiHubLike ? (
+                      <div>
+                        检测到 all-api-hub 账号清单：账号 {summary.allApiHubRowsCount}，预估站点 {summary.allApiHubEstimatedSites}。点击“导入”会自动走“合并导入（不覆盖现有数据）”。
+                      </div>
+                    ) : null}
                   </>
                 ) : (
                   <div>JSON 可解析，但结构不受支持。</div>
@@ -395,11 +489,22 @@ export default function ImportExport() {
             {/* ---- 操作按钮 ---- */}
             <button
               onClick={handleImport}
-              disabled={importing || !summary?.valid}
+              disabled={importing || importingAllApiHubMerge || !summary?.valid}
               className="btn btn-primary"
               style={{ width: '100%', padding: '10px 0', fontSize: 14, fontWeight: 600, borderRadius: 'var(--radius-sm)' }}
             >
               {importing ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 导入中...</> : '导入'}
+            </button>
+
+            <button
+              onClick={handleImportAllApiHubMerge}
+              disabled={importing || importingAllApiHubMerge}
+              className="btn btn-ghost"
+              style={{ width: '100%', padding: '10px 0', fontSize: 14, fontWeight: 600, borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border)' }}
+            >
+              {importingAllApiHubMerge
+                ? <><span className="spinner spinner-sm" /> 合并导入中...</>
+                : '合并导入 all-api-hub 账号（不覆盖现有数据）'}
             </button>
           </div>
         </div>
@@ -409,8 +514,9 @@ export default function ImportExport() {
         <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>注意事项</div>
         <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.75 }}>
           <div>1. 导入账号分区会覆盖现有站点、账号、令牌和路由配置。</div>
-          <div>2. 为避免锁死管理界面，管理员登录令牌（`auth_token`）不会从备份导入。</div>
-          <div>3. 建议先导出一份"全部备份"再执行导入操作。</div>
+          <div>2. “合并导入 all-api-hub 账号”会按站点/账号/Key 去重，不会清空现有数据。</div>
+          <div>3. 为避免锁死管理界面，管理员登录令牌（`auth_token`）不会从备份导入。</div>
+          <div>4. 建议先导出一份"全部备份"再执行导入操作。</div>
         </div>
       </div>
     </div>

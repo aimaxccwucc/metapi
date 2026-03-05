@@ -27,6 +27,7 @@ export const config = {
   accountCredentialSecret: process.env.ACCOUNT_CREDENTIAL_SECRET || process.env.AUTH_TOKEN || 'change-me-admin-token',
   checkinCron: process.env.CHECKIN_CRON || '0 8 * * *',
   balanceRefreshCron: process.env.BALANCE_REFRESH_CRON || '0 * * * *',
+  siteHealthRefreshCron: process.env.SITE_HEALTH_REFRESH_CRON || '*/15 * * * *',
   webhookUrl: process.env.WEBHOOK_URL || '',
   barkUrl: process.env.BARK_URL || '',
   webhookEnabled: parseBoolean(process.env.WEBHOOK_ENABLED, true),

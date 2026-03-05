@@ -26,6 +26,7 @@ import {
 } from '../../services/accountHealthService.js';
 import { appendSessionTokenRebindHint } from '../../services/alertRules.js';
 import { withExplicitProxyRequestInit } from '../../services/siteProxy.js';
+import { repairAllAccountKeys } from '../../services/accountKeyRepairService.js';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -246,6 +247,34 @@ async function executeRefreshAccountRuntimeHealth(accountId?: number) {
   };
 }
 
+function buildAccountKeyRepairTaskDetailMessage(results: Awaited<ReturnType<typeof repairAllAccountKeys>>['results']): string {
+  if (!Array.isArray(results) || results.length === 0) return '';
+
+  const renderRows = (rows: typeof results, withReason = false) => {
+    const sliced = rows.slice(0, 12).map((item) => {
+      const base = `${item.accountName || `#${item.accountId}`} @ ${item.siteName || 'unknown-site'}`;
+      if (!withReason) return base;
+      const reason = String(item.message || item.reason || '').trim();
+      if (!reason) return base;
+      return reason.length <= 32 ? `${base}(${reason})` : `${base}(${reason.slice(0, 32)}...)`;
+    });
+    if (rows.length > 12) sliced.push(`...等${rows.length}个`);
+    return sliced.join('、');
+  };
+
+  const repairedRows = results.filter((item) => item.status === 'repaired' || item.status === 'created' || item.status === 'synced');
+  const alreadyRows = results.filter((item) => item.status === 'already_ok');
+  const skippedRows = results.filter((item) => item.status === 'skipped');
+  const failedRows = results.filter((item) => item.status === 'failed');
+
+  return [
+    `修复(${repairedRows.length}): ${repairedRows.length > 0 ? renderRows(repairedRows) : '-'}`,
+    `已正常(${alreadyRows.length}): ${alreadyRows.length > 0 ? renderRows(alreadyRows) : '-'}`,
+    `跳过(${skippedRows.length}): ${skippedRows.length > 0 ? renderRows(skippedRows, true) : '-'}`,
+    `失败(${failedRows.length}): ${failedRows.length > 0 ? renderRows(failedRows, true) : '-'}`,
+  ].join('\n');
+}
+
 export async function accountsRoutes(app: FastifyInstance) {
   // List all accounts (with site info)
   app.get('/api/accounts', async () => {
@@ -328,7 +357,7 @@ export async function accountsRoutes(app: FastifyInstance) {
 
     // Get platform adapter
     const adapter = getAdapter(site.platform);
-    if (!adapter) return { success: false, message: `婵炴垶鎸哥粔鐢稿极椤曗偓楠炴劖鎷呴悜妯兼殸濡ょ姷鍋涢崯鑳亹? ${site.platform}` };
+    if (!adapter) return { success: false, message: `不支持的平台: ${site.platform}` };
 
     // Login to the target site
     const loginResult = await adapter.login(site.url, username, password);
@@ -441,7 +470,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     const adapter = getAdapter(site.platform);
-    if (!adapter) return { success: false, message: `婵炴垶鎸哥粔鐢稿极椤曗偓楠炴劖鎷呴悜妯兼殸濡ょ姷鍋涢崯鑳亹? ${site.platform}` };
+    if (!adapter) return { success: false, message: `不支持的平台: ${site.platform}` };
 
     if (credentialMode === 'apikey') {
       try {
@@ -694,7 +723,7 @@ export async function accountsRoutes(app: FastifyInstance) {
   );
 
   // Add an account (manual credential input)
-  app.post<{ Body: { siteId: number; username?: string; accessToken: string; apiToken?: string; platformUserId?: number; checkinEnabled?: boolean; credentialMode?: AccountCredentialMode; refreshToken?: string; tokenExpiresAt?: number | string; preverified?: { tokenType?: 'session' | 'apikey'; username?: string; apiToken?: string } } }>('/api/accounts', async (request, reply) => {
+  app.post<{ Body: { siteId: number; username?: string; accessToken: string; apiToken?: string; platformUserId?: number; checkinEnabled?: boolean; credentialMode?: AccountCredentialMode; refreshToken?: string; tokenExpiresAt?: number | string; allowUnverified?: boolean; preverified?: { tokenType?: 'session' | 'apikey'; username?: string; apiToken?: string } } }>('/api/accounts', async (request, reply) => {
     const body = request.body;
     const site = db.select().from(schema.sites).where(eq(schema.sites.id, body.siteId)).get();
     if (!site) {
@@ -707,6 +736,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     const credentialMode = resolveRequestedCredentialMode(body.credentialMode);
+    const allowUnverified = body.allowUnverified === true;
     const rawAccessToken = (body.accessToken || '').trim();
     if (!rawAccessToken) {
       return reply.code(400).send({ success: false, message: '请填写 Token' });
@@ -716,6 +746,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     let accessToken = rawAccessToken;
     let apiToken = (body.apiToken || '').trim();
     let tokenType: 'session' | 'apikey' | 'unknown' = 'unknown';
+    let isUnverifiedBinding = false;
     let verifiedModels: string[] = [];
     const preverified = body.preverified && typeof body.preverified === 'object'
       ? body.preverified
@@ -770,11 +801,16 @@ export async function accountsRoutes(app: FastifyInstance) {
 
       tokenType = verifyResult.tokenType;
       if (tokenType === 'unknown') {
+        if (allowUnverified && credentialMode !== 'apikey') {
+          tokenType = 'session';
+          isUnverifiedBinding = true;
+        } else {
         return reply.code(400).send({
           success: false,
           requiresVerification: true,
           message: 'Token 验证失败，请先点击“验证 Token”，验证成功后再绑定账号',
         });
+        }
       }
 
       if (credentialMode === 'session' && tokenType !== 'session') {
@@ -820,11 +856,19 @@ export async function accountsRoutes(app: FastifyInstance) {
       username: username || undefined,
       accessToken,
       apiToken: apiToken || undefined,
-      checkinEnabled: tokenType === 'session' ? (body.checkinEnabled ?? true) : false,
+      checkinEnabled: tokenType === 'session' ? (isUnverifiedBinding ? false : (body.checkinEnabled ?? true)) : false,
       extraConfig,
       isPinned: false,
       sortOrder: getNextAccountSortOrder(),
     }).returning().get();
+
+    if (isUnverifiedBinding) {
+      setAccountRuntimeHealth(result.id, {
+        state: 'degraded',
+        reason: '账号已保存但凭证未验证，需人工确认',
+        source: 'auth',
+      });
+    }
 
     if (apiToken) {
       try {
@@ -833,34 +877,40 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     const accountId = result.id;
-    const initializationTask = startBackgroundTask({
-      type: 'account-init',
-      title: `账号初始化（#${accountId}）`,
-      dedupeKey: `account-init:${accountId}`,
-      keepMs: 15 * 60 * 1000,
-      notifyOnSuccess: false,
-      notifyOnFailure: false,
-      successMessage: `账号 #${accountId} 初始化完成`,
-      failureMessage: (task) => `账号 #${accountId} 初始化失败：${task.error || 'unknown error'}`,
-    }, async () => {
-      if (tokenType === 'session' && accessToken) {
-        try {
-          const syncedTokens = await adapter.getApiTokens(site.url, accessToken, resolvedPlatformUserId);
-          if (syncedTokens.length > 0) {
-            syncTokensFromUpstream(accountId, syncedTokens);
-          }
-        } catch { }
-      }
+    let initializationTaskId: string | null = null;
+    let initializationQueued = false;
+    if (!isUnverifiedBinding) {
+      const initializationTask = startBackgroundTask({
+        type: 'account-init',
+        title: `账号初始化（#${accountId}）`,
+        dedupeKey: `account-init:${accountId}`,
+        keepMs: 15 * 60 * 1000,
+        notifyOnSuccess: false,
+        notifyOnFailure: false,
+        successMessage: `账号 #${accountId} 初始化完成`,
+        failureMessage: (task) => `账号 #${accountId} 初始化失败：${task.error || 'unknown error'}`,
+      }, async () => {
+        if (tokenType === 'session' && accessToken) {
+          try {
+            const syncedTokens = await adapter.getApiTokens(site.url, accessToken, resolvedPlatformUserId);
+            if (syncedTokens.length > 0) {
+              syncTokensFromUpstream(accountId, syncedTokens);
+            }
+          } catch { }
+        }
 
-      if (tokenType === 'session') {
-        try { await refreshBalance(accountId); } catch { }
-      }
-      try {
-        await refreshModelsForAccount(accountId);
-        rebuildTokenRoutesFromAvailability();
-      } catch { }
-      return { accountId };
-    });
+        if (tokenType === 'session') {
+          try { await refreshBalance(accountId); } catch { }
+        }
+        try {
+          await refreshModelsForAccount(accountId);
+          rebuildTokenRoutesFromAvailability();
+        } catch { }
+        return { accountId };
+      });
+      initializationTaskId = initializationTask.task.id;
+      initializationQueued = true;
+    }
 
     const account = db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
     const finalCredentialMode = account ? resolveStoredCredentialMode(account) : resolvedCredentialMode;
@@ -875,8 +925,9 @@ export async function accountsRoutes(app: FastifyInstance) {
       modelCount: verifiedModels.length,
       apiTokenFound: !!apiToken,
       usernameDetected: !!(!body.username && username),
-      queued: true,
-      initTaskId: initializationTask.task.id,
+      queued: initializationQueued,
+      initTaskId: initializationTaskId || undefined,
+      unverified: isUnverifiedBinding,
     };
   });
 
@@ -1016,6 +1067,49 @@ export async function accountsRoutes(app: FastifyInstance) {
       message: reused
         ? '账号运行健康状态刷新进行中，请稍后查看账号列表'
         : '已开始刷新账号运行健康状态，请稍后查看账号列表',
+    });
+  });
+
+  app.post<{ Body?: { wait?: boolean } }>('/api/accounts/keys/repair', async (request, reply) => {
+    if (request.body?.wait) {
+      const result = await repairAllAccountKeys();
+      return { success: true, ...result };
+    }
+
+    const { task, reused } = startBackgroundTask(
+      {
+        type: 'token',
+        title: '账号 Key 一键修复',
+        dedupeKey: 'repair-all-account-keys',
+        notifyOnFailure: true,
+        successTitle: (currentTask) => {
+          const summary = (currentTask.result as Awaited<ReturnType<typeof repairAllAccountKeys>> | null)?.summary;
+          if (!summary) return '账号 Key 一键修复已完成';
+          return `账号 Key 一键修复已完成（修复${summary.repaired + summary.created + summary.synced}/失败${summary.failed}/跳过${summary.skipped}）`;
+        },
+        failureTitle: () => '账号 Key 一键修复失败',
+        successMessage: (currentTask) => {
+          const payload = (currentTask.result as Awaited<ReturnType<typeof repairAllAccountKeys>> | null);
+          if (!payload?.summary) return '账号 Key 一键修复任务已完成';
+          const detail = buildAccountKeyRepairTaskDetailMessage(payload.results || []);
+          return detail
+            ? `账号 Key 一键修复完成：修复 ${payload.summary.repaired + payload.summary.created + payload.summary.synced}，已正常 ${payload.summary.alreadyOk}，跳过 ${payload.summary.skipped}，失败 ${payload.summary.failed}\n${detail}`
+            : `账号 Key 一键修复完成：修复 ${payload.summary.repaired + payload.summary.created + payload.summary.synced}，已正常 ${payload.summary.alreadyOk}，跳过 ${payload.summary.skipped}，失败 ${payload.summary.failed}`;
+        },
+        failureMessage: (currentTask) => `账号 Key 一键修复失败：${currentTask.error || 'unknown error'}`,
+      },
+      async () => repairAllAccountKeys(),
+    );
+
+    return reply.code(202).send({
+      success: true,
+      queued: true,
+      reused,
+      jobId: task.id,
+      status: task.status,
+      message: reused
+        ? '账号 Key 修复任务执行中，请稍后查看任务中心'
+        : '已开始账号 Key 一键修复，请稍后查看任务中心',
     });
   });
 

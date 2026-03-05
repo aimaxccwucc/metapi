@@ -195,4 +195,188 @@ describe('backupService', () => {
     expect(accounts[0].username).toBe('legacy-user');
     expect(settings.some((row) => row.key === 'legacy_preferences_ref_v2')).toBe(true);
   });
+
+  it('merges ALL-API-Hub accounts without overwriting existing data', () => {
+    const existingSite = db.insert(schema.sites).values({
+      name: 'existing-site',
+      url: 'https://same.example.com',
+      platform: 'new-api',
+      status: 'active',
+      isPinned: false,
+      sortOrder: 0,
+      globalWeight: 1,
+    }).returning().get();
+
+    const existingAccount = db.insert(schema.accounts).values({
+      siteId: existingSite.id,
+      username: 'alice',
+      accessToken: 'sess-old',
+      apiToken: null,
+      balance: 0,
+      balanceUsed: 0,
+      quota: 0,
+      unitCost: null,
+      valueScore: 0,
+      status: 'active',
+      isPinned: false,
+      sortOrder: 0,
+      checkinEnabled: true,
+      extraConfig: JSON.stringify({ platformUserId: 1001 }),
+      createdAt: '2025-01-01T00:00:00.000Z',
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    }).returning().get();
+
+    const payload = {
+      timestamp: Date.now(),
+      accounts: {
+        accounts: [
+          {
+            site_url: 'https://same.example.com/path?a=1',
+            site_type: 'new-api',
+            site_name: 'same-site-imported',
+            authType: 'api_key',
+            account_info: {
+              id: 1001,
+              username: 'alice',
+              access_token: 'sk-new-primary',
+              quota: 200000,
+              today_quota_consumption: 100000,
+              api_key: 'sk-new-primary',
+            },
+            apiTokens: [
+              { key: 'sk-new-primary' },
+              { key: 'sk-new-secondary' },
+            ],
+            checkIn: {
+              autoCheckInEnabled: false,
+            },
+            created_at: '2030-01-01T00:00:00.000Z',
+            updated_at: '2030-01-02T00:00:00.000Z',
+          },
+          {
+            site_url: 'https://new.example.com',
+            site_type: 'one-api',
+            site_name: 'new-site',
+            authType: 'access_token',
+            account_info: {
+              id: 2002,
+              username: 'bob',
+              access_token: 'sess-bob',
+              quota: 50000,
+              today_quota_consumption: 5000,
+            },
+            checkIn: {
+              autoCheckInEnabled: true,
+              customCheckIn: {
+                url: 'https://new.example.com/welfare',
+              },
+            },
+            created_at: '2030-02-01T00:00:00.000Z',
+            updated_at: '2030-02-02T00:00:00.000Z',
+          },
+          {
+            site_url: '',
+            site_type: 'new-api',
+            account_info: {
+              id: 3003,
+              username: 'skip-me',
+              access_token: 'sess-skip',
+            },
+          },
+        ],
+      },
+    } as Record<string, unknown>;
+
+    const result = backupService.importAllApiHubAccountsMerge(payload);
+
+    expect(result.importedRows).toBe(2);
+    expect(result.skippedRows).toBe(1);
+    expect(result.sites.created).toBe(1);
+    expect(result.accounts.created).toBe(1);
+    expect(result.accounts.updated).toBe(1);
+    expect(result.tokens.created).toBe(2);
+    expect(result.repairedDefaultTokenAccounts).toBe(1);
+
+    const allSites = db.select().from(schema.sites).all();
+    const allAccounts = db.select().from(schema.accounts).all();
+    const allTokens = db.select().from(schema.accountTokens).all();
+
+    expect(allSites.length).toBe(2);
+    expect(allAccounts.length).toBe(2);
+    expect(allTokens.length).toBe(2);
+    const importedNewSite = allSites.find((site) => site.url === 'https://new.example.com');
+    expect(importedNewSite?.externalCheckinUrl).toBe('https://new.example.com/welfare');
+
+    const updatedAccount = db.select().from(schema.accounts).where(eq(schema.accounts.id, existingAccount.id)).get();
+    expect(updatedAccount).toBeTruthy();
+    expect(updatedAccount?.balance).toBeCloseTo(0.4, 6);
+    expect(updatedAccount?.balanceUsed).toBeCloseTo(0.2, 6);
+    expect(updatedAccount?.checkinEnabled).toBe(false);
+    expect(updatedAccount?.apiToken).toBe('sk-new-primary');
+
+    const updatedExtraConfig = JSON.parse(updatedAccount?.extraConfig || '{}') as Record<string, unknown>;
+    expect(updatedExtraConfig.credentialMode).toBe('apikey');
+
+    const defaultTokens = allTokens.filter((token) => token.accountId === existingAccount.id && token.isDefault);
+    expect(defaultTokens.length).toBe(1);
+  });
+
+  it('fills existing site external checkin url from import data when empty', () => {
+    const existingSite = db.insert(schema.sites).values({
+      name: 'existing',
+      url: 'https://welfare-fill.example.com',
+      platform: 'new-api',
+      externalCheckinUrl: null,
+      status: 'active',
+      isPinned: false,
+      sortOrder: 0,
+      globalWeight: 1,
+    }).returning().get();
+
+    db.insert(schema.accounts).values({
+      siteId: existingSite.id,
+      username: 'user',
+      accessToken: 'old-token',
+      apiToken: null,
+      balance: 0,
+      balanceUsed: 0,
+      quota: 0,
+      status: 'active',
+      isPinned: false,
+      sortOrder: 0,
+      checkinEnabled: true,
+      extraConfig: JSON.stringify({ platformUserId: 777 }),
+    }).run();
+
+    const payload = {
+      timestamp: Date.now(),
+      accounts: {
+        accounts: [
+          {
+            site_url: 'https://welfare-fill.example.com',
+            site_type: 'new-api',
+            site_name: 'existing',
+            authType: 'access_token',
+            account_info: {
+              id: 777,
+              username: 'user',
+              access_token: 'new-token',
+              quota: 10_000,
+            },
+            checkIn: {
+              customCheckIn: {
+                url: 'https://welfare-fill.example.com/checkin',
+              },
+            },
+          },
+        ],
+      },
+    } as Record<string, unknown>;
+
+    const result = backupService.importAllApiHubAccountsMerge(payload);
+    expect(result.importedRows).toBe(1);
+
+    const refreshed = db.select().from(schema.sites).where(eq(schema.sites.id, existingSite.id)).get();
+    expect(refreshed?.externalCheckinUrl).toBe('https://welfare-fill.example.com/checkin');
+  });
 });

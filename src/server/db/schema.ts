@@ -9,6 +9,9 @@ export const sites = sqliteTable('sites', {
   platform: text('platform').notNull(), // 'new-api' | 'one-api' | 'veloera' | 'one-hub' | 'done-hub' | 'sub2api' | 'openai' | 'claude' | 'gemini'
   proxyUrl: text('proxy_url'),
   status: text('status').notNull().default('active'), // 'active' | 'disabled'
+  healthStatus: text('health_status').notNull().default('unknown'), // 'alive' | 'unreachable' | 'unknown'
+  healthReason: text('health_reason'),
+  healthCheckedAt: text('health_checked_at'),
   isPinned: integer('is_pinned', { mode: 'boolean' }).default(false),
   sortOrder: integer('sort_order').default(0),
   globalWeight: real('global_weight').default(1),

@@ -138,4 +138,36 @@ describe('accounts add requires token verification success', () => {
     expect(accounts).toHaveLength(1);
     expect((accounts[0]?.apiToken || '').startsWith('sk-')).toBe(true);
   });
+
+  it('allows saving unverified session only when explicitly requested', async () => {
+    verifyTokenMock.mockResolvedValueOnce({ tokenType: 'unknown' });
+
+    const site = db.insert(schema.sites).values({
+      name: 'Shielded Site',
+      url: 'https://shielded.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts',
+      payload: {
+        siteId: site.id,
+        accessToken: 'session-token',
+        credentialMode: 'session',
+        allowUnverified: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { unverified?: boolean; queued?: boolean; initTaskId?: string };
+    expect(body.unverified).toBe(true);
+    expect(body.queued).toBe(false);
+    expect(body.initTaskId).toBeUndefined();
+
+    const accounts = db.select().from(schema.accounts).all();
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]?.checkinEnabled).toBe(false);
+    expect(accounts[0]?.accessToken).toBe('session-token');
+  });
 });

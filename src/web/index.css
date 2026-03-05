@@ -1765,8 +1765,20 @@ textarea {
 }
 
 .sites-page-actions {
+  display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
+  align-items: center;
+  margin-left: auto;
+  max-width: 100%;
+}
+
+.sites-page-actions .sites-sort-select {
+  flex: 0 0 auto;
+}
+
+.sites-page-actions .btn {
+  flex: 0 0 auto;
 }
 
 /* ===== Chart Placeholder ===== */
@@ -3203,6 +3215,12 @@ textarea {
     justify-content: stretch;
   }
 
+  .sites-page-actions .btn {
+    flex: 1 1 calc(50% - 4px);
+    min-width: 0;
+    justify-content: center;
+  }
+
   .sites-page-actions .sites-sort-select {
     flex: 1 1 100%;
     min-width: 0 !important;
@@ -3220,8 +3238,8 @@ textarea {
 
   .sites-table th:nth-child(2),
   .sites-table td:nth-child(2),
-  .sites-table th:nth-child(6),
-  .sites-table td:nth-child(6) {
+  .sites-table th:nth-child(7),
+  .sites-table td:nth-child(7) {
     display: none;
   }
 

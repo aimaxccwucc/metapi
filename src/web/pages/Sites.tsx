@@ -23,6 +23,9 @@ type SiteRow = {
   externalCheckinUrl?: string | null;
   platform?: string;
   status?: string;
+  healthStatus?: 'alive' | 'unreachable' | 'unknown' | string;
+  healthReason?: string | null;
+  healthCheckedAt?: string | null;
   apiKey?: string;
   proxyUrl?: string | null;
   globalWeight?: number;
@@ -44,6 +47,17 @@ const platformColors: Record<string, string> = {
   claude: 'badge-warning',
   gemini: 'badge-info',
   cliproxyapi: 'badge-info',
+};
+
+const siteReachabilityMap: Record<string, {
+  label: string;
+  cls: string;
+  dotClass: string;
+  pulse?: boolean;
+}> = {
+  alive: { label: '可达', cls: 'badge-success', dotClass: 'status-dot-success', pulse: true },
+  unreachable: { label: '不可达', cls: 'badge-error', dotClass: 'status-dot-error', pulse: true },
+  unknown: { label: '未知', cls: 'badge-muted', dotClass: 'status-dot-muted' },
 };
 
 const SITE_PLATFORM_OPTIONS = [
@@ -76,6 +90,7 @@ export default function Sites() {
   const [togglingSiteId, setTogglingSiteId] = useState<number | null>(null);
   const [orderingSiteId, setOrderingSiteId] = useState<number | null>(null);
   const [pinningSiteId, setPinningSiteId] = useState<number | null>(null);
+  const [siteOpsLoading, setSiteOpsLoading] = useState<Record<string, boolean>>({});
   const editorPresence = useAnimatedVisibility(Boolean(editor), 220);
   const lastEditorRef = useRef<SiteEditorState | null>(null);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
@@ -293,6 +308,70 @@ export default function Sites() {
     }
   };
 
+  const withSiteOpLoading = async (key: string, fn: () => Promise<void>) => {
+    setSiteOpsLoading((prev) => ({ ...prev, [key]: true }));
+    try {
+      await fn();
+    } finally {
+      setSiteOpsLoading((prev) => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const handleRefreshSiteHealth = async () => {
+    await withSiteOpLoading('refresh-site-health', async () => {
+      const result = await api.refreshSiteHealth();
+      toast.success(result?.message || '已开始检测站点存活状态，请到任务中心查看结果');
+    });
+  };
+
+  const handleDryRunCleanup = async () => {
+    await withSiteOpLoading('dryrun-cleanup', async () => {
+      const result = await api.cleanupUnreachableSites({ dryRun: true });
+      toast.success(result?.message || '已开始预检失活站点，请到任务中心查看结果');
+    });
+  };
+
+  const handleCleanupUnreachable = async () => {
+    if (!window.confirm('将移除不可达站点，并级联删除其账号/Key/签到日志。确认继续？')) return;
+    await withSiteOpLoading('cleanup-unreachable', async () => {
+      const result = await api.cleanupUnreachableSites();
+      toast.success(result?.message || '已开始移除失活站点，请到任务中心查看结果');
+      await load();
+    });
+  };
+
+  const renderSiteReachability = (site: SiteRow) => {
+    const healthKey = site.healthStatus || 'unknown';
+    const health = siteReachabilityMap[healthKey] || siteReachabilityMap.unknown;
+    const reason = (site.healthReason || '').trim();
+    const checkedAt = site.healthCheckedAt ? formatDateTimeLocal(site.healthCheckedAt) : '';
+    const detail = reason || (checkedAt ? `最后检测: ${checkedAt}` : '尚未检测');
+
+    return (
+      <div>
+        <span className={`badge ${health.cls}`} style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4, width: 'fit-content' }}>
+          <span className={`status-dot ${health.dotClass} ${health.pulse ? 'animate-pulse-dot' : ''}`} style={{ marginRight: 0 }} />
+          {health.label}
+        </span>
+        <div
+          style={{
+            marginTop: 4,
+            maxWidth: 220,
+            fontSize: 11,
+            lineHeight: 1.35,
+            color: 'var(--color-text-muted)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+          title={detail}
+        >
+          {detail}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="animate-fade-in">
       <div className="page-header">
@@ -319,6 +398,34 @@ export default function Sites() {
 
       <div className="info-tip" style={{ marginBottom: 12 }}>
         站点权重说明：最终站点倍率 = 站点全局权重 × 设置页中下游 API Key 的站点倍率。它会与路由策略因子（基础权重、价值分、成本、余额、使用频次）共同作用。数值越大，该站点在同优先级下越容易被选中。建议范围 0.5-3，默认 1；长期不建议超过 5。
+      </div>
+
+      <div className="card" style={{ marginBottom: 12, padding: 12 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <button
+            onClick={handleRefreshSiteHealth}
+            disabled={!!siteOpsLoading['refresh-site-health']}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+          >
+            {siteOpsLoading['refresh-site-health'] ? <><span className="spinner spinner-sm" /> 检测中...</> : '一键检测站点存活'}
+          </button>
+          <button
+            onClick={handleDryRunCleanup}
+            disabled={!!siteOpsLoading['dryrun-cleanup']}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+          >
+            {siteOpsLoading['dryrun-cleanup'] ? <><span className="spinner spinner-sm" /> 预检中...</> : '预检可移除站点'}
+          </button>
+          <button
+            onClick={handleCleanupUnreachable}
+            disabled={!!siteOpsLoading['cleanup-unreachable']}
+            className="btn btn-link btn-link-danger"
+          >
+            {siteOpsLoading['cleanup-unreachable'] ? <><span className="spinner spinner-sm" /> 移除中...</> : '一键移除失活站点+账号'}
+          </button>
+        </div>
       </div>
 
       {editorPresence.shouldRender && activeEditor && (
@@ -476,6 +583,7 @@ export default function Sites() {
                 <th>外部签到站URL</th>
                 <th>总余额</th>
                 <th>状态</th>
+                <th>可达状态</th>
                 <th>权重</th>
                 <th>平台</th>
                 <th>创建时间</th>
@@ -531,6 +639,9 @@ export default function Sites() {
                     <span className={`badge ${site.status === 'disabled' ? 'badge-muted' : 'badge-success'}`} style={{ fontSize: 11 }}>
                       {site.status === 'disabled' ? '禁用' : '启用'}
                     </span>
+                  </td>
+                  <td>
+                    {renderSiteReachability(site)}
                   </td>
                   <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
                     {(site.globalWeight || 1).toFixed(2)}

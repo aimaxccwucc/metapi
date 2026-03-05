@@ -30,11 +30,23 @@ async function request(url: string, options: RequestOptions = {}) {
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${token}`,
   };
-  if (fetchOptions.body) headers['Content-Type'] = 'application/json';
+  const method = String(fetchOptions.method || 'GET').toUpperCase();
+  const isMutatingJsonMethod = method === 'POST' || method === 'PUT' || method === 'PATCH';
+  const rawBody = fetchOptions.body;
+  const isFormDataBody = typeof FormData !== 'undefined' && rawBody instanceof FormData;
+  const hasBody = rawBody !== undefined && rawBody !== null;
+  const normalizedBody = (!isFormDataBody && isMutatingJsonMethod && !hasBody)
+    ? '{}'
+    : rawBody;
+
+  if (!isFormDataBody && (hasBody || isMutatingJsonMethod)) {
+    headers['Content-Type'] = 'application/json';
+  }
 
   try {
     const res = await fetch(url, {
       ...fetchOptions,
+      body: normalizedBody,
       signal: controller.signal,
       headers: {
         ...headers,
@@ -104,6 +116,16 @@ export const api = {
   updateSite: (id: number, data: any) => request(`/api/sites/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteSite: (id: number) => request(`/api/sites/${id}`, { method: 'DELETE' }),
   detectSite: (url: string) => request('/api/sites/detect', { method: 'POST', body: JSON.stringify({ url }) }),
+  refreshSiteHealth: (data?: { wait?: boolean }) => request('/api/sites/health/refresh', {
+    method: 'POST',
+    body: JSON.stringify(data || {}),
+    timeoutMs: data?.wait ? 150_000 : 30_000,
+  }),
+  cleanupUnreachableSites: (data?: { wait?: boolean; dryRun?: boolean }) => request('/api/sites/cleanup-unreachable', {
+    method: 'POST',
+    body: JSON.stringify(data || {}),
+    timeoutMs: data?.wait ? 150_000 : 30_000,
+  }),
 
   // Accounts
   getAccounts: () => request('/api/accounts'),
@@ -127,6 +149,11 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(data || {}),
     timeoutMs: data?.wait ? 150_000 : 30_000,
+  }),
+  repairAccountKeys: (data?: { wait?: boolean }) => request('/api/accounts/keys/repair', {
+    method: 'POST',
+    body: JSON.stringify(data || {}),
+    timeoutMs: data?.wait ? 180_000 : 30_000,
   }),
 
   // Account tokens
@@ -229,6 +256,11 @@ export const api = {
     request(`/api/settings/backup/export?type=${encodeURIComponent(type)}`),
   importBackup: (data: any) =>
     request('/api/settings/backup/import', {
+      method: 'POST',
+      body: JSON.stringify({ data }),
+    }),
+  importAllApiHubMerge: (data: any) =>
+    request('/api/settings/backup/import-all-api-hub-merge', {
       method: 'POST',
       body: JSON.stringify({ data }),
     }),

@@ -45,6 +45,29 @@ const CLOUDFLARE_530_HTML = `
 `;
 
 describe('NewApiAdapter', () => {
+  it('detects new-api via x-new-api-version header when /api/status is blocked', async () => {
+    await withDetectServer((req, res) => {
+      if (req.url === '/api/status') {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<html><head><title>Just a moment...</title></head><body></body></html>');
+        return;
+      }
+      if (req.url === '/v1/models') {
+        res.writeHead(401, {
+          'Content-Type': 'application/json',
+          'x-new-api-version': 'v0.1.65',
+        });
+        res.end(JSON.stringify({ error: { message: 'unauthorized' } }));
+        return;
+      }
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+    }, async (baseUrl) => {
+      const adapter = new NewApiAdapter();
+      await expect(adapter.detect(baseUrl)).resolves.toBe(true);
+    });
+  });
+
   let server: ReturnType<typeof createServer>;
   let baseUrl: string;
   let requests: RequestSnapshot[] = [];
@@ -546,3 +569,22 @@ describe('NewApiAdapter', () => {
     expect(receivedHeaders['neo-api-user']).toBe('42');
   });
 });
+
+async function withDetectServer(
+  handler: (req: IncomingMessage, res: ServerResponse) => void,
+  run: (baseUrl: string) => Promise<void>,
+) {
+  const server = createServer(handler);
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const addr = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+  try {
+    await run(baseUrl);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((err?: Error) => (err ? reject(err) : resolve()));
+    });
+  }
+}

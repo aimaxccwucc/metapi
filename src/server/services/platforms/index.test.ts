@@ -61,7 +61,7 @@ describe('getAdapter platform aliases', () => {
     expect(openai?.platformName).toBe('openai');
     expect(claude?.platformName).toBe('claude');
     expect(gemini?.platformName).toBe('gemini');
-  });
+  }, 20_000);
 
   it('detects one-hub by title under custom domain before generic new-api', async () => {
     await withHttpServer((req, res) => {

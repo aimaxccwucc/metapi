@@ -52,6 +52,16 @@ export default function Accounts() {
   const [rebindSaving, setRebindSaving] = useState(false);
   const [highlightRebindPanel, setHighlightRebindPanel] = useState(false);
   const [rebindFocusTrigger, setRebindFocusTrigger] = useState(0);
+  const [editTarget, setEditTarget] = useState<any | null>(null);
+  const [editForm, setEditForm] = useState({
+    username: '',
+    apiToken: '',
+    accessToken: '',
+    platformUserId: '',
+    refreshToken: '',
+    tokenExpiresAt: '',
+  });
+  const [editSaving, setEditSaving] = useState(false);
   const addPanelPresence = useAnimatedVisibility(showAdd, 220);
   const rebindPanelPresence = useAnimatedVisibility(Boolean(rebindTarget), 220);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
@@ -166,9 +176,11 @@ export default function Accounts() {
     }
   };
 
-  const handleTokenAdd = async () => {
+  const canForceAddUnverified = !!verifyResult && !verifyResult.success && verifyResult.shieldBlocked;
+
+  const handleTokenAdd = async (allowUnverified = false) => {
     if (!tokenForm.siteId || !tokenForm.accessToken) return;
-    if (!verifyResult?.success) {
+    if (!verifyResult?.success && !(allowUnverified && verifyResult?.shieldBlocked)) {
       toast.error('请先验证 Token 成功后再添加账号');
       return;
     }
@@ -187,6 +199,9 @@ export default function Accounts() {
         : undefined,
       credentialMode: tokenForm.credentialMode,
     };
+    if (allowUnverified && verifyResult?.shieldBlocked) {
+      payload.allowUnverified = true;
+    }
     const snapshotMatchesCurrentForm = !!verifiedSnapshot
       && verifiedSnapshot.siteId === tokenForm.siteId
       && verifiedSnapshot.accessToken === tokenForm.accessToken
@@ -215,6 +230,8 @@ export default function Accounts() {
       setVerifiedSnapshot(null);
       if (result.tokenType === 'apikey') {
         toast.success('已添加为 API Key 账号（可用于代理转发）');
+      } else if (result.unverified) {
+        toast.info('账号已保存（未完成验证），请先手动签到/确认后再使用自动任务');
       } else {
         const parts: string[] = [];
         if (result.usernameDetected) parts.push('用户名已自动识别');
@@ -309,6 +326,23 @@ export default function Accounts() {
     }
   };
 
+  const handleRepairAccountKeys = async () => {
+    setActionLoading((s) => ({ ...s, 'keys-repair': true }));
+    try {
+      const res = await api.repairAccountKeys();
+      if (res?.queued) {
+        toast.info(res.message || '账号 Key 修复任务已提交，完成后会自动更新。');
+      } else {
+        toast.success(res?.message || '账号 Key 修复已完成');
+      }
+      load();
+    } catch (e: any) {
+      toast.error(e.message || '账号 Key 修复失败');
+    } finally {
+      setActionLoading((s) => ({ ...s, 'keys-repair': false }));
+    }
+  };
+
   const handleToggleCheckin = async (account: any) => {
     const key = `checkin-toggle-${account.id}`;
     const nextEnabled = !account.checkinEnabled;
@@ -364,6 +398,88 @@ export default function Accounts() {
     } catch { }
     const guessed = Number.parseInt(String(account?.username || '').match(/(\d{3,8})$/)?.[1] || '', 10);
     return Number.isFinite(guessed) && guessed > 0 ? String(guessed) : '';
+  };
+
+  const extractManagedSub2ApiAuth = (account: any): { refreshToken: string; tokenExpiresAt: string } => {
+    try {
+      const parsed = JSON.parse(account?.extraConfig || '{}');
+      const auth = parsed?.sub2apiAuth;
+      if (!auth || typeof auth !== 'object') return { refreshToken: '', tokenExpiresAt: '' };
+      const refreshToken = typeof auth.refreshToken === 'string' ? auth.refreshToken : '';
+      const tokenExpiresAt = Number.isFinite(auth.tokenExpiresAt) ? String(Math.trunc(auth.tokenExpiresAt)) : '';
+      return { refreshToken, tokenExpiresAt };
+    } catch {
+      return { refreshToken: '', tokenExpiresAt: '' };
+    }
+  };
+
+  const openEditPanel = (account: any) => {
+    const managedAuth = extractManagedSub2ApiAuth(account);
+    setEditTarget(account);
+    setEditForm({
+      username: account?.username || '',
+      apiToken: account?.apiToken || '',
+      accessToken: account?.accessToken || '',
+      platformUserId: extractPlatformUserId(account),
+      refreshToken: managedAuth.refreshToken,
+      tokenExpiresAt: managedAuth.tokenExpiresAt,
+    });
+  };
+
+  const closeEditPanel = () => {
+    setEditTarget(null);
+    setEditForm({
+      username: '',
+      apiToken: '',
+      accessToken: '',
+      platformUserId: '',
+      refreshToken: '',
+      tokenExpiresAt: '',
+    });
+    setEditSaving(false);
+  };
+
+  const handleSubmitEdit = async () => {
+    if (!editTarget) return;
+    setEditSaving(true);
+    try {
+      const normalizedPlatformUserId = editForm.platformUserId.trim()
+        ? Number.parseInt(editForm.platformUserId.trim(), 10)
+        : undefined;
+      const baseExtraConfig = (() => {
+        try {
+          const parsed = JSON.parse(editTarget?.extraConfig || '{}');
+          return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch {
+          return {};
+        }
+      })();
+      if (Number.isFinite(normalizedPlatformUserId as number) && (normalizedPlatformUserId as number) > 0) {
+        (baseExtraConfig as Record<string, unknown>).platformUserId = normalizedPlatformUserId;
+      }
+
+      const payload: Record<string, unknown> = {
+        username: editForm.username.trim() || null,
+        apiToken: editForm.apiToken.trim() || null,
+        accessToken: editForm.accessToken.trim() || '',
+        extraConfig: JSON.stringify(baseExtraConfig),
+      };
+
+      const isSub2Api = (editTarget?.site?.platform || '').toLowerCase() === 'sub2api';
+      if (isSub2Api) {
+        payload.refreshToken = editForm.refreshToken.trim();
+        payload.tokenExpiresAt = editForm.tokenExpiresAt.trim();
+      }
+
+      await api.updateAccount(editTarget.id, payload);
+      toast.success('账号已更新');
+      closeEditPanel();
+      await load();
+    } catch (e: any) {
+      toast.error(e.message || '更新账号失败');
+    } finally {
+      setEditSaving(false);
+    }
   };
 
   const openRebindPanel = (account: any) => {
@@ -505,6 +621,13 @@ export default function Accounts() {
             className="btn btn-soft-primary"
           >
             {actionLoading['health-refresh'] ? <><span className="spinner spinner-sm" />{tr('刷新状态中...')}</> : tr('刷新账户状态')}
+          </button>
+          <button
+            onClick={handleRepairAccountKeys}
+            disabled={actionLoading['keys-repair']}
+            className="btn btn-soft-primary"
+          >
+            {actionLoading['keys-repair'] ? <><span className="spinner spinner-sm" />{tr('修复中...')}</> : tr('一键修复Key')}
           </button>
           <button onClick={() => { setShowAdd(!showAdd); setAddMode('token'); setVerifyResult(null); }} className="btn btn-primary">
             {showAdd ? tr('取消') : tr('+ 添加账号')}
@@ -698,6 +821,11 @@ export default function Accounts() {
                     {verifyResult.message || 'Token 无效或已过期'}
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>请检查 Token 是否正确</div>
+                  {verifyResult.shieldBlocked && (
+                    <div style={{ fontSize: 12, color: 'var(--color-warning)', marginTop: 6 }}>
+                      站点开启了反爬挑战。可先“保存账号（未验证）”，后续先手动签到，再回来重绑/更新凭证。
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -706,12 +834,21 @@ export default function Accounts() {
                   className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}>
                   {verifying ? <><span className="spinner spinner-sm" />验证中...</> : '验证 Token'}
                 </button>
-                <button onClick={handleTokenAdd} disabled={saving || !tokenForm.siteId || !tokenForm.accessToken || !verifyResult?.success}
+                <button onClick={() => handleTokenAdd(false)} disabled={saving || !tokenForm.siteId || !tokenForm.accessToken || !verifyResult?.success}
                   className="btn btn-success">
                   {saving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />添加中...</> : '添加账号'}
                 </button>
+                {canForceAddUnverified && (
+                  <button
+                    onClick={() => handleTokenAdd(true)}
+                    disabled={saving || !tokenForm.siteId || !tokenForm.accessToken}
+                    className="btn btn-link btn-link-warning"
+                  >
+                    {saving ? '保存中...' : '保存账号（未验证）'}
+                  </button>
+                )}
               </div>
-              {!verifyResult?.success && (
+              {!verifyResult?.success && !canForceAddUnverified && (
                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                   请先点击“验证 Token”，验证成功后才能添加账号
                 </div>
@@ -819,6 +956,73 @@ export default function Accounts() {
               {rebindSaving
                 ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />绑定中...</>
                 : '确认重新绑定'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {editTarget && (
+        <div className="card" style={{ marginBottom: 16, padding: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--color-text-primary)' }}>
+              编辑账号
+            </div>
+            <button className="btn btn-ghost" onClick={closeEditPanel}>关闭</button>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+            账号: {editTarget.username || '未命名'} @ {editTarget.site?.name || '-'}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10, marginBottom: 10 }}>
+            <input
+              placeholder="用户名"
+              value={editForm.username}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, username: e.target.value }))}
+              style={inputStyle}
+            />
+            <input
+              placeholder="用户 ID（可选）"
+              value={editForm.platformUserId}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, platformUserId: e.target.value.replace(/\D/g, '') }))}
+              style={inputStyle}
+            />
+            <input
+              placeholder="API Key（可选）"
+              value={editForm.apiToken}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, apiToken: e.target.value.trim() }))}
+              style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+            />
+          </div>
+
+          <textarea
+            placeholder="Session Token / Cookie（可选，留空表示清空）"
+            value={editForm.accessToken}
+            onChange={(e) => setEditForm((prev) => ({ ...prev, accessToken: e.target.value.trim() }))}
+            style={{ ...inputStyle, fontFamily: 'var(--font-mono)', height: 74, resize: 'none' as const, marginBottom: 10 }}
+          />
+
+          {(editTarget?.site?.platform || '').toLowerCase() === 'sub2api' && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10, marginBottom: 10 }}>
+              <input
+                placeholder="Sub2API refresh_token（可选）"
+                value={editForm.refreshToken}
+                onChange={(e) => setEditForm((prev) => ({ ...prev, refreshToken: e.target.value.trim() }))}
+                style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+              />
+              <input
+                placeholder="token_expires_at（可选，毫秒时间戳）"
+                value={editForm.tokenExpiresAt}
+                onChange={(e) => setEditForm((prev) => ({ ...prev, tokenExpiresAt: e.target.value.replace(/\D/g, '') }))}
+                style={inputStyle}
+              />
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={handleSubmitEdit} disabled={editSaving} className="btn btn-success">
+              {editSaving
+                ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />保存中...</>
+                : '保存修改'}
             </button>
           </div>
         </div>
@@ -986,6 +1190,12 @@ export default function Accounts() {
                             重新绑定
                           </button>
                         )}
+                        <button
+                          onClick={() => openEditPanel(a)}
+                          className="btn btn-link btn-link-info"
+                        >
+                          编辑
+                        </button>
                         <button onClick={() => withLoading(`delete-${a.id}`, () => api.deleteAccount(a.id), '已删除')} disabled={actionLoading[`delete-${a.id}`]}
                           className="btn btn-link btn-link-danger">
                           {actionLoading[`delete-${a.id}`] ? <span className="spinner spinner-sm" /> : '删除'}

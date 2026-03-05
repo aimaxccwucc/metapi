@@ -61,6 +61,48 @@ describe('sites proxy url settings', () => {
     expect(payload.globalWeight).toBe(1.5);
   });
 
+  it('normalizes site url to origin when creating a site', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'origin-site',
+        url: 'https://elysiver.h-e.top/console/token',
+        platform: 'new-api',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as { url?: string };
+    expect(payload.url).toBe('https://elysiver.h-e.top');
+  });
+
+  it('normalizes site url to origin when updating a site', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'update-origin-site',
+        url: 'https://origin-update.example.com',
+        platform: 'new-api',
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const createdPayload = created.json() as { id: number };
+
+    const updated = await app.inject({
+      method: 'PUT',
+      url: `/api/sites/${createdPayload.id}`,
+      payload: {
+        url: 'https://elysiver.h-e.top/console/token',
+      },
+    });
+
+    expect(updated.statusCode).toBe(200);
+    const payload = updated.json() as { url?: string };
+    expect(payload.url).toBe('https://elysiver.h-e.top');
+  });
+
   it('rejects invalid proxy url', async () => {
     const response = await app.inject({
       method: 'POST',

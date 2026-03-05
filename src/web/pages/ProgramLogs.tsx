@@ -17,7 +17,19 @@ type ProgramEvent = {
   createdAt?: string | null;
 };
 
+type BackgroundTask = {
+  id: string;
+  type: string;
+  title: string;
+  status: 'pending' | 'running' | 'succeeded' | 'failed';
+  message?: string | null;
+  error?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
 const PAGE_SIZE = 80;
+const TASK_POLL_INTERVAL_MS = 5000;
 
 const TYPE_OPTIONS = [
   { value: '', label: '全部类型' },
@@ -55,8 +67,18 @@ function eventStatusLabel(row: ProgramEvent) {
   return { label: '信息', cls: 'badge-info' };
 }
 
+function taskStatusLabel(status: BackgroundTask['status']) {
+  if (status === 'failed') return { label: '失败', cls: 'badge-error' };
+  if (status === 'succeeded') return { label: '成功', cls: 'badge-success' };
+  if (status === 'running') return { label: '进行中', cls: 'badge-info' };
+  return { label: '排队中', cls: 'badge-warning' };
+}
+
 export default function ProgramLogs() {
   const [events, setEvents] = useState<ProgramEvent[]>([]);
+  const [tasks, setTasks] = useState<BackgroundTask[]>([]);
+  const [tasksLoading, setTasksLoading] = useState(true);
+  const [tasksRefreshing, setTasksRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [filterType, setFilterType] = useState('');
@@ -67,7 +89,23 @@ export default function ProgramLogs() {
   const [markingAll, setMarkingAll] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [rowLoading, setRowLoading] = useState<Record<number, boolean>>({});
+  const [taskRetryLoading, setTaskRetryLoading] = useState<Record<string, boolean>>({});
   const toast = useToast();
+
+  const loadTasks = async (silent = false) => {
+    if (silent) setTasksRefreshing(true);
+    else setTasksLoading(true);
+    try {
+      const result = await api.getTasks(60);
+      const rows = Array.isArray(result?.tasks) ? result.tasks : [];
+      setTasks(rows);
+    } catch (e: any) {
+      if (!silent) toast.error(e.message || '加载任务中心失败');
+    } finally {
+      setTasksLoading(false);
+      setTasksRefreshing(false);
+    }
+  };
 
   const load = async (silent = false, append = false) => {
     if (append) setLoadingMore(true);
@@ -100,7 +138,23 @@ export default function ProgramLogs() {
     load();
   }, [filterType, onlyUnread]);
 
+  useEffect(() => {
+    loadTasks();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void loadTasks(true);
+    }, TASK_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const visibleRows = useMemo(() => events, [events]);
+  const taskSummary = useMemo(() => ({
+    total: tasks.length,
+    pending: tasks.filter((item) => item.status === 'pending').length,
+    running: tasks.filter((item) => item.status === 'running').length,
+    succeeded: tasks.filter((item) => item.status === 'succeeded').length,
+    failed: tasks.filter((item) => item.status === 'failed').length,
+  }), [tasks]);
 
   const withRowLoading = async (id: number, fn: () => Promise<void>) => {
     setRowLoading((prev) => ({ ...prev, [id]: true }));
@@ -108,6 +162,34 @@ export default function ProgramLogs() {
       await fn();
     } finally {
       setRowLoading((prev) => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const retryTask = async (task: BackgroundTask) => {
+    const taskId = task.id;
+    setTaskRetryLoading((prev) => ({ ...prev, [taskId]: true }));
+    try {
+      if (task.type === 'checkin') {
+        await api.triggerCheckinAll();
+      } else if (task.type === 'token' && (task.title || '').includes('Key 一键修复')) {
+        await api.repairAccountKeys();
+      } else if (task.type === 'status' && (task.title || '').includes('运行健康状态')) {
+        await api.refreshAccountHealth();
+      } else if (task.type === 'status' && (task.title || '').includes('站点存活')) {
+        await api.refreshSiteHealth();
+      } else if (task.type === 'status' && (task.title || '').includes('失活站点')) {
+        const dryRun = (task.title || '').includes('预检');
+        await api.cleanupUnreachableSites(dryRun ? { dryRun: true } : {});
+      } else {
+        toast.info('该任务类型暂不支持一键重试，请到对应页面手动重试。');
+        return;
+      }
+      toast.success('已提交重试任务');
+      await loadTasks(true);
+    } catch (e: any) {
+      toast.error(e.message || '重试任务失败');
+    } finally {
+      setTaskRetryLoading((prev) => ({ ...prev, [taskId]: false }));
     }
   };
 
@@ -156,6 +238,14 @@ export default function ProgramLogs() {
         <h2 className="page-title">{tr('程序日志')}</h2>
         <div className="page-actions">
           <button
+            onClick={() => loadTasks(true)}
+            disabled={tasksRefreshing}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+          >
+            {tasksRefreshing ? <><span className="spinner spinner-sm" /> 任务刷新中...</> : '刷新任务中心'}
+          </button>
+          <button
             onClick={() => load(true)}
             disabled={refreshing}
             className="btn btn-ghost"
@@ -179,6 +269,95 @@ export default function ProgramLogs() {
             {clearing ? <><span className="spinner spinner-sm" /> 清空中...</> : '清空日志'}
           </button>
         </div>
+      </div>
+
+      <div className="card" style={{ overflowX: 'auto', marginBottom: 12 }}>
+        <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--color-border-light)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ fontSize: 14, fontWeight: 700 }}>任务中心</div>
+          <span className="badge badge-muted" style={{ fontSize: 11 }}>自动轮询 {TASK_POLL_INTERVAL_MS / 1000}s</span>
+          <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-muted)' }}>
+            总计 {taskSummary.total} · 排队 {taskSummary.pending} · 进行中 {taskSummary.running} · 成功 {taskSummary.succeeded} · 失败 {taskSummary.failed}
+          </div>
+        </div>
+        {tasksLoading ? (
+          <div style={{ padding: 14 }}>
+            <div className="skeleton" style={{ width: '100%', height: 34, marginBottom: 8 }} />
+            <div className="skeleton" style={{ width: '100%', height: 34 }} />
+          </div>
+        ) : tasks.length > 0 ? (
+          <table className="data-table program-logs-table">
+            <colgroup>
+              <col style={{ width: 170 }} />
+              <col style={{ width: 90 }} />
+              <col style={{ width: 120 }} />
+              <col style={{ width: 280 }} />
+              <col />
+              <col style={{ width: 120 }} />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>类型</th>
+                <th>状态</th>
+                <th>任务</th>
+                <th>详情</th>
+                <th style={{ textAlign: 'right' }}>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tasks.map((task) => {
+                const status = taskStatusLabel(task.status);
+                return (
+                  <tr key={task.id}>
+                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                      {formatDateTimeLocal(task.updatedAt || task.createdAt)}
+                    </td>
+                    <td>
+                      <span className="badge badge-muted" style={{ fontSize: 11 }}>
+                        {task.type || '-'}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={`badge ${status.cls}`} style={{ fontSize: 11 }}>
+                        {status.label}
+                      </span>
+                    </td>
+                    <td>
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>{task.title || '-'}</div>
+                      <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{task.id}</div>
+                    </td>
+                    <td>
+                      <div style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>{task.message || '-'}</div>
+                      {task.error ? (
+                        <div style={{ marginTop: 6, fontSize: 12, color: 'var(--color-danger)' }}>
+                          错误：{task.error}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td style={{ textAlign: 'right' }}>
+                      {task.status === 'failed' ? (
+                        <button
+                          className="btn btn-link btn-link-primary"
+                          onClick={() => retryTask(task)}
+                          disabled={!!taskRetryLoading[task.id]}
+                        >
+                          {taskRetryLoading[task.id] ? <span className="spinner spinner-sm" /> : '重试'}
+                        </button>
+                      ) : (
+                        <span className="badge badge-muted" style={{ fontSize: 11 }}>-</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <div className="empty-state" style={{ padding: '24px 12px' }}>
+            <div className="empty-state-title">暂无后台任务</div>
+            <div className="empty-state-desc">触发同步 Token、签到或模型刷新后会显示执行状态。</div>
+          </div>
+        )}
       </div>
 
       <div className="card" style={{ padding: 14, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
