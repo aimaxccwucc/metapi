@@ -491,6 +491,47 @@ export async function statsRoutes(app: FastifyInstance) {
     }));
   });
 
+  app.get<{ Querystring: { limit?: string; offset?: string } }>('/api/stats/proxy-video-tasks', async (request) => {
+    const limit = parseInt(request.query.limit || '50', 10);
+    const offset = parseInt(request.query.offset || '0', 10);
+    const rows = await db.select({
+      task: schema.proxyVideoTasks,
+      accounts: schema.accounts,
+      sites: schema.sites,
+    }).from(schema.proxyVideoTasks)
+      .leftJoin(schema.accounts, eq(schema.proxyVideoTasks.accountId, schema.accounts.id))
+      .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .orderBy(desc(schema.proxyVideoTasks.createdAt))
+      .limit(limit).offset(offset).all();
+
+    return rows.map((row) => {
+      const statusSnapshot = (() => {
+        if (!row.task.statusSnapshot) return null;
+        try {
+          return JSON.parse(row.task.statusSnapshot);
+        } catch {
+          return null;
+        }
+      })();
+      const upstreamResponseMeta = (() => {
+        if (!row.task.upstreamResponseMeta) return null;
+        try {
+          return JSON.parse(row.task.upstreamResponseMeta);
+        } catch {
+          return null;
+        }
+      })();
+      return {
+        ...row.task,
+        statusSnapshot,
+        upstreamResponseMeta,
+        username: row.accounts?.username || null,
+        siteName: row.sites?.name || null,
+        siteUrl: row.sites?.url || null,
+      };
+    });
+  });
+
   // Models marketplace - refresh upstream models and aggregate.
   app.get<{ Querystring: { refresh?: string; includePricing?: string } }>('/api/models/marketplace', async (request) => {
     const refreshRequested = parseBooleanFlag(request.query.refresh);

@@ -15,8 +15,24 @@ import {
   refreshProxyVideoTaskSnapshot,
   saveProxyVideoTask,
 } from '../../services/proxyVideoTaskStore.js';
+import { filterCandidatesByTokenModelAvailability, markTokenModelUnavailable } from '../../services/mediaRoutingSupport.js';
 
 const MAX_RETRIES = 2;
+
+const selectCompatibleVideoChannel = (
+  requestedModel: string,
+  downstreamPolicy: ReturnType<typeof getDownstreamRoutingPolicy>,
+  excludeChannelIds?: number[],
+) => {
+  const candidateFilter = (candidates: Parameters<typeof filterCandidatesByTokenModelAvailability>[0]) =>
+    filterCandidatesByTokenModelAvailability(candidates, requestedModel, 'video');
+
+  if (excludeChannelIds && excludeChannelIds.length > 0) {
+    return tokenRouter.selectNextChannelWithOptions(requestedModel, excludeChannelIds, { downstreamPolicy, candidateFilter });
+  }
+
+  return tokenRouter.selectChannelWithOptions(requestedModel, { downstreamPolicy, candidateFilter });
+};
 
 function rewriteVideoResponsePublicId(payload: unknown, publicId: string): unknown {
   if (!payload || typeof payload !== 'object') return payload;
@@ -51,12 +67,12 @@ export async function videosProxyRoute(app: FastifyInstance) {
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
-        ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
+        ? await selectCompatibleVideoChannel(requestedModel, downstreamPolicy)
+        : await selectCompatibleVideoChannel(requestedModel, downstreamPolicy, excludeChannelIds);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
-        selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
+        selected = await selectCompatibleVideoChannel(requestedModel, downstreamPolicy);
       }
 
       if (!selected) {
@@ -100,6 +116,9 @@ export async function videosProxyRoute(app: FastifyInstance) {
         const text = await upstream.text();
         if (!upstream.ok) {
           tokenRouter.recordFailure(selected.channel.id);
+          if ((text || '').match(/unsupported\s+model|model\s+not\s+supported|does\s+not\s+support(?:\s+the)?\s+model/i)) {
+            await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
+          }
           if (isTokenExpiredError({ status: upstream.status, message: text })) {
             await reportTokenExpired({
               accountId: selected.account.id,

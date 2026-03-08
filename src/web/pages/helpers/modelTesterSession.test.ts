@@ -13,6 +13,7 @@ import {
   collectModelTesterModelNames,
   countConversationTurns,
   filterModelTesterModelNames,
+  getPreferredModelTesterModel,
   parseCustomRequestBody,
   parseModelTesterSession,
   serializeModelTesterSession,
@@ -304,5 +305,19 @@ describe('modelTesterSession', () => {
       'bge-m3',
       'BAAI/bge-large-en-v1.5',
     ]);
+  });
+
+  it('prefers media-friendly models for image and video modes', () => {
+    expect(getPreferredModelTesterModel([
+      'claude-sonnet-4',
+      'gpt-4o-image',
+      'imagen-4',
+    ], 'images.generate')).toBe('imagen-4');
+
+    expect(getPreferredModelTesterModel([
+      'gpt-4o-mini',
+      'veo3-fast',
+      'sora_video2',
+    ], 'videos.create')).toBe('sora_video2');
   });
 });

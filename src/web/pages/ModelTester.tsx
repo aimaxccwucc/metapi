@@ -20,6 +20,7 @@ import {
   collectModelTesterModelNames,
   createLoadingAssistantMessage,
   createMessage,
+  getPreferredModelTesterModel,
   filterModelTesterModelNames,
   finalizeIncompleteMessage,
   findLastLoadingAssistantIndex,
@@ -772,9 +773,7 @@ export default function ModelTester() {
         const currentModel = inputs.model || '';
         const nextModel = restoredModel && names.includes(restoredModel)
           ? restoredModel
-          : currentModel && names.includes(currentModel)
-            ? currentModel
-            : names[0] || '';
+          : getPreferredModelTesterModel(names, inputs.mode, currentModel);
 
         if (nextModel) {
           setInputs((prev) => ({ ...prev, model: nextModel }));
@@ -1260,6 +1259,13 @@ export default function ModelTester() {
     () => filteredModels.map((item) => ({ value: item, label: item })),
     [filteredModels],
   );
+  useEffect(() => {
+    if (models.length === 0) return;
+    const preferredModel = getPreferredModelTesterModel(models, inputs.mode, inputs.model);
+    if (!preferredModel || preferredModel === inputs.model) return;
+    setInputs((prev) => ({ ...prev, model: preferredModel }));
+  }, [inputs.mode, inputs.model, models]);
+
   const canSend = useMemo(() => {
     if (sending || pendingJobId || !inputs.model) return false;
     if (inputs.mode !== 'conversation') {

@@ -12,8 +12,24 @@ import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { composeProxyLogMessage } from './logPathMeta.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { cloneFormDataWithOverrides, ensureMultipartBufferParser, parseMultipartFormData } from './multipart.js';
+import { filterCandidatesByTokenModelAvailability, markTokenModelUnavailable } from '../../services/mediaRoutingSupport.js';
 
 const MAX_RETRIES = 2;
+
+const selectCompatibleImageChannel = (
+  requestedModel: string,
+  downstreamPolicy: ReturnType<typeof getDownstreamRoutingPolicy>,
+  excludeChannelIds?: number[],
+) => {
+  const candidateFilter = (candidates: Parameters<typeof filterCandidatesByTokenModelAvailability>[0]) =>
+    filterCandidatesByTokenModelAvailability(candidates, requestedModel, 'image');
+
+  if (excludeChannelIds && excludeChannelIds.length > 0) {
+    return tokenRouter.selectNextChannelWithOptions(requestedModel, excludeChannelIds, { downstreamPolicy, candidateFilter });
+  }
+
+  return tokenRouter.selectChannelWithOptions(requestedModel, { downstreamPolicy, candidateFilter });
+};
 
 export async function imagesProxyRoute(app: FastifyInstance) {
   ensureMultipartBufferParser(app);
@@ -28,12 +44,12 @@ export async function imagesProxyRoute(app: FastifyInstance) {
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
-        ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
+        ? await selectCompatibleImageChannel(requestedModel, downstreamPolicy)
+        : await selectCompatibleImageChannel(requestedModel, downstreamPolicy, excludeChannelIds);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
-        selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
+        selected = await selectCompatibleImageChannel(requestedModel, downstreamPolicy);
       }
 
       if (!selected) {
@@ -65,6 +81,9 @@ export async function imagesProxyRoute(app: FastifyInstance) {
         const text = await upstream.text();
         if (!upstream.ok) {
           tokenRouter.recordFailure(selected.channel.id);
+          if ((text || '').match(/unsupported\s+model|only\s+imagen\s+models\s+are\s+supported|not\s+supported\s+model\s+for\s+image\s+generation/i)) {
+            await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
+          }
           logProxy(selected, requestedModel, 'failed', upstream.status, Date.now() - startTime, text, retryCount);
           if (isTokenExpiredError({ status: upstream.status, message: text })) {
             await reportTokenExpired({
@@ -135,12 +154,12 @@ export async function imagesProxyRoute(app: FastifyInstance) {
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
-        ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
+        ? await selectCompatibleImageChannel(requestedModel, downstreamPolicy)
+        : await selectCompatibleImageChannel(requestedModel, downstreamPolicy, excludeChannelIds);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
-        selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
+        selected = await selectCompatibleImageChannel(requestedModel, downstreamPolicy);
       }
 
       if (!selected) {
@@ -184,6 +203,9 @@ export async function imagesProxyRoute(app: FastifyInstance) {
         const text = await upstream.text();
         if (!upstream.ok) {
           tokenRouter.recordFailure(selected.channel.id);
+          if ((text || '').match(/unsupported\s+model|only\s+imagen\s+models\s+are\s+supported|not\s+supported\s+model\s+for\s+image\s+generation/i)) {
+            await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
+          }
           logProxy(selected, requestedModel, 'failed', upstream.status, Date.now() - startTime, text, retryCount, 0, '/v1/images/edits');
           if (isTokenExpiredError({ status: upstream.status, message: text })) {
             await reportTokenExpired({

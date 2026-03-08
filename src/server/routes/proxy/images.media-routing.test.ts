@@ -1,5 +1,12 @@
-import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import Fastify from 'fastify';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { eq } from 'drizzle-orm';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+type DbModule = typeof import('../../db/index.js');
 
 const fetchMock = vi.fn();
 const selectChannelMock = vi.fn();
@@ -10,11 +17,6 @@ const refreshModelsAndRebuildRoutesMock = vi.fn();
 const reportProxyAllFailedMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
 const estimateProxyCostMock = vi.fn(async () => 0);
-const dbInsertMock = vi.fn((_arg?: any) => ({
-  values: () => ({
-    run: () => undefined,
-  }),
-}));
 
 vi.mock('undici', async () => {
   const actual = await vi.importActual<typeof import('undici')>('undici');
@@ -52,50 +54,29 @@ vi.mock('../../services/modelPricingService.js', () => ({
   estimateProxyCost: (arg: any) => estimateProxyCostMock(arg),
 }));
 
-vi.mock('../../services/mediaRoutingSupport.js', () => ({
-  filterCandidatesByTokenModelAvailability: async (candidates: any[]) => candidates,
-  markTokenModelUnavailable: vi.fn(),
-}));
-
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldRetryProxyRequest: () => false,
 }));
 
-vi.mock('../../db/index.js', () => ({
-  db: {
-    insert: (arg: any) => dbInsertMock(arg),
-  },
-  schema: {
-    proxyLogs: {},
-  },
-}));
-
-function buildMultipartBody(boundary: string) {
-  return Buffer.from(
-    `--${boundary}\r\n`
-      + `Content-Disposition: form-data; name="model"\r\n\r\n`
-      + `gpt-image-1\r\n`
-      + `--${boundary}\r\n`
-      + `Content-Disposition: form-data; name="prompt"\r\n\r\n`
-      + `edit this\r\n`
-      + `--${boundary}\r\n`
-      + `Content-Disposition: form-data; name="image"; filename="cat.png"\r\n`
-      + `Content-Type: image/png\r\n\r\n`
-      + `pngdata\r\n`
-      + `--${boundary}--\r\n`,
-  );
-}
-
-describe('/v1/images/edits route', () => {
+describe('/v1/images media routing', () => {
   let app: FastifyInstance;
+  let db: DbModule['db'];
+  let schema: DbModule['schema'];
+  let dataDir = '';
 
   beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), 'metapi-images-media-routing-'));
+    process.env.DATA_DIR = dataDir;
+    await import('../../db/migrate.js');
+    const dbModule = await import('../../db/index.js');
+    db = dbModule.db;
+    schema = dbModule.schema;
     const { imagesProxyRoute } = await import('./images.js');
     app = Fastify();
     await app.register(imagesProxyRoute);
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     fetchMock.mockReset();
     selectChannelMock.mockReset();
     selectNextChannelMock.mockReset();
@@ -105,63 +86,78 @@ describe('/v1/images/edits route', () => {
     reportProxyAllFailedMock.mockReset();
     reportTokenExpiredMock.mockReset();
     estimateProxyCostMock.mockClear();
-    dbInsertMock.mockClear();
 
-    selectChannelMock.mockReturnValue({
-      channel: { id: 11, routeId: 22 },
-      site: { id: 44, name: 'demo-site', url: 'https://upstream.example.com', platform: 'openai' },
-      account: { id: 33, username: 'demo-user' },
-      tokenName: 'default',
-      tokenValue: 'sk-demo',
-      actualModel: 'upstream-gpt-image',
-    });
-    selectNextChannelMock.mockReturnValue(null);
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.proxyLogs).run();
+    await db.delete(schema.routeChannels).run();
+    await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
   });
 
   afterAll(async () => {
     await app.close();
+    delete process.env.DATA_DIR;
   });
 
-  it('accepts multipart image edit requests and forwards them to /v1/images/edits', async () => {
+  it('marks image model unavailable when upstream rejects it as unsupported', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'image-site',
+      url: 'https://image.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'image-user',
+      accessToken: 'access',
+      apiToken: 'sk-image',
+      status: 'active',
+    }).returning().get();
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-image',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'gemini-2.5-flash-image',
+      available: true,
+    }).run();
+
+    selectChannelMock.mockResolvedValue({
+      channel: { id: 11, routeId: 22, tokenId: token.id },
+      site,
+      account,
+      token,
+      tokenName: 'default',
+      tokenValue: 'sk-image',
+      actualModel: 'gemini-2.5-flash-image',
+    });
+
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
-      created: 1,
-      data: [{ b64_json: 'iVBORw0KGgo=' }],
+      error: { message: 'not supported model for image generation, only imagen models are supported' },
     }), {
-      status: 200,
+      status: 500,
       headers: { 'content-type': 'application/json' },
     }));
 
-    const boundary = 'metapi-boundary';
     const response = await app.inject({
       method: 'POST',
-      url: '/v1/images/edits',
-      headers: {
-        authorization: 'Bearer sk-demo',
-        'content-type': `multipart/form-data; boundary=${boundary}`,
-      },
-      payload: buildMultipartBody(boundary),
-    });
-
-    expect(response.statusCode).toBe(200);
-    const [targetUrl] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(targetUrl).toBe('https://upstream.example.com/v1/images/edits');
-  });
-
-  it('returns explicit not-supported error for /v1/images/variations', async () => {
-    const response = await app.inject({
-      method: 'POST',
-      url: '/v1/images/variations',
+      url: '/v1/images/generations',
       payload: {
-        model: 'gpt-image-1',
+        model: 'gemini-2.5-flash-image',
+        prompt: 'draw a cat',
       },
     });
 
-    expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({
-      error: {
-        message: 'Image variations are not supported',
-        type: 'invalid_request_error',
-      },
-    });
+    expect(response.statusCode).toBe(500);
+    const availability = await db.select().from(schema.tokenModelAvailability)
+      .where(eq(schema.tokenModelAvailability.tokenId, token.id))
+      .get();
+    expect(availability?.available).toBe(false);
   });
 });

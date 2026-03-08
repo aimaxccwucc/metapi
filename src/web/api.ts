@@ -257,6 +257,7 @@ export const api = {
   // Stats
   getDashboard: () => request('/api/stats/dashboard'),
   getProxyLogs: (params?: string) => request(`/api/stats/proxy-logs${params ? '?' + params : ''}`),
+  getProxyVideoTasks: (params?: string) => request(`/api/stats/proxy-video-tasks${params ? '?' + params : ''}`),
   checkModels: (accountId: number) => request(`/api/models/check/${accountId}`, { method: 'POST' }),
   getSiteDistribution: () => request('/api/stats/site-distribution'),
   getSiteTrend: (days = 7) => request(`/api/stats/site-trend?days=${days}`),

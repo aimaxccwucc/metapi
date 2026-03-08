@@ -628,6 +628,46 @@ export const filterModelTesterModelNames = (models: string[], query: string): st
     .map((item) => item.name);
 };
 
+const IMAGE_MODEL_PREFERENCES = [
+  /imagen/i,
+  /gpt-4o-image/i,
+  /gpt-image/i,
+  /flux/i,
+  /qwen[-/.]?image/i,
+  /image-preview/i,
+  /image/i,
+];
+
+const VIDEO_MODEL_PREFERENCES = [
+  /sora/i,
+  /veo/i,
+  /grok-imagine.*video/i,
+  /video/i,
+];
+
+function pickPreferredModel(models: string[], patterns: RegExp[]): string {
+  for (const pattern of patterns) {
+    const matched = models.find((model) => pattern.test(model));
+    if (matched) return matched;
+  }
+  return models[0] || '';
+}
+
+export const getPreferredModelTesterModel = (
+  models: string[],
+  mode: ModelTesterInputs['mode'],
+  fallbackModel = '',
+): string => {
+  if (mode === 'images.generate' || mode === 'images.edit') {
+    return pickPreferredModel(models, IMAGE_MODEL_PREFERENCES) || (models.includes(fallbackModel) ? fallbackModel : '') || models[0] || '';
+  }
+  if (mode === 'videos.create' || mode === 'videos.inspect') {
+    return pickPreferredModel(models, VIDEO_MODEL_PREFERENCES) || (models.includes(fallbackModel) ? fallbackModel : '') || models[0] || '';
+  }
+  if (fallbackModel && models.includes(fallbackModel)) return fallbackModel;
+  return models[0] || fallbackModel || '';
+};
+
 export const createMessage = (role: ChatRole, content: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({
   id: createMessageId(),
   role,

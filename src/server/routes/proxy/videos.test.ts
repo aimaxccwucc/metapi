@@ -27,6 +27,8 @@ vi.mock('../../services/tokenRouter.js', () => ({
   tokenRouter: {
     selectChannel: (...args: unknown[]) => selectChannelMock(...args),
     selectNextChannel: (...args: unknown[]) => selectNextChannelMock(...args),
+    selectChannelWithOptions: (...args: unknown[]) => selectChannelMock(...args),
+    selectNextChannelWithOptions: (...args: unknown[]) => selectNextChannelMock(...args),
     recordSuccess: (...args: unknown[]) => recordSuccessMock(...args),
     recordFailure: (...args: unknown[]) => recordFailureMock(...args),
   },
@@ -47,6 +49,11 @@ vi.mock('../../services/alertRules.js', () => ({
 
 vi.mock('../../services/modelPricingService.js', () => ({
   estimateProxyCost: (arg: any) => estimateProxyCostMock(arg),
+}));
+
+vi.mock('../../services/mediaRoutingSupport.js', () => ({
+  filterCandidatesByTokenModelAvailability: async (candidates: any[]) => candidates,
+  markTokenModelUnavailable: vi.fn(),
 }));
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({

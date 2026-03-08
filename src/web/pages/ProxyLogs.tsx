@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { ModelBadge } from '../components/BrandIcon.js';
@@ -8,6 +8,8 @@ import { parseProxyLogPathMeta } from './helpers/proxyLogPathMeta.js';
 import { tr } from '../i18n.js';
 
 type StatusFilter = 'all' | 'success' | 'failed';
+type LogView = 'proxy' | 'videos';
+type VideoStatusFilter = 'all' | 'queued' | 'running' | 'succeeded' | 'failed';
 
 interface ProxyLog {
   id: number;
@@ -55,6 +57,30 @@ interface ProxyLog {
       cacheCreationCost: number;
       totalCost: number;
     };
+  } | null;
+}
+
+interface ProxyVideoTask {
+  id: number;
+  publicId: string;
+  upstreamVideoId: string;
+  requestedModel?: string | null;
+  actualModel?: string | null;
+  lastUpstreamStatus?: number | null;
+  lastPolledAt?: string | null;
+  createdAt: string;
+  updatedAt?: string | null;
+  username?: string | null;
+  siteName?: string | null;
+  siteUrl?: string | null;
+  statusSnapshot?: {
+    status?: string;
+    error?: unknown;
+    [key: string]: unknown;
+  } | null;
+  upstreamResponseMeta?: {
+    contentType?: string;
+    [key: string]: unknown;
   } | null;
 }
 
@@ -133,222 +159,131 @@ function buildBillingProcessLines(log: ProxyLog) {
   return lines;
 }
 
-export default function ProxyLogs() {
-  const [logs, setLogs] = useState<ProxyLog[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  const [search, setSearch] = useState('');
-  const [expanded, setExpanded] = useState<number | null>(null);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
-  const toast = useToast();
+function getVideoTaskStatus(task: ProxyVideoTask): string {
+  return String(task.statusSnapshot?.status || 'unknown').trim().toLowerCase() || 'unknown';
+}
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await api.getProxyLogs('limit=500');
-      setLogs(data);
-    } catch (e: any) {
-      toast.error(e.message || '加载日志失败');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  /* ---- derived ---- */
-  const filtered = useMemo(() => logs.filter(log => {
-    if (statusFilter === 'success' && log.status !== 'success') return false;
-    if (statusFilter === 'failed' && log.status === 'success') return false;
-    if (search) {
-      const q = search.toLowerCase();
-      return (log.modelRequested || '').toLowerCase().includes(q) ||
-        (log.modelActual || '').toLowerCase().includes(q);
-    }
-    return true;
-  }), [logs, statusFilter, search]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const safePage = Math.min(page, totalPages);
-  const paged = useMemo(
-    () => filtered.slice((safePage - 1) * pageSize, safePage * pageSize),
-    [filtered, safePage, pageSize],
-  );
-
-  useEffect(() => { setPage(1); }, [statusFilter, search, pageSize]);
-
-  /* ---- stats ---- */
-  const summary = useMemo(() => {
-    let successCount = 0;
-    let totalCost = 0;
-    let totalTokensAll = 0;
-    for (const log of logs) {
-      if (log.status === 'success') successCount += 1;
-      totalCost += log.estimatedCost || 0;
-      totalTokensAll += log.totalTokens || 0;
-    }
-    const totalCount = logs.length;
-    return {
-      totalCount,
-      successCount,
-      failedCount: totalCount - successCount,
-      totalCost,
-      totalTokensAll,
-    };
-  }, [logs]);
+function renderVideoStatusBadge(status: string) {
+  const normalized = status.trim().toLowerCase();
+  const isSuccess = normalized === 'succeeded' || normalized === 'completed';
+  const isQueued = normalized === 'queued' || normalized === 'submitted';
+  const isRunning = normalized === 'running' || normalized === 'processing' || normalized === 'in_progress';
+  const isFailed = normalized === 'failed' || normalized === 'error' || normalized === 'cancelled';
+  const label = isSuccess
+    ? '成功'
+    : isQueued
+      ? '排队中'
+      : isRunning
+        ? '处理中'
+        : isFailed
+          ? '失败'
+          : normalized || '未知';
+  const badgeClass = isSuccess
+    ? 'badge-success'
+    : isFailed
+      ? 'badge-error'
+      : 'badge-warning';
+  const dotColor = isSuccess
+    ? 'var(--color-success)'
+    : isFailed
+      ? 'var(--color-danger)'
+      : 'var(--color-warning)';
 
   return (
-    <div className="animate-fade-in">
-      {/* Header + Stat Badges */}
-      <div className="page-header" style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <h2 className="page-title">{tr('使用日志')}</h2>
-          <span className="kpi-chip kpi-chip-success">
-            消耗总额 ${summary.totalCost.toFixed(4)}
-          </span>
-          <span className="kpi-chip kpi-chip-warning">
-            {summary.totalTokensAll.toLocaleString()} tokens
-          </span>
-        </div>
-        <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', padding: '6px 14px' }}>
-          <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }}>
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-          </svg>
-          {loading ? '加载中...' : '刷新'}
-        </button>
-      </div>
+    <span className={`badge ${badgeClass}`} style={{ fontSize: 11, fontWeight: 600 }}>
+      <span style={{ width: 6, height: 6, borderRadius: '50%', background: dotColor }} />
+      {label}
+    </span>
+  );
+}
 
-      {/* Toolbar: Filter + Search */}
-      <div className="toolbar" style={{ marginBottom: 12 }}>
-        <div className="pill-tabs">
-          {([
-            { key: 'all' as StatusFilter, label: '全部', count: summary.totalCount },
-            { key: 'success' as StatusFilter, label: '成功', count: summary.successCount },
-            { key: 'failed' as StatusFilter, label: '失败', count: summary.failedCount },
-          ]).map(tab => (
-            <button
-              key={tab.key}
-              className={`pill-tab ${statusFilter === tab.key ? 'active' : ''}`}
-              onClick={() => setStatusFilter(tab.key)}
-            >
-              {tab.label} <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.7 }}>{tab.count}</span>
-            </button>
-          ))}
-        </div>
-        <div className="toolbar-search" style={{ maxWidth: 280 }}>
-          <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索模型名称..." />
-        </div>
-      </div>
-
-      {/* Table */}
-      <div className="card" style={{ overflowX: 'auto' }}>
-        {loading ? (
-          <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {[...Array(8)].map((_, i) => (
-              <div key={i} style={{ display: 'flex', gap: 16 }}>
-                <div className="skeleton" style={{ width: 140, height: 16 }} />
-                <div className="skeleton" style={{ width: 200, height: 16 }} />
-                <div className="skeleton" style={{ width: 50, height: 16 }} />
-                <div className="skeleton" style={{ width: 50, height: 16 }} />
-                <div className="skeleton" style={{ width: 50, height: 16 }} />
-                <div className="skeleton" style={{ width: 70, height: 16 }} />
-              </div>
-            ))}
-          </div>
-        ) : (
-          <table className="data-table" style={{ width: '100%' }}>
-            <thead>
-              <tr>
-                <th style={{ width: 28 }} />
-                <th>时间</th>
-                <th>模型</th>
-                <th>{tr('状态')}</th>
-                <th style={{ textAlign: 'center' }}>用时</th>
-                <th style={{ textAlign: 'right' }}>输入</th>
-                <th style={{ textAlign: 'right' }}>输出</th>
-                <th style={{ textAlign: 'right' }}>花费</th>
-                <th style={{ textAlign: 'center' }}>重试</th>
+function renderProxyLogTable(
+  paged: ProxyLog[],
+  expanded: number | null,
+  setExpanded: React.Dispatch<React.SetStateAction<number | null>>,
+) {
+  return (
+    <table className="data-table" style={{ width: '100%' }}>
+      <thead>
+        <tr>
+          <th style={{ width: 28 }} />
+          <th>时间</th>
+          <th>模型</th>
+          <th>{tr('状态')}</th>
+          <th style={{ textAlign: 'center' }}>用时</th>
+          <th style={{ textAlign: 'right' }}>输入</th>
+          <th style={{ textAlign: 'right' }}>输出</th>
+          <th style={{ textAlign: 'right' }}>花费</th>
+          <th style={{ textAlign: 'center' }}>重试</th>
+        </tr>
+      </thead>
+      <tbody>
+        {paged.map((log) => {
+          const pathMeta = parseProxyLogPathMeta(log.errorMessage);
+          const billingDetailSummary = formatBillingDetailSummary(log);
+          const billingProcessLines = buildBillingProcessLines(log);
+          return (
+            <React.Fragment key={log.id}>
+              <tr
+                onClick={() => setExpanded(expanded === log.id ? null : log.id)}
+                style={{
+                  cursor: 'pointer',
+                  background: expanded === log.id ? 'var(--color-primary-light)' : undefined,
+                  transition: 'background 0.15s',
+                }}
+              >
+                <td style={{ padding: '8px 4px 8px 12px' }}>
+                  <svg width="10" height="10" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{
+                    transform: expanded === log.id ? 'rotate(90deg)' : 'none',
+                    transition: 'transform 0.2s',
+                    color: 'var(--color-text-muted)',
+                  }}>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+                  </svg>
+                </td>
+                <td style={{ fontSize: 12, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
+                  {formatDateTimeLocal(log.createdAt)}
+                </td>
+                <td>
+                  <ModelBadge model={log.modelRequested} />
+                </td>
+                <td>{renderVideoStatusBadge(log.status === 'success' ? 'succeeded' : 'failed')}</td>
+                <td style={{ textAlign: 'center' }}>
+                  <span style={{
+                    fontVariantNumeric: 'tabular-nums',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: latencyColor(log.latencyMs),
+                    background: latencyBgColor(log.latencyMs),
+                    padding: '2px 8px',
+                    borderRadius: 4,
+                  }}>
+                    {formatLatency(log.latencyMs)}
+                  </span>
+                </td>
+                <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
+                  {log.promptTokens?.toLocaleString() || '-'}
+                </td>
+                <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
+                  {log.completionTokens?.toLocaleString() || '-'}
+                </td>
+                <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>
+                  {typeof log.estimatedCost === 'number' ? `$${log.estimatedCost.toFixed(6)}` : '-'}
+                </td>
+                <td style={{ textAlign: 'center' }}>
+                  {log.retryCount > 0 ? (
+                    <span className="badge badge-warning" style={{ fontSize: 11 }}>{log.retryCount}</span>
+                  ) : (
+                    <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>0</span>
+                  )}
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {paged.map(log => {
-                const pathMeta = parseProxyLogPathMeta(log.errorMessage);
-                const billingDetailSummary = formatBillingDetailSummary(log);
-                const billingProcessLines = buildBillingProcessLines(log);
-                return (
-                <React.Fragment key={log.id}>
-                  <tr
-                    onClick={() => setExpanded(expanded === log.id ? null : log.id)}
-                    style={{
-                      cursor: 'pointer',
-                      background: expanded === log.id ? 'var(--color-primary-light)' : undefined,
-                      transition: 'background 0.15s',
-                    }}
-                  >
-                    <td style={{ padding: '8px 4px 8px 12px' }}>
-                      <svg width="10" height="10" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{
-                        transform: expanded === log.id ? 'rotate(90deg)' : 'none',
-                        transition: 'transform 0.2s',
-                        color: 'var(--color-text-muted)',
-                      }}>
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
-                      </svg>
-                    </td>
-                    <td style={{ fontSize: 12, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
-                      {formatDateTimeLocal(log.createdAt)}
-                    </td>
-                    <td>
-                      <ModelBadge model={log.modelRequested} />
-                    </td>
-                    <td>
-                      <span className={`badge ${log.status === 'success' ? 'badge-success' : 'badge-error'}`} style={{ fontSize: 11, fontWeight: 600 }}>
-                        <span style={{
-                          width: 6, height: 6, borderRadius: '50%',
-                          background: log.status === 'success' ? 'var(--color-success)' : 'var(--color-danger)',
-                        }} />
-                        {log.status === 'success' ? '成功' : '失败'}
-                      </span>
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <span style={{
-                        fontVariantNumeric: 'tabular-nums',
-                        fontSize: 12,
-                        fontWeight: 600,
-                        color: latencyColor(log.latencyMs),
-                        background: latencyBgColor(log.latencyMs),
-                        padding: '2px 8px',
-                        borderRadius: 4,
-                      }}>
-                        {formatLatency(log.latencyMs)}
-                      </span>
-                    </td>
-                    <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
-                      {log.promptTokens?.toLocaleString() || '-'}
-                    </td>
-                    <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
-                      {log.completionTokens?.toLocaleString() || '-'}
-                    </td>
-                    <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>
-                      {typeof log.estimatedCost === 'number' ? `$${log.estimatedCost.toFixed(6)}` : '-'}
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      {log.retryCount > 0 ? (
-                        <span className="badge badge-warning" style={{ fontSize: 11 }}>{log.retryCount}</span>
-                      ) : (
-                        <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>0</span>
-                      )}
-                    </td>
-                  </tr>
-                  {expanded === log.id && (
-                  <tr style={{ background: 'var(--color-bg)' }}>
-                    <td colSpan={9} style={{ padding: 0 }}>
-                      <div className="anim-collapse is-open">
-                        <div className="anim-collapse-inner">
-                          <div className="animate-fade-in" style={{
+              {expanded === log.id && (
+                <tr style={{ background: 'var(--color-bg)' }}>
+                  <td colSpan={9} style={{ padding: 0 }}>
+                    <div className="anim-collapse is-open">
+                      <div className="anim-collapse-inner">
+                        <div className="animate-fade-in" style={{
                           padding: '14px 20px 14px 40px',
                           borderTop: '1px solid var(--color-border-light)',
                           borderBottom: '1px solid var(--color-border-light)',
@@ -356,7 +291,6 @@ export default function ProxyLogs() {
                           lineHeight: 1.9,
                           color: 'var(--color-text-secondary)',
                         }}>
-                          {/* 鏃ュ織璇︽儏 section */}
                           <div style={{ display: 'flex', gap: 6 }}>
                             <span style={{ fontWeight: 600, color: 'var(--color-warning)', flexShrink: 0 }}>日志详情</span>
                             <div>
@@ -390,7 +324,6 @@ export default function ProxyLogs() {
                             </div>
                           )}
 
-                          {/* 璁¤垂杩囩▼ section */}
                           <div style={{ display: 'flex', gap: 6 }}>
                             <span style={{ fontWeight: 600, color: 'var(--color-info)', flexShrink: 0 }}>计费过程</span>
                             {billingProcessLines.length > 0 ? (
@@ -412,7 +345,6 @@ export default function ProxyLogs() {
                             )}
                           </div>
 
-                          {/* 涓嬫父璇锋眰璺緞 */}
                           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                             <span style={{ fontWeight: 600, color: 'var(--color-primary)', flexShrink: 0 }}>下游请求路径</span>
                             {pathMeta.downstreamPath ? (
@@ -428,7 +360,6 @@ export default function ProxyLogs() {
                             )}
                           </div>
 
-                          {/* 涓婃父璇锋眰璺緞 */}
                           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                             <span style={{ fontWeight: 600, color: 'var(--color-primary)', flexShrink: 0 }}>上游请求路径</span>
                             {pathMeta.upstreamPath ? (
@@ -444,55 +375,404 @@ export default function ProxyLogs() {
                             )}
                           </div>
 
-                          {/* 閿欒淇℃伅 */}
                           {pathMeta.errorMessage.trim().length > 0 && (
                             <div style={{ display: 'flex', gap: 6 }}>
                               <span style={{ fontWeight: 600, color: 'var(--color-danger)', flexShrink: 0 }}>错误信息</span>
                               <span style={{ color: 'var(--color-danger)' }}>{pathMeta.errorMessage}</span>
                             </div>
                           )}
-                          </div>
                         </div>
                       </div>
-                    </td>
-                  </tr>
-                  )}
-                </React.Fragment>
-              )})}
-            </tbody>
-          </table>
-        )}
-        {!loading && filtered.length === 0 && (
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function renderVideoTaskTable(
+  paged: ProxyVideoTask[],
+  expandedVideo: number | null,
+  setExpandedVideo: React.Dispatch<React.SetStateAction<number | null>>,
+) {
+  return (
+    <table className="data-table" style={{ width: '100%' }}>
+      <thead>
+        <tr>
+          <th style={{ width: 28 }} />
+          <th>时间</th>
+          <th>模型</th>
+          <th>{tr('状态')}</th>
+          <th>任务 ID</th>
+          <th style={{ textAlign: 'center' }}>上游状态</th>
+          <th>站点 / 账号</th>
+        </tr>
+      </thead>
+      <tbody>
+        {paged.map((task) => {
+          const upstreamStatus = getVideoTaskStatus(task);
+          const isExpanded = expandedVideo === task.id;
+          return (
+            <React.Fragment key={task.id}>
+              <tr
+                onClick={() => setExpandedVideo(isExpanded ? null : task.id)}
+                style={{
+                  cursor: 'pointer',
+                  background: isExpanded ? 'var(--color-primary-light)' : undefined,
+                  transition: 'background 0.15s',
+                }}
+              >
+                <td style={{ padding: '8px 4px 8px 12px' }}>
+                  <svg width="10" height="10" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{
+                    transform: isExpanded ? 'rotate(90deg)' : 'none',
+                    transition: 'transform 0.2s',
+                    color: 'var(--color-text-muted)',
+                  }}>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
+                  </svg>
+                </td>
+                <td style={{ fontSize: 12, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
+                  {formatDateTimeLocal(task.createdAt)}
+                </td>
+                <td>
+                  <ModelBadge model={task.requestedModel || task.actualModel || 'video'} />
+                </td>
+                <td>{renderVideoStatusBadge(upstreamStatus)}</td>
+                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{task.publicId}</td>
+                <td style={{ textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>{task.lastUpstreamStatus ?? '-'}</td>
+                <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                  {task.siteName || '未知站点'} / {task.username || '未知账号'}
+                </td>
+              </tr>
+              {isExpanded && (
+                <tr style={{ background: 'var(--color-bg)' }}>
+                  <td colSpan={7} style={{ padding: 0 }}>
+                    <div className="anim-collapse is-open">
+                      <div className="anim-collapse-inner">
+                        <div className="animate-fade-in" style={{
+                          padding: '14px 20px 14px 40px',
+                          borderTop: '1px solid var(--color-border-light)',
+                          borderBottom: '1px solid var(--color-border-light)',
+                          fontSize: 12,
+                          lineHeight: 1.9,
+                          color: 'var(--color-text-secondary)',
+                        }}>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <span style={{ fontWeight: 600, color: 'var(--color-warning)', flexShrink: 0 }}>任务详情</span>
+                            <div>
+                              <div>
+                                请求模型: <strong style={{ color: 'var(--color-text-primary)' }}>{task.requestedModel || '-'}</strong>
+                                {task.actualModel && task.actualModel !== task.requestedModel && (
+                                  <>{' -> '}实际模型: <strong style={{ color: 'var(--color-text-primary)' }}>{task.actualModel}</strong></>
+                                )}
+                              </div>
+                              <div>
+                                本地任务 ID: <strong style={{ color: 'var(--color-text-primary)' }}>{task.publicId}</strong>
+                                {'，'}上游任务 ID: <strong style={{ color: 'var(--color-text-primary)' }}>{task.upstreamVideoId}</strong>
+                              </div>
+                              <div>
+                                任务状态: <strong style={{ color: 'var(--color-text-primary)' }}>{upstreamStatus || 'unknown'}</strong>
+                                {'，'}上游 HTTP: <strong style={{ color: 'var(--color-text-primary)' }}>{task.lastUpstreamStatus ?? '-'}</strong>
+                              </div>
+                              <div>
+                                站点: <strong style={{ color: 'var(--color-text-primary)' }}>{task.siteName || '未知站点'}</strong>
+                                {'，'}账号: <strong style={{ color: 'var(--color-text-primary)' }}>{task.username || '未知账号'}</strong>
+                              </div>
+                              {task.lastPolledAt && (
+                                <div>
+                                  最近轮询: <strong style={{ color: 'var(--color-text-primary)' }}>{formatDateTimeLocal(task.lastPolledAt)}</strong>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <span style={{ fontWeight: 600, color: 'var(--color-info)', flexShrink: 0 }}>说明</span>
+                            <span>视频任务为异步流程，`/logs` 里的文本调用日志不等于最终生成结果，请以这里的任务状态为准。</span>
+                          </div>
+                          {task.statusSnapshot && (
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <span style={{ fontWeight: 600, color: 'var(--color-primary)', flexShrink: 0 }}>状态快照</span>
+                              <pre style={{
+                                margin: 0,
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-word',
+                                background: 'var(--color-bg-card)',
+                                border: '1px solid var(--color-border-light)',
+                                borderRadius: 6,
+                                padding: 10,
+                                flex: 1,
+                              }}>
+                                {JSON.stringify(task.statusSnapshot, null, 2)}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+export default function ProxyLogs() {
+  const [view, setView] = useState<LogView>('proxy');
+  const [logs, setLogs] = useState<ProxyLog[]>([]);
+  const [videoTasks, setVideoTasks] = useState<ProxyVideoTask[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [videoStatusFilter, setVideoStatusFilter] = useState<VideoStatusFilter>('all');
+  const [search, setSearch] = useState('');
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const [expandedVideo, setExpandedVideo] = useState<number | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const toast = useToast();
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [proxyData, videoData] = await Promise.all([
+        api.getProxyLogs('limit=500'),
+        api.getProxyVideoTasks('limit=500'),
+      ]);
+      setLogs(Array.isArray(proxyData) ? proxyData : []);
+      setVideoTasks(Array.isArray(videoData) ? videoData : []);
+    } catch (e: any) {
+      toast.error(e.message || '加载日志失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const filteredLogs = useMemo(() => logs.filter((log) => {
+    if (statusFilter === 'success' && log.status !== 'success') return false;
+    if (statusFilter === 'failed' && log.status === 'success') return false;
+    if (search) {
+      const q = search.toLowerCase();
+      return (log.modelRequested || '').toLowerCase().includes(q)
+        || (log.modelActual || '').toLowerCase().includes(q)
+        || (log.username || '').toLowerCase().includes(q)
+        || (log.siteName || '').toLowerCase().includes(q);
+    }
+    return true;
+  }), [logs, search, statusFilter]);
+
+  const filteredVideoTasks = useMemo(() => videoTasks.filter((task) => {
+    const status = getVideoTaskStatus(task);
+    if (videoStatusFilter !== 'all' && status !== videoStatusFilter) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      return (task.requestedModel || '').toLowerCase().includes(q)
+        || (task.actualModel || '').toLowerCase().includes(q)
+        || (task.publicId || '').toLowerCase().includes(q)
+        || (task.upstreamVideoId || '').toLowerCase().includes(q)
+        || (task.username || '').toLowerCase().includes(q)
+        || (task.siteName || '').toLowerCase().includes(q);
+    }
+    return true;
+  }), [search, videoStatusFilter, videoTasks]);
+
+  const activeRows = view === 'proxy' ? filteredLogs : filteredVideoTasks;
+  const totalPages = Math.max(1, Math.ceil(activeRows.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pagedProxyLogs = useMemo(
+    () => filteredLogs.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filteredLogs, pageSize, safePage],
+  );
+  const pagedVideoTasks = useMemo(
+    () => filteredVideoTasks.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filteredVideoTasks, pageSize, safePage],
+  );
+
+  useEffect(() => {
+    setPage(1);
+    setExpanded(null);
+    setExpandedVideo(null);
+  }, [view, search, statusFilter, videoStatusFilter, pageSize]);
+
+  const proxySummary = useMemo(() => {
+    let successCount = 0;
+    let totalCost = 0;
+    let totalTokensAll = 0;
+    for (const log of logs) {
+      if (log.status === 'success') successCount += 1;
+      totalCost += log.estimatedCost || 0;
+      totalTokensAll += log.totalTokens || 0;
+    }
+    const totalCount = logs.length;
+    return {
+      totalCount,
+      successCount,
+      failedCount: totalCount - successCount,
+      totalCost,
+      totalTokensAll,
+    };
+  }, [logs]);
+
+  const videoSummary = useMemo(() => {
+    let queuedCount = 0;
+    let runningCount = 0;
+    let successCount = 0;
+    let failedCount = 0;
+    for (const task of videoTasks) {
+      const status = getVideoTaskStatus(task);
+      if (status === 'queued' || status === 'submitted') queuedCount += 1;
+      else if (status === 'running' || status === 'processing' || status === 'in_progress') runningCount += 1;
+      else if (status === 'succeeded' || status === 'completed') successCount += 1;
+      else if (status === 'failed' || status === 'error' || status === 'cancelled') failedCount += 1;
+    }
+    return {
+      totalCount: videoTasks.length,
+      queuedCount,
+      runningCount,
+      successCount,
+      failedCount,
+    };
+  }, [videoTasks]);
+
+  return (
+    <div className="animate-fade-in">
+      <div className="page-header" style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <h2 className="page-title">{tr('使用日志')}</h2>
+          {view === 'proxy' ? (
+            <>
+              <span className="kpi-chip kpi-chip-success">消耗总额 ${proxySummary.totalCost.toFixed(4)}</span>
+              <span className="kpi-chip kpi-chip-warning">{proxySummary.totalTokensAll.toLocaleString()} tokens</span>
+            </>
+          ) : (
+            <>
+              <span className="kpi-chip kpi-chip-warning">排队 {videoSummary.queuedCount}</span>
+              <span className="kpi-chip kpi-chip-primary">处理中 {videoSummary.runningCount}</span>
+              <span className="kpi-chip kpi-chip-success">成功 {videoSummary.successCount}</span>
+              <span className="kpi-chip kpi-chip-danger">失败 {videoSummary.failedCount}</span>
+            </>
+          )}
+        </div>
+        <button onClick={load} disabled={loading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', padding: '6px 14px' }}>
+          <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }}>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          {loading ? '加载中...' : '刷新'}
+        </button>
+      </div>
+
+      <div className="toolbar" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div className="pill-tabs">
+            {[
+              { key: 'proxy' as LogView, label: '文本日志', count: proxySummary.totalCount },
+              { key: 'videos' as LogView, label: '视频任务', count: videoSummary.totalCount },
+            ].map((tab) => (
+              <button
+                key={tab.key}
+                className={`pill-tab ${view === tab.key ? 'active' : ''}`}
+                onClick={() => setView(tab.key)}
+              >
+                {tab.label} <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.7 }}>{tab.count}</span>
+              </button>
+            ))}
+          </div>
+          <div className="toolbar-search" style={{ maxWidth: 320 }}>
+            <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={view === 'proxy' ? '搜索模型 / 站点 / 账号...' : '搜索任务 / 模型 / 站点...'} />
+          </div>
+        </div>
+
+        <div className="pill-tabs">
+          {view === 'proxy'
+            ? ([
+              { key: 'all' as StatusFilter, label: '全部', count: proxySummary.totalCount },
+              { key: 'success' as StatusFilter, label: '成功', count: proxySummary.successCount },
+              { key: 'failed' as StatusFilter, label: '失败', count: proxySummary.failedCount },
+            ]).map((tab) => (
+              <button
+                key={tab.key}
+                className={`pill-tab ${statusFilter === tab.key ? 'active' : ''}`}
+                onClick={() => setStatusFilter(tab.key)}
+              >
+                {tab.label} <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.7 }}>{tab.count}</span>
+              </button>
+            ))
+            : ([
+              { key: 'all' as VideoStatusFilter, label: '全部', count: videoSummary.totalCount },
+              { key: 'queued' as VideoStatusFilter, label: '排队中', count: videoSummary.queuedCount },
+              { key: 'running' as VideoStatusFilter, label: '处理中', count: videoSummary.runningCount },
+              { key: 'succeeded' as VideoStatusFilter, label: '成功', count: videoSummary.successCount },
+              { key: 'failed' as VideoStatusFilter, label: '失败', count: videoSummary.failedCount },
+            ]).map((tab) => (
+              <button
+                key={tab.key}
+                className={`pill-tab ${videoStatusFilter === tab.key ? 'active' : ''}`}
+                onClick={() => setVideoStatusFilter(tab.key)}
+              >
+                {tab.label} <span style={{ fontVariantNumeric: 'tabular-nums', opacity: 0.7 }}>{tab.count}</span>
+              </button>
+            ))}
+        </div>
+      </div>
+
+      <div className="card" style={{ overflowX: 'auto' }}>
+        {loading ? (
+          <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {[...Array(8)].map((_, index) => (
+              <div key={index} style={{ display: 'flex', gap: 16 }}>
+                <div className="skeleton" style={{ width: 140, height: 16 }} />
+                <div className="skeleton" style={{ width: 200, height: 16 }} />
+                <div className="skeleton" style={{ width: 50, height: 16 }} />
+                <div className="skeleton" style={{ width: 50, height: 16 }} />
+                <div className="skeleton" style={{ width: 50, height: 16 }} />
+                <div className="skeleton" style={{ width: 70, height: 16 }} />
+              </div>
+            ))}
+          </div>
+        ) : view === 'proxy' ? renderProxyLogTable(pagedProxyLogs, expanded, setExpanded) : renderVideoTaskTable(pagedVideoTasks, expandedVideo, setExpandedVideo)}
+
+        {!loading && activeRows.length === 0 && (
           <div className="empty-state">
             <svg className="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
-            <div className="empty-state-title">{tr('暂无使用日志')}</div>
-            <div className="empty-state-desc">当请求通过代理时，日志将显示在这里</div>
+            <div className="empty-state-title">{view === 'proxy' ? tr('暂无使用日志') : '暂无视频任务'}</div>
+            <div className="empty-state-desc">{view === 'proxy' ? '当请求通过代理时，日志将显示在这里' : '视频创建后会在这里显示异步任务状态'}</div>
           </div>
         )}
       </div>
 
-      {/* Pagination */}
-      {filtered.length > 0 && (
+      {activeRows.length > 0 && (
         <div className="pagination">
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginRight: 'auto' }}>
-            显示第 {(safePage - 1) * pageSize + 1} - {Math.min(safePage * pageSize, filtered.length)} 条，共 {filtered.length} 条
+            显示第 {(safePage - 1) * pageSize + 1} - {Math.min(safePage * pageSize, activeRows.length)} 条，共 {activeRows.length} 条
           </div>
-          <button className="pagination-btn" disabled={safePage <= 1} onClick={() => setPage(p => p - 1)}>
+          <button className="pagination-btn" disabled={safePage <= 1} onClick={() => setPage((value) => value - 1)}>
             <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
           </button>
-          {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+          {Array.from({ length: Math.min(totalPages, 7) }, (_, index) => {
             let num: number;
-            if (totalPages <= 7) num = i + 1;
-            else if (safePage <= 4) num = i + 1;
-            else if (safePage >= totalPages - 3) num = totalPages - 6 + i;
-            else num = safePage - 3 + i;
+            if (totalPages <= 7) num = index + 1;
+            else if (safePage <= 4) num = index + 1;
+            else if (safePage >= totalPages - 3) num = totalPages - 6 + index;
+            else num = safePage - 3 + index;
             return (
               <button key={num} className={`pagination-btn ${safePage === num ? 'active' : ''}`} onClick={() => setPage(num)}>
                 {num}
               </button>
             );
           })}
-          <button className="pagination-btn" disabled={safePage >= totalPages} onClick={() => setPage(p => p + 1)}>
+          <button className="pagination-btn" disabled={safePage >= totalPages} onClick={() => setPage((value) => value + 1)}>
             <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
           </button>
           <div className="pagination-size">
@@ -502,7 +782,7 @@ export default function ProxyLogs() {
                 size="sm"
                 value={String(pageSize)}
                 onChange={(nextValue) => setPageSize(Number(nextValue))}
-                options={PAGE_SIZES.map((s) => ({ value: String(s), label: String(s) }))}
+                options={PAGE_SIZES.map((size) => ({ value: String(size), label: String(size) }))}
                 placeholder={String(pageSize)}
               />
             </div>
@@ -512,4 +792,3 @@ export default function ProxyLogs() {
     </div>
   );
 }
-
