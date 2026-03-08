@@ -2,12 +2,18 @@ interface ParsedProxyUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  promptTokensIncludeCache: boolean | null;
 }
 
 const ZERO_USAGE: ParsedProxyUsage = {
   promptTokens: 0,
   completionTokens: 0,
   totalTokens: 0,
+  cacheReadTokens: 0,
+  cacheCreationTokens: 0,
+  promptTokensIncludeCache: null,
 };
 
 function toPositiveInt(value: unknown): number {
@@ -76,6 +82,84 @@ function sumNumericFields(value: unknown): number {
   return Object.values(value).reduce<number>((sum, item) => sum + toPositiveInt(item), 0);
 }
 
+function detectPromptTokensIncludeCache(record: Record<string, unknown>): boolean | null {
+  const hasAnthropicCacheFields = [
+    'cache_read_input_tokens',
+    'cacheReadInputTokens',
+    'cache_creation_input_tokens',
+    'cacheCreationInputTokens',
+    'cache_creation',
+    'cacheCreation',
+    'claude_cache_creation_5_m_tokens',
+    'claudeCacheCreation5mTokens',
+    'claude_cache_creation_1_h_tokens',
+    'claudeCacheCreation1hTokens',
+  ].some((key) => key in record);
+  if (hasAnthropicCacheFields) return false;
+
+  const hasDetailCacheFields = [
+    'prompt_tokens_details',
+    'promptTokensDetails',
+    'input_tokens_details',
+    'inputTokensDetails',
+    'prompt_cache_hit_tokens',
+    'promptCacheHitTokens',
+  ].some((key) => key in record);
+  if (hasDetailCacheFields) return true;
+
+  return null;
+}
+
+function getCacheReadTokens(record: Record<string, unknown>): number {
+  const direct = firstPositiveInt(record, [
+    'cache_read_input_tokens',
+    'cacheReadInputTokens',
+    'prompt_cache_hit_tokens',
+    'promptCacheHitTokens',
+    'cached_tokens',
+    'cachedTokens',
+    'cache_read_tokens',
+    'cacheReadTokens',
+  ]);
+  if (direct > 0) return direct;
+
+  return Math.max(
+    toPositiveInt((record.prompt_tokens_details as any)?.cached_tokens),
+    toPositiveInt((record.promptTokensDetails as any)?.cachedTokens),
+    toPositiveInt((record.input_tokens_details as any)?.cached_tokens),
+    toPositiveInt((record.inputTokensDetails as any)?.cachedTokens),
+  );
+}
+
+function getCacheCreationTokens(record: Record<string, unknown>): number {
+  const direct = firstPositiveInt(record, [
+    'cache_creation_input_tokens',
+    'cacheCreationInputTokens',
+    'cache_creation_tokens',
+    'cacheCreationTokens',
+  ]);
+  if (direct > 0) return direct;
+
+  const split = Math.max(
+    toPositiveInt((record.cache_creation as any)?.ephemeral_5m_input_tokens)
+      + toPositiveInt((record.cache_creation as any)?.ephemeral_1h_input_tokens),
+    toPositiveInt((record.cacheCreation as any)?.ephemeral5mInputTokens)
+      + toPositiveInt((record.cacheCreation as any)?.ephemeral1hInputTokens),
+    toPositiveInt(record.claude_cache_creation_5_m_tokens)
+      + toPositiveInt(record.claude_cache_creation_1_h_tokens),
+    toPositiveInt(record.claudeCacheCreation5mTokens)
+      + toPositiveInt(record.claudeCacheCreation1hTokens),
+  );
+  if (split > 0) return split;
+
+  return Math.max(
+    toPositiveInt((record.prompt_tokens_details as any)?.cache_creation_tokens),
+    toPositiveInt((record.promptTokensDetails as any)?.cacheCreationTokens),
+    toPositiveInt((record.input_tokens_details as any)?.cache_creation_tokens),
+    toPositiveInt((record.inputTokensDetails as any)?.cacheCreationTokens),
+  );
+}
+
 function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
   let promptTokens = firstPositiveInt(record, [
     'prompt_tokens',
@@ -105,6 +189,9 @@ function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
     'total_token_count',
     'totalTokenCount',
   ]);
+  const cacheReadTokens = getCacheReadTokens(record);
+  const cacheCreationTokens = getCacheCreationTokens(record);
+  const promptTokensIncludeCache = detectPromptTokensIncludeCache(record);
 
   if (promptTokens <= 0) {
     promptTokens = Math.max(
@@ -139,6 +226,9 @@ function parseUsageRecord(record: Record<string, unknown>): ParsedProxyUsage {
     promptTokens,
     completionTokens,
     totalTokens: Math.max(totalTokens, promptTokens + completionTokens),
+    cacheReadTokens,
+    cacheCreationTokens,
+    promptTokensIncludeCache,
   };
 }
 
@@ -164,18 +254,45 @@ export function parseProxyUsage(payload: unknown): ParsedProxyUsage {
 }
 
 export function mergeProxyUsage(base: ParsedProxyUsage, incoming: ParsedProxyUsage): ParsedProxyUsage {
-  const baseScore = base.totalTokens > 0 ? base.totalTokens * 10_000 + base.promptTokens + base.completionTokens : (base.promptTokens + base.completionTokens);
+  const normalizeUsage = (usage: ParsedProxyUsage): ParsedProxyUsage => ({
+    promptTokens: toPositiveInt(usage.promptTokens),
+    completionTokens: toPositiveInt(usage.completionTokens),
+    totalTokens: Math.max(
+      toPositiveInt(usage.totalTokens),
+      toPositiveInt(usage.promptTokens) + toPositiveInt(usage.completionTokens),
+    ),
+    cacheReadTokens: toPositiveInt(usage.cacheReadTokens),
+    cacheCreationTokens: toPositiveInt(usage.cacheCreationTokens),
+    promptTokensIncludeCache: usage.promptTokensIncludeCache ?? null,
+  });
+  const baseCacheReadTokens = toPositiveInt(base.cacheReadTokens);
+  const baseCacheCreationTokens = toPositiveInt(base.cacheCreationTokens);
+  const incomingCacheReadTokens = toPositiveInt(incoming.cacheReadTokens);
+  const incomingCacheCreationTokens = toPositiveInt(incoming.cacheCreationTokens);
+  const baseScore = base.totalTokens > 0
+    ? (base.totalTokens * 10_000 + base.promptTokens + base.completionTokens + baseCacheReadTokens + baseCacheCreationTokens)
+    : (base.promptTokens + base.completionTokens + baseCacheReadTokens + baseCacheCreationTokens);
   const incomingScore = incoming.totalTokens > 0
-    ? incoming.totalTokens * 10_000 + incoming.promptTokens + incoming.completionTokens
-    : (incoming.promptTokens + incoming.completionTokens);
+    ? (incoming.totalTokens * 10_000 + incoming.promptTokens + incoming.completionTokens + incomingCacheReadTokens + incomingCacheCreationTokens)
+    : (incoming.promptTokens + incoming.completionTokens + incomingCacheReadTokens + incomingCacheCreationTokens);
 
-  if (incomingScore > baseScore) return incoming;
+  if (incomingScore > baseScore) return normalizeUsage(incoming);
 
   const promptTokens = Math.max(base.promptTokens, incoming.promptTokens);
   const completionTokens = Math.max(base.completionTokens, incoming.completionTokens);
   const totalTokens = Math.max(base.totalTokens, incoming.totalTokens, promptTokens + completionTokens);
+  const cacheReadTokens = Math.max(baseCacheReadTokens, incomingCacheReadTokens);
+  const cacheCreationTokens = Math.max(baseCacheCreationTokens, incomingCacheCreationTokens);
+  const promptTokensIncludeCache = incoming.promptTokensIncludeCache ?? base.promptTokensIncludeCache;
 
-  return { promptTokens, completionTokens, totalTokens };
+  return normalizeUsage({
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    promptTokensIncludeCache,
+  });
 }
 
 export function pullSseDataEvents(buffer: string): { events: string[]; rest: string } {

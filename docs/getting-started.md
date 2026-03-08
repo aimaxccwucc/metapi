@@ -60,34 +60,16 @@ docker compose up -d
 > 如果未显式设置（非 Compose 场景），默认值为 `change-me-admin-token`（仅建议本地调试）。  
 > 若你在后台「设置」里修改过管理员令牌，后续登录请使用新令牌。
 
-## 方式二：Release 包启动（Linux / macOS / Windows）
+## 方式二：桌面版启动（Windows / macOS / Linux）
 
-如果不想用 Docker，可以直接下载预打包的 Release 产物运行：
+如果你是在个人电脑上本地使用，请直接下载桌面版安装包：
 
-1. 打开 [Releases](https://github.com/cita-777/metapi/releases) 下载与你系统匹配的压缩包
-2. 解压后进入目录
-3. 设置环境变量并启动
-
-Linux / macOS：
-
-```bash
-export AUTH_TOKEN=your-admin-token
-export PROXY_TOKEN=your-proxy-sk-token
-./start.sh
-```
-
-Windows（PowerShell）：
-
-```powershell
-$env:AUTH_TOKEN="your-admin-token"
-$env:PROXY_TOKEN="your-proxy-sk-token"
-.\start.bat
-```
-
-`start.sh` / `start.bat` 会自动检查 `better-sqlite3` ABI 兼容性、执行数据库迁移并启动服务。
+1. 打开 [Releases](https://github.com/cita-777/metapi/releases) 下载与你系统匹配的桌面安装包
+2. 安装并启动 Metapi Desktop
+3. 桌面壳会自动启动本地服务并保存数据，无需手动准备 Node.js 环境
 
 > [!NOTE]
-> Release 包依赖本机安装 Node.js（支持 20+，推荐 22 LTS）。
+> 服务器部署统一推荐 Docker / Docker Compose，不再提供裸 Node.js 的 Release 压缩包。
 
 ## 方式三：本地开发启动
 

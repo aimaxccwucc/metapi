@@ -1,4 +1,6 @@
 import { db, schema } from '../db/index.js';
+import { eq } from 'drizzle-orm';
+import { config } from '../config.js';
 import type { Dispatcher, RequestInit as UndiciRequestInit } from 'undici';
 import { ProxyAgent } from 'undici';
 
@@ -15,7 +17,7 @@ const SUPPORTED_PROXY_PROTOCOLS = new Set([
 
 type SiteProxyRow = {
   siteUrl: string;
-  proxyUrl: string | null;
+  useSystemProxy: boolean;
 };
 
 type ParsedSiteProxyInput = {
@@ -24,12 +26,18 @@ type ParsedSiteProxyInput = {
   proxyUrl: string | null;
 };
 
+type SiteProxyConfigLike = {
+  useSystemProxy?: boolean | null;
+};
+
 let siteProxyCache: {
   loadedAt: number;
   rows: SiteProxyRow[];
+  systemProxyUrl: string | null;
 } = {
   loadedAt: 0,
   rows: [],
+  systemProxyUrl: null,
 };
 
 const dispatcherCache = new Map<string, Dispatcher>();
@@ -58,23 +66,41 @@ async function getCachedSiteProxyRows(nowMs = Date.now()): Promise<SiteProxyRow[
   }
 
   try {
-    const rows = await db
-      .select({
-        siteUrl: schema.sites.url,
-        proxyUrl: schema.sites.proxyUrl,
-      })
-      .from(schema.sites)
-      .all();
+    const [rows, systemProxySetting] = await Promise.all([
+      db
+        .select({
+          siteUrl: schema.sites.url,
+          useSystemProxy: schema.sites.useSystemProxy,
+        })
+        .from(schema.sites)
+        .all(),
+      db.select({ value: schema.settings.value })
+        .from(schema.settings)
+        .where(eq(schema.settings.key, 'system_proxy_url'))
+        .get(),
+    ]);
+    const parsedSystemProxyUrl = normalizeSiteProxyUrl(
+      typeof systemProxySetting?.value === 'string'
+        ? (() => {
+          try {
+            return JSON.parse(systemProxySetting.value);
+          } catch {
+            return systemProxySetting.value;
+          }
+        })()
+        : systemProxySetting?.value,
+    );
 
     siteProxyCache = {
       loadedAt: nowMs,
       rows: rows.map((row) => ({
         siteUrl: normalizeSiteUrl(row.siteUrl),
-        proxyUrl: normalizeSiteProxyUrl(row.proxyUrl),
+        useSystemProxy: !!row.useSystemProxy,
       })),
+      systemProxyUrl: parsedSystemProxyUrl,
     };
   } catch {
-    siteProxyCache = { loadedAt: nowMs, rows: [] };
+    siteProxyCache = { loadedAt: nowMs, rows: [], systemProxyUrl: null };
   }
 
   return siteProxyCache.rows;
@@ -142,7 +168,7 @@ export function parseSiteProxyUrlInput(input: unknown): ParsedSiteProxyInput {
 }
 
 export function invalidateSiteProxyCache(): void {
-  siteProxyCache = { loadedAt: 0, rows: [] };
+  siteProxyCache = { loadedAt: 0, rows: [], systemProxyUrl: null };
 }
 
 export async function resolveSiteProxyUrlByRequestUrl(requestUrl: string): Promise<string | null> {
@@ -150,11 +176,13 @@ export async function resolveSiteProxyUrlByRequestUrl(requestUrl: string): Promi
   if (!normalizedRequestUrl) return null;
 
   const rows = await getCachedSiteProxyRows();
+  const systemProxyUrl = siteProxyCache.systemProxyUrl;
+  if (!systemProxyUrl) return null;
   let bestMatch: string | null = null;
   let bestMatchLength = -1;
 
   for (const row of rows) {
-    if (!row.proxyUrl) continue;
+    if (!row.useSystemProxy) continue;
     if (!row.siteUrl) continue;
 
     const isPrefixMatch = (
@@ -165,7 +193,7 @@ export async function resolveSiteProxyUrlByRequestUrl(requestUrl: string): Promi
     if (!isPrefixMatch) continue;
 
     if (row.siteUrl.length > bestMatchLength) {
-      bestMatch = row.proxyUrl;
+      bestMatch = systemProxyUrl;
       bestMatchLength = row.siteUrl.length;
     }
   }
@@ -203,4 +231,16 @@ export function withExplicitProxyRequestInit(
     ...(options || {}),
     dispatcher,
   };
+}
+
+export function resolveProxyUrlForSite(site: SiteProxyConfigLike | null | undefined): string | null {
+  if (!site?.useSystemProxy) return null;
+  return normalizeSiteProxyUrl(config.systemProxyUrl);
+}
+
+export function withSiteRecordProxyRequestInit(
+  site: SiteProxyConfigLike | null | undefined,
+  options?: UndiciRequestInit,
+): UndiciRequestInit {
+  return withExplicitProxyRequestInit(resolveProxyUrlForSite(site), options);
 }

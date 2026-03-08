@@ -5,6 +5,8 @@ import { drizzle as drizzleSqliteProxy } from 'drizzle-orm/sqlite-proxy';
 import { drizzle as drizzleMysqlProxy } from 'drizzle-orm/mysql-proxy';
 import { drizzle as drizzlePgProxy } from 'drizzle-orm/pg-proxy';
 import * as schema from './schema.js';
+import { ensureSiteSchemaCompatibility, type SiteSchemaInspector } from './siteSchemaCompatibility.js';
+import { ensureRouteGroupingSchemaCompatibility } from './routeGroupingSchemaCompatibility.js';
 import { config } from '../config.js';
 import { mkdirSync } from 'fs';
 import { dirname, resolve } from 'path';
@@ -22,6 +24,7 @@ const TABLES_WITH_NUMERIC_ID = new Set([
   'token_routes',
   'route_channels',
   'proxy_logs',
+  'proxy_video_tasks',
   'downstream_api_keys',
   'events',
 ]);
@@ -31,6 +34,7 @@ export let runtimeDbDialect: RuntimeDbDialect = config.dbType;
 let sqliteConnection: Database.Database | null = null;
 let mysqlPool: mysql.Pool | null = null;
 let pgPool: pg.Pool | null = null;
+let proxyLogBillingDetailsColumnAvailable: boolean | null = null;
 
 function resolveSqlitePath(): string {
   const raw = (config.dbUrl || '').trim();
@@ -136,6 +140,49 @@ function ensureTokenManagementSchema() {
   `);
 }
 
+function ensureProxyVideoTaskSchema() {
+  const sqlite = requireSqliteConnection();
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS proxy_video_tasks (
+      id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      public_id text NOT NULL,
+      upstream_video_id text NOT NULL,
+      site_url text NOT NULL,
+      token_value text NOT NULL,
+      requested_model text,
+      actual_model text,
+      channel_id integer,
+      account_id integer,
+      status_snapshot text,
+      upstream_response_meta text,
+      last_upstream_status integer,
+      last_polled_at text,
+      created_at text DEFAULT (datetime('now')),
+      updated_at text DEFAULT (datetime('now'))
+    );
+  `);
+  if (!tableColumnExists('proxy_video_tasks', 'status_snapshot')) {
+    sqlite.exec('ALTER TABLE proxy_video_tasks ADD COLUMN status_snapshot text;');
+  }
+  if (!tableColumnExists('proxy_video_tasks', 'upstream_response_meta')) {
+    sqlite.exec('ALTER TABLE proxy_video_tasks ADD COLUMN upstream_response_meta text;');
+  }
+  if (!tableColumnExists('proxy_video_tasks', 'last_upstream_status')) {
+    sqlite.exec('ALTER TABLE proxy_video_tasks ADD COLUMN last_upstream_status integer;');
+  }
+  if (!tableColumnExists('proxy_video_tasks', 'last_polled_at')) {
+    sqlite.exec('ALTER TABLE proxy_video_tasks ADD COLUMN last_polled_at text;');
+  }
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS proxy_video_tasks_public_id_unique
+    ON proxy_video_tasks(public_id);
+  `);
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS proxy_video_tasks_upstream_video_id_idx
+    ON proxy_video_tasks(upstream_video_id);
+  `);
+}
+
 function ensureSiteStatusSchema() {
   const sqlite = requireSqliteConnection();
   if (!tableExists('sites')) {
@@ -174,6 +221,23 @@ function ensureSiteProxySchema() {
   }
 }
 
+function ensureSiteUseSystemProxySchema() {
+  const sqlite = requireSqliteConnection();
+  if (!tableExists('sites')) {
+    return;
+  }
+
+  if (!tableColumnExists('sites', 'use_system_proxy')) {
+    sqlite.exec(`ALTER TABLE sites ADD COLUMN use_system_proxy integer DEFAULT 0;`);
+  }
+
+  sqlite.exec(`
+    UPDATE sites
+    SET use_system_proxy = 0
+    WHERE use_system_proxy IS NULL;
+  `);
+}
+
 function ensureSiteExternalCheckinUrlSchema() {
   const sqlite = requireSqliteConnection();
   if (!tableExists('sites')) {
@@ -203,6 +267,94 @@ function ensureSiteGlobalWeightSchema() {
   `);
 }
 
+type RuntimeSchemaInspector = {
+  dialect: SiteSchemaInspector['dialect'];
+  tableExists(table: string): Promise<boolean>;
+  columnExists(table: string, column: string): Promise<boolean>;
+  execute(sqlText: string): Promise<void>;
+};
+
+function createSqliteSchemaInspector(): RuntimeSchemaInspector {
+  return {
+    dialect: 'sqlite',
+    tableExists: async (table) => tableExists(table),
+    columnExists: async (table, column) => tableColumnExists(table, column),
+    execute: async (sqlText) => {
+      requireSqliteConnection().exec(sqlText);
+    },
+  };
+}
+
+function createMysqlSchemaInspector(): RuntimeSchemaInspector | null {
+  if (!mysqlPool) return null;
+  return {
+      dialect: 'mysql',
+      tableExists: async (table) => {
+        const [rows] = await mysqlPool!.query(
+          'SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1',
+          [table],
+        );
+        return Array.isArray(rows) && rows.length > 0;
+      },
+      columnExists: async (table, column) => {
+        const [rows] = await mysqlPool!.query(
+          'SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1',
+          [table, column],
+        );
+        return Array.isArray(rows) && rows.length > 0;
+      },
+      execute: async (sqlText) => {
+        await mysqlPool!.query(sqlText);
+      },
+    };
+}
+
+function createPostgresSchemaInspector(): RuntimeSchemaInspector | null {
+  if (!pgPool) return null;
+  return {
+    dialect: 'postgres',
+    tableExists: async (table) => {
+      const result = await pgPool!.query(
+        'SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1 LIMIT 1',
+        [table],
+      );
+      return Number(result.rowCount || 0) > 0;
+    },
+    columnExists: async (table, column) => {
+      const result = await pgPool!.query(
+        'SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2 LIMIT 1',
+        [table, column],
+      );
+      return Number(result.rowCount || 0) > 0;
+    },
+    execute: async (sqlText) => {
+      await pgPool!.query(sqlText);
+    },
+  };
+}
+
+function createRuntimeSchemaInspector(): RuntimeSchemaInspector | null {
+  if (runtimeDbDialect === 'sqlite') {
+    return createSqliteSchemaInspector();
+  }
+  if (runtimeDbDialect === 'mysql') {
+    return createMysqlSchemaInspector();
+  }
+  return createPostgresSchemaInspector();
+}
+
+export async function ensureSiteCompatibilityColumns(): Promise<void> {
+  const inspector = createRuntimeSchemaInspector();
+  if (!inspector) return;
+  await ensureSiteSchemaCompatibility(inspector);
+}
+
+export async function ensureRouteGroupingCompatibilityColumns(): Promise<void> {
+  const inspector = createRuntimeSchemaInspector();
+  if (!inspector) return;
+  await ensureRouteGroupingSchemaCompatibility(inspector);
+}
+
 function ensureRouteGroupingSchema() {
   const sqlite = requireSqliteConnection();
   if (!tableExists('token_routes') || !tableExists('route_channels')) {
@@ -215,6 +367,14 @@ function ensureRouteGroupingSchema() {
 
   if (!tableColumnExists('token_routes', 'display_icon')) {
     sqlite.exec(`ALTER TABLE token_routes ADD COLUMN display_icon text;`);
+  }
+
+  if (!tableColumnExists('token_routes', 'decision_snapshot')) {
+    sqlite.exec(`ALTER TABLE token_routes ADD COLUMN decision_snapshot text;`);
+  }
+
+  if (!tableColumnExists('token_routes', 'decision_refreshed_at')) {
+    sqlite.exec(`ALTER TABLE token_routes ADD COLUMN decision_refreshed_at text;`);
   }
 
   if (!tableColumnExists('route_channels', 'source_model')) {
@@ -261,6 +421,95 @@ function ensureDownstreamApiKeySchema() {
     CREATE INDEX IF NOT EXISTS downstream_api_keys_expires_at_idx
     ON downstream_api_keys(expires_at);
   `);
+}
+
+function ensureProxyLogBillingDetailsSchema() {
+  const sqlite = requireSqliteConnection();
+  if (!tableExists('proxy_logs')) {
+    return;
+  }
+
+  if (!tableColumnExists('proxy_logs', 'billing_details')) {
+    sqlite.exec('ALTER TABLE proxy_logs ADD COLUMN billing_details text;');
+  }
+
+  proxyLogBillingDetailsColumnAvailable = true;
+}
+
+function normalizeSchemaErrorMessage(error: unknown): string {
+  if (typeof error === 'object' && error && 'message' in error) {
+    return String((error as { message?: unknown }).message || '');
+  }
+  return String(error || '');
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  const lowered = normalizeSchemaErrorMessage(error).toLowerCase();
+  return lowered.includes('duplicate column') || lowered.includes('already exists');
+}
+
+export async function hasProxyLogBillingDetailsColumn(): Promise<boolean> {
+  if (proxyLogBillingDetailsColumnAvailable !== null) {
+    return proxyLogBillingDetailsColumnAvailable;
+  }
+
+  if (runtimeDbDialect === 'sqlite') {
+    proxyLogBillingDetailsColumnAvailable = tableExists('proxy_logs')
+      && tableColumnExists('proxy_logs', 'billing_details');
+    return proxyLogBillingDetailsColumnAvailable;
+  }
+
+  if (runtimeDbDialect === 'mysql') {
+    if (!mysqlPool) return false;
+    const [rows] = await mysqlPool.query('SHOW COLUMNS FROM `proxy_logs` LIKE ?', ['billing_details']);
+    proxyLogBillingDetailsColumnAvailable = Array.isArray(rows) && rows.length > 0;
+    return proxyLogBillingDetailsColumnAvailable;
+  }
+
+  if (!pgPool) return false;
+  const result = await pgPool.query(
+    'SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2 LIMIT 1',
+    ['proxy_logs', 'billing_details'],
+  );
+  proxyLogBillingDetailsColumnAvailable = Number(result.rowCount || 0) > 0;
+  return proxyLogBillingDetailsColumnAvailable;
+}
+
+export async function ensureProxyLogBillingDetailsColumn(): Promise<boolean> {
+  if (runtimeDbDialect === 'sqlite') {
+    ensureProxyLogBillingDetailsSchema();
+    proxyLogBillingDetailsColumnAvailable = tableExists('proxy_logs')
+      && tableColumnExists('proxy_logs', 'billing_details');
+    return proxyLogBillingDetailsColumnAvailable;
+  }
+
+  if (await hasProxyLogBillingDetailsColumn()) {
+    return true;
+  }
+
+  try {
+    if (runtimeDbDialect === 'mysql') {
+      if (!mysqlPool) return false;
+      await mysqlPool.query('ALTER TABLE `proxy_logs` ADD COLUMN `billing_details` TEXT NULL');
+    } else {
+      if (!pgPool) return false;
+      await pgPool.query('ALTER TABLE "proxy_logs" ADD COLUMN "billing_details" TEXT');
+    }
+    proxyLogBillingDetailsColumnAvailable = true;
+    return true;
+  } catch (error) {
+    if (isDuplicateColumnError(error)) {
+      proxyLogBillingDetailsColumnAvailable = true;
+      return true;
+    }
+    proxyLogBillingDetailsColumnAvailable = false;
+    console.warn('[db] failed to ensure proxy_logs.billing_details column', error);
+    return false;
+  }
+}
+
+function resetSchemaCapabilityCache() {
+  proxyLogBillingDetailsColumnAvailable = null;
 }
 
 async function sqliteProxyQuery(sqlText: string, params: unknown[], method: SqlMethod) {
@@ -514,10 +763,13 @@ function initSqliteDb() {
   ensureTokenManagementSchema();
   ensureSiteStatusSchema();
   ensureSiteProxySchema();
+  ensureSiteUseSystemProxySchema();
   ensureSiteExternalCheckinUrlSchema();
   ensureSiteGlobalWeightSchema();
   ensureRouteGroupingSchema();
   ensureDownstreamApiKeySchema();
+  ensureProxyLogBillingDetailsSchema();
+  ensureProxyVideoTaskSchema();
 
   const rawDb = drizzleSqliteProxy(
     (sqlText, params, method) => sqliteProxyQuery(sqlText, params, method as SqlMethod),
@@ -532,7 +784,11 @@ function initMysqlDb(): AppDb {
   if (!config.dbUrl) {
     throw new Error('DB_URL is required when DB_TYPE=mysql');
   }
-  mysqlPool = mysql.createPool(config.dbUrl);
+  const poolOptions: mysql.PoolOptions = { uri: config.dbUrl };
+  if (config.dbSsl) {
+    poolOptions.ssl = { rejectUnauthorized: false };
+  }
+  mysqlPool = mysql.createPool(poolOptions);
 
   const rawDb = drizzleMysqlProxy(
     (sqlText, params, method) => mysqlProxyQuery(mysqlPool!, sqlText, params, method as SqlMethod),
@@ -564,7 +820,11 @@ function initPostgresDb(): AppDb {
   if (!config.dbUrl) {
     throw new Error('DB_URL is required when DB_TYPE=postgres');
   }
-  pgPool = new pg.Pool({ connectionString: config.dbUrl });
+  const poolOptions: pg.PoolConfig = { connectionString: config.dbUrl };
+  if (config.dbSsl) {
+    poolOptions.ssl = { rejectUnauthorized: false };
+  }
+  pgPool = new pg.Pool(poolOptions);
 
   const rawDb = drizzlePgProxy(
     (sqlText, params, method) => pgProxyQuery(pgPool!, sqlText, params, method as SqlMethod),
@@ -608,6 +868,7 @@ export const db: any = new Proxy({}, {
 export { schema };
 
 export async function closeDbConnections(): Promise<void> {
+  resetSchemaCapabilityCache();
   if (mysqlPool) {
     await mysqlPool.end();
     mysqlPool = null;
@@ -622,16 +883,20 @@ export async function closeDbConnections(): Promise<void> {
   }
 }
 
-export async function switchRuntimeDatabase(nextDialect: RuntimeDbDialect, nextDbUrl: string): Promise<void> {
+export async function switchRuntimeDatabase(nextDialect: RuntimeDbDialect, nextDbUrl: string, nextDbSsl?: boolean): Promise<void> {
   const previousDialect = runtimeDbDialect;
   const previousDbUrl = config.dbUrl;
   const previousConfigDialect = config.dbType;
+  const previousDbSsl = config.dbSsl;
 
   await closeDbConnections();
 
   runtimeDbDialect = nextDialect;
   config.dbType = nextDialect;
   config.dbUrl = nextDbUrl;
+  if (nextDbSsl !== undefined) {
+    config.dbSsl = nextDbSsl;
+  }
 
   try {
     activeDb = initDb();
@@ -640,6 +905,7 @@ export async function switchRuntimeDatabase(nextDialect: RuntimeDbDialect, nextD
     runtimeDbDialect = previousDialect;
     config.dbType = previousConfigDialect;
     config.dbUrl = previousDbUrl;
+    config.dbSsl = previousDbSsl;
     activeDb = initDb();
     throw error;
   }

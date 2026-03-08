@@ -4,6 +4,12 @@ import { db, schema } from '../../db/index.js';
 import { rebuildTokenRoutesFromAvailability, refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { invalidateTokenRouterCache, matchesModelPattern, tokenRouter } from '../../services/tokenRouter.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
+import {
+  clearRouteDecisionSnapshot,
+  clearRouteDecisionSnapshots,
+  parseRouteDecisionSnapshot,
+  saveRouteDecisionSnapshots,
+} from '../../services/routeDecisionSnapshotStore.js';
 
 function isExactModelPattern(modelPattern: string): boolean {
   const normalized = modelPattern.trim();
@@ -169,6 +175,30 @@ async function populateRouteChannelsByModelPattern(routeId: number, modelPattern
   return created;
 }
 
+async function rebuildAutomaticRouteChannelsByModelPattern(routeId: number, modelPattern: string): Promise<{
+  removedChannels: number;
+  createdChannels: number;
+}> {
+  const removableChannels = await db.select().from(schema.routeChannels)
+    .where(
+      and(
+        eq(schema.routeChannels.routeId, routeId),
+        eq(schema.routeChannels.manualOverride, false),
+      ),
+    )
+    .all();
+
+  for (const channel of removableChannels) {
+    await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
+  }
+
+  const createdChannels = await populateRouteChannelsByModelPattern(routeId, modelPattern);
+  return {
+    removedChannels: removableChannels.length,
+    createdChannels,
+  };
+}
+
 type BatchChannelPriorityUpdate = {
   id: number;
   priority: number;
@@ -176,6 +206,8 @@ type BatchChannelPriorityUpdate = {
 
 type BatchRouteDecisionModels = {
   models: string[];
+  refreshPricingCatalog?: boolean;
+  persistSnapshots?: boolean;
 };
 
 type BatchRouteDecisionRouteModels = {
@@ -183,10 +215,14 @@ type BatchRouteDecisionRouteModels = {
     routeId: number;
     model: string;
   }>;
+  refreshPricingCatalog?: boolean;
+  persistSnapshots?: boolean;
 };
 
 type BatchRouteWideDecisionRouteIds = {
   routeIds: number[];
+  refreshPricingCatalog?: boolean;
+  persistSnapshots?: boolean;
 };
 
 function parseBatchChannelUpdates(input: unknown): { ok: true; updates: BatchChannelPriorityUpdate[] } | { ok: false; message: string } {
@@ -228,7 +264,9 @@ function parseBatchChannelUpdates(input: unknown): { ok: true; updates: BatchCha
   return { ok: true, updates: normalized };
 }
 
-function parseBatchRouteDecisionModels(input: unknown): { ok: true; models: string[] } | { ok: false; message: string } {
+function parseBatchRouteDecisionModels(
+  input: unknown,
+): { ok: true; models: string[]; refreshPricingCatalog: boolean; persistSnapshots: boolean } | { ok: false; message: string } {
   if (!input || typeof input !== 'object') {
     return { ok: false, message: '请求体必须是对象' };
   }
@@ -253,12 +291,17 @@ function parseBatchRouteDecisionModels(input: unknown): { ok: true; models: stri
     return { ok: false, message: 'models 中没有有效模型名称' };
   }
 
-  return { ok: true, models: normalized };
+  return {
+    ok: true,
+    models: normalized,
+    refreshPricingCatalog: (input as { refreshPricingCatalog?: unknown }).refreshPricingCatalog === true,
+    persistSnapshots: (input as { persistSnapshots?: unknown }).persistSnapshots === true,
+  };
 }
 
 function parseBatchRouteDecisionRouteModels(
   input: unknown,
-): { ok: true; items: Array<{ routeId: number; model: string }> } | { ok: false; message: string } {
+): { ok: true; items: Array<{ routeId: number; model: string }>; refreshPricingCatalog: boolean; persistSnapshots: boolean } | { ok: false; message: string } {
   if (!input || typeof input !== 'object') {
     return { ok: false, message: '请求体必须是对象' };
   }
@@ -292,12 +335,17 @@ function parseBatchRouteDecisionRouteModels(
     return { ok: false, message: 'items 中没有有效 routeId/model' };
   }
 
-  return { ok: true, items: normalized };
+  return {
+    ok: true,
+    items: normalized,
+    refreshPricingCatalog: (input as { refreshPricingCatalog?: unknown }).refreshPricingCatalog === true,
+    persistSnapshots: (input as { persistSnapshots?: unknown }).persistSnapshots === true,
+  };
 }
 
 function parseBatchRouteWideDecisionRouteIds(
   input: unknown,
-): { ok: true; routeIds: number[] } | { ok: false; message: string } {
+): { ok: true; routeIds: number[]; refreshPricingCatalog: boolean; persistSnapshots: boolean } | { ok: false; message: string } {
   if (!input || typeof input !== 'object') {
     return { ok: false, message: '请求体必须是对象' };
   }
@@ -322,7 +370,12 @@ function parseBatchRouteWideDecisionRouteIds(
     return { ok: false, message: 'routeIds 中没有有效 routeId' };
   }
 
-  return { ok: true, routeIds: normalized };
+  return {
+    ok: true,
+    routeIds: normalized,
+    refreshPricingCatalog: (input as { refreshPricingCatalog?: unknown }).refreshPricingCatalog === true,
+    persistSnapshots: (input as { persistSnapshots?: unknown }).persistSnapshots === true,
+  };
 }
 
 export async function tokensRoutes(app: FastifyInstance) {
@@ -362,6 +415,8 @@ export async function tokensRoutes(app: FastifyInstance) {
 
     return routes.map((route) => ({
       ...route,
+      decisionSnapshot: parseRouteDecisionSnapshot(route.decisionSnapshot),
+      decisionRefreshedAt: route.decisionRefreshedAt ?? null,
       channels: channelsByRoute.get(route.id) || [],
     }));
   });
@@ -383,8 +438,31 @@ export async function tokensRoutes(app: FastifyInstance) {
     }
 
     const decisions: Record<string, Awaited<ReturnType<typeof tokenRouter.explainSelection>>> = {};
+    const routes = parsed.persistSnapshots
+      ? await db.select({
+        id: schema.tokenRoutes.id,
+        modelPattern: schema.tokenRoutes.modelPattern,
+      }).from(schema.tokenRoutes).all()
+      : [];
+    const refreshedKeys = parsed.refreshPricingCatalog ? new Set<string>() : undefined;
     for (const model of parsed.models) {
+      if (parsed.refreshPricingCatalog) {
+        await tokenRouter.refreshPricingReferenceCosts(model, { refreshedKeys });
+      }
       decisions[model] = await tokenRouter.explainSelection(model);
+    }
+
+    if (parsed.persistSnapshots) {
+      const snapshotWrites: Array<{ routeId: number; snapshot: unknown }> = [];
+      for (const model of parsed.models) {
+        const decision = decisions[model];
+        for (const route of routes) {
+          if (!isExactModelPattern(route.modelPattern)) continue;
+          if (!matchesModelPattern(model, route.modelPattern)) continue;
+          snapshotWrites.push({ routeId: route.id, snapshot: decision });
+        }
+      }
+      await saveRouteDecisionSnapshots(snapshotWrites);
     }
 
     return { success: true, decisions };
@@ -397,10 +475,21 @@ export async function tokensRoutes(app: FastifyInstance) {
     }
 
     const decisions: Record<string, Record<string, Awaited<ReturnType<typeof tokenRouter.explainSelectionForRoute>>>> = {};
+    const refreshedKeys = parsed.refreshPricingCatalog ? new Set<string>() : undefined;
     for (const item of parsed.items) {
       const routeKey = String(item.routeId);
       if (!decisions[routeKey]) decisions[routeKey] = {};
+      if (parsed.refreshPricingCatalog) {
+        await tokenRouter.refreshPricingReferenceCostsForRoute(item.routeId, item.model, { refreshedKeys });
+      }
       decisions[routeKey][item.model] = await tokenRouter.explainSelectionForRoute(item.routeId, item.model);
+    }
+
+    if (parsed.persistSnapshots) {
+      await saveRouteDecisionSnapshots(parsed.items.map((item) => ({
+        routeId: item.routeId,
+        snapshot: decisions[String(item.routeId)]?.[item.model] ?? null,
+      })));
     }
 
     return { success: true, decisions };
@@ -413,8 +502,19 @@ export async function tokensRoutes(app: FastifyInstance) {
     }
 
     const decisions: Record<string, Awaited<ReturnType<typeof tokenRouter.explainSelectionRouteWide>>> = {};
+    const refreshedKeys = parsed.refreshPricingCatalog ? new Set<string>() : undefined;
     for (const routeId of parsed.routeIds) {
+      if (parsed.refreshPricingCatalog) {
+        await tokenRouter.refreshRouteWidePricingReferenceCosts(routeId, { refreshedKeys });
+      }
       decisions[String(routeId)] = await tokenRouter.explainSelectionRouteWide(routeId);
+    }
+
+    if (parsed.persistSnapshots) {
+      await saveRouteDecisionSnapshots(parsed.routeIds.map((routeId) => ({
+        routeId,
+        snapshot: decisions[String(routeId)] ?? null,
+      })));
     }
 
     return { success: true, decisions };
@@ -445,19 +545,36 @@ export async function tokensRoutes(app: FastifyInstance) {
   });
 
   // Update a route
-  app.put<{ Params: { id: string }; Body: any }>('/api/routes/:id', async (request) => {
+  app.put<{ Params: { id: string }; Body: any }>('/api/routes/:id', async (request, reply) => {
     const id = parseInt(request.params.id, 10);
     const body = request.body as Record<string, unknown>;
+    const existingRoute = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, id)).get();
+    if (!existingRoute) {
+      return reply.code(404).send({ success: false, message: '路由不存在' });
+    }
+
     const updates: Record<string, unknown> = {};
+    let nextModelPattern = existingRoute.modelPattern;
 
     if (body.displayName !== undefined) updates.displayName = body.displayName;
     if (body.displayIcon !== undefined) updates.displayIcon = body.displayIcon;
-    if (body.modelPattern !== undefined) updates.modelPattern = body.modelPattern;
+    if (body.modelPattern !== undefined) {
+      nextModelPattern = String(body.modelPattern);
+      updates.modelPattern = nextModelPattern;
+    }
     if (body.modelMapping !== undefined) updates.modelMapping = body.modelMapping;
     if (body.enabled !== undefined) updates.enabled = body.enabled;
     updates.updatedAt = new Date().toISOString();
 
     await db.update(schema.tokenRoutes).set(updates).where(eq(schema.tokenRoutes.id, id)).run();
+    const modelPatternChanged = body.modelPattern !== undefined && nextModelPattern !== existingRoute.modelPattern;
+    const routeBehaviorChanged = modelPatternChanged || body.modelMapping !== undefined || body.enabled !== undefined;
+    if (modelPatternChanged) {
+      await rebuildAutomaticRouteChannelsByModelPattern(id, nextModelPattern);
+    }
+    if (routeBehaviorChanged) {
+      await clearRouteDecisionSnapshot(id);
+    }
     invalidateTokenRouterCache();
     return await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, id)).get();
   });
@@ -521,6 +638,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     if (!created) {
       return reply.code(500).send({ success: false, message: '创建通道失败' });
     }
+    await clearRouteDecisionSnapshot(routeId);
     invalidateTokenRouterCache();
     return created;
   });
@@ -552,6 +670,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     const updatedChannels = await db.select().from(schema.routeChannels)
       .where(inArray(schema.routeChannels.id, channelIds))
       .all();
+    await clearRouteDecisionSnapshots(existingChannels.map((channel) => channel.routeId));
     invalidateTokenRouterCache();
     return { success: true, channels: updatedChannels };
   });
@@ -597,6 +716,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     }
 
     await db.update(schema.routeChannels).set(updates).where(eq(schema.routeChannels.id, channelId)).run();
+    await clearRouteDecisionSnapshot(channel.routeId);
     invalidateTokenRouterCache();
     return await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
   });
@@ -604,7 +724,11 @@ export async function tokensRoutes(app: FastifyInstance) {
   // Delete a channel
   app.delete<{ Params: { channelId: string } }>('/api/channels/:channelId', async (request) => {
     const channelId = parseInt(request.params.channelId, 10);
+    const channel = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
     await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).run();
+    if (channel) {
+      await clearRouteDecisionSnapshot(channel.routeId);
+    }
     invalidateTokenRouterCache();
     return { success: true };
   });

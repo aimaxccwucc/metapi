@@ -26,6 +26,12 @@ const COOKIE_ONLY_LOGIN_SESSION = 'cookie-only-session';
 const COOKIE_SHIELDED_TOKEN = Buffer.from(
   `1771864970|${Buffer.from('username=linuxdo_131936').toString('base64')}|sig`,
 ).toString('base64');
+const COOKIE_GOB_USER_TOKEN = Buffer.from(
+  `1772806887|${Buffer.from(
+    '0d7f040102ff8000011001100000ff93ff80000506737472696e670c060004726f6c6503696e740402000206737472696e670c08000673746174757303696e740402000206737472696e670c07000567726f757006737472696e670c09000764656661756c7406737472696e670c040002696403696e74040500fd04683006737472696e670c0a0008757365726e616d6506737472696e670c09000773756974313539',
+    'hex',
+  ).toString('base64')}|sig`,
+).toString('base64');
 const ANYROUTER_CHALLENGE_HTML = readFileSync(
   new URL('./__fixtures__/anyrouter-challenge.html', import.meta.url),
   'utf8',
@@ -233,7 +239,7 @@ describe('NewApiAdapter', () => {
       if (req.url === '/api/user/self') {
         if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${BALANCE_FAIL_TOKEN}`) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, message: '閺冪姵娼堟潻娑滎攽濮濄倖鎼锋担婊愮礉閺堫亞娅ヨぐ鏇氱瑬閺堫亝褰佹笟?access token' }));
+          res.end(JSON.stringify({ success: false, message: '无权进行此操作，access token 无效' }));
           return;
         }
 
@@ -245,7 +251,7 @@ describe('NewApiAdapter', () => {
           )
         ) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, message: '閺冪姵娼堟潻娑滎攽濮濄倖鎼锋担婊愮礉閺堫亞娅ヨぐ鏇氱瑬閺堫亝褰佹笟?access token' }));
+          res.end(JSON.stringify({ success: false, message: '无权进行此操作，access token 无效' }));
           return;
         }
 
@@ -316,6 +322,20 @@ describe('NewApiAdapter', () => {
           return;
         }
 
+        if (typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`session=${COOKIE_GOB_USER_TOKEN}`)) {
+          if (req.headers['new-api-user'] !== '144408') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: 'missing New-Api-User' }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            data: { id: 144408, username: 'suit159', quota: 50000000, used_quota: 0 },
+          }));
+          return;
+        }
+
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, message: 'unauthorized' }));
         return;
@@ -339,12 +359,12 @@ describe('NewApiAdapter', () => {
         }
         if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${CHECKIN_ALREADY_TOKEN}`) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, message: '浠婂ぉ宸茬粡绛惧埌杩囧暒' }));
+          res.end(JSON.stringify({ success: false, message: '今天已经签到过啦' }));
           return;
         }
         if (typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`session=${CHECKIN_ALREADY_TOKEN}`)) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, message: '鏃犳潈杩涜姝ゆ搷浣滐紝鏈櫥褰曚笖鏈彁渚?access token' }));
+          res.end(JSON.stringify({ success: false, message: '无权进行此操作，未登录且未提供 access token' }));
           return;
         }
         if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${COOKIE_SHIELDED_TOKEN}`) {
@@ -372,7 +392,7 @@ describe('NewApiAdapter', () => {
       if (req.url === '/api/user/sign_in') {
         if (typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`session=${CHECKIN_ALREADY_TOKEN}`)) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, message: '鏃犳潈杩涜姝ゆ搷浣滐紝鏈櫥褰曚笖鏈彁渚?access token' }));
+          res.end(JSON.stringify({ success: false, message: '无权进行此操作，未登录且未提供 access token' }));
           return;
         }
       }
@@ -490,6 +510,29 @@ describe('NewApiAdapter', () => {
     ).toBe(true);
   });
 
+  it('extracts gob-encoded user id from anyrouter session cookie when reading balance', async () => {
+    const adapter = new NewApiAdapter();
+    const balance = await adapter.getBalance(baseUrl, COOKIE_GOB_USER_TOKEN);
+
+    expect(balance.balance).toBe(100);
+    expect(
+      requests.some((r) => r.url === '/api/user/self' && r.headers['new-api-user'] === '144408'),
+    ).toBe(true);
+  });
+
+  it('recovers from mismatched provided user id by probing gob-encoded session payload', async () => {
+    const adapter = new NewApiAdapter();
+    const balance = await adapter.getBalance(baseUrl, COOKIE_GOB_USER_TOKEN, 159);
+
+    expect(balance.balance).toBe(100);
+    expect(
+      requests.some((r) => r.url === '/api/user/self' && r.headers['new-api-user'] === '159'),
+    ).toBe(true);
+    expect(
+      requests.some((r) => r.url === '/api/user/self' && r.headers['new-api-user'] === '144408'),
+    ).toBe(true);
+  });
+
   it('uses shielded cookie flow for balance and checkin', async () => {
     const adapter = new NewApiAdapter();
     const balance = await adapter.getBalance(baseUrl, COOKIE_SHIELDED_TOKEN);
@@ -533,7 +576,7 @@ describe('NewApiAdapter', () => {
     const result = await adapter.checkin(baseUrl, CHECKIN_ALREADY_TOKEN, 11494);
 
     expect(result.success).toBe(false);
-    expect(result.message).toBe('浠婂ぉ宸茬粡绛惧埌杩囧暒');
+    expect(result.message).toBe('今天已经签到过啦');
   });
 
   it('sends all compatibility user-id headers when userId is known', async () => {

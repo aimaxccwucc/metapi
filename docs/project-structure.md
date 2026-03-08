@@ -23,10 +23,10 @@ metapi/
 ├── scripts/               # 项目脚本（按场景分组）
 │   ├── dev/
 │   │   └── restart.bat    # Windows 开发环境快捷重启
-│   └── release/
-│       ├── start.sh       # Release 包启动脚本（Linux/macOS）
-│       └── start.bat      # Release 包启动脚本（Windows）
+│   └── desktop/
+│       └── afterSign.mjs  # Electron macOS 签名后处理 / 可选公证
 ├── src/
+│   ├── desktop/           # Electron 主进程与桌面运行时
 │   ├── server/            # Fastify 后端服务
 │   └── web/               # React 前端应用
 ├── .github/workflows/     # CI/CD 工作流

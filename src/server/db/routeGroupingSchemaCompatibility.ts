@@ -1,0 +1,106 @@
+export type RouteGroupingSchemaDialect = 'sqlite' | 'mysql' | 'postgres';
+
+export interface RouteGroupingSchemaInspector {
+  dialect: RouteGroupingSchemaDialect;
+  tableExists(table: string): Promise<boolean>;
+  columnExists(table: string, column: string): Promise<boolean>;
+  execute(sqlText: string): Promise<void>;
+}
+
+type RouteGroupingColumnCompatibilitySpec = {
+  table: 'token_routes' | 'route_channels';
+  column: string;
+  addSql: Record<RouteGroupingSchemaDialect, string>;
+};
+
+const ROUTE_GROUPING_COLUMN_COMPATIBILITY_SPECS: RouteGroupingColumnCompatibilitySpec[] = [
+  {
+    table: 'token_routes',
+    column: 'display_name',
+    addSql: {
+      sqlite: 'ALTER TABLE token_routes ADD COLUMN display_name text;',
+      mysql: 'ALTER TABLE `token_routes` ADD COLUMN `display_name` TEXT NULL',
+      postgres: 'ALTER TABLE "token_routes" ADD COLUMN "display_name" TEXT',
+    },
+  },
+  {
+    table: 'token_routes',
+    column: 'display_icon',
+    addSql: {
+      sqlite: 'ALTER TABLE token_routes ADD COLUMN display_icon text;',
+      mysql: 'ALTER TABLE `token_routes` ADD COLUMN `display_icon` TEXT NULL',
+      postgres: 'ALTER TABLE "token_routes" ADD COLUMN "display_icon" TEXT',
+    },
+  },
+  {
+    table: 'token_routes',
+    column: 'decision_snapshot',
+    addSql: {
+      sqlite: 'ALTER TABLE token_routes ADD COLUMN decision_snapshot text;',
+      mysql: 'ALTER TABLE `token_routes` ADD COLUMN `decision_snapshot` TEXT NULL',
+      postgres: 'ALTER TABLE "token_routes" ADD COLUMN "decision_snapshot" TEXT',
+    },
+  },
+  {
+    table: 'token_routes',
+    column: 'decision_refreshed_at',
+    addSql: {
+      sqlite: 'ALTER TABLE token_routes ADD COLUMN decision_refreshed_at text;',
+      mysql: 'ALTER TABLE `token_routes` ADD COLUMN `decision_refreshed_at` TEXT NULL',
+      postgres: 'ALTER TABLE "token_routes" ADD COLUMN "decision_refreshed_at" TEXT',
+    },
+  },
+  {
+    table: 'route_channels',
+    column: 'source_model',
+    addSql: {
+      sqlite: 'ALTER TABLE route_channels ADD COLUMN source_model text;',
+      mysql: 'ALTER TABLE `route_channels` ADD COLUMN `source_model` TEXT NULL',
+      postgres: 'ALTER TABLE "route_channels" ADD COLUMN "source_model" TEXT',
+    },
+  },
+];
+
+function normalizeSchemaErrorMessage(error: unknown): string {
+  if (typeof error === 'object' && error && 'message' in error) {
+    return String((error as { message?: unknown }).message || '');
+  }
+  return String(error || '');
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  const lowered = normalizeSchemaErrorMessage(error).toLowerCase();
+  return lowered.includes('duplicate column')
+    || lowered.includes('already exists')
+    || lowered.includes('duplicate column name');
+}
+
+async function executeAddColumn(inspector: RouteGroupingSchemaInspector, sqlText: string): Promise<void> {
+  try {
+    await inspector.execute(sqlText);
+  } catch (error) {
+    if (!isDuplicateColumnError(error)) {
+      throw error;
+    }
+  }
+}
+
+export async function ensureRouteGroupingSchemaCompatibility(inspector: RouteGroupingSchemaInspector): Promise<void> {
+  const tableExistsCache = new Map<string, boolean>();
+
+  for (const spec of ROUTE_GROUPING_COLUMN_COMPATIBILITY_SPECS) {
+    let hasTable = tableExistsCache.get(spec.table);
+    if (hasTable === undefined) {
+      hasTable = await inspector.tableExists(spec.table);
+      tableExistsCache.set(spec.table, hasTable);
+    }
+    if (!hasTable) {
+      continue;
+    }
+
+    const hasColumn = await inspector.columnExists(spec.table, spec.column);
+    if (!hasColumn) {
+      await executeAddColumn(inspector, spec.addSql[inspector.dialect]);
+    }
+  }
+}

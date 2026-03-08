@@ -1,10 +1,12 @@
-import { FastifyInstance, FastifyReply } from 'fastify';
+import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { fetch } from 'undici';
+import { fetch, File, FormData } from 'undici';
 import { config } from '../../config.js';
 
+type UndiciRequestInit = Parameters<typeof fetch>[1];
+
 type TestChatMessage = { role: string; content: string };
-type TestTargetFormat = 'openai' | 'claude' | 'responses';
+type TestTargetFormat = 'openai' | 'claude' | 'responses' | 'gemini';
 
 type TestChatRequestBody = {
   model?: string;
@@ -32,12 +34,48 @@ type ValidatedTestChatPayload = {
   seed?: number;
 };
 
-type TestChatJobStatus = 'pending' | 'succeeded' | 'failed' | 'cancelled';
+type ProxyTestMethod = 'POST' | 'GET' | 'DELETE';
+type ProxyTestRequestKind = 'json' | 'multipart' | 'empty';
 
-type TestChatJob = {
+type ProxyTestMultipartFile = {
+  field: string;
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+};
+
+type ProxyTestEnvelope = {
+  method?: ProxyTestMethod;
+  path?: string;
+  requestKind?: ProxyTestRequestKind;
+  stream?: boolean;
+  jobMode?: boolean;
+  rawMode?: boolean;
+  jsonBody?: unknown;
+  rawJsonText?: string;
+  multipartFields?: Record<string, string>;
+  multipartFiles?: ProxyTestMultipartFile[];
+};
+
+type ValidatedProxyTestEnvelope = {
+  method: ProxyTestMethod;
+  path: string;
+  requestKind: ProxyTestRequestKind;
+  stream: boolean;
+  jobMode: boolean;
+  rawMode: boolean;
+  jsonBody?: unknown;
+  rawJsonText?: string;
+  multipartFields?: Record<string, string>;
+  multipartFiles?: ProxyTestMultipartFile[];
+};
+
+type TestJobStatus = 'pending' | 'succeeded' | 'failed' | 'cancelled';
+
+type TestProxyJob = {
   id: string;
-  status: TestChatJobStatus;
-  payload: ValidatedTestChatPayload;
+  status: TestJobStatus;
+  envelope: ValidatedProxyTestEnvelope;
   result?: unknown;
   error?: unknown;
   controller?: AbortController | null;
@@ -48,7 +86,22 @@ type TestChatJob = {
 
 const JOB_TTL_MS = 10 * 60 * 1000;
 const JOB_CLEANUP_INTERVAL_MS = 60 * 1000;
-const jobs = new Map<string, TestChatJob>();
+const jobs = new Map<string, TestProxyJob>();
+
+const ALLOWED_PROXY_PATH_PATTERNS: RegExp[] = [
+  /^\/v1\/chat\/completions(?:\?.*)?$/i,
+  /^\/v1\/responses(?:\/compact)?(?:\?.*)?$/i,
+  /^\/v1\/messages(?:\?.*)?$/i,
+  /^\/v1\/embeddings(?:\?.*)?$/i,
+  /^\/v1\/search(?:\?.*)?$/i,
+  /^\/v1\/images\/(?:generations|edits)(?:\?.*)?$/i,
+  /^\/v1\/videos(?:\?.*)?$/i,
+  /^\/v1\/videos\/[^/?#]+(?:\?.*)?$/i,
+  /^\/gemini\/[^/]+\/models(?:\?.*)?$/i,
+  /^\/gemini\/[^/]+\/models\/.+(?:\?.*)?$/i,
+  /^\/v1beta\/models(?:\?.*)?$/i,
+  /^\/v1beta\/models\/.+(?:\?.*)?$/i,
+];
 
 class UpstreamProxyError extends Error {
   statusCode: number;
@@ -62,18 +115,41 @@ class UpstreamProxyError extends Error {
   }
 }
 
-const normalizeErrorPayload = (text: string): unknown => {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeErrorPayload(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch {
     return { error: { message: text, type: 'upstream_error' } };
   }
-};
+}
 
-const validatePayload = (
+function normalizeProxyPath(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  try {
+    if (/^https?:\/\//i.test(trimmed)) {
+      const url = new URL(trimmed);
+      return `${url.pathname}${url.search}`;
+    }
+  } catch {
+    // ignore invalid absolute URL
+  }
+  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+}
+
+function isAllowedProxyPath(path: string): boolean {
+  return ALLOWED_PROXY_PATH_PATTERNS.some((pattern) => pattern.test(path));
+}
+
+function validateLegacyPayload(
   body: TestChatRequestBody,
   reply: FastifyReply,
-): ValidatedTestChatPayload | null => {
+): ValidatedTestChatPayload | null {
   if (!body.model || body.model.trim().length === 0) {
     reply.code(400).send({ error: 'model is required' });
     return null;
@@ -88,7 +164,9 @@ const validatePayload = (
     ? 'claude'
     : body.targetFormat === 'responses'
       ? 'responses'
-      : 'openai';
+      : body.targetFormat === 'gemini'
+        ? 'gemini'
+        : 'openai';
 
   return {
     model: body.model,
@@ -102,12 +180,12 @@ const validatePayload = (
     presence_penalty: body.presence_penalty,
     seed: body.seed,
   };
-};
+}
 
-const convertOpenAiPayloadToClaudeBody = (
+function convertOpenAiPayloadToClaudeBody(
   payload: ValidatedTestChatPayload,
   forceStream: boolean,
-): Record<string, unknown> => {
+): Record<string, unknown> {
   const systemContents: string[] = [];
   const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
@@ -136,10 +214,7 @@ const convertOpenAiPayloadToClaudeBody = (
     messages,
   };
 
-  if (systemContents.length > 0) {
-    body.system = systemContents.join('\n\n');
-  }
-
+  if (systemContents.length > 0) body.system = systemContents.join('\n\n');
   if (typeof payload.temperature === 'number' && Number.isFinite(payload.temperature)) {
     body.temperature = payload.temperature;
   }
@@ -148,12 +223,12 @@ const convertOpenAiPayloadToClaudeBody = (
   }
 
   return body;
-};
+}
 
-const convertOpenAiPayloadToResponsesBody = (
+function convertOpenAiPayloadToResponsesBody(
   payload: ValidatedTestChatPayload,
   forceStream: boolean,
-): Record<string, unknown> => {
+): Record<string, unknown> {
   const systemContents: string[] = [];
   const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
@@ -198,62 +273,263 @@ const convertOpenAiPayloadToResponsesBody = (
     : 4096;
 
   return body;
-};
+}
 
-const buildUpstreamRequest = (
+function convertLegacyPayloadToEnvelope(
   payload: ValidatedTestChatPayload,
   forceStream: boolean,
-): { url: string; headers: Record<string, string>; body: Record<string, unknown> } => {
+): ValidatedProxyTestEnvelope {
   if (payload.targetFormat === 'claude') {
     return {
-      url: `http://127.0.0.1:${config.port}/v1/messages`,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': config.proxyToken,
-        'anthropic-version': '2023-06-01',
-      },
-      body: convertOpenAiPayloadToClaudeBody(payload, forceStream),
+      method: 'POST',
+      path: '/v1/messages',
+      requestKind: 'json',
+      stream: forceStream,
+      jobMode: false,
+      rawMode: false,
+      jsonBody: convertOpenAiPayloadToClaudeBody(payload, forceStream),
     };
   }
 
   if (payload.targetFormat === 'responses') {
     return {
-      url: `http://127.0.0.1:${config.port}/v1/responses`,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.proxyToken}`,
-      },
-      body: convertOpenAiPayloadToResponsesBody(payload, forceStream),
+      method: 'POST',
+      path: '/v1/responses',
+      requestKind: 'json',
+      stream: forceStream,
+      jobMode: false,
+      rawMode: false,
+      jsonBody: convertOpenAiPayloadToResponsesBody(payload, forceStream),
     };
   }
 
-  const { targetFormat: _targetFormat, ...openAiPayload } = payload;
   return {
-    url: `http://127.0.0.1:${config.port}/v1/chat/completions`,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.proxyToken}`,
+    method: 'POST',
+    path: '/v1/chat/completions',
+    requestKind: 'json',
+    stream: forceStream,
+    jobMode: false,
+    rawMode: false,
+    jsonBody: {
+      ...payload,
+      stream: forceStream,
     },
-    body: { ...openAiPayload, stream: forceStream },
   };
-};
+}
 
-const requestUpstreamChat = async (
-  payload: ValidatedTestChatPayload,
+function validateProxyEnvelope(
+  body: ProxyTestEnvelope,
+  reply: FastifyReply,
+): ValidatedProxyTestEnvelope | null {
+  const method = body.method === 'GET' || body.method === 'DELETE' ? body.method : 'POST';
+  const path = normalizeProxyPath(body.path);
+
+  if (!path) {
+    reply.code(400).send({ error: { message: 'path is required', type: 'validation_error' } });
+    return null;
+  }
+
+  if (!isAllowedProxyPath(path)) {
+    reply.code(400).send({ error: { message: `path is not allowed: ${path}`, type: 'validation_error' } });
+    return null;
+  }
+
+  const requestKind: ProxyTestRequestKind = body.requestKind === 'multipart'
+    ? 'multipart'
+    : body.requestKind === 'empty'
+      ? 'empty'
+      : 'json';
+
+  if (method !== 'POST' && requestKind !== 'empty') {
+    reply.code(400).send({
+      error: { message: `${method} only supports requestKind=empty in tester`, type: 'validation_error' },
+    });
+    return null;
+  }
+
+  const envelope: ValidatedProxyTestEnvelope = {
+    method,
+    path,
+    requestKind,
+    stream: body.stream === true,
+    jobMode: body.jobMode === true,
+    rawMode: body.rawMode === true,
+  };
+
+  if (requestKind === 'json') {
+    if (typeof body.rawJsonText === 'string' && body.rawJsonText.trim().length > 0) {
+      envelope.rawJsonText = body.rawJsonText;
+    }
+    if (body.jsonBody !== undefined) {
+      envelope.jsonBody = body.jsonBody;
+    }
+    if (envelope.rawMode && typeof envelope.rawJsonText !== 'string') {
+      reply.code(400).send({
+        error: { message: 'rawJsonText is required when rawMode is enabled', type: 'validation_error' },
+      });
+      return null;
+    }
+  }
+
+  if (requestKind === 'multipart') {
+    envelope.multipartFields = isRecord(body.multipartFields)
+      ? Object.fromEntries(
+        Object.entries(body.multipartFields)
+          .filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string'),
+      )
+      : {};
+    envelope.multipartFiles = Array.isArray(body.multipartFiles)
+      ? body.multipartFiles
+        .filter((item): item is ProxyTestMultipartFile => (
+          !!item
+          && typeof item.field === 'string'
+          && item.field.trim().length > 0
+          && typeof item.name === 'string'
+          && item.name.trim().length > 0
+          && typeof item.mimeType === 'string'
+          && item.mimeType.trim().length > 0
+          && typeof item.dataUrl === 'string'
+          && item.dataUrl.trim().length > 0
+        ))
+      : [];
+    if ((envelope.multipartFiles?.length || 0) === 0 && Object.keys(envelope.multipartFields || {}).length === 0) {
+      reply.code(400).send({
+        error: { message: 'multipart requests require multipartFields or multipartFiles', type: 'validation_error' },
+      });
+      return null;
+    }
+  }
+
+  if (requestKind === 'empty' && (method === 'POST' || path === '/v1/search')) {
+    // keep explicit empty body path legal, no additional validation
+  }
+
+  return envelope;
+}
+
+function decodeDataUrl(dataUrl: string): { mimeType: string; buffer: Buffer } {
+  const match = /^data:([^;,]+)?;base64,(.+)$/i.exec(dataUrl.trim());
+  if (!match) {
+    throw new Error('multipartFiles[].dataUrl must be a base64 data URL');
+  }
+  return {
+    mimeType: match[1] || 'application/octet-stream',
+    buffer: Buffer.from(match[2], 'base64'),
+  };
+}
+
+function createDefaultHeadersForPath(path: string): Record<string, string> {
+  if (/^\/v1\/messages$/i.test(path)) {
+    return {
+      'x-api-key': config.proxyToken,
+      'anthropic-version': '2023-06-01',
+    };
+  }
+
+  if (/^\/(?:gemini\/[^/]+\/models\/.+|v1beta\/models\/.+)$/i.test(path)) {
+    return {
+      'x-goog-api-key': config.proxyToken,
+    };
+  }
+
+  return {
+    Authorization: `Bearer ${config.proxyToken}`,
+  };
+}
+
+function applyStreamOverride(value: unknown, forceStream: boolean): unknown {
+  if (!isRecord(value)) return value;
+  return {
+    ...value,
+    stream: forceStream,
+  };
+}
+
+function serializeJsonEnvelopeBody(
+  envelope: ValidatedProxyTestEnvelope,
+  forceStream: boolean,
+): string | undefined {
+  if (typeof envelope.rawJsonText === 'string' && envelope.rawJsonText.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(envelope.rawJsonText);
+      return JSON.stringify(applyStreamOverride(parsed, forceStream));
+    } catch {
+      return envelope.rawJsonText;
+    }
+  }
+
+  if (envelope.jsonBody !== undefined) {
+    return JSON.stringify(applyStreamOverride(envelope.jsonBody, forceStream));
+  }
+
+  return JSON.stringify({ stream: forceStream });
+}
+
+async function buildUpstreamRequestInit(
+  envelope: ValidatedProxyTestEnvelope,
+  forceStream: boolean,
+): Promise<UndiciRequestInit> {
+  const headers: Record<string, string> = createDefaultHeadersForPath(envelope.path);
+
+  if (envelope.requestKind === 'json') {
+    headers['Content-Type'] = 'application/json';
+    return {
+      method: envelope.method,
+      headers,
+      body: serializeJsonEnvelopeBody(envelope, forceStream),
+    };
+  }
+
+  if (envelope.requestKind === 'multipart') {
+    const formData = new FormData();
+    for (const [field, value] of Object.entries(envelope.multipartFields || {})) {
+      formData.append(field, value);
+    }
+    for (const file of envelope.multipartFiles || []) {
+      const decoded = decodeDataUrl(file.dataUrl);
+      const bytes = Uint8Array.from(decoded.buffer);
+      formData.append(
+        file.field,
+        new File([bytes], file.name, { type: file.mimeType || decoded.mimeType }),
+      );
+    }
+
+    return {
+      method: envelope.method,
+      headers,
+      body: formData,
+    };
+  }
+
+  return {
+    method: envelope.method,
+    headers,
+  };
+}
+
+async function fetchProxyBuffered(
+  envelope: ValidatedProxyTestEnvelope,
   signal?: AbortSignal,
   forceStream = false,
-): Promise<unknown> => {
-  const upstreamRequest = buildUpstreamRequest(payload, forceStream);
-  const upstream = await fetch(upstreamRequest.url, {
-    method: 'POST',
-    headers: upstreamRequest.headers,
-    body: JSON.stringify(upstreamRequest.body),
+): Promise<unknown> {
+  const upstream = await fetch(`http://127.0.0.1:${config.port}${envelope.path}`, {
+    ...(await buildUpstreamRequestInit(envelope, forceStream)),
     signal,
   });
 
+  const contentType = upstream.headers.get('content-type') || '';
   const text = await upstream.text();
+
   if (!upstream.ok) {
     throw new UpstreamProxyError(upstream.status, normalizeErrorPayload(text));
+  }
+
+  if (contentType.includes('application/json')) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { raw: text };
+    }
   }
 
   try {
@@ -261,18 +537,18 @@ const requestUpstreamChat = async (
   } catch {
     return { raw: text };
   }
-};
+}
 
-const cleanupExpiredJobs = () => {
+function cleanupExpiredJobs() {
   const now = Date.now();
   for (const [jobId, job] of jobs.entries()) {
     if (job.expiresAt <= now) {
       jobs.delete(jobId);
     }
   }
-};
+}
 
-const runJob = async (jobId: string) => {
+async function runJob(jobId: string) {
   const job = jobs.get(jobId);
   if (!job || job.status !== 'pending') return;
 
@@ -280,7 +556,7 @@ const runJob = async (jobId: string) => {
   job.controller = controller;
 
   try {
-    const result = await requestUpstreamChat(job.payload, controller.signal);
+    const result = await fetchProxyBuffered(job.envelope, controller.signal, job.envelope.stream);
     const current = jobs.get(jobId);
     if (!current) return;
     current.controller = null;
@@ -308,7 +584,141 @@ const runJob = async (jobId: string) => {
     current.updatedAt = Date.now();
     current.expiresAt = current.updatedAt + JOB_TTL_MS;
   }
-};
+}
+
+async function sendBufferedEnvelope(
+  envelope: ValidatedProxyTestEnvelope,
+  reply: FastifyReply,
+  forceStream = false,
+) {
+  try {
+    const data = await fetchProxyBuffered(envelope, undefined, forceStream);
+    return reply.send(data);
+  } catch (error) {
+    if (error instanceof UpstreamProxyError) {
+      return reply.code(error.statusCode).send(error.responsePayload);
+    }
+    return reply.code(502).send({
+      error: {
+        message: (error as any)?.message || 'proxy request failed',
+        type: 'server_error',
+      },
+    });
+  }
+}
+
+async function sendStreamingEnvelope(
+  envelope: ValidatedProxyTestEnvelope,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  forceStream = true,
+) {
+  const controller = new AbortController();
+  const abortUpstream = () => {
+    try {
+      if (!controller.signal.aborted) {
+        controller.abort();
+      }
+    } catch {
+      // no-op
+    }
+  };
+
+  const onClientAborted = () => abortUpstream();
+  const onClientClosed = () => {
+    if (!reply.raw.writableEnded) abortUpstream();
+  };
+  const cleanupClientListeners = () => {
+    request.raw.off?.('aborted', onClientAborted);
+    reply.raw.off?.('close', onClientClosed);
+  };
+
+  request.raw.on('aborted', onClientAborted);
+  reply.raw.on('close', onClientClosed);
+
+  let upstream;
+  try {
+    upstream = await fetch(`http://127.0.0.1:${config.port}${envelope.path}`, {
+      ...(await buildUpstreamRequestInit(envelope, forceStream)),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    cleanupClientListeners();
+    return reply.code(502).send({
+      error: {
+        message: (error as any)?.message || 'proxy request failed',
+        type: 'server_error',
+      },
+    });
+  }
+
+  if (!upstream.ok) {
+    const text = await upstream.text();
+    cleanupClientListeners();
+    return reply.code(upstream.status).send(normalizeErrorPayload(text));
+  }
+
+  const contentType = upstream.headers.get('content-type') || '';
+  const reader = upstream.body?.getReader();
+  if (!reader) {
+    cleanupClientListeners();
+    return reply.code(502).send({
+      error: {
+        message: 'upstream stream body missing',
+        type: 'server_error',
+      },
+    });
+  }
+
+  reply.hijack();
+  reply.raw.statusCode = 200;
+  reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+  reply.raw.setHeader('Connection', 'keep-alive');
+  reply.raw.setHeader('X-Accel-Buffering', 'no');
+
+  try {
+    if (contentType.includes('text/event-stream')) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          reply.raw.write(Buffer.from(value));
+        }
+      }
+    } else {
+      let text = '';
+      const decoder = new TextDecoder('utf-8');
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          text += decoder.decode(value, { stream: true });
+        }
+      }
+      text += decoder.decode();
+      reply.raw.write(`data: ${text}\n\n`);
+      reply.raw.write('data: [DONE]\n\n');
+    }
+  } catch (error) {
+    if (!reply.raw.writableEnded) {
+      const message = JSON.stringify({
+        error: { message: (error as any)?.message || 'stream interrupted', type: 'stream_error' },
+      });
+      reply.raw.write(`event: error\ndata: ${message}\n\n`);
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // no-op
+    }
+    cleanupClientListeners();
+    if (!reply.raw.writableEnded) {
+      reply.raw.end();
+    }
+  }
+}
 
 export async function testRoutes(app: FastifyInstance) {
   const cleanupTimer = setInterval(cleanupExpiredJobs, JOB_CLEANUP_INTERVAL_MS);
@@ -318,143 +728,126 @@ export async function testRoutes(app: FastifyInstance) {
     clearInterval(cleanupTimer);
   });
 
+  app.post<{ Body: ProxyTestEnvelope }>(
+    '/api/test/proxy',
+    async (request, reply) => {
+      const envelope = validateProxyEnvelope(request.body || {}, reply);
+      if (!envelope) return;
+      return sendBufferedEnvelope(envelope, reply, false);
+    },
+  );
+
+  app.post<{ Body: ProxyTestEnvelope }>(
+    '/api/test/proxy/stream',
+    async (request, reply) => {
+      const envelope = validateProxyEnvelope(request.body || {}, reply);
+      if (!envelope) return;
+      return sendStreamingEnvelope(envelope, request, reply, true);
+    },
+  );
+
+  app.post<{ Body: ProxyTestEnvelope }>(
+    '/api/test/proxy/jobs',
+    async (request, reply) => {
+      const envelope = validateProxyEnvelope(request.body || {}, reply);
+      if (!envelope) return;
+
+      const now = Date.now();
+      const jobId = randomUUID();
+      const job: TestProxyJob = {
+        id: jobId,
+        status: 'pending',
+        envelope,
+        controller: null,
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: now + JOB_TTL_MS,
+      };
+
+      jobs.set(jobId, job);
+      void runJob(jobId);
+
+      return reply.code(202).send({
+        jobId,
+        status: job.status,
+        createdAt: new Date(job.createdAt).toISOString(),
+        expiresAt: new Date(job.expiresAt).toISOString(),
+      });
+    },
+  );
+
+  app.get<{ Params: { jobId: string } }>(
+    '/api/test/proxy/jobs/:jobId',
+    async (request, reply) => {
+      const job = jobs.get(request.params.jobId);
+      if (!job) {
+        return reply.code(404).send({ error: { message: 'job not found', type: 'not_found' } });
+      }
+
+      return reply.send({
+        jobId: job.id,
+        status: job.status,
+        result: job.result,
+        error: job.error,
+        createdAt: new Date(job.createdAt).toISOString(),
+        updatedAt: new Date(job.updatedAt).toISOString(),
+        expiresAt: new Date(job.expiresAt).toISOString(),
+      });
+    },
+  );
+
+  app.delete<{ Params: { jobId: string } }>(
+    '/api/test/proxy/jobs/:jobId',
+    async (request, reply) => {
+      const job = jobs.get(request.params.jobId);
+      if (!job) {
+        return reply.code(404).send({ error: { message: 'job not found', type: 'not_found' } });
+      }
+
+      if (job.status === 'pending' && job.controller) {
+        try {
+          job.controller.abort();
+        } catch {
+          // no-op
+        }
+      }
+
+      jobs.delete(request.params.jobId);
+      return reply.send({ success: true });
+    },
+  );
+
   app.post<{ Body: TestChatRequestBody }>(
     '/api/test/chat',
     async (request, reply) => {
-      const body = request.body || {};
-      const payload = validatePayload(body, reply);
+      const payload = validateLegacyPayload(request.body || {}, reply);
       if (!payload) return;
-
-      try {
-        const data = await requestUpstreamChat(payload, undefined, false);
-        return reply.send(data);
-      } catch (error) {
-        if (error instanceof UpstreamProxyError) {
-          return reply.code(error.statusCode).send(error.responsePayload);
-        }
-        return reply.code(502).send({
-          error: {
-            message: (error as any)?.message || 'proxy request failed',
-            type: 'server_error',
-          },
-        });
-      }
+      return sendBufferedEnvelope(convertLegacyPayloadToEnvelope(payload, false), reply, false);
     },
   );
 
   app.post<{ Body: TestChatRequestBody }>(
     '/api/test/chat/stream',
     async (request, reply) => {
-      const body = request.body || {};
-      const payload = validatePayload(body, reply);
+      const payload = validateLegacyPayload(request.body || {}, reply);
       if (!payload) return;
-
-      const controller = new AbortController();
-      const abortUpstream = () => {
-        try {
-          if (!controller.signal.aborted) {
-            controller.abort();
-          }
-        } catch {
-          // no-op
-        }
-      };
-      const onClientAborted = () => {
-        abortUpstream();
-      };
-      const onClientClosed = () => {
-        if (!reply.raw.writableEnded) {
-          abortUpstream();
-        }
-      };
-      const cleanupClientListeners = () => {
-        request.raw.off?.('aborted', onClientAborted);
-        reply.raw.off?.('close', onClientClosed);
-      };
-      request.raw.on('aborted', onClientAborted);
-      reply.raw.on('close', onClientClosed);
-
-      let upstream;
-      try {
-        const upstreamRequest = buildUpstreamRequest(payload, true);
-        upstream = await fetch(upstreamRequest.url, {
-          method: 'POST',
-          headers: upstreamRequest.headers,
-          body: JSON.stringify(upstreamRequest.body),
-          signal: controller.signal,
-        });
-      } catch (error) {
-        cleanupClientListeners();
-        return reply.code(502).send({
-          error: {
-            message: (error as any)?.message || 'proxy request failed',
-            type: 'server_error',
-          },
-        });
-      }
-
-      if (!upstream.ok) {
-        const text = await upstream.text();
-        cleanupClientListeners();
-        return reply.code(upstream.status).send(normalizeErrorPayload(text));
-      }
-
-      reply.hijack();
-      reply.raw.statusCode = 200;
-      reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-      reply.raw.setHeader('Connection', 'keep-alive');
-      reply.raw.setHeader('X-Accel-Buffering', 'no');
-
-      const reader = upstream.body?.getReader();
-      if (!reader) {
-        cleanupClientListeners();
-        reply.raw.end();
-        return;
-      }
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            reply.raw.write(Buffer.from(value));
-          }
-        }
-      } catch (error) {
-        if (!reply.raw.writableEnded) {
-          const message = JSON.stringify({
-            error: { message: (error as any)?.message || 'stream interrupted', type: 'stream_error' },
-          });
-          reply.raw.write(`event: error\ndata: ${message}\n\n`);
-        }
-      } finally {
-        try {
-          await reader.cancel();
-        } catch {
-          // no-op
-        }
-        cleanupClientListeners();
-        if (!reply.raw.writableEnded) {
-          reply.raw.end();
-        }
-      }
+      return sendStreamingEnvelope(convertLegacyPayloadToEnvelope(payload, true), request, reply, true);
     },
   );
 
   app.post<{ Body: TestChatRequestBody }>(
     '/api/test/chat/jobs',
     async (request, reply) => {
-      const body = request.body || {};
-      const payload = validatePayload(body, reply);
+      const payload = validateLegacyPayload(request.body || {}, reply);
       if (!payload) return;
 
+      const envelope = convertLegacyPayloadToEnvelope(payload, false);
       const now = Date.now();
       const jobId = randomUUID();
-      const job: TestChatJob = {
+      const job: TestProxyJob = {
         id: jobId,
         status: 'pending',
-        payload,
+        envelope,
         controller: null,
         createdAt: now,
         updatedAt: now,

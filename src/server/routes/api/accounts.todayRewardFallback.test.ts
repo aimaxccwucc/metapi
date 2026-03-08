@@ -11,11 +11,13 @@ import {
 } from '../../services/localTimeService.js';
 
 type DbModule = typeof import('../../db/index.js');
+type RepairModule = typeof import('../../services/storedTimestampRepairService.js');
 
 describe('accounts api today reward fallback', () => {
   let app: FastifyInstance;
   let db: DbModule['db'];
   let schema: DbModule['schema'];
+  let repairStoredCreatedAtValues: RepairModule['repairStoredCreatedAtValues'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -25,8 +27,10 @@ describe('accounts api today reward fallback', () => {
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');
     const routesModule = await import('./accounts.js');
+    const repairModule = await import('../../services/storedTimestampRepairService.js');
     db = dbModule.db;
     schema = dbModule.schema;
+    repairStoredCreatedAtValues = repairModule.repairStoredCreatedAtValues;
 
     app = Fastify();
     await app.register(routesModule.accountsRoutes);
@@ -88,6 +92,39 @@ describe('accounts api today reward fallback', () => {
     const rows = response.json() as Array<{ id: number; todayReward: number }>;
     const target = rows.find((row) => row.id === account.id);
     expect(target?.todayReward).toBe(12.5);
+  });
+
+  it('repairs ISO timestamps for today reward filtering', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'iso-reward-site',
+      url: 'https://iso-reward-site.example.com',
+      platform: 'new-api',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'iso-reward-user',
+      accessToken: 'token',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.checkinLogs).values({
+      accountId: account.id,
+      status: 'success',
+      message: 'checkin success',
+      reward: '1.8',
+      createdAt: new Date().toISOString(),
+    }).run();
+    await repairStoredCreatedAtValues();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/accounts',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const rows = response.json() as Array<{ id: number; todayReward: number }>;
+    const target = rows.find((row) => row.id === account.id);
+    expect(target?.todayReward).toBe(1.8);
   });
 
   it('prefers parsed checkin reward when available', async () => {
@@ -181,5 +218,41 @@ describe('accounts api today reward fallback', () => {
     const rows = response.json() as Array<{ id: number; todaySpend: number }>;
     const target = rows.find((row) => row.id === account.id);
     expect(target?.todaySpend).toBe(2);
+  });
+
+  it('repairs ISO timestamps for today spend filtering', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'iso-spend-site',
+      url: 'https://iso-spend-site.example.com',
+      platform: 'new-api',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'iso-spend-user',
+      accessToken: 'token',
+      status: 'active',
+    }).returning().get();
+
+    const { startUtc } = getLocalDayRangeUtc();
+    const startDate = parseStoredUtcDateTime(startUtc)!;
+    const inRangeIso = new Date(startDate.getTime() + 60_000).toISOString();
+
+    await db.insert(schema.proxyLogs).values({
+      accountId: account.id,
+      status: 'success',
+      estimatedCost: 2.25,
+      createdAt: inRangeIso,
+    }).run();
+    await repairStoredCreatedAtValues();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/accounts',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const rows = response.json() as Array<{ id: number; todaySpend: number }>;
+    const target = rows.find((row) => row.id === account.id);
+    expect(target?.todaySpend).toBe(2.25);
   });
 });

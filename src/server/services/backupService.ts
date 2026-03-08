@@ -391,6 +391,7 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         externalCheckinUrl: importedExternalCheckinUrl,
         platform,
         proxyUrl: null,
+        useSystemProxy: false,
         status: 'active',
         healthStatus: 'unknown',
         healthReason: null,

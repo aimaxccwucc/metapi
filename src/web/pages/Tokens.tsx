@@ -1,14 +1,19 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
+import CenteredModal from '../components/CenteredModal.js';
 import { useToast } from '../components/Toast.js';
-import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import ModernSelect from '../components/ModernSelect.js';
-import { getAccountsAddPanelStyle } from './helpers/accountsPanelStyle.js';
+import { clearFocusParams, readFocusTokenId } from './helpers/navigationFocus.js';
+import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { tr } from '../i18n.js';
 
 type SyncStatus = 'success' | 'skipped' | 'failed';
+type TokensPanelProps = {
+  embedded?: boolean;
+  onEmbeddedActionsChange?: (actions: React.ReactNode | null) => void;
+};
 
 type AccountTokenSyncResult = {
   status?: string;
@@ -25,8 +30,22 @@ type AccountTokenSyncResult = {
   };
 };
 
+const resolveAccountCredentialMode = (account: any): 'session' | 'apikey' => {
+  const rawMode = String(account?.credentialMode || '').trim().toLowerCase();
+  if (rawMode === 'apikey') return 'apikey';
+  if (rawMode === 'session') return 'session';
+  if (typeof account?.capabilities?.proxyOnly === 'boolean') {
+    return account.capabilities.proxyOnly ? 'apikey' : 'session';
+  }
+  return typeof account?.accessToken === 'string' && account.accessToken.trim()
+    ? 'session'
+    : 'apikey';
+};
+
 const isAccountSyncable = (account: any) =>
-  account?.status === 'active' && account?.site?.status !== 'disabled';
+  resolveAccountCredentialMode(account) === 'session'
+  && account?.status === 'active'
+  && account?.site?.status !== 'disabled';
 
 const resolveSyncStatus = (result: AccountTokenSyncResult | null | undefined): SyncStatus => {
   const raw = String(result?.status || '').toLowerCase();
@@ -83,7 +102,7 @@ function isTruthyFlag(input: string | null): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 }
 
-export default function Tokens() {
+export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: TokensPanelProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const initialCreateForm = {
@@ -104,19 +123,35 @@ export default function Tokens() {
   const [syncing, setSyncing] = useState(false);
   const [syncingAll, setSyncingAll] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editingToken, setEditingToken] = useState<any | null>(null);
+  const [editingTokenValueLoading, setEditingTokenValueLoading] = useState(false);
   const [createHintModelName, setCreateHintModelName] = useState('');
+  const [highlightTokenId, setHighlightTokenId] = useState<number | null>(null);
   const [rowLoading, setRowLoading] = useState<Record<string, boolean>>({});
+  const [selectedTokenIds, setSelectedTokenIds] = useState<number[]>([]);
+  const [batchActionLoading, setBatchActionLoading] = useState(false);
   const [form, setForm] = useState(initialCreateForm);
+  const [editForm, setEditForm] = useState({
+    name: '',
+    token: '',
+    enabled: true,
+    isDefault: false,
+  });
   const [groupOptions, setGroupOptions] = useState<string[]>(['default']);
   const [groupLoading, setGroupLoading] = useState(false);
-  const addPanelPresence = useAnimatedVisibility(showAdd, 220);
+  const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const editingTokenIdRef = useRef<number | null>(null);
   const toast = useToast();
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const [tokenRows, accountRows] = await Promise.all([api.getAccountTokens(), api.getAccounts()]);
-      setTokens(tokenRows || []);
+      const nextTokens = tokenRows || [];
+      setTokens(nextTokens);
+      setSelectedTokenIds((current) => current.filter((id) => nextTokens.some((token: any) => token.id === id)));
       const latestAccounts = accountRows || [];
       setAccounts(latestAccounts);
 
@@ -130,10 +165,18 @@ export default function Tokens() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [syncingAccountId, toast]);
 
   useEffect(() => {
-    load();
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -215,6 +258,27 @@ export default function Tokens() {
     );
   }, [activeAccounts, location.pathname, location.search, navigate, toast]);
 
+  useEffect(() => {
+    const focusTokenId = readFocusTokenId(location.search);
+    if (!focusTokenId || loading) return;
+
+    const row = rowRefs.current.get(focusTokenId);
+    const cleanedSearch = clearFocusParams(location.search);
+    if (!row) {
+      navigate({ pathname: location.pathname, search: cleanedSearch }, { replace: true });
+      return;
+    }
+
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightTokenId(focusTokenId);
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = setTimeout(() => {
+      setHighlightTokenId((current) => (current === focusTokenId ? null : current));
+    }, 2200);
+
+    navigate({ pathname: location.pathname, search: cleanedSearch }, { replace: true });
+  }, [loading, location.pathname, location.search, navigate, tokens]);
+
   const withRowLoading = async (key: string, fn: () => Promise<void>) => {
     setRowLoading((prev) => ({ ...prev, [key]: true }));
     try {
@@ -222,6 +286,118 @@ export default function Tokens() {
     } finally {
       setRowLoading((prev) => ({ ...prev, [key]: false }));
     }
+  };
+
+  const toggleTokenSelection = (tokenId: number, checked: boolean) => {
+    setSelectedTokenIds((current) => (
+      checked
+        ? Array.from(new Set([...current, tokenId]))
+        : current.filter((id) => id !== tokenId)
+    ));
+  };
+
+  const toggleSelectAllTokens = (checked: boolean) => {
+    if (!checked) {
+      setSelectedTokenIds([]);
+      return;
+    }
+    setSelectedTokenIds(tokens.map((token) => token.id));
+  };
+
+  const runBatchTokenAction = async (action: 'enable' | 'disable' | 'delete') => {
+    if (selectedTokenIds.length === 0) return;
+    if (action === 'delete' && typeof globalThis.confirm === 'function' && !globalThis.confirm(`确认删除选中的 ${selectedTokenIds.length} 个令牌？`)) return;
+
+    setBatchActionLoading(true);
+    try {
+      const result = await api.batchUpdateAccountTokens({
+        ids: selectedTokenIds,
+        action,
+      });
+      const successIds = Array.isArray(result?.successIds) ? result.successIds.map((id: unknown) => Number(id)) : [];
+      const failedItems = Array.isArray(result?.failedItems) ? result.failedItems : [];
+      if (failedItems.length > 0) {
+        toast.info(`批量操作完成：成功 ${successIds.length}，失败 ${failedItems.length}`);
+      } else {
+        toast.success(`批量操作完成：成功 ${successIds.length}`);
+      }
+      setSelectedTokenIds(failedItems.map((item: any) => Number(item.id)).filter((id: number) => Number.isFinite(id) && id > 0));
+      await load();
+    } catch (e: any) {
+      toast.error(e.message || '批量操作失败');
+    } finally {
+      setBatchActionLoading(false);
+    }
+  };
+
+  const openEditPanel = useCallback((token: any) => {
+    setShowAdd(false);
+    setCreateHintModelName('');
+    setEditingToken(token);
+    editingTokenIdRef.current = token.id;
+    setEditForm({
+      name: token?.name || '',
+      token: '',
+      enabled: token?.enabled !== false,
+      isDefault: !!token?.isDefault,
+    });
+    setEditingTokenValueLoading(true);
+
+    void api.getAccountTokenValue(token.id)
+      .then((res: any) => {
+        if (editingTokenIdRef.current !== token.id) return;
+        setEditForm((prev) => ({
+          ...prev,
+          token: typeof res?.token === 'string' ? res.token : prev.token,
+        }));
+      })
+      .catch((error: any) => {
+        if (editingTokenIdRef.current !== token.id) return;
+        toast.error(error?.message || '加载令牌详情失败');
+      })
+      .finally(() => {
+        if (editingTokenIdRef.current !== token.id) return;
+        setEditingTokenValueLoading(false);
+      });
+  }, [toast]);
+
+  const closeEditPanel = useCallback(() => {
+    editingTokenIdRef.current = null;
+    setEditingToken(null);
+    setSavingEdit(false);
+    setEditingTokenValueLoading(false);
+    setEditForm({
+      name: '',
+      token: '',
+      enabled: true,
+      isDefault: false,
+    });
+  }, []);
+
+  const saveEditPanel = async () => {
+    if (!editingToken) return;
+    setSavingEdit(true);
+    try {
+      await api.updateAccountToken(editingToken.id, {
+        name: editForm.name.trim() || editingToken.name,
+        token: editForm.token.trim() || undefined,
+        enabled: editForm.enabled,
+        isDefault: editForm.isDefault,
+      });
+      toast.success('令牌已更新');
+      closeEditPanel();
+      await load();
+    } catch (e: any) {
+      toast.error(e.message || '更新令牌失败');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const handleTokenRowClick = (tokenId: number, event: React.MouseEvent<HTMLTableRowElement>) => {
+    if (shouldIgnoreRowSelectionClick(event.target)) return;
+    const isSelected = selectedTokenIds.includes(tokenId);
+    toggleTokenSelection(tokenId, !isSelected);
   };
 
   const handleCopyToken = async (tokenId: number, tokenName: string) => {
@@ -273,7 +449,7 @@ export default function Tokens() {
     }
   };
 
-  const handleSync = async () => {
+  const handleSync = useCallback(async () => {
     if (!syncingAccountId) return;
     setSyncing(true);
     try {
@@ -292,9 +468,9 @@ export default function Tokens() {
     } finally {
       setSyncing(false);
     }
-  };
+  }, [load, syncingAccountId, toast]);
 
-  const handleSyncAll = async () => {
+  const handleSyncAll = useCallback(async () => {
     setSyncingAll(true);
     try {
       const res = await api.syncAllAccountTokens();
@@ -348,7 +524,15 @@ export default function Tokens() {
     } finally {
       setSyncingAll(false);
     }
-  };
+  }, [load, toast]);
+
+  const handleToggleAdd = useCallback(() => {
+    setShowAdd((prev) => {
+      const nextOpen = !prev;
+      if (!nextOpen) setCreateHintModelName('');
+      return nextOpen;
+    });
+  }, []);
 
   const inputStyle: React.CSSProperties = {
     width: '100%',
@@ -361,174 +545,320 @@ export default function Tokens() {
     color: 'var(--color-text-primary)',
   };
 
-  return (
-    <div className="animate-fade-in">
-      <div className="page-header">
-        <h2 className="page-title">{tr('令牌管理')}</h2>
-        <div className="page-actions">
-          <div style={{ minWidth: 220, position: 'relative', zIndex: 20 }}>
-            <ModernSelect
-              size="sm"
-              value={String(syncingAccountId || 0)}
-              onChange={(nextValue) => setSyncingAccountId(Number.parseInt(nextValue, 10) || 0)}
-              options={[
-                { value: '0', label: '选择账号后同步站点令牌' },
-                ...activeAccounts.map((account) => ({
-                  value: String(account.id),
-                  label: `${account.username || `account-${account.id}`} @ ${account.site?.name || '-'}`,
-                })),
-              ]}
-              placeholder="选择账号后同步站点令牌"
-            />
-          </div>
-          <button
-            onClick={handleSync}
-            disabled={syncing || syncingAll || !syncingAccountId}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-          >
-            {syncing ? <><span className="spinner spinner-sm" /> 同步中...</> : '同步站点令牌'}
-          </button>
-          <button
-            onClick={handleSyncAll}
-            disabled={syncing || syncingAll || activeAccounts.length === 0}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-          >
-            {syncingAll ? <><span className="spinner spinner-sm" /> 同步中...</> : '同步全部账号'}
-          </button>
-          <button
-            onClick={() => {
-              setShowAdd((prev) => {
-                const nextOpen = !prev;
-                if (!nextOpen) setCreateHintModelName('');
-                return nextOpen;
-              });
-            }}
-            className="btn btn-primary"
-          >
-            {showAdd ? '取消' : '+ 新增令牌'}
-          </button>
-        </div>
+  const sectionCardStyle: React.CSSProperties = {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 12,
+    padding: 14,
+    border: '1px solid var(--color-border-light)',
+    borderRadius: 'var(--radius-md)',
+    background: 'var(--color-bg-card)',
+  };
+
+  const sectionLabelStyle: React.CSSProperties = {
+    fontSize: 12,
+    fontWeight: 600,
+    color: 'var(--color-text-secondary)',
+    letterSpacing: '0.02em',
+  };
+
+  const toggleCardStyle: React.CSSProperties = {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 10,
+    padding: '12px 14px',
+    border: '1px solid var(--color-border)',
+    borderRadius: 'var(--radius-sm)',
+    background: 'var(--color-bg)',
+    color: 'var(--color-text-primary)',
+  };
+
+  const headerActions = useMemo(() => (
+    <div className={`page-actions ${embedded ? 'accounts-page-actions' : ''}`.trim()}>
+      <div style={{ minWidth: 220, position: 'relative', zIndex: 20 }}>
+        <ModernSelect
+          size="sm"
+          value={String(syncingAccountId || 0)}
+          onChange={(nextValue) => setSyncingAccountId(Number.parseInt(nextValue, 10) || 0)}
+          options={[
+            { value: '0', label: '选择账号后同步站点令牌' },
+            ...activeAccounts.map((account) => ({
+              value: String(account.id),
+              label: `${account.username || `account-${account.id}`} @ ${account.site?.name || '-'}`,
+            })),
+          ]}
+          placeholder="选择账号后同步站点令牌"
+        />
       </div>
+      <button
+        onClick={handleSync}
+        disabled={syncing || syncingAll || !syncingAccountId}
+        className="btn btn-ghost"
+        style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+      >
+        {syncing ? <><span className="spinner spinner-sm" /> 同步中...</> : '同步站点令牌'}
+      </button>
+      <button
+        onClick={handleSyncAll}
+        disabled={syncing || syncingAll || activeAccounts.length === 0}
+        className="btn btn-ghost"
+        style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+      >
+        {syncingAll ? <><span className="spinner spinner-sm" /> 同步中...</> : '同步全部账号'}
+      </button>
+      <button
+        onClick={handleToggleAdd}
+        className="btn btn-primary"
+      >
+        {showAdd ? '取消' : '+ 新增令牌'}
+      </button>
+    </div>
+  ), [activeAccounts, embedded, handleSync, handleSyncAll, handleToggleAdd, showAdd, syncing, syncingAccountId, syncingAll]);
+
+  useEffect(() => {
+    if (!embedded || !onEmbeddedActionsChange) return;
+    onEmbeddedActionsChange(headerActions);
+    return () => {
+      onEmbeddedActionsChange(null);
+    };
+  }, [embedded, headerActions, onEmbeddedActionsChange]);
+
+  return (
+    <div className={embedded ? '' : 'animate-fade-in'}>
+      {(!embedded || !onEmbeddedActionsChange) && (
+        <div className="page-header">
+          {!embedded ? <h2 className="page-title">{tr('账号令牌')}</h2> : <div />}
+          {headerActions}
+        </div>
+      )}
 
       <div className="info-tip" style={{ marginBottom: 12 }}>
         新增令牌会调用站点 API 创建新密钥，再自动同步到本地。支持设置分组、额度、过期时间和 IP 白名单；已存在密钥可直接用“同步站点令牌”读取。
       </div>
 
-      {addPanelPresence.shouldRender && (
-        <div className={`card panel-presence ${addPanelPresence.isVisible ? '' : 'is-closing'}`.trim()} style={getAccountsAddPanelStyle()}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <div style={{ gridColumn: '1 / span 2' }}>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>所属账号</div>
-              <ModernSelect
-                value={String(form.accountId || 0)}
-                onChange={(nextValue) => {
-                  setForm((prev) => ({
-                    ...prev,
-                    accountId: Number.parseInt(nextValue, 10) || 0,
-                    group: '',
-                  }));
-                }}
-                options={[
-                  { value: '0', label: '选择账号' },
-                  ...activeAccounts.map((account) => ({
-                    value: String(account.id),
-                    label: `${account.username || `account-${account.id}`} @ ${account.site?.name || '-'}`,
-                  })),
-                ]}
-                placeholder="选择账号"
-              />
-            </div>
-            {createHintModelName ? (
-              <div
-                style={{
-                  gridColumn: '1 / span 2',
-                  fontSize: 12,
-                  color: 'var(--color-text-secondary)',
-                  background: 'color-mix(in srgb, var(--color-info) 10%, var(--color-bg))',
-                  border: '1px solid color-mix(in srgb, var(--color-info) 30%, transparent)',
-                  borderRadius: 'var(--radius-sm)',
-                  padding: '6px 8px',
-                }}
-              >
-                来自路由提醒：为模型 <code style={{ fontSize: 11 }}>{createHintModelName}</code> 补充该账号令牌后，可自动生成对应通道。
-              </div>
-            ) : null}
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>令牌名称（可选）</div>
-              <input
-                value={form.name}
-                onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
-                placeholder="例如 metapi"
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>分组</div>
-              <ModernSelect
-                value={form.group || ''}
-                onChange={(nextValue) => setForm((prev) => ({ ...prev, group: nextValue }))}
-                options={(groupOptions.length > 0 ? groupOptions : ['default']).map((group) => ({
-                  value: group,
-                  label: group,
-                }))}
-                placeholder={groupLoading ? '分组加载中...' : '选择分组'}
-                disabled={!form.accountId || groupLoading}
-              />
-            </div>
-            <div style={{ gridColumn: '1 / span 2', display: 'flex', alignItems: 'center', gap: 8 }}>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-text-secondary)' }}>
-                <input
-                  type="checkbox"
-                  checked={form.unlimitedQuota}
-                  onChange={(e) => setForm((prev) => ({ ...prev, unlimitedQuota: e.target.checked }))}
-                />
-                不限额度
-              </label>
-              {!form.unlimitedQuota && (
-                <input
-                  value={form.remainQuota}
-                  onChange={(e) => setForm((prev) => ({ ...prev, remainQuota: e.target.value.replace(/[^\d]/g, '') }))}
-                  placeholder="额度（正整数）"
-                  style={{ ...inputStyle, maxWidth: 220 }}
-                />
-              )}
-            </div>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>过期时间（可选）</div>
-              <input
-                type="datetime-local"
-                value={form.expiredTime}
-                onChange={(e) => setForm((prev) => ({ ...prev, expiredTime: e.target.value }))}
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>IP 白名单（可选）</div>
-              <input
-                value={form.allowIps}
-                onChange={(e) => setForm((prev) => ({ ...prev, allowIps: e.target.value }))}
-                placeholder="多个用英文逗号分隔"
-                style={inputStyle}
-              />
-            </div>
-            <div style={{ gridColumn: '1 / span 2', display: 'flex', alignItems: 'center', fontSize: 12, color: 'var(--color-text-muted)' }}>
-              将在选中账号所属站点直接创建新密钥
-            </div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <button
-              onClick={handleAddToken}
-              disabled={saving || !form.accountId}
-              className="btn btn-primary"
-            >
-              {saving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 创建中...</> : '创建并同步令牌'}
+      <CenteredModal
+        open={Boolean(editingToken)}
+        onClose={closeEditPanel}
+        title="编辑令牌"
+        maxWidth={760}
+        bodyStyle={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+        footer={(
+          <>
+            <button onClick={closeEditPanel} className="btn btn-ghost">取消</button>
+            <button onClick={saveEditPanel} disabled={savingEdit || editingTokenValueLoading} className="btn btn-primary">
+              {savingEdit ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存修改'}
             </button>
-          </div>
+          </>
+        )}
+      >
+        {editingToken ? (
+          <>
+            <div
+              style={{
+                fontSize: 12,
+                color: 'var(--color-text-secondary)',
+                background: 'color-mix(in srgb, var(--color-primary) 8%, var(--color-bg))',
+                border: '1px solid color-mix(in srgb, var(--color-primary) 18%, transparent)',
+                borderRadius: 'var(--radius-sm)',
+                padding: '8px 10px',
+              }}
+            >
+              账号: {editingToken.account?.username || `account-${editingToken.accountId}`} @ {editingToken.site?.name || '-'}
+            </div>
+            <div style={sectionCardStyle}>
+              <div style={sectionLabelStyle}>基本信息</div>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>令牌名称</div>
+                <input
+                  placeholder="令牌名称"
+                  value={editForm.name}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, name: e.target.value }))}
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>令牌值</div>
+                <textarea
+                  placeholder={editingTokenValueLoading ? '令牌加载中...' : '令牌值'}
+                  value={editForm.token}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, token: e.target.value }))}
+                  style={{
+                    ...inputStyle,
+                    minHeight: 96,
+                    resize: 'vertical',
+                    fontFamily: 'var(--font-mono)',
+                    lineHeight: 1.5,
+                  }}
+                  disabled={editingTokenValueLoading}
+                />
+              </div>
+            </div>
+            <div style={sectionCardStyle}>
+              <div style={sectionLabelStyle}>状态设置</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                <label style={toggleCardStyle}>
+                  <input
+                    type="checkbox"
+                    checked={editForm.enabled}
+                    onChange={(e) => setEditForm((prev) => ({ ...prev, enabled: e.target.checked }))}
+                    style={{ marginTop: 2 }}
+                  />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>启用令牌</span>
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>关闭后令牌不会参与分发</span>
+                  </div>
+                </label>
+                <label style={toggleCardStyle}>
+                  <input
+                    type="checkbox"
+                    checked={editForm.isDefault}
+                    onChange={(e) => setEditForm((prev) => ({ ...prev, isDefault: e.target.checked }))}
+                    style={{ marginTop: 2 }}
+                  />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>设为默认令牌</span>
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>优先作为该账号的默认转发令牌</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </>
+        ) : null}
+      </CenteredModal>
+
+      {selectedTokenIds.length > 0 && (
+        <div className="card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ fontSize: 13, fontWeight: 600 }}>已选 {selectedTokenIds.length} 项</span>
+          <button onClick={() => runBatchTokenAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+            批量启用
+          </button>
+          <button onClick={() => runBatchTokenAction('disable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+            批量禁用
+          </button>
+          <button data-testid="tokens-batch-delete" onClick={() => runBatchTokenAction('delete')} disabled={batchActionLoading} className="btn btn-link btn-link-danger">
+            批量删除
+          </button>
         </div>
       )}
+
+      <CenteredModal
+        open={showAdd}
+        onClose={handleToggleAdd}
+        title="新增令牌"
+        maxWidth={820}
+        bodyStyle={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+      >
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div style={{ gridColumn: '1 / span 2' }}>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>所属账号</div>
+            <ModernSelect
+              value={String(form.accountId || 0)}
+              onChange={(nextValue) => {
+                setForm((prev) => ({
+                  ...prev,
+                  accountId: Number.parseInt(nextValue, 10) || 0,
+                  group: '',
+                }));
+              }}
+              options={[
+                { value: '0', label: '选择账号' },
+                ...activeAccounts.map((account) => ({
+                  value: String(account.id),
+                  label: `${account.username || `account-${account.id}`} @ ${account.site?.name || '-'}`,
+                })),
+              ]}
+              placeholder="选择账号"
+            />
+          </div>
+          {createHintModelName ? (
+            <div
+              style={{
+                gridColumn: '1 / span 2',
+                fontSize: 12,
+                color: 'var(--color-text-secondary)',
+                background: 'color-mix(in srgb, var(--color-info) 10%, var(--color-bg))',
+                border: '1px solid color-mix(in srgb, var(--color-info) 30%, transparent)',
+                borderRadius: 'var(--radius-sm)',
+                padding: '6px 8px',
+              }}
+            >
+              来自路由提醒：为模型 <code style={{ fontSize: 11 }}>{createHintModelName}</code> 补充该账号令牌后，可自动生成对应通道。
+            </div>
+          ) : null}
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>令牌名称（可选）</div>
+            <input
+              value={form.name}
+              onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+              placeholder="例如 metapi"
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>分组</div>
+            <ModernSelect
+              value={form.group || ''}
+              onChange={(nextValue) => setForm((prev) => ({ ...prev, group: nextValue }))}
+              options={(groupOptions.length > 0 ? groupOptions : ['default']).map((group) => ({
+                value: group,
+                label: group,
+              }))}
+              placeholder={groupLoading ? '分组加载中...' : '选择分组'}
+              disabled={!form.accountId || groupLoading}
+            />
+          </div>
+          <div style={{ gridColumn: '1 / span 2', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-text-secondary)' }}>
+              <input
+                type="checkbox"
+                checked={form.unlimitedQuota}
+                onChange={(e) => setForm((prev) => ({ ...prev, unlimitedQuota: e.target.checked }))}
+              />
+              不限额度
+            </label>
+            {!form.unlimitedQuota && (
+              <input
+                value={form.remainQuota}
+                onChange={(e) => setForm((prev) => ({ ...prev, remainQuota: e.target.value.replace(/[^\d]/g, '') }))}
+                placeholder="额度（正整数）"
+                style={{ ...inputStyle, maxWidth: 220 }}
+              />
+            )}
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>过期时间（可选）</div>
+            <input
+              type="datetime-local"
+              value={form.expiredTime}
+              onChange={(e) => setForm((prev) => ({ ...prev, expiredTime: e.target.value }))}
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>IP 白名单（可选）</div>
+            <input
+              value={form.allowIps}
+              onChange={(e) => setForm((prev) => ({ ...prev, allowIps: e.target.value }))}
+              placeholder="多个用英文逗号分隔"
+              style={inputStyle}
+            />
+          </div>
+          <div style={{ gridColumn: '1 / span 2', display: 'flex', alignItems: 'center', fontSize: 12, color: 'var(--color-text-muted)' }}>
+            将在选中账号所属站点直接创建新密钥
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 8 }}>
+          <button onClick={handleToggleAdd} className="btn btn-ghost">取消</button>
+          <button
+            onClick={handleAddToken}
+            disabled={saving || !form.accountId}
+            className="btn btn-primary"
+          >
+            {saving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 创建中...</> : '创建并同步令牌'}
+          </button>
+        </div>
+      </CenteredModal>
 
       <div className="card" style={{ overflowX: 'auto' }}>
         {loading ? (
@@ -541,6 +871,13 @@ export default function Tokens() {
           <table className="data-table token-table">
             <thead>
               <tr>
+                <th style={{ width: 44 }}>
+                  <input
+                    type="checkbox"
+                    checked={tokens.length > 0 && selectedTokenIds.length === tokens.length}
+                    onChange={(e) => toggleSelectAllTokens(e.target.checked)}
+                  />
+                </th>
                 <th>令牌名称</th>
                 <th>令牌值</th>
                 <th>来源站点</th>
@@ -555,7 +892,25 @@ export default function Tokens() {
               {tokens.map((token: any, i: number) => {
                 const loadingPrefix = `token-${token.id}`;
                 return (
-                  <tr key={token.id} className={`animate-slide-up stagger-${Math.min(i + 1, 5)}`}>
+                  <tr
+                    key={token.id}
+                    data-testid={`token-row-${token.id}`}
+                    ref={(node) => {
+                      if (node) rowRefs.current.set(token.id, node);
+                      else rowRefs.current.delete(token.id);
+                    }}
+                    onClick={(event) => handleTokenRowClick(token.id, event)}
+                    className={`animate-slide-up stagger-${Math.min(i + 1, 5)} row-selectable ${selectedTokenIds.includes(token.id) ? 'row-selected' : ''} ${highlightTokenId === token.id ? 'row-focus-highlight' : ''}`.trim()}
+                  >
+                    <td>
+                      <input
+                        data-testid={`token-select-${token.id}`}
+                        type="checkbox"
+                        checked={selectedTokenIds.includes(token.id)}
+                        onChange={(e) => toggleTokenSelection(token.id, e.target.checked)}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </td>
                     <td style={{ fontWeight: 600 }}>{token.name || '-'}</td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{token.tokenMasked || '***'}</td>
                     <td>
@@ -565,6 +920,7 @@ export default function Tokens() {
                           target="_blank"
                           rel="noopener noreferrer"
                           className="badge-link"
+                          onClick={(e) => e.stopPropagation()}
                         >
                           <span className="badge badge-muted" style={{ fontSize: 11 }}>
                             {token.site?.name || 'unknown'}
@@ -584,7 +940,7 @@ export default function Tokens() {
                     </td>
                     <td>{token.isDefault ? <span className="badge badge-warning" style={{ fontSize: 11 }}>默认</span> : '-'}</td>
                     <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{formatDateTimeLocal(token.updatedAt)}</td>
-                    <td className="token-table-actions-col" style={{ textAlign: 'right' }}>
+                    <td className="token-actions-cell" style={{ textAlign: 'right' }}>
                       <div className="token-table-actions">
                         {!token.isDefault && (
                           <button
@@ -603,8 +959,15 @@ export default function Tokens() {
                           onClick={() => handleCopyToken(token.id, token.name || '')}
                           disabled={!!rowLoading[`${loadingPrefix}-copy`]}
                           className="btn btn-link btn-link-primary token-table-action-btn"
+                          data-testid={`token-copy-${token.id}`}
                         >
                           {rowLoading[`${loadingPrefix}-copy`] ? <span className="spinner spinner-sm" /> : '复制'}
+                        </button>
+                        <button
+                          onClick={() => openEditPanel(token)}
+                          className="btn btn-link btn-link-info token-table-action-btn"
+                        >
+                          编辑
                         </button>
                         <button
                           onClick={() => withRowLoading(`${loadingPrefix}-toggle`, async () => {
@@ -645,4 +1008,12 @@ export default function Tokens() {
       </div>
     </div>
   );
+}
+
+export default function Tokens() {
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  params.set('segment', 'tokens');
+  const nextSearch = params.toString();
+  return <Navigate to={`/accounts${nextSearch ? `?${nextSearch}` : ''}`} replace />;
 }

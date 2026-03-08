@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { VChart } from '@visactor/react-vchart';
+import { useThemeLabelColor } from '../useThemeLabelColor.js';
 
 interface SiteDistributionData {
   siteName: string;
@@ -86,6 +87,7 @@ function EmptyState() {
 
 export default function SiteDistributionChart({ data, loading }: SiteDistributionChartProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('balance');
+  const labelColor = useThemeLabelColor();
 
   const chartData = useMemo(() => {
     if (!data || data.length === 0) return [];
@@ -98,19 +100,6 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
   }, [data, viewMode]);
 
   const hasData = chartData.length > 0 && chartData.some((d) => d.value > 0);
-
-  /* VChart uses Canvas — CSS variables don't work for label colors. Read the computed value. */
-  const [labelColor, setLabelColor] = useState('#9ca3af');
-  React.useEffect(() => {
-    const read = () => {
-      const c = getComputedStyle(document.documentElement).getPropertyValue('--color-text-secondary').trim();
-      if (c) setLabelColor(c);
-    };
-    read();
-    const obs = new MutationObserver(read);
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-    return () => obs.disconnect();
-  }, []);
 
   const PIE_COLORS = ['#4f46e5', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6'];
 

@@ -83,4 +83,40 @@ describe('TokenRouter site status guard', () => {
     const candidate = decision.candidates.find((item) => item.channelId === channel.id);
     expect(candidate?.eligible).toBe(false);
   });
+
+  it('does not fallback to deprecated site apiKey when channel and account tokens are missing', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-api-key-only',
+      url: 'https://site-key.example.com',
+      platform: 'new-api',
+      apiKey: 'sk-site-only',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'site-key-user',
+      accessToken: '',
+      apiToken: null,
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4.1-mini',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).run();
+
+    const selected = await new TokenRouter().selectChannel('gpt-4.1-mini');
+    expect(selected).toBeNull();
+  });
 });

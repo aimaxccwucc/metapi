@@ -35,8 +35,55 @@ describe('proxyUsageFallbackService', () => {
         quota: 3300,
         createdAtMs: 1_700_000_123_000,
         requestTimeMs: 1450,
+        billingMeta: null,
       },
     ]);
+  });
+
+  it('extracts cache billing metadata from self-log other payload', () => {
+    const payload = {
+      success: true,
+      data: {
+        items: [
+          {
+            model_name: 'claude-haiku-4-5-20251001',
+            token_name: 'anyrouter',
+            prompt_tokens: 146638,
+            completion_tokens: 172,
+            quota: 41528,
+            created_at: 1_772_790_705,
+            request_time: 1700,
+            other: JSON.stringify({
+              cache_creation_ratio: 1.25,
+              cache_creation_tokens: 945,
+              cache_ratio: 0.1,
+              cache_tokens: 145692,
+              completion_ratio: 5,
+              group_ratio: 1,
+              model_ratio: 2.5,
+            }),
+          },
+        ],
+      },
+    };
+
+    const logs = extractSelfLogItems(payload);
+    expect(logs[0]).toMatchObject({
+      modelName: 'claude-haiku-4-5-20251001',
+      tokenName: 'anyrouter',
+      promptTokens: 146638,
+      completionTokens: 172,
+      quota: 41528,
+      billingMeta: {
+        cacheReadTokens: 145692,
+        cacheCreationTokens: 945,
+        cacheRatio: 0.1,
+        cacheCreationRatio: 1.25,
+        completionRatio: 5,
+        groupRatio: 1,
+        modelRatio: 2.5,
+      },
+    });
   });
 
   it('matches best log by model + time window + request time', () => {
@@ -137,11 +184,13 @@ describe('proxyUsageFallbackService', () => {
     expect(shouldLookupSelfLog('one-hub', { promptTokens: 1, completionTokens: 1, totalTokens: 2 })).toBe(true);
   });
 
-  it('only enables self-log lookup for new-api/anyrouter when usage is missing', () => {
+  it('only enables self-log lookup for new-api when usage is missing', () => {
     expect(shouldLookupSelfLog('new-api', { promptTokens: 0, completionTokens: 0, totalTokens: 0 })).toBe(true);
-    expect(shouldLookupSelfLog('anyrouter', { promptTokens: 0, completionTokens: 0, totalTokens: 0 })).toBe(true);
-
     expect(shouldLookupSelfLog('new-api', { promptTokens: 12, completionTokens: 3, totalTokens: 15 })).toBe(false);
-    expect(shouldLookupSelfLog('anyrouter', { promptTokens: 12, completionTokens: 3, totalTokens: 15 })).toBe(false);
+  });
+
+  it('always enables self-log lookup for anyrouter to recover exact billing metadata', () => {
+    expect(shouldLookupSelfLog('anyrouter', { promptTokens: 0, completionTokens: 0, totalTokens: 0 })).toBe(true);
+    expect(shouldLookupSelfLog('anyrouter', { promptTokens: 12, completionTokens: 3, totalTokens: 15 })).toBe(true);
   });
 });

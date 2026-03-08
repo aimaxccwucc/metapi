@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
-import { config } from './config.js';
+import { buildFastifyOptions, config } from './config.js';
 import { authMiddleware } from './middleware/auth.js';
 import { sitesRoutes } from './routes/api/sites.js';
 import { accountsRoutes } from './routes/api/accounts.js';
@@ -21,10 +21,35 @@ import { proxyRoutes } from './routes/proxy/router.js';
 import { startScheduler } from './services/checkinScheduler.js';
 import { startProxyLogRetentionService, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
 import { buildStartupSummaryLines } from './services/startupInfo.js';
+import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
+import { migrateSiteApiKeysToAccounts } from './services/siteApiKeyMigrationService.js';
+import { ensureDefaultSitesSeeded } from './services/defaultSiteSeedService.js';
+import { isPublicApiRoute, registerDesktopRoutes } from './desktop.js';
 import { existsSync } from 'fs';
-import { normalize, resolve, sep } from 'path';
-import { eq, isNull, or } from 'drizzle-orm';
-import { db, runtimeDbDialect, schema, switchRuntimeDatabase, type RuntimeDbDialect } from './db/index.js';
+import { fileURLToPath } from 'url';
+import { dirname, normalize, resolve, sep } from 'path';
+import {
+  db,
+  ensureProxyLogBillingDetailsColumn,
+  ensureRouteGroupingCompatibilityColumns,
+  ensureSiteCompatibilityColumns,
+  runtimeDbDialect,
+  schema,
+  switchRuntimeDatabase,
+  type RuntimeDbDialect,
+} from './db/index.js';
+
+let sqliteMigrationsBootstrapped = false;
+
+async function ensureSqliteRuntimeMigrations() {
+  if (runtimeDbDialect !== 'sqlite') return;
+  const migrateModule = await import('./db/migrate.js');
+  if (sqliteMigrationsBootstrapped) {
+    migrateModule.runSqliteMigrations();
+    return;
+  }
+  sqliteMigrationsBootstrapped = true;
+}
 
 function toSettingsMap(rows: Array<{ key: string; value: string }>) {
   return new Map(rows.map((row) => [row.key, row.value]));
@@ -74,14 +99,19 @@ function validateSavedDbUrl(dialect: RuntimeDbDialect, value: unknown): string |
   return null;
 }
 
-function extractSavedRuntimeDatabaseConfig(settingsMap: Map<string, string>): { dialect: RuntimeDbDialect; dbUrl: string } | null {
+function extractSavedRuntimeDatabaseConfig(settingsMap: Map<string, string>): { dialect: RuntimeDbDialect; dbUrl: string; ssl: boolean } | null {
   const rawType = parseSettingFromMap<unknown>(settingsMap, 'db_type');
   const rawUrl = parseSettingFromMap<unknown>(settingsMap, 'db_url');
+  const rawSsl = parseSettingFromMap<boolean>(settingsMap, 'db_ssl');
   const dialect = normalizeSavedDbType(rawType);
   if (!dialect) return null;
   const dbUrl = validateSavedDbUrl(dialect, rawUrl);
   if (!dbUrl) return null;
-  return { dialect, dbUrl };
+  return {
+    dialect,
+    dbUrl,
+    ssl: typeof rawSsl === 'boolean' ? rawSsl : false,
+  };
 }
 
 function applyRuntimeSettings(settingsMap: Map<string, string>) {
@@ -90,6 +120,9 @@ function applyRuntimeSettings(settingsMap: Map<string, string>) {
 
   const proxyToken = parseSettingFromMap<string>(settingsMap, 'proxy_token');
   if (typeof proxyToken === 'string' && proxyToken) config.proxyToken = proxyToken;
+
+  const systemProxyUrl = parseSettingFromMap<string>(settingsMap, 'system_proxy_url');
+  if (typeof systemProxyUrl === 'string') config.systemProxyUrl = systemProxyUrl;
 
   const checkinCron = parseSettingFromMap<string>(settingsMap, 'checkin_cron');
   if (typeof checkinCron === 'string' && checkinCron) config.checkinCron = checkinCron;
@@ -170,43 +203,41 @@ function applyRuntimeSettings(settingsMap: Map<string, string>) {
   }
 }
 
+// Ensure sqlite tables exist before reading runtime settings.
+await ensureSqliteRuntimeMigrations();
+
 // Load runtime config overrides from settings
 try {
   const initialRows = await db.select().from(schema.settings).all();
   const initialMap = toSettingsMap(initialRows);
   const savedDbConfig = extractSavedRuntimeDatabaseConfig(initialMap);
   const activeDbUrl = (config.dbUrl || '').trim();
-  if (savedDbConfig && (savedDbConfig.dialect !== runtimeDbDialect || savedDbConfig.dbUrl !== activeDbUrl)) {
+  if (savedDbConfig && (savedDbConfig.dialect !== runtimeDbDialect || savedDbConfig.dbUrl !== activeDbUrl || savedDbConfig.ssl !== config.dbSsl)) {
     try {
-      await switchRuntimeDatabase(savedDbConfig.dialect, savedDbConfig.dbUrl);
+      await switchRuntimeDatabase(savedDbConfig.dialect, savedDbConfig.dbUrl, savedDbConfig.ssl);
+      await ensureSqliteRuntimeMigrations();
       console.log(`Loaded runtime DB config from settings: ${savedDbConfig.dialect}`);
     } catch (error) {
       console.warn(`Failed to switch runtime DB from settings: ${(error as Error)?.message || 'unknown error'}`);
     }
   }
 
+  await ensureSiteCompatibilityColumns();
+  await ensureRouteGroupingCompatibilityColumns();
   const finalRows = await db.select().from(schema.settings).all();
   const finalMap = toSettingsMap(finalRows);
   applyRuntimeSettings(finalMap);
-
-  const repairedAt = new Date().toISOString();
-  await db.update(schema.events)
-    .set({ createdAt: repairedAt })
-    .where(or(isNull(schema.events.createdAt), eq(schema.events.createdAt, '')))
-    .run();
-  await db.update(schema.proxyLogs)
-    .set({ createdAt: repairedAt })
-    .where(or(isNull(schema.proxyLogs.createdAt), eq(schema.proxyLogs.createdAt, '')))
-    .run();
-  await db.update(schema.checkinLogs)
-    .set({ createdAt: repairedAt })
-    .where(or(isNull(schema.checkinLogs.createdAt), eq(schema.checkinLogs.createdAt, '')))
-    .run();
+  await ensureProxyLogBillingDetailsColumn();
+  await repairStoredCreatedAtValues();
+  await migrateSiteApiKeysToAccounts();
+  await ensureDefaultSitesSeeded();
 
   console.log('Loaded runtime settings overrides');
-} catch { /* first run, table may not exist */ }
+} catch (error) {
+  console.warn(`Failed to load runtime settings overrides: ${(error as Error)?.message || 'unknown error'}`);
+}
 
-const app = Fastify({ logger: true });
+const app = Fastify(buildFastifyOptions(config));
 
 await app.register(cors);
 
@@ -238,12 +269,13 @@ app.addHook('onRequest', async (request) => {
 
 // Auth middleware for /api routes
 app.addHook('onRequest', async (request, reply) => {
-  if (request.url.startsWith('/api/')) {
+  if (request.url.startsWith('/api/') && !isPublicApiRoute(request.url)) {
     await authMiddleware(request, reply);
   }
 });
 
 // Register API routes
+await app.register(registerDesktopRoutes);
 await app.register(sitesRoutes);
 await app.register(accountsRoutes);
 await app.register(checkinRoutes);
@@ -263,7 +295,7 @@ await app.register(downstreamApiKeysRoutes);
 await app.register(proxyRoutes);
 
 // Serve static web frontend in production
-const webDir = resolve('dist/web');
+const webDir = resolve(dirname(fileURLToPath(import.meta.url)), '../web');
 if (existsSync(webDir)) {
   await app.register(fastifyStatic, {
     root: webDir,
@@ -298,11 +330,10 @@ app.addHook('onClose', async () => {
 
 // Start server
 try {
-  const listenHost = '0.0.0.0';
-  await app.listen({ port: config.port, host: listenHost });
+  await app.listen({ port: config.port, host: config.listenHost });
   const summaryLines = buildStartupSummaryLines({
     port: config.port,
-    host: listenHost,
+    host: config.listenHost,
     authToken: config.authToken,
     proxyToken: config.proxyToken,
   });

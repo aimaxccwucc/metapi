@@ -110,6 +110,76 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return null;
   }
 
+  private decodeBase64BufferLoose(value: string): Buffer | null {
+    if (!value) return null;
+    try {
+      return Buffer.from(value, 'base64');
+    } catch {}
+    try {
+      const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+      return Buffer.from(normalized, 'base64');
+    } catch {}
+    return null;
+  }
+
+  private decodeGobSignedInt(encoded: Buffer): number | null {
+    if (!encoded.length) return null;
+
+    let unsigned = 0n;
+    if (encoded[0] < 0x80) {
+      unsigned = BigInt(encoded[0]);
+    } else {
+      const width = 0x100 - encoded[0];
+      if (width <= 0 || encoded.length !== width + 1) return null;
+      for (let i = 1; i < encoded.length; i += 1) {
+        unsigned = (unsigned << 8n) | BigInt(encoded[i]);
+      }
+    }
+
+    const signed = (unsigned & 1n) === 0n
+      ? unsigned >> 1n
+      : -((unsigned >> 1n) + 1n);
+    if (signed <= 0n || signed > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    return Number(signed);
+  }
+
+  private extractGobFieldInts(payload: Buffer, fieldName: string): number[] {
+    const ids: number[] = [];
+    const push = (value: number | null) => {
+      if (typeof value !== 'number' || Number.isNaN(value)) return;
+      if (value <= 0 || value > 10_000_000) return;
+      if (!ids.includes(value)) ids.push(value);
+    };
+
+    const marker = Buffer.concat([
+      Buffer.from(fieldName, 'utf8'),
+      Buffer.from([0x03]),
+      Buffer.from('int', 'utf8'),
+      Buffer.from([0x04]),
+    ]);
+
+    let start = 0;
+    while (start < payload.length) {
+      const position = payload.indexOf(marker, start);
+      if (position < 0) break;
+
+      const encodedLength = payload[position + marker.length];
+      const delimiter = payload[position + marker.length + 1];
+      if (typeof encodedLength === 'number' && delimiter === 0x00) {
+        const byteLength = encodedLength - 1;
+        const valueStart = position + marker.length + 2;
+        const valueEnd = valueStart + byteLength;
+        if (byteLength > 0 && valueEnd <= payload.length) {
+          push(this.decodeGobSignedInt(payload.subarray(valueStart, valueEnd)));
+        }
+      }
+
+      start = position + marker.length;
+    }
+
+    return ids;
+  }
+
   private extractLikelyUserIds(token: string): number[] {
     const ids: number[] = [];
     const push = (value: unknown) => {
@@ -134,14 +204,20 @@ export class NewApiAdapter extends BasePlatformAdapter {
     }
 
     for (const sessionValue of sessionValues) {
-      const decoded = this.decodeBase64Loose(sessionValue);
-      if (!decoded) continue;
+      const decodedBuffer = this.decodeBase64BufferLoose(sessionValue);
+      if (!decodedBuffer) continue;
+
+      const decoded = decodedBuffer.toString('utf8');
 
       const payloadCandidates: string[] = [decoded];
+      const payloadBuffers: Buffer[] = [decodedBuffer];
       const parts = decoded.split('|');
       if (parts.length >= 2) {
-        const middlePayload = this.decodeBase64Loose(parts[1]);
-        if (middlePayload) payloadCandidates.push(middlePayload);
+        const middlePayloadBuffer = this.decodeBase64BufferLoose(parts[1]);
+        if (middlePayloadBuffer) {
+          payloadCandidates.push(middlePayloadBuffer.toString('utf8'));
+          payloadBuffers.push(middlePayloadBuffer);
+        }
       }
 
       for (const payload of payloadCandidates) {
@@ -150,6 +226,12 @@ export class NewApiAdapter extends BasePlatformAdapter {
         }
         for (const m of payload.matchAll(/(?:user(?:name)?|uid|id)[^\d]{0,16}(\d{4,8})(?!\d)/gi)) {
           push(m[1]);
+        }
+      }
+
+      for (const payload of payloadBuffers) {
+        for (const value of this.extractGobFieldInts(payload, 'id')) {
+          push(value);
         }
       }
     }
@@ -669,6 +751,19 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return null;
   }
 
+  private async probeAlternateUserIdByCookie(
+    baseUrl: string,
+    token: string,
+    currentUserId?: number | null,
+  ): Promise<number | null> {
+    const probed = await this.probeUserIdByCookie(baseUrl, token);
+    if (!probed) return null;
+    if (typeof currentUserId === 'number' && currentUserId > 0 && probed === currentUserId) {
+      return null;
+    }
+    return probed;
+  }
+
   private async getApiTokensByCookie(baseUrl: string, token: string, userId?: number | null): Promise<ApiTokenInfo[]> {
     for (const cookie of this.buildCookieCandidates(token)) {
       try {
@@ -752,6 +847,16 @@ export class NewApiAdapter extends BasePlatformAdapter {
       const cookieRes = await this.fetchUserSelfByCookie(baseUrl, accessToken, platformUserId);
       if (cookieRes?.success && cookieRes?.data) {
         return this.parseUserInfo(cookieRes.data);
+      }
+    } catch {}
+
+    try {
+      const fallbackUserId = await this.probeAlternateUserIdByCookie(baseUrl, accessToken, platformUserId);
+      if (fallbackUserId) {
+        const cookieRetry = await this.fetchUserSelfByCookie(baseUrl, accessToken, fallbackUserId);
+        if (cookieRetry?.success && cookieRetry?.data) {
+          return this.parseUserInfo(cookieRetry.data);
+        }
       }
     } catch {}
 
@@ -937,47 +1042,59 @@ export class NewApiAdapter extends BasePlatformAdapter {
       return { success: false, message: firstFailureMessage };
     }
 
-    const cookieUserId = resolvedUserId || await this.probeUserIdByCookie(baseUrl, accessToken);
-    for (const cookie of this.buildCookieCandidates(accessToken)) {
-      try {
-        const signInRes = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/sign_in`, {
-          method: 'POST',
-          body: '{}',
-          headers: {
-            Cookie: cookie,
-            'X-Requested-With': 'XMLHttpRequest',
-          },
-        });
-        if (signInRes?.success) {
-          return {
-            success: true,
-            message: signInRes.message || 'checked in',
-            reward: signInRes.data?.reward?.toString(),
-          };
+    const tryCookieCheckin = async (cookieUserId?: number | null): Promise<CheckinResult | null> => {
+      for (const cookie of this.buildCookieCandidates(accessToken)) {
+        try {
+          const signInRes = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/sign_in`, {
+            method: 'POST',
+            body: '{}',
+            headers: {
+              Cookie: cookie,
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+          });
+          if (signInRes?.success) {
+            return {
+              success: true,
+              message: signInRes.message || 'checked in',
+              reward: signInRes.data?.reward?.toString(),
+            };
+          }
+          const signInMessage = this.extractResponseMessage(signInRes);
+          if (!firstFailureMessage && signInMessage) firstFailureMessage = signInMessage;
+        } catch (err) {
+          const parsed = this.formatRequestErrorMessage(err);
+          if (!firstFailureMessage && parsed) firstFailureMessage = parsed;
         }
-        const signInMessage = this.extractResponseMessage(signInRes);
-        if (!firstFailureMessage && signInMessage) firstFailureMessage = signInMessage;
-      } catch (err) {
-        const parsed = this.formatRequestErrorMessage(err);
-        if (!firstFailureMessage && parsed) firstFailureMessage = parsed;
+
+        try {
+          const headers: Record<string, string> = { Cookie: cookie };
+          if (cookieUserId) headers['New-Api-User'] = String(cookieUserId);
+          const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/checkin`, {
+            method: 'POST',
+            headers,
+          });
+          if (res?.success) {
+            return { success: true, message: res.message || 'checkin success', reward: res.data?.reward?.toString() };
+          }
+          const cookieMessage = this.extractResponseMessage(res);
+          if (cookieMessage) firstFailureMessage = cookieMessage;
+        } catch (err) {
+          const parsed = this.formatRequestErrorMessage(err);
+          if (parsed) firstFailureMessage = parsed;
+        }
       }
 
-      try {
-        const headers: Record<string, string> = { Cookie: cookie };
-        if (cookieUserId) headers['New-Api-User'] = String(cookieUserId);
-        const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/checkin`, {
-          method: 'POST',
-          headers,
-        });
-        if (res?.success) {
-          return { success: true, message: res.message || 'checkin success', reward: res.data?.reward?.toString() };
-        }
-        const cookieMessage = this.extractResponseMessage(res);
-        if (cookieMessage) firstFailureMessage = cookieMessage;
-      } catch (err) {
-        const parsed = this.formatRequestErrorMessage(err);
-        if (parsed) firstFailureMessage = parsed;
-      }
+      return null;
+    };
+
+    const initialCookieResult = await tryCookieCheckin(resolvedUserId);
+    if (initialCookieResult) return initialCookieResult;
+
+    const alternateCookieUserId = await this.probeAlternateUserIdByCookie(baseUrl, accessToken, resolvedUserId);
+    if (alternateCookieUserId) {
+      const retriedCookieResult = await tryCookieCheckin(alternateCookieUserId);
+      if (retriedCookieResult) return retriedCookieResult;
     }
 
     return { success: false, message: firstFailureMessage || 'checkin failed' };
@@ -1015,13 +1132,11 @@ export class NewApiAdapter extends BasePlatformAdapter {
       return this.parseBalance(cookieRes.data);
     }
 
-    if (!resolvedUserId) {
-      const cookieUserId = await this.probeUserIdByCookie(baseUrl, accessToken);
-      if (cookieUserId) {
-        const cookieRetry = await this.fetchUserSelfByCookie(baseUrl, accessToken, cookieUserId, rememberFailure);
-        if (cookieRetry?.success && cookieRetry?.data) {
-          return this.parseBalance(cookieRetry.data);
-        }
+    const cookieUserId = await this.probeAlternateUserIdByCookie(baseUrl, accessToken, resolvedUserId);
+    if (cookieUserId) {
+      const cookieRetry = await this.fetchUserSelfByCookie(baseUrl, accessToken, cookieUserId, rememberFailure);
+      if (cookieRetry?.success && cookieRetry?.data) {
+        return this.parseBalance(cookieRetry.data);
       }
     }
 
@@ -1049,6 +1164,12 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
     const cookieModels = await this.getSessionModelsByCookie(baseUrl, token, userId || platformUserId);
     if (cookieModels.length > 0) return cookieModels;
+
+    const alternateCookieUserId = await this.probeAlternateUserIdByCookie(baseUrl, token, userId || platformUserId);
+    if (alternateCookieUserId) {
+      const fallbackModels = await this.getSessionModelsByCookie(baseUrl, token, alternateCookieUserId);
+      if (fallbackModels.length > 0) return fallbackModels;
+    }
 
     return [];
   }
@@ -1217,6 +1338,15 @@ export class NewApiAdapter extends BasePlatformAdapter {
       if (normalized.length > 0) return normalized;
     } catch {}
 
-    return this.getApiTokensByCookie(baseUrl, accessToken, userId);
+    const cookieTokens = await this.getApiTokensByCookie(baseUrl, accessToken, userId);
+    if (cookieTokens.length > 0) return cookieTokens;
+
+    const alternateCookieUserId = await this.probeAlternateUserIdByCookie(baseUrl, accessToken, userId);
+    if (alternateCookieUserId) {
+      const fallbackTokens = await this.getApiTokensByCookie(baseUrl, accessToken, alternateCookieUserId);
+      if (fallbackTokens.length > 0) return fallbackTokens;
+    }
+
+    return [];
   }
 }

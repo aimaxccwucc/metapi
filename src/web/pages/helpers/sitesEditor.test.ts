@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSiteSaveAction } from './sitesEditor.js';
+import { buildSiteSaveAction, emptySiteForm, siteFormFromSite } from './sitesEditor.js';
 
 describe('buildSiteSaveAction', () => {
   it('returns add action in add mode', () => {
@@ -10,7 +10,6 @@ describe('buildSiteSaveAction', () => {
         url: 'https://a.example.com/',
         externalCheckinUrl: 'https://checkin.a.example.com',
         platform: 'new-api',
-        apiKey: 'sk-1',
         proxyUrl: 'http://127.0.0.1:7890',
         globalWeight: '1.2',
       },
@@ -23,7 +22,6 @@ describe('buildSiteSaveAction', () => {
         url: 'https://a.example.com/',
         externalCheckinUrl: 'https://checkin.a.example.com',
         platform: 'new-api',
-        apiKey: 'sk-1',
         proxyUrl: 'http://127.0.0.1:7890',
         globalWeight: '1.2',
       },
@@ -38,7 +36,6 @@ describe('buildSiteSaveAction', () => {
         url: 'https://b.example.com',
         externalCheckinUrl: '',
         platform: 'one-api',
-        apiKey: '',
         proxyUrl: '',
         globalWeight: '0.8',
       },
@@ -52,7 +49,6 @@ describe('buildSiteSaveAction', () => {
         url: 'https://b.example.com',
         externalCheckinUrl: '',
         platform: 'one-api',
-        apiKey: '',
         proxyUrl: '',
         globalWeight: '0.8',
       },
@@ -68,11 +64,23 @@ describe('buildSiteSaveAction', () => {
           url: 'https://c.example.com',
           externalCheckinUrl: '',
           platform: '',
-          apiKey: '',
           proxyUrl: '',
           globalWeight: '1',
         },
       ),
     ).toThrow('editingSiteId is required in edit mode');
+  });
+
+  it('does not expose deprecated apiKey in site editor state', () => {
+    expect(emptySiteForm()).not.toHaveProperty('apiKey');
+    expect(siteFormFromSite({
+      name: 'site-d',
+      url: 'https://d.example.com',
+      externalCheckinUrl: null,
+      platform: 'new-api',
+      proxyUrl: null,
+      globalWeight: 1,
+      apiKey: 'sk-legacy-site-key',
+    })).not.toHaveProperty('apiKey');
   });
 });

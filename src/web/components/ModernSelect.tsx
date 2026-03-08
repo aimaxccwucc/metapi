@@ -1,9 +1,11 @@
-﻿import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+
 type ModernSelectOption = {
   value: string;
   label: string;
   description?: string;
   disabled?: boolean;
+  iconNode?: ReactNode;
   iconUrl?: string;
   iconText?: string;
 };
@@ -66,6 +68,9 @@ export default function ModernSelect({
   }, [disabled]);
 
   const renderOptionIcon = (item: ModernSelectOption) => {
+    if (item.iconNode) {
+      return item.iconNode;
+    }
     if (item.iconUrl) {
       return <img className="modern-select-option-icon" src={item.iconUrl} alt="" loading="lazy" />;
     }
@@ -151,4 +156,3 @@ export default function ModernSelect({
     </div>
   );
 }
-

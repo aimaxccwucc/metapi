@@ -82,10 +82,21 @@ export function extractRuntimeHealth(extraConfig?: string | null): RuntimeHealth
   return normalizeRuntimeHealthRecord(parsed.runtimeHealth);
 }
 
+function isProxyOnlyAuthFailure(
+  health: RuntimeHealthInfo | null,
+  sessionCapable?: boolean,
+): boolean {
+  if (!health || sessionCapable !== false) return false;
+  if (health.state !== 'unhealthy') return false;
+  return (health.source || '').toLowerCase() === 'auth';
+}
+
 export function buildRuntimeHealthForAccount(input: {
   accountStatus?: string | null;
   siteStatus?: string | null;
   extraConfig?: string | null;
+  sessionCapable?: boolean;
+  hasDiscoveredModels?: boolean;
 }): RuntimeHealthInfo {
   const accountStatus = (input.accountStatus || 'active').toLowerCase();
   const siteStatus = (input.siteStatus || 'active').toLowerCase();
@@ -99,7 +110,7 @@ export function buildRuntimeHealthForAccount(input: {
     };
   }
 
-  if (accountStatus === 'expired') {
+  if (accountStatus === 'expired' && input.sessionCapable !== false) {
     return {
       state: 'unhealthy',
       reason: '访问令牌已过期',
@@ -109,7 +120,23 @@ export function buildRuntimeHealthForAccount(input: {
   }
 
   const stored = extractRuntimeHealth(input.extraConfig);
-  if (stored) return stored;
+  const ignoreStoredProxyOnlyAuthFailure = isProxyOnlyAuthFailure(stored, input.sessionCapable);
+  if (
+    stored
+    && !ignoreStoredProxyOnlyAuthFailure
+    && !(input.sessionCapable === false && input.hasDiscoveredModels && stored.state === 'unknown')
+  ) {
+    return stored;
+  }
+
+  if (input.sessionCapable === false && input.hasDiscoveredModels) {
+    return {
+      state: 'healthy',
+      reason: '模型探测成功',
+      source: 'model-discovery',
+      checkedAt: stored?.checkedAt || null,
+    };
+  }
 
   return {
     state: 'unknown',

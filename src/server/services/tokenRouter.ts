@@ -2,7 +2,7 @@
 import { minimatch } from 'minimatch';
 import { db, schema } from '../db/index.js';
 import { config } from '../config.js';
-import { getCachedModelRoutingReferenceCost } from './modelPricingService.js';
+import { getCachedModelRoutingReferenceCost, refreshModelPricingCatalog } from './modelPricingService.js';
 import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
 
 interface RouteMatch {
@@ -195,6 +195,19 @@ type ExplainSelectionOptions = {
   downstreamPolicy?: DownstreamRoutingPolicy;
 };
 
+type PricingReferenceRefreshOptions = {
+  useChannelSourceModelForCost?: boolean;
+  downstreamPolicy?: DownstreamRoutingPolicy;
+  refreshedKeys?: Set<string>;
+};
+
+type CandidateEligibilityOptions = {
+  requestedModel: string;
+  bypassSourceModelCheck?: boolean;
+  excludeChannelIds?: number[];
+  nowIso?: string;
+};
+
 type CostSignal = {
   unitCost: number;
   source: 'observed' | 'configured' | 'catalog' | 'fallback';
@@ -364,6 +377,10 @@ function resolveEffectiveUnitCost(candidate: RouteChannelCandidate, modelName: s
   };
 }
 
+function isExplicitTokenChannel(candidate: RouteChannelCandidate): boolean {
+  return typeof candidate.channel.tokenId === 'number' && candidate.channel.tokenId > 0;
+}
+
 export class TokenRouter {
   /**
    * Find matching route and select a channel for the given model.
@@ -379,17 +396,15 @@ export class TokenRouter {
     const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
     const bypassSourceModelCheck = requestedByDisplayName;
 
-    // Filter channels: enabled, not in cooldown, account/site active with token
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
-    const available = match.channels.filter((c) =>
-      (bypassSourceModelCheck || channelSupportsRequestedModel(c.channel.sourceModel, requestedModel)) &&
-      c.channel.enabled &&
-      c.account.status === 'active' &&
-      !isSiteDisabled(c.site.status) &&
-      !!this.resolveChannelTokenValue(c) &&
-      (!c.channel.cooldownUntil || c.channel.cooldownUntil <= nowIso),
-    );
+    const available = match.channels.filter((candidate) => (
+      this.getCandidateEligibilityReasons(candidate, {
+        requestedModel,
+        bypassSourceModelCheck,
+        nowIso,
+      }).length === 0
+    ));
 
     if (available.length === 0) return null;
 
@@ -459,15 +474,14 @@ export class TokenRouter {
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
-    const available = match.channels.filter((c) =>
-      (bypassSourceModelCheck || channelSupportsRequestedModel(c.channel.sourceModel, requestedModel)) &&
-      c.channel.enabled &&
-      c.account.status === 'active' &&
-      !isSiteDisabled(c.site.status) &&
-      !!this.resolveChannelTokenValue(c) &&
-      (!c.channel.cooldownUntil || c.channel.cooldownUntil <= nowIso) &&
-      !excludeChannelIds.includes(c.channel.id),
-    );
+    const available = match.channels.filter((candidate) => (
+      this.getCandidateEligibilityReasons(candidate, {
+        requestedModel,
+        bypassSourceModelCheck,
+        excludeChannelIds,
+        nowIso,
+      }).length === 0
+    ));
 
     if (available.length === 0) return null;
 
@@ -543,6 +557,38 @@ export class TokenRouter {
     });
   }
 
+  async refreshPricingReferenceCosts(
+    requestedModel: string,
+    options: PricingReferenceRefreshOptions = {},
+  ): Promise<void> {
+    const downstreamPolicy = options.downstreamPolicy ?? DEFAULT_DOWNSTREAM_POLICY;
+    const match = await this.findRoute(requestedModel, downstreamPolicy);
+    await this.refreshPricingReferenceCostsForMatch(match, requestedModel, options);
+  }
+
+  async refreshPricingReferenceCostsForRoute(
+    routeId: number,
+    requestedModel: string,
+    options: PricingReferenceRefreshOptions = {},
+  ): Promise<void> {
+    const downstreamPolicy = options.downstreamPolicy ?? DEFAULT_DOWNSTREAM_POLICY;
+    const match = await this.findRouteById(routeId, downstreamPolicy);
+    await this.refreshPricingReferenceCostsForMatch(match, requestedModel, options);
+  }
+
+  async refreshRouteWidePricingReferenceCosts(
+    routeId: number,
+    options: Omit<PricingReferenceRefreshOptions, 'useChannelSourceModelForCost'> = {},
+  ): Promise<void> {
+    const downstreamPolicy = options.downstreamPolicy ?? DEFAULT_DOWNSTREAM_POLICY;
+    const match = await this.findRouteById(routeId, downstreamPolicy);
+    const requestedModel = match?.route.modelPattern || `route:${routeId}`;
+    await this.refreshPricingReferenceCostsForMatch(match, requestedModel, {
+      ...options,
+      useChannelSourceModelForCost: true,
+    });
+  }
+
   private explainSelectionFromMatch(
     match: RouteMatch | null,
     requestedModel: string,
@@ -578,17 +624,12 @@ export class TokenRouter {
     const candidateMap = new Map<number, RouteDecisionCandidate>();
 
     for (const row of match.channels) {
-      const reasonParts: string[] = [];
-      if (!bypassSourceModelCheck && !channelSupportsRequestedModel(row.channel.sourceModel, requestedModel)) {
-        reasonParts.push(`来源模型不匹配=${row.channel.sourceModel || ''}`);
-      }
-      if (!row.channel.enabled) reasonParts.push('通道禁用');
-      if (row.account.status !== 'active') reasonParts.push(`账号状态=${row.account.status}`);
-      if (isSiteDisabled(row.site.status)) reasonParts.push(`站点状态=${row.site.status || 'disabled'}`);
-      if (excludeChannelIds.includes(row.channel.id)) reasonParts.push('当前请求已尝试');
-      const tokenValue = this.resolveChannelTokenValue(row);
-      if (!tokenValue) reasonParts.push('令牌不可用');
-      if (row.channel.cooldownUntil && row.channel.cooldownUntil > nowIso) reasonParts.push('冷却中');
+      const reasonParts = this.getCandidateEligibilityReasons(row, {
+        requestedModel,
+        bypassSourceModelCheck,
+        excludeChannelIds,
+        nowIso,
+      });
 
       const recentlyFailed = isChannelRecentlyFailed(row.channel, nowMs, RECENT_FAILURE_AVOID_SEC);
       const eligible = reasonParts.length === 0;
@@ -717,6 +758,45 @@ export class TokenRouter {
     };
   }
 
+  private async refreshPricingReferenceCostsForMatch(
+    match: RouteMatch | null,
+    requestedModel: string,
+    options: PricingReferenceRefreshOptions = {},
+  ): Promise<void> {
+    if (!match) return;
+
+    const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
+    const useChannelSourceModelForCost = (options.useChannelSourceModelForCost ?? false) || requestedByDisplayName;
+    const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
+    const refreshedKeys = options.refreshedKeys ?? new Set<string>();
+
+    await Promise.allSettled(match.channels.map(async (candidate) => {
+      const refreshKey = `${candidate.site.id}:${candidate.account.id}`;
+      if (refreshedKeys.has(refreshKey)) return;
+      refreshedKeys.add(refreshKey);
+
+      const modelName = useChannelSourceModelForCost
+        ? (normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
+        : mappedModel;
+      if (!modelName) return;
+
+      await refreshModelPricingCatalog({
+        site: {
+          id: candidate.site.id,
+          url: candidate.site.url,
+          platform: candidate.site.platform,
+          apiKey: candidate.site.apiKey,
+        },
+        account: {
+          id: candidate.account.id,
+          accessToken: candidate.account.accessToken,
+          apiToken: candidate.account.apiToken,
+        },
+        modelName,
+      });
+    }));
+  }
+
   /**
    * Record success for a channel.
    */
@@ -835,10 +915,48 @@ export class TokenRouter {
     }
 
     const fallback = candidate.account.apiToken?.trim();
-    if (fallback) return fallback;
+    return fallback || null;
+  }
 
-    const siteApiKey = candidate.site?.apiKey?.trim();
-    return siteApiKey ? siteApiKey : null;
+  private getCandidateEligibilityReasons(
+    candidate: RouteChannelCandidate,
+    options: CandidateEligibilityOptions,
+  ): string[] {
+    const reasonParts: string[] = [];
+    const bypassSourceModelCheck = options.bypassSourceModelCheck ?? false;
+    const excludeChannelIds = options.excludeChannelIds ?? [];
+    const nowIso = options.nowIso ?? new Date().toISOString();
+
+    if (!bypassSourceModelCheck && !channelSupportsRequestedModel(candidate.channel.sourceModel, options.requestedModel)) {
+      reasonParts.push(`来源模型不匹配=${candidate.channel.sourceModel || ''}`);
+    }
+
+    if (!candidate.channel.enabled) reasonParts.push('通道禁用');
+
+    if (isExplicitTokenChannel(candidate)) {
+      if (candidate.account.status === 'disabled') {
+        reasonParts.push(`账号状态=${candidate.account.status}`);
+      }
+    } else if (candidate.account.status !== 'active') {
+      reasonParts.push(`账号状态=${candidate.account.status}`);
+    }
+
+    if (isSiteDisabled(candidate.site.status)) {
+      reasonParts.push(`站点状态=${candidate.site.status || 'disabled'}`);
+    }
+
+    if (excludeChannelIds.includes(candidate.channel.id)) {
+      reasonParts.push('当前请求已尝试');
+    }
+
+    const tokenValue = this.resolveChannelTokenValue(candidate);
+    if (!tokenValue) reasonParts.push('令牌不可用');
+
+    if (candidate.channel.cooldownUntil && candidate.channel.cooldownUntil > nowIso) {
+      reasonParts.push('冷却中');
+    }
+
+    return reasonParts;
   }
 
   private weightedRandomSelect(

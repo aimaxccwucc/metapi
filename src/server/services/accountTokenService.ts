@@ -1,5 +1,6 @@
 ﻿import { and, eq, ne } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
+import { getCredentialModeFromExtraConfig } from './accountExtraConfig.js';
 
 type UpstreamApiToken = {
   name?: string | null;
@@ -64,6 +65,12 @@ async function updateAccountApiToken(accountId: number, tokenValue: string | nul
     .set({ apiToken: tokenValue || null, updatedAt: new Date().toISOString() })
     .where(eq(schema.accounts.id, accountId))
     .run();
+}
+
+function isApiKeyConnection(account: typeof schema.accounts.$inferSelect): boolean {
+  const explicit = getCredentialModeFromExtraConfig(account.extraConfig);
+  if (explicit && explicit !== 'auto') return explicit === 'apikey';
+  return normalizeTokenValue(account.accessToken) === null;
 }
 
 export async function getPreferredAccountToken(accountId: number) {
@@ -267,7 +274,9 @@ export async function listTokensWithRelations(accountId?: number) {
     ? await base.where(eq(schema.accountTokens.accountId, accountId)).all()
     : await base.all();
 
-  return rows.map((row) => {
+  return rows
+    .filter((row) => !isApiKeyConnection(row.accounts))
+    .map((row) => {
     const { token, ...tokenMeta } = row.account_tokens;
     return {
       ...tokenMeta,
@@ -284,6 +293,6 @@ export async function listTokensWithRelations(accountId?: number) {
         platform: row.sites.platform,
       },
     };
-  });
+    });
 }
 

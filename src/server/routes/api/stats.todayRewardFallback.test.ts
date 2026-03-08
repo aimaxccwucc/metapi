@@ -11,11 +11,13 @@ import {
 } from '../../services/localTimeService.js';
 
 type DbModule = typeof import('../../db/index.js');
+type RepairModule = typeof import('../../services/storedTimestampRepairService.js');
 
 describe('stats dashboard today reward fallback', () => {
   let app: FastifyInstance;
   let db: DbModule['db'];
   let schema: DbModule['schema'];
+  let repairStoredCreatedAtValues: RepairModule['repairStoredCreatedAtValues'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -25,8 +27,10 @@ describe('stats dashboard today reward fallback', () => {
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');
     const routesModule = await import('./stats.js');
+    const repairModule = await import('../../services/storedTimestampRepairService.js');
     db = dbModule.db;
     schema = dbModule.schema;
+    repairStoredCreatedAtValues = repairModule.repairStoredCreatedAtValues;
 
     app = Fastify();
     await app.register(routesModule.statsRoutes);
@@ -89,6 +93,38 @@ describe('stats dashboard today reward fallback', () => {
     expect(body.todayReward).toBe(4.8);
   });
 
+  it('repairs ISO timestamps for dashboard today reward filtering', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'stats-iso-site',
+      url: 'https://stats-iso.example.com',
+      platform: 'new-api',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'stats-iso-user',
+      accessToken: 'token',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.checkinLogs).values({
+      accountId: account.id,
+      status: 'success',
+      message: 'checked in',
+      reward: '3.6',
+      createdAt: new Date().toISOString(),
+    }).run();
+    await repairStoredCreatedAtValues();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/stats/dashboard',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { todayReward: number };
+    expect(body.todayReward).toBe(3.6);
+  });
+
   it('counts dashboard today spend only inside local-day range', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'stats-spend-site',
@@ -138,5 +174,40 @@ describe('stats dashboard today reward fallback', () => {
     expect(response.statusCode).toBe(200);
     const body = response.json() as { todaySpend: number };
     expect(body.todaySpend).toBe(3);
+  });
+
+  it('repairs ISO timestamps for dashboard today spend filtering', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'stats-iso-spend-site',
+      url: 'https://stats-iso-spend.example.com',
+      platform: 'new-api',
+    }).returning().get();
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'stats-iso-spend-user',
+      accessToken: 'token',
+      status: 'active',
+    }).returning().get();
+
+    const { startUtc } = getLocalDayRangeUtc();
+    const startDate = parseStoredUtcDateTime(startUtc)!;
+    const inRangeIso = new Date(startDate.getTime() + 60_000).toISOString();
+
+    await db.insert(schema.proxyLogs).values({
+      accountId: account.id,
+      status: 'success',
+      estimatedCost: 6.4,
+      createdAt: inRangeIso,
+    }).run();
+    await repairStoredCreatedAtValues();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/stats/dashboard',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { todaySpend: number };
+    expect(body.todaySpend).toBe(6.4);
   });
 });

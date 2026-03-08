@@ -48,6 +48,8 @@ type AccountCapabilities = {
   proxyOnly: boolean;
 };
 
+type VerifyFailureReason = 'needs-user-id' | 'invalid-user-id' | 'shield-blocked' | null;
+
 function hasSessionTokenValue(value: string | null | undefined): boolean {
   return typeof value === 'string' && value.trim().length > 0;
 }
@@ -79,6 +81,13 @@ function buildCapabilitiesFromCredentialMode(
 function buildCapabilitiesForAccount(account: typeof schema.accounts.$inferSelect): AccountCapabilities {
   const credentialMode = resolveStoredCredentialMode(account);
   return buildCapabilitiesFromCredentialMode(credentialMode, hasSessionTokenValue(account.accessToken));
+}
+
+function normalizeBatchIds(input: unknown): number[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((item) => Number.parseInt(String(item), 10))
+    .filter((id) => Number.isFinite(id) && id > 0);
 }
 
 function normalizePinnedFlag(input: unknown): boolean | null {
@@ -126,6 +135,10 @@ type LoginFailureInfo = {
   shieldBlocked: boolean;
 };
 
+const ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS = 10_000;
+const ACCOUNT_VERIFY_TIMEOUT_MS = 10_000;
+const ACCOUNT_VERIFY_DIAG_TIMEOUT_MS = 2_500;
+
 function normalizeLoginFailure(message: string | null | undefined): LoginFailureInfo {
   const raw = (message || '').trim();
   const lowered = raw.toLowerCase();
@@ -169,10 +182,65 @@ function summarizeAccountHealthRefresh(results: AccountHealthRefreshResult[]) {
   };
 }
 
+async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function isVerificationTimeoutError(error: unknown): boolean {
+  const name = typeof error === 'object' && error && 'name' in error
+    ? String((error as { name?: unknown }).name || '')
+    : '';
+  const message = typeof error === 'object' && error && 'message' in error
+    ? String((error as { message?: unknown }).message || '')
+    : String(error || '');
+  const lowered = `${name} ${message}`.toLowerCase();
+  return lowered.includes('timeout') || lowered.includes('timed out') || lowered.includes('abort');
+}
+
+function resolveUserIdFailureReason(message: string, hasProvidedUserId: boolean): VerifyFailureReason {
+  const lowered = String(message || '').trim().toLowerCase();
+  if (!lowered) return null;
+
+  if (
+    lowered.includes('mismatch')
+    || lowered.includes('not match')
+    || lowered.includes('invalid user id')
+    || lowered.includes('wrong user id')
+  ) {
+    return 'invalid-user-id';
+  }
+
+  if (
+    lowered.includes('missing new-api-user')
+    || lowered.includes('new-api-user required')
+    || lowered.includes('requires user id')
+    || lowered.includes('missing user id')
+  ) {
+    return 'needs-user-id';
+  }
+
+  if (lowered.includes('new-api-user') || lowered.includes('user id')) {
+    return hasProvidedUserId ? 'invalid-user-id' : 'needs-user-id';
+  }
+
+  return null;
+}
+
 async function refreshRuntimeHealthForRow(row: AccountWithSiteRow): Promise<AccountHealthRefreshResult> {
   const accountId = row.accounts.id;
   const username = row.accounts.username;
   const siteName = row.sites.name;
+  const capabilities = buildCapabilitiesForAccount(row.accounts);
 
   if ((row.accounts.status || 'active') === 'disabled' || (row.sites.status || 'active') === 'disabled') {
     setAccountRuntimeHealth(accountId, {
@@ -190,8 +258,23 @@ async function refreshRuntimeHealthForRow(row: AccountWithSiteRow): Promise<Acco
     };
   }
 
+  if (capabilities.proxyOnly) {
+    return {
+      accountId,
+      username,
+      siteName,
+      status: 'skipped',
+      state: 'unknown',
+      message: '仅代理账号不支持会话健康检查',
+    };
+  }
+
   try {
-    await refreshBalance(accountId);
+    await withTimeout(
+      () => refreshBalance(accountId),
+      ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS,
+      `站点健康检查超时（${Math.max(1, Math.round(ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS / 1000))}s）`,
+    );
     const refreshedAccount = await db.select().from(schema.accounts)
       .where(eq(schema.accounts.id, accountId))
       .get();
@@ -199,6 +282,7 @@ async function refreshRuntimeHealthForRow(row: AccountWithSiteRow): Promise<Acco
       accountStatus: refreshedAccount?.status || row.accounts.status,
       siteStatus: row.sites.status,
       extraConfig: refreshedAccount?.extraConfig ?? row.accounts.extraConfig,
+      sessionCapable: capabilities.canRefreshBalance,
     });
 
     return {
@@ -297,6 +381,19 @@ export async function accountsRoutes(app: FastifyInstance) {
       spendByAccount[row.accountId] = Number(row.totalSpend || 0);
     }
 
+    const modelCountRows = await db.select({
+      accountId: schema.modelAvailability.accountId,
+      modelCount: sql<number>`count(*)`,
+    }).from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.available, true))
+      .groupBy(schema.modelAvailability.accountId)
+      .all();
+    const modelCountByAccount: Record<number, number> = {};
+    for (const row of modelCountRows) {
+      if (row.accountId == null) continue;
+      modelCountByAccount[row.accountId] = Number(row.modelCount || 0);
+    }
+
     // Aggregate today's checkin rewards per account
     const todayCheckins = await db.select({
       accountId: schema.checkinLogs.accountId,
@@ -342,6 +439,11 @@ export async function accountsRoutes(app: FastifyInstance) {
           accountStatus: r.accounts.status,
           siteStatus: r.sites.status,
           extraConfig: r.accounts.extraConfig,
+          sessionCapable: buildCapabilitiesFromCredentialMode(
+            credentialMode,
+            hasSessionTokenValue(r.accounts.accessToken),
+          ).canRefreshBalance,
+          hasDiscoveredModels: (modelCountByAccount[r.accounts.id] || 0) > 0,
         }),
       };
     });
@@ -475,7 +577,11 @@ export async function accountsRoutes(app: FastifyInstance) {
 
     if (credentialMode === 'apikey') {
       try {
-        const models = await adapter.getModels(site.url, accessToken, platformUserId);
+        const models = await withTimeout(
+          () => adapter.getModels(site.url, accessToken, parsedPlatformUserId),
+          ACCOUNT_VERIFY_TIMEOUT_MS,
+          `Token verification timed out (${Math.max(1, Math.round(ACCOUNT_VERIFY_TIMEOUT_MS / 1000))}s)`,
+        );
         const availableModels = Array.isArray(models) ? models.filter((item) => typeof item === 'string' && item.trim().length > 0) : [];
         if (availableModels.length === 0) {
           return {
@@ -490,6 +596,10 @@ export async function accountsRoutes(app: FastifyInstance) {
           models: availableModels.slice(0, 10),
         };
       } catch (err: any) {
+        if (isVerificationTimeoutError(err)) {
+          const failure = buildVerificationFailureResponse(await diagnoseVerificationFailure());
+          if (failure) return failure;
+        }
         return {
           success: false,
           message: err?.message || 'API Key 验证失败',
@@ -499,8 +609,16 @@ export async function accountsRoutes(app: FastifyInstance) {
 
     let result: any;
     try {
-      result = await adapter.verifyToken(site.url, accessToken, platformUserId);
+      result = await withTimeout(
+        () => adapter.verifyToken(site.url, accessToken, parsedPlatformUserId),
+        ACCOUNT_VERIFY_TIMEOUT_MS,
+        `Token verification timed out (${Math.max(1, Math.round(ACCOUNT_VERIFY_TIMEOUT_MS / 1000))}s)`,
+      );
     } catch (err: any) {
+      if (isVerificationTimeoutError(err)) {
+        const failure = buildVerificationFailureResponse(await diagnoseVerificationFailure());
+        if (failure) return failure;
+      }
       return {
         success: false,
         message: appendSessionTokenRebindHint(err?.message || 'Token 验证失败'),
@@ -533,12 +651,6 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     // Try to explain unknown failures: missing user id vs anti-bot challenge page.
-    const normalizedPlatform = String(adapter.platformName || site.platform || '').trim().toLowerCase();
-    // New-API family already runs shield-aware probing inside adapters.
-    // Raw fallback probe below does not include challenge-solving and can
-    // misclassify valid Cookie/Session flows as shield-blocked.
-    const skipRawShieldDetection = normalizedPlatform === 'new-api' || normalizedPlatform === 'anyrouter';
-    type VerifyFailureReason = 'needs-user-id' | 'shield-blocked' | null;
     const detectVerifyFailureReason = async (): Promise<VerifyFailureReason> => {
       const deadlineAt = Date.now() + 8_000;
       const parseFailureReason = (bodyText: string, contentType: string): VerifyFailureReason => {
@@ -555,7 +667,8 @@ export async function accountsRoutes(app: FastifyInstance) {
         try {
           const body = JSON.parse(text) as any;
           const message = typeof body?.message === 'string' ? body.message : '';
-          if (/mismatch|new-api-user|user id/i.test(message)) return 'needs-user-id';
+          const userIdReason = resolveUserIdFailureReason(message, hasProvidedUserId);
+          if (userIdReason) return userIdReason;
           if (!skipRawShieldDetection && /shield|challenge|captcha|acw_sc__v2|arg1/i.test(message)) {
             return 'shield-blocked';
           }
@@ -574,8 +687,9 @@ export async function accountsRoutes(app: FastifyInstance) {
           candidates.add(`token=${raw}`);
         }
 
+        const diagnosticUserId = hasProvidedUserId ? String(parsedPlatformUserId) : '0';
         const headerVariants: Record<string, string>[] = [
-          { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'New-Api-User': '0' },
+          { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'New-Api-User': diagnosticUserId },
         ];
 
         for (const cookie of candidates) {
@@ -583,13 +697,20 @@ export async function accountsRoutes(app: FastifyInstance) {
             Cookie: cookie,
             'Content-Type': 'application/json',
             'X-Requested-With': 'XMLHttpRequest',
+            ...(hasProvidedUserId ? { 'New-Api-User': diagnosticUserId } : {}),
           });
         }
 
         for (const headers of headerVariants) {
           if (Date.now() > deadlineAt) break;
           try {
-            const testRes = await fetch(`${site.url}/api/user/self`, withExplicitProxyRequestInit(site.proxyUrl, { headers }));
+            const testRes = await fetch(
+              `${site.url}/api/user/self`,
+              withSiteRecordProxyRequestInit(site, {
+                headers,
+                signal: AbortSignal.timeout(ACCOUNT_VERIFY_DIAG_TIMEOUT_MS),
+              }),
+            );
             const bodyText = await testRes.text();
             const contentType = testRes.headers.get('content-type') || '';
             const reason = parseFailureReason(bodyText, contentType);
@@ -607,6 +728,14 @@ export async function accountsRoutes(app: FastifyInstance) {
         success: false,
         needsUserId: true,
         message: 'This site requires a user ID. Please fill in your site user ID.',
+      };
+    }
+
+    if (failureReason === 'invalid-user-id') {
+      return {
+        success: false,
+        invalidUserId: true,
+        message: 'The provided user ID does not match this token. Please check your site user ID.',
       };
     }
 
@@ -1026,7 +1155,15 @@ export async function accountsRoutes(app: FastifyInstance) {
     updates.updatedAt = new Date().toISOString();
     await db.update(schema.accounts).set(updates).where(eq(schema.accounts.id, id)).run();
 
-    if (typeof updates.apiToken === 'string' && updates.apiToken.trim()) {
+    const nextAccessToken = typeof updates.accessToken === 'string' ? updates.accessToken : account.accessToken;
+    const nextExtraConfig = typeof updates.extraConfig === 'string' ? updates.extraConfig : account.extraConfig;
+    const explicitNextMode = getCredentialModeFromExtraConfig(nextExtraConfig);
+    const nextCredentialMode =
+      explicitNextMode && explicitNextMode !== 'auto'
+        ? explicitNextMode
+        : (hasSessionTokenValue(nextAccessToken) ? 'session' : 'apikey');
+
+    if (nextCredentialMode !== 'apikey' && typeof updates.apiToken === 'string' && updates.apiToken.trim()) {
       try {
         await ensureDefaultTokenForAccount(id, updates.apiToken, { name: 'default', source: 'manual' });
       } catch { }

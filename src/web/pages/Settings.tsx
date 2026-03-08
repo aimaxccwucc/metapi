@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import ChangeKeyModal from '../components/ChangeKeyModal.js';
 import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
-import { InlineBrandIcon, getBrand, useIconCdn } from '../components/BrandIcon.js';
+import { BrandGlyph, InlineBrandIcon, getBrand, normalizeBrandIconKey } from '../components/BrandIcon.js';
 import ModernSelect from '../components/ModernSelect.js';
 import {
   applyRoutingProfilePreset,
@@ -13,10 +13,13 @@ import {
 } from './helpers/routingProfiles.js';
 import { fuzzyMatch } from './helpers/fuzzySearch.js';
 import { clearAuthSession } from '../authSession.js';
+import { clearAppInstallationState } from '../appLocalState.js';
 import { tr } from '../i18n.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
 const ROUTE_BRAND_ICON_PREFIX = 'brand:';
+const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
+const FACTORY_RESET_CONFIRM_SECONDS = 3;
 type DbDialect = 'sqlite' | 'mysql' | 'postgres';
 
 type RuntimeSettings = {
@@ -25,6 +28,7 @@ type RuntimeSettings = {
   siteHealthRefreshCron: string;
   routingFallbackUnitCost: number;
   routingWeights: RoutingWeights;
+  systemProxyUrl: string;
   proxyTokenMasked?: string;
   adminIpAllowlist?: string[];
   currentAdminIp?: string;
@@ -86,10 +90,12 @@ type RuntimeDatabaseState = {
   active: {
     dialect: DbDialect;
     connection: string;
+    ssl: boolean;
   };
   saved: {
     dialect: DbDialect;
     connection: string;
+    ssl: boolean;
   } | null;
   restartRequired: boolean;
 };
@@ -161,7 +167,7 @@ function parseBrandIconValue(raw: string | null | undefined): string | null {
   const normalized = (raw || '').trim();
   if (!normalized.startsWith(ROUTE_BRAND_ICON_PREFIX)) return null;
   const icon = normalized.slice(ROUTE_BRAND_ICON_PREFIX.length).trim();
-  return icon || null;
+  return normalizeBrandIconKey(icon);
 }
 
 function resolveRouteBrandSource(route: RouteSelectorItem): string {
@@ -171,19 +177,20 @@ function resolveRouteBrandSource(route: RouteSelectorItem): string {
 }
 
 export default function Settings() {
-  const iconCdn = useIconCdn();
   const [runtime, setRuntime] = useState<RuntimeSettings>({
     checkinCron: '0 8 * * *',
     balanceRefreshCron: '0 * * * *',
     siteHealthRefreshCron: '*/15 * * * *',
     routingFallbackUnitCost: 1,
     routingWeights: defaultWeights,
+    systemProxyUrl: '',
   });
   const [proxyTokenSuffix, setProxyTokenSuffix] = useState('');
   const [maskedToken, setMaskedToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
+  const [savingSystemProxy, setSavingSystemProxy] = useState(false);
   const [savingRouting, setSavingRouting] = useState(false);
   const [showAdvancedRouting, setShowAdvancedRouting] = useState(false);
   const [savingSecurity, setSavingSecurity] = useState(false);
@@ -202,6 +209,7 @@ export default function Settings() {
     database: 'postgres',
   });
   const [migrationOverwrite, setMigrationOverwrite] = useState(true);
+  const [migrationSsl, setMigrationSsl] = useState(false);
   const [testingMigrationConnection, setTestingMigrationConnection] = useState(false);
   const [migratingDatabase, setMigratingDatabase] = useState(false);
   const [savingRuntimeDatabase, setSavingRuntimeDatabase] = useState(false);
@@ -217,6 +225,10 @@ export default function Settings() {
   const downstreamModalPresence = useAnimatedVisibility(downstreamModalOpen, 220);
   const [selectorOpen, setSelectorOpen] = useState(false);
   const selectorModalPresence = useAnimatedVisibility(selectorOpen, 220);
+  const [factoryResetOpen, setFactoryResetOpen] = useState(false);
+  const factoryResetPresence = useAnimatedVisibility(factoryResetOpen, 220);
+  const [factoryResetting, setFactoryResetting] = useState(false);
+  const [factoryResetSecondsLeft, setFactoryResetSecondsLeft] = useState(FACTORY_RESET_CONFIRM_SECONDS);
   const [selectorLoading, setSelectorLoading] = useState(false);
   const [selectorRoutes, setSelectorRoutes] = useState<RouteSelectorItem[]>([]);
   const [selectorModelSearch, setSelectorModelSearch] = useState('');
@@ -289,6 +301,18 @@ export default function Settings() {
       database: defaults.database,
     }));
   }, [migrationDialect]);
+
+  useEffect(() => {
+    if (!factoryResetOpen) {
+      setFactoryResetSecondsLeft(FACTORY_RESET_CONFIRM_SECONDS);
+      return;
+    }
+    setFactoryResetSecondsLeft(FACTORY_RESET_CONFIRM_SECONDS);
+    const timer = globalThis.setInterval(() => {
+      setFactoryResetSecondsLeft((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => globalThis.clearInterval(timer);
+  }, [factoryResetOpen]);
 
   const inputStyle: React.CSSProperties = {
     width: '100%',
@@ -367,6 +391,7 @@ export default function Settings() {
           ...defaultWeights,
           ...(runtimeInfo.routingWeights || {}),
         },
+        systemProxyUrl: typeof runtimeInfo.systemProxyUrl === 'string' ? runtimeInfo.systemProxyUrl : '',
         proxyTokenMasked: runtimeInfo.proxyTokenMasked || '',
         adminIpAllowlist: Array.isArray(runtimeInfo.adminIpAllowlist)
           ? runtimeInfo.adminIpAllowlist.filter((item: unknown) => typeof item === 'string')
@@ -394,11 +419,13 @@ export default function Settings() {
         active: {
           dialect: (runtimeDatabaseInfo?.active?.dialect || 'sqlite') as DbDialect,
           connection: String(runtimeDatabaseInfo?.active?.connection || ''),
+          ssl: !!runtimeDatabaseInfo?.active?.ssl,
         },
         saved: runtimeDatabaseInfo?.saved
           ? {
             dialect: runtimeDatabaseInfo.saved.dialect as DbDialect,
             connection: String(runtimeDatabaseInfo.saved.connection || ''),
+            ssl: !!runtimeDatabaseInfo.saved.ssl,
           }
           : null,
         restartRequired: !!runtimeDatabaseInfo?.restartRequired,
@@ -454,6 +481,26 @@ export default function Settings() {
       toast.error(err?.message || '保存失败');
     } finally {
       setSavingToken(false);
+    }
+  };
+
+  const saveSystemProxy = async () => {
+    setSavingSystemProxy(true);
+    try {
+      const res = await api.updateRuntimeSettings({
+        systemProxyUrl: runtime.systemProxyUrl.trim(),
+      });
+      setRuntime((prev) => ({
+        ...prev,
+        systemProxyUrl: typeof res?.systemProxyUrl === 'string'
+          ? res.systemProxyUrl
+          : prev.systemProxyUrl,
+      }));
+      toast.success('系统代理已保存');
+    } catch (err: any) {
+      toast.error(err?.message || '保存失败');
+    } finally {
+      setSavingSystemProxy(false);
     }
   };
 
@@ -688,6 +735,24 @@ export default function Settings() {
     }
   };
 
+  const closeFactoryResetModal = () => {
+    if (factoryResetting) return;
+    setFactoryResetOpen(false);
+  };
+
+  const handleFactoryReset = async () => {
+    if (factoryResetSecondsLeft > 0 || factoryResetting) return;
+    setFactoryResetting(true);
+    try {
+      await api.factoryReset();
+      clearAppInstallationState(localStorage);
+      window.location.reload();
+    } catch (err: any) {
+      toast.error(err?.message || '重新初始化系统失败');
+      setFactoryResetting(false);
+    }
+  };
+
   const handleTestExternalDatabaseConnection = async () => {
     if (!effectiveMigrationConnectionString) {
       toast.info('Please fill target database connection first');
@@ -705,7 +770,7 @@ export default function Settings() {
       const res = await api.testExternalDatabaseConnection({
         dialect: migrationDialect,
         connectionString: effectiveMigrationConnectionString,
-        overwrite: migrationOverwrite,
+        ssl: migrationSsl,
       });
       toast.success(`Connection success: ${res.connection || migrationDialect}`);
     } catch (err: any) {
@@ -738,6 +803,7 @@ export default function Settings() {
         dialect: migrationDialect,
         connectionString: effectiveMigrationConnectionString,
         overwrite: migrationOverwrite,
+        ssl: migrationSsl,
       });
       setMigrationSummary(res);
       toast.success(res?.message || 'Database migration completed');
@@ -765,16 +831,19 @@ export default function Settings() {
       const res = await api.updateRuntimeDatabaseConfig({
         dialect: migrationDialect,
         connectionString: effectiveMigrationConnectionString,
+        ssl: migrationSsl,
       });
       setRuntimeDatabaseState({
         active: {
           dialect: (res?.active?.dialect || 'sqlite') as DbDialect,
           connection: String(res?.active?.connection || ''),
+          ssl: !!res?.active?.ssl,
         },
         saved: res?.saved
           ? {
             dialect: res.saved.dialect as DbDialect,
             connection: String(res.saved.connection || ''),
+            ssl: !!res.saved.ssl,
           }
           : null,
         restartRequired: !!res?.restartRequired,
@@ -854,6 +923,22 @@ export default function Settings() {
         </div>
 
         <div className="card animate-slide-up stagger-3" style={{ padding: 20 }}>
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>系统代理</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+            配置一个全局出站代理地址，站点页可按站点决定是否启用系统代理。
+          </div>
+          <input
+            value={runtime.systemProxyUrl}
+            onChange={(e) => setRuntime((prev) => ({ ...prev, systemProxyUrl: e.target.value }))}
+            placeholder="系统代理 URL（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）"
+            style={{ ...inputStyle, fontFamily: 'var(--font-mono)', marginBottom: 10 }}
+          />
+          <button onClick={saveSystemProxy} disabled={savingSystemProxy} className="btn btn-primary">
+            {savingSystemProxy ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存系统代理'}
+          </button>
+        </div>
+
+        <div className="card animate-slide-up stagger-4" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>下游访问令牌（PROXY_TOKEN）</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
             用于下游站点或客户端访问本服务代理接口。前缀 sk- 固定不可修改，只需填写后缀。
@@ -905,7 +990,7 @@ export default function Settings() {
           </button>
         </div>
 
-        <div className="card animate-slide-up stagger-4" style={{ padding: 20 }}>
+        <div className="card animate-slide-up stagger-5" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>下游 API Key 策略（按项目/分组）</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
             每个下游 Key 可独立配置过期、额度，并通过勾选界面限制可访问的模型与群组。
@@ -1176,6 +1261,18 @@ export default function Settings() {
             </div>
           )}
 
+          {migrationDialect !== 'sqlite' && (
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: 12, color: 'var(--color-text-secondary)' }}>
+              <input
+                type="checkbox"
+                checked={migrationSsl}
+                onChange={(e) => setMigrationSsl(e.target.checked)}
+                style={{ width: 14, height: 14, accentColor: 'var(--color-primary)' }}
+              />
+              启用 SSL/TLS 加密连接
+            </label>
+          )}
+
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: 12, color: 'var(--color-text-secondary)' }}>
             <input
               type="checkbox"
@@ -1214,11 +1311,11 @@ export default function Settings() {
 
           {runtimeDatabaseState && (
             <div style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 10, fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.8, marginBottom: migrationSummary ? 12 : 0 }}>
-              <div>当前运行：{runtimeDatabaseState.active.dialect}（{runtimeDatabaseState.active.connection || '(empty)' }）</div>
+              <div>当前运行：{runtimeDatabaseState.active.dialect}（{runtimeDatabaseState.active.connection || '(empty)' }）{runtimeDatabaseState.active.ssl && ' [SSL]'}</div>
               <div>
                 已保存待生效：
                 {runtimeDatabaseState.saved
-                  ? ` ${runtimeDatabaseState.saved.dialect}（${runtimeDatabaseState.saved.connection}）`
+                  ? ` ${runtimeDatabaseState.saved.dialect}（${runtimeDatabaseState.saved.connection}）${runtimeDatabaseState.saved.ssl ? ' [SSL]' : ''}`
                   : ' 未保存'}
               </div>
               {runtimeDatabaseState.restartRequired && (
@@ -1246,6 +1343,19 @@ export default function Settings() {
               {clearingUsage ? <><span className="spinner spinner-sm" /> 清理中...</> : '清除占用与使用日志'}
             </button>
           </div>
+        </div>
+
+        <div className="card animate-slide-up stagger-7" style={{ padding: 20, border: '1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border))' }}>
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10, color: 'var(--color-danger)' }}>危险操作</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 12 }}>
+            重新初始化系统会清空当前 metapi 使用中的全部数据库内容；若当前运行在外部 MySQL/Postgres，也会先清空该外部库中的 metapi 数据，然后切回默认 SQLite。
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 14 }}>
+            完成后管理员 Token 会重置为 <code style={{ fontFamily: 'var(--font-mono)' }}>{FACTORY_RESET_ADMIN_TOKEN}</code>，当前会话会立即退出并刷新页面。
+          </div>
+          <button onClick={() => setFactoryResetOpen(true)} className="btn btn-danger">
+            重新初始化系统
+          </button>
         </div>
 
         <div className="card animate-slide-up stagger-7" style={{ padding: 20 }}>
@@ -1374,6 +1484,44 @@ export default function Settings() {
                   {downstreamSaving
                     ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</>
                     : (editingDownstreamId ? '更新 API Key' : '新增 API Key')}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+        return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal;
+      })()}
+      {factoryResetPresence.shouldRender && (() => {
+        const confirmLabel = factoryResetting
+          ? '重新初始化中...'
+          : (factoryResetSecondsLeft > 0
+            ? `确认重新初始化系统（${factoryResetSecondsLeft}s）`
+            : '确认重新初始化系统');
+        const modal = (
+          <div className={`modal-backdrop ${factoryResetPresence.isVisible ? '' : 'is-closing'}`.trim()} onClick={closeFactoryResetModal}>
+            <div
+              className={`modal-content ${factoryResetPresence.isVisible ? '' : 'is-closing'}`.trim()}
+              style={{ maxWidth: 720, border: '1px solid color-mix(in srgb, var(--color-danger) 35%, var(--color-border))' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="modal-header" style={{ color: 'var(--color-danger)' }}>确认重新初始化系统</div>
+              <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ padding: 12, borderRadius: 'var(--radius-sm)', background: 'var(--color-danger-bg)', color: 'var(--color-danger)', fontSize: 12, lineHeight: 1.8 }}>
+                  这是不可逆操作。系统会清空当前 metapi 使用中的全部数据库内容，并在成功后立即退出当前登录状态。
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', lineHeight: 1.9 }}>
+                  <div>• 当前若使用外部 MySQL/Postgres，也会先清空该外部库中的 metapi 数据。</div>
+                  <div>• 系统随后会强制切回默认 SQLite。</div>
+                  <div>• 管理员 Token 将重置为 <code style={{ fontFamily: 'var(--font-mono)' }}>{FACTORY_RESET_ADMIN_TOKEN}</code>。</div>
+                  <div>• 完成后会立即退出登录并刷新页面，回到当前首装初始状态。</div>
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button onClick={closeFactoryResetModal} disabled={factoryResetting} className="btn btn-ghost">取消</button>
+                <button onClick={handleFactoryReset} disabled={factoryResetting || factoryResetSecondsLeft > 0} className="btn btn-danger">
+                  {factoryResetting
+                    ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> {confirmLabel}</>
+                    : confirmLabel}
                 </button>
               </div>
             </div>
@@ -1570,12 +1718,11 @@ export default function Settings() {
                                     }}
                                   >
                                     {explicitBrandIcon ? (
-                                      <img
-                                        src={`${iconCdn}/${explicitBrandIcon.replace(/\./g, '-')}.png`}
+                                      <BrandGlyph
+                                        icon={explicitBrandIcon}
                                         alt={routeTitle(route)}
-                                        style={{ width: 18, height: 18, objectFit: 'contain' }}
-                                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                        loading="lazy"
+                                        size={18}
+                                        fallbackText={routeTitle(route)}
                                       />
                                     ) : textIcon ? (
                                       textIcon

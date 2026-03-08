@@ -209,4 +209,165 @@ describe('/v1/models route', () => {
     expect(ids).toContain('allowed-model');
     expect(ids).not.toContain('blocked-model');
   });
+
+  it('returns only selected group route alias for managed key with allowedRouteIds policy', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'test-site',
+      url: 'https://upstream.example.com',
+      platform: 'openai',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'account-access-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'account-api-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: account.id,
+        modelName: 'claude-opus-4-5',
+        available: true,
+      },
+      {
+        accountId: account.id,
+        modelName: 'claude-sonnet-4-5',
+        available: true,
+      },
+    ]).run();
+
+    const groupRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 're:^claude-(opus|sonnet)-4-5$',
+      displayName: 'claude-opus-4-6',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: groupRoute.id,
+      accountId: account.id,
+      tokenId: token.id,
+      enabled: true,
+    }).run();
+
+    await db.insert(schema.downstreamApiKeys).values({
+      name: 'managed-key',
+      key: 'sk-managed-group-only',
+      enabled: true,
+      allowedRouteIds: JSON.stringify([groupRoute.id]),
+    }).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        authorization: 'Bearer sk-managed-group-only',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      object: 'list';
+      data: Array<{ id: string }>;
+    };
+
+    const ids = body.data.map((item) => item.id);
+    expect(ids).toContain('claude-opus-4-6');
+    expect(ids).not.toContain('claude-opus-4-5');
+    expect(ids).not.toContain('claude-sonnet-4-5');
+  });
+
+  it('filters search pseudo models out of /v1/models', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'search-site',
+      url: 'https://search.example.com',
+      platform: 'openai',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'search-access-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'search-api-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: account.id,
+        modelName: '__search',
+        available: true,
+      },
+      {
+        accountId: account.id,
+        modelName: '__tavily_search',
+        available: true,
+      },
+      {
+        accountId: account.id,
+        modelName: 'gpt-4.1',
+        available: true,
+      },
+    ]).run();
+
+    const searchRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: '__search',
+      enabled: true,
+    }).returning().get();
+
+    const llmRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4.1',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values([
+      {
+        routeId: searchRoute.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: '__search',
+        enabled: true,
+      },
+      {
+        routeId: llmRoute.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: 'gpt-4.1',
+        enabled: true,
+      },
+    ]).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        authorization: 'Bearer change-me-proxy-sk-token',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      object: 'list';
+      data: Array<{ id: string }>;
+    };
+    const ids = body.data.map((item) => item.id);
+    expect(ids).toContain('gpt-4.1');
+    expect(ids).not.toContain('__search');
+    expect(ids).not.toContain('__tavily_search');
+  });
 });

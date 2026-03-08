@@ -19,6 +19,9 @@ describe('proxyUsageParser', () => {
       promptTokens: 123,
       completionTokens: 45,
       totalTokens: 168,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      promptTokensIncludeCache: null,
     });
   });
 
@@ -34,6 +37,9 @@ describe('proxyUsageParser', () => {
       promptTokens: 80,
       completionTokens: 20,
       totalTokens: 100,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      promptTokensIncludeCache: null,
     });
   });
 
@@ -50,6 +56,9 @@ describe('proxyUsageParser', () => {
       promptTokens: 12,
       completionTokens: 34,
       totalTokens: 46,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      promptTokensIncludeCache: null,
     });
   });
 
@@ -72,6 +81,9 @@ describe('proxyUsageParser', () => {
       promptTokens: 210,
       completionTokens: 40,
       totalTokens: 250,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      promptTokensIncludeCache: null,
     });
   });
 
@@ -92,19 +104,59 @@ describe('proxyUsageParser', () => {
       promptTokens: 10,
       completionTokens: 20,
       totalTokens: 30,
+      cacheReadTokens: 3,
+      cacheCreationTokens: 0,
+      promptTokensIncludeCache: true,
+    });
+  });
+
+  it('parses anthropic cache usage fields without treating input tokens as cache-inclusive', () => {
+    const usage = parseProxyUsage({
+      usage: {
+        input_tokens: 120,
+        output_tokens: 30,
+        cache_read_input_tokens: 1000,
+        cache_creation_input_tokens: 40,
+      },
+    });
+
+    expect(usage).toEqual({
+      promptTokens: 120,
+      completionTokens: 30,
+      totalTokens: 150,
+      cacheReadTokens: 1000,
+      cacheCreationTokens: 40,
+      promptTokensIncludeCache: false,
     });
   });
 
   it('merges usage snapshots by keeping richer values', () => {
     const merged = mergeProxyUsage(
-      { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-      { promptTokens: 90, completionTokens: 30, totalTokens: 120 },
+      {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        promptTokensIncludeCache: null,
+      },
+      {
+        promptTokens: 90,
+        completionTokens: 30,
+        totalTokens: 120,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        promptTokensIncludeCache: null,
+      },
     );
 
     expect(merged).toEqual({
       promptTokens: 90,
       completionTokens: 30,
       totalTokens: 120,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      promptTokensIncludeCache: null,
     });
   });
 

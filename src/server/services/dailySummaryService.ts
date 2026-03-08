@@ -3,6 +3,7 @@ import { db, schema } from '../db/index.js';
 import { getLocalDayRangeUtc, formatLocalDateTime, getResolvedTimeZone } from './localTimeService.js';
 import { parseCheckinRewardAmount } from './checkinRewardParser.js';
 import { estimateRewardWithTodayIncomeFallback } from './todayIncomeRewardService.js';
+import { getProxyLogBaseSelectFields } from './proxyLogStore.js';
 
 export type DailySummaryMetrics = {
   localDay: string;
@@ -28,6 +29,7 @@ function round6(value: number): number {
 }
 
 export async function collectDailySummaryMetrics(now = new Date()): Promise<DailySummaryMetrics> {
+  const proxyLogBaseFields = getProxyLogBaseSelectFields();
   const { localDay, startUtc, endUtc } = getLocalDayRangeUtc(now);
 
   const accountRows = await db.select().from(schema.accounts)
@@ -67,7 +69,11 @@ export async function collectDailySummaryMetrics(now = new Date()): Promise<Dail
     parsedRewardCountByAccount[accountId] = (parsedRewardCountByAccount[accountId] || 0) + 1;
   }
 
-  const todayProxyRows = await db.select().from(schema.proxyLogs)
+  const todayProxyRows = await db.select({
+    proxy_logs: proxyLogBaseFields,
+    accounts: schema.accounts,
+    sites: schema.sites,
+  }).from(schema.proxyLogs)
     .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
     .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(and(

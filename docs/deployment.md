@@ -83,54 +83,27 @@ docker run -d --name metapi \
 > - `./data:/app/data` — 相对路径，数据存到当前目录下的 `data` 文件夹
 > - 也可以使用绝对路径：`/your/custom/path:/app/data`
 
-## Release 包部署（免 Docker）
+## 桌面版部署（Windows / macOS / Linux）
 
-适用于没有 Docker 环境的服务器，或 Windows / macOS 桌面使用场景。
+个人电脑本地部署请直接使用 [Releases](https://github.com/cita-777/metapi/releases) 中的 Electron 安装包：
 
-### 前置条件
+1. 下载与你系统匹配的桌面安装包
+2. 安装并启动 Metapi Desktop
+3. 桌面壳会自动启动本地服务并将数据保存到应用数据目录
 
-- Node.js 20+（推荐 22 LTS）
+桌面版特性：
 
-### 步骤
-
-1. 从 [Releases](https://github.com/cita-777/metapi/releases) 下载与你系统匹配的压缩包（Linux / Windows / macOS）
-2. 解压后进入目录
-
-Linux / macOS：
-
-```bash
-export AUTH_TOKEN=your-admin-token
-export PROXY_TOKEN=your-proxy-sk-token
-export PORT=4000
-export DATA_DIR=./data
-./start.sh
-```
-
-Windows（PowerShell）：
-
-```powershell
-$env:AUTH_TOKEN="your-admin-token"
-$env:PROXY_TOKEN="your-proxy-sk-token"
-$env:PORT="4000"
-$env:DATA_DIR="./data"
-.\start.bat
-```
-
-`start.sh` / `start.bat` 的作用是：
-
-- 先检查 `better-sqlite3` 与当前 Node.js ABI 是否兼容
-- 若检测到 ABI 不匹配，会自动尝试 `npm rebuild better-sqlite3`
-- 若重建失败，会回退到 `npm ci --omit=dev` 重新安装运行时依赖
-- 最后执行数据库迁移并启动服务
+- 内置本地 Metapi 服务，无需手动准备 Node.js 运行环境
+- 托盘菜单支持重新打开窗口、重启后端、开机自启
+- 支持基于 GitHub Releases 的应用内更新检查
 
 > [!NOTE]
-> 如果本机 Node 主版本与打包时不同（例如包内依赖基于 Node 22，而本机是 Node 24），首次启动可能触发自动重建，需联网。
+> 服务器部署不再提供裸 Node.js Release 压缩包，统一推荐 Docker / Docker Compose。
 
-### Release 包升级
+### 桌面版升级
 
-1. 下载新版本的 Release 包
-2. 解压覆盖旧文件（`data/` 目录不受影响）
-3. 重新启动即可
+1. 通过应用内更新提示安装新版本，或从 Releases 下载最新安装包覆盖安装
+2. 用户数据目录会保留，升级后自动继续使用原有数据
 
 ---
 

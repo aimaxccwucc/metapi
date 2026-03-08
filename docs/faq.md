@@ -80,14 +80,14 @@ docker compose up -d
 
 或使用 `.env` 文件。
 
-### Q: Release 包启动失败
+### Q: 桌面版启动失败
 
 **A:** 排查步骤：
 
-1. 确认 Node.js 已安装且版本 ≥ 20：`node --version`
-2. 首次启动时如果报 `better-sqlite3` 相关错误，启动脚本会尝试自动重建，需要网络连接
-3. 如果本机 Node 主版本与打包时不同（例如包内依赖基于 Node 22，而本机是 Node 24），首次启动需联网执行 `npm rebuild`
-4. Windows 用户确认使用 PowerShell 而非 CMD 运行 `start.bat`
+1. 确认下载的是与你系统匹配的桌面安装包
+2. Windows 首次运行若出现“未知发布者”，先确认安装包来自官方 Releases
+3. 如果桌面版提示后端启动失败，优先查看托盘菜单中的日志目录
+4. 如需部署到服务器，请改用 Docker / Docker Compose，而不是桌面安装包
 
 ---
 

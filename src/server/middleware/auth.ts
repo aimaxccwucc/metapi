@@ -66,12 +66,22 @@ export async function proxyAuthMiddleware(request: FastifyRequest, reply: Fastif
   const apiKeyHeader = typeof request.headers['x-api-key'] === 'string'
     ? request.headers['x-api-key']
     : '';
+  const googApiKeyHeader = typeof request.headers['x-goog-api-key'] === 'string'
+    ? request.headers['x-goog-api-key']
+    : '';
+  const queryKey = (
+    request.query
+    && typeof request.query === 'object'
+    && typeof (request.query as Record<string, unknown>).key === 'string'
+  )
+    ? String((request.query as Record<string, unknown>).key).trim()
+    : '';
   const token = auth
     ? auth.replace(/^Bearer\s+/i, '').trim()
-    : apiKeyHeader.trim();
+    : (apiKeyHeader.trim() || googApiKeyHeader.trim() || queryKey);
 
   if (!token) {
-    reply.code(401).send({ error: 'Missing Authorization or x-api-key header' });
+    reply.code(401).send({ error: 'Missing Authorization, x-api-key, x-goog-api-key, or key query parameter' });
     return;
   }
 

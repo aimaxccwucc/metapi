@@ -5,30 +5,19 @@ import { fetch } from 'undici';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
-import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
-import { withExplicitProxyRequestInit } from '../../services/siteProxy.js';
-import {
-  type DownstreamFormat,
-  createStreamTransformContext,
-  createClaudeDownstreamContext,
-  parseDownstreamChatRequest,
-  pullSseEventsWithDone,
-  normalizeUpstreamStreamEvent,
-  serializeNormalizedStreamEvent,
-  serializeStreamDone,
-  normalizeUpstreamFinalResponse,
-  serializeFinalResponse,
-  buildSyntheticOpenAiChunks,
-} from './chatFormats.js';
+import { resolveProxyUrlForSite, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import { type DownstreamFormat } from '../../transformers/shared/normalized.js';
 import {
   buildMinimalJsonHeadersForCompatibility,
   buildUpstreamEndpointRequest,
+  isEndpointDispatchDeniedError,
   isEndpointDowngradeError,
   isUnsupportedMediaTypeError,
   resolveUpstreamEndpointCandidates,
+  shouldPreferResponsesAfterLegacyChatError,
 } from './upstreamEndpoint.js';
 import {
   ensureModelAllowedForDownstreamKey,
@@ -37,19 +26,18 @@ import {
 } from './downstreamPolicy.js';
 import { composeProxyLogMessage } from './logPathMeta.js';
 import { executeEndpointFlow, withUpstreamPath } from './endpointFlow.js';
+import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
+import { resolveProxyLogBilling } from './proxyBilling.js';
+import { openAiChatTransformer } from '../../transformers/openai/chat/index.js';
+import {
+  anthropicMessagesTransformer,
+  isAnthropicRawSseEventName,
+  serializeAnthropicFinalAsStream,
+  serializeAnthropicRawSseEvent,
+  syncAnthropicRawStreamStateFromEvent,
+} from '../../transformers/anthropic/messages/index.js';
 
 const MAX_RETRIES = 2;
-const CLAUDE_SSE_EVENT_NAMES = new Set([
-  'message_start',
-  'content_block_start',
-  'content_block_delta',
-  'content_block_stop',
-  'message_delta',
-  'message_stop',
-  'ping',
-  'error',
-]);
-
 function shouldRetryClaudeMessagesWithNormalizedBody(
   downstreamFormat: DownstreamFormat,
   endpointPath: string,
@@ -70,53 +58,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
 }
 
-function isClaudeSseEventName(value: unknown): value is string {
-  return typeof value === 'string' && CLAUDE_SSE_EVENT_NAMES.has(value);
-}
-
-function serializeRawSseEvent(event: string, data: string): string {
-  const dataLines = data.split('\n').map((line) => `data: ${line}`).join('\n');
-  if (event) {
-    return `event: ${event}\n${dataLines}\n\n`;
-  }
-  return `${dataLines}\n\n`;
-}
-
-function syncClaudeStreamStateFromRawEvent(
-  eventName: string,
-  parsedPayload: unknown,
-  streamContext: { id: string; model: string },
-  claudeContext: { messageStarted: boolean; contentBlockStarted: boolean; doneSent: boolean },
-) {
-  if (eventName === 'message_start') {
-    claudeContext.messageStarted = true;
-    if (isRecord(parsedPayload) && isRecord(parsedPayload.message)) {
-      const message = parsedPayload.message;
-      if (typeof message.id === 'string' && message.id.trim().length > 0) {
-        streamContext.id = message.id;
-      }
-      if (typeof message.model === 'string' && message.model.trim().length > 0) {
-        streamContext.model = message.model;
-      }
-    }
-    return;
-  }
-
-  if (eventName === 'content_block_start') {
-    claudeContext.contentBlockStarted = true;
-    return;
-  }
-
-  if (eventName === 'content_block_stop') {
-    claudeContext.contentBlockStarted = false;
-    return;
-  }
-
-  if (eventName === 'message_stop') {
-    claudeContext.doneSent = true;
-  }
-}
-
 export async function chatProxyRoute(app: FastifyInstance) {
   app.post('/v1/chat/completions', async (request: FastifyRequest, reply: FastifyReply) =>
     handleChatProxyRequest(request, reply, 'openai'));
@@ -132,7 +73,10 @@ async function handleChatProxyRequest(
   reply: FastifyReply,
   downstreamFormat: DownstreamFormat,
 ) {
-  const parsedRequest = parseDownstreamChatRequest(request.body, downstreamFormat);
+  const downstreamTransformer = downstreamFormat === 'claude'
+    ? anthropicMessagesTransformer
+    : openAiChatTransformer;
+  const parsedRequest = downstreamTransformer.transformRequest(request.body);
   if (parsedRequest.error) {
     return reply.code(parsedRequest.error.statusCode).send(parsedRequest.error.payload);
   }
@@ -168,7 +112,8 @@ async function handleChatProxyRequest(
     excludeChannelIds.push(selected.channel.id);
 
     const modelName = selected.actualModel || requestedModel;
-    const endpointCandidates = await resolveUpstreamEndpointCandidates(
+    const endpointCandidates = [
+      ...await resolveUpstreamEndpointCandidates(
       {
         site: selected.site,
         account: selected.account,
@@ -176,13 +121,35 @@ async function handleChatProxyRequest(
       modelName,
       downstreamFormat,
       requestedModel,
-    );
+      ),
+    ];
     let startTime = Date.now();
+
+    const promoteResponsesCandidate = (currentEndpoint: string | null | undefined, upstreamErrorText?: string | null, status = 0) => {
+      if (!shouldPreferResponsesAfterLegacyChatError({
+        status,
+        upstreamErrorText,
+        downstreamFormat,
+        sitePlatform: selected.site.platform,
+        modelName,
+        requestedModelHint: requestedModel,
+        currentEndpoint: currentEndpoint as any,
+      })) {
+        return;
+      }
+
+      const currentIndex = endpointCandidates.findIndex((endpoint) => endpoint === currentEndpoint);
+      const responsesIndex = endpointCandidates.indexOf('responses');
+      if (currentIndex < 0 || responsesIndex < 0 || responsesIndex <= currentIndex + 1) return;
+
+      endpointCandidates.splice(responsesIndex, 1);
+      endpointCandidates.splice(currentIndex + 1, 0, 'responses');
+    };
 
     try {
       const endpointResult = await executeEndpointFlow({
         siteUrl: selected.site.url,
-        proxyUrl: selected.site.proxyUrl,
+        proxyUrl: resolveProxyUrlForSite(selected.site),
         endpointCandidates,
         buildRequest: (endpoint) => {
           const endpointRequest = buildUpstreamEndpointRequest({
@@ -224,7 +191,7 @@ async function handleChatProxyRequest(
               downstreamHeaders: request.headers as Record<string, unknown>,
             });
             const normalizedTargetUrl = `${selected.site.url}${normalizedClaudeRequest.path}`;
-            const normalizedResponse = await fetch(normalizedTargetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
+            const normalizedResponse = await fetch(normalizedTargetUrl, withSiteRecordProxyRequestInit(selected.site, {
               method: 'POST',
               headers: normalizedClaudeRequest.headers,
               body: JSON.stringify(normalizedClaudeRequest.body),
@@ -263,7 +230,7 @@ async function handleChatProxyRequest(
             return null;
           }
 
-          const minimalResponse = await fetch(ctx.targetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
+          const minimalResponse = await fetch(ctx.targetUrl, withSiteRecordProxyRequestInit(selected.site, {
             method: 'POST',
             headers: minimalHeaders,
             body: JSON.stringify(ctx.request.body),
@@ -285,9 +252,15 @@ async function handleChatProxyRequest(
           return null;
         },
         shouldDowngrade: (ctx) => (
-          ctx.response.status >= 500
-          || isEndpointDowngradeError(ctx.response.status, ctx.rawErrText)
-          || isMessagesRequiredError(ctx.rawErrText)
+          (() => {
+            promoteResponsesCandidate(ctx.request.endpoint, ctx.rawErrText, ctx.response.status);
+            return (
+              ctx.response.status >= 500
+              || isEndpointDowngradeError(ctx.response.status, ctx.rawErrText)
+              || isMessagesRequiredError(ctx.rawErrText)
+              || isEndpointDispatchDeniedError(ctx.response.status, ctx.rawErrText)
+            );
+          })()
         ),
         onDowngrade: (ctx) => {
           logProxy(
@@ -344,9 +317,16 @@ async function handleChatProxyRequest(
         reply.raw.setHeader('Connection', 'keep-alive');
         reply.raw.setHeader('X-Accel-Buffering', 'no');
 
-        const streamContext = createStreamTransformContext(modelName);
-        const claudeContext = createClaudeDownstreamContext();
-        let parsedUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+        const streamContext = downstreamTransformer.createStreamContext(modelName);
+        const claudeContext = anthropicMessagesTransformer.createDownstreamContext();
+        let parsedUsage: ReturnType<typeof parseProxyUsage> = {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          promptTokensIncludeCache: null,
+        };
 
         const writeLines = (lines: string[]) => {
           for (const line of lines) {
@@ -355,38 +335,24 @@ async function handleChatProxyRequest(
         };
 
         const writeDone = () => {
-          writeLines(serializeStreamDone(downstreamFormat, streamContext, claudeContext));
+          writeLines(downstreamTransformer.serializeDone(streamContext, claudeContext));
         };
 
         const emitNormalizedFinalAsStream = (upstreamData: unknown, fallbackText = '') => {
-          const normalizedFinal = normalizeUpstreamFinalResponse(upstreamData, modelName, fallbackText);
+          const normalizedFinal = downstreamTransformer.transformFinalResponse(upstreamData, modelName, fallbackText);
           streamContext.id = normalizedFinal.id;
           streamContext.model = normalizedFinal.model;
           streamContext.created = normalizedFinal.created;
 
           if (downstreamFormat === 'openai') {
-            const syntheticChunks = buildSyntheticOpenAiChunks(normalizedFinal);
+            const syntheticChunks = openAiChatTransformer.buildSyntheticChunks(normalizedFinal);
             for (const chunk of syntheticChunks) {
               reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
             }
             return;
           }
 
-          writeLines(serializeNormalizedStreamEvent('claude', { role: 'assistant' }, streamContext, claudeContext));
-
-          const combinedText = [normalizedFinal.reasoningContent, normalizedFinal.content]
-            .filter((item) => typeof item === 'string' && item.trim().length > 0)
-            .join('\n\n');
-
-          if (combinedText) {
-            writeLines(serializeNormalizedStreamEvent('claude', {
-              contentDelta: combinedText,
-            }, streamContext, claudeContext));
-          }
-
-          writeLines(serializeNormalizedStreamEvent('claude', {
-            finishReason: normalizedFinal.finishReason,
-          }, streamContext, claudeContext));
+          writeLines(serializeAnthropicFinalAsStream(normalizedFinal, streamContext, claudeContext));
         };
 
         const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
@@ -421,18 +387,13 @@ async function handleChatProxyRequest(
             },
           });
 
-          let estimatedCost = await estimateProxyCost({
+          const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
             site: selected.site,
             account: selected.account,
             modelName,
-            promptTokens: resolvedUsage.promptTokens,
-            completionTokens: resolvedUsage.completionTokens,
-            totalTokens: resolvedUsage.totalTokens,
+            parsedUsage,
+            resolvedUsage,
           });
-
-          if (resolvedUsage.estimatedCostFromQuota > 0 && (resolvedUsage.recoveredFromSelfLog || estimatedCost <= 0)) {
-            estimatedCost = resolvedUsage.estimatedCostFromQuota;
-          }
 
           tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
           recordDownstreamCostUsage(request, estimatedCost);
@@ -449,6 +410,7 @@ async function handleChatProxyRequest(
             resolvedUsage.completionTokens,
             resolvedUsage.totalTokens,
             estimatedCost,
+            billingDetails,
             successfulUpstreamPath,
           );
           return;
@@ -466,7 +428,7 @@ async function handleChatProxyRequest(
         let shouldTerminateEarly = false;
 
         const consumeSseBuffer = (incoming: string): string => {
-          const pulled = pullSseEventsWithDone(incoming);
+          const pulled = downstreamTransformer.pullSseEvents(incoming);
           for (const eventBlock of pulled.events) {
             if (eventBlock.data === '[DONE]') {
               writeDone();
@@ -483,23 +445,22 @@ async function handleChatProxyRequest(
 
             if (parsedPayload && typeof parsedPayload === 'object') {
               parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(parsedPayload));
-
               if (downstreamFormat === 'claude') {
                 const payloadType = (isRecord(parsedPayload) && typeof parsedPayload.type === 'string')
                   ? parsedPayload.type
                   : '';
-                const claudeEventName = isClaudeSseEventName(eventBlock.event)
+                const claudeEventName = isAnthropicRawSseEventName(eventBlock.event)
                   ? eventBlock.event
-                  : (isClaudeSseEventName(payloadType) ? payloadType : '');
+                  : (isAnthropicRawSseEventName(payloadType) ? payloadType : '');
 
                 if (claudeEventName) {
-                  syncClaudeStreamStateFromRawEvent(
+                  syncAnthropicRawStreamStateFromEvent(
                     claudeEventName,
                     parsedPayload,
                     streamContext,
                     claudeContext,
                   );
-                  reply.raw.write(serializeRawSseEvent(claudeEventName, eventBlock.data));
+                  reply.raw.write(serializeAnthropicRawSseEvent(claudeEventName, eventBlock.data));
                   if (claudeContext.doneSent) {
                     shouldTerminateEarly = true;
                     break;
@@ -507,19 +468,13 @@ async function handleChatProxyRequest(
                   continue;
                 }
               }
-
-              const normalizedEvent = normalizeUpstreamStreamEvent(parsedPayload, streamContext, modelName);
-              writeLines(serializeNormalizedStreamEvent(
-                downstreamFormat,
-                normalizedEvent,
-                streamContext,
-                claudeContext,
-              ));
+              const normalizedEvent = downstreamTransformer.transformStreamEvent(parsedPayload, streamContext, modelName);
+              writeLines(downstreamTransformer.serializeStreamEvent(normalizedEvent, streamContext, claudeContext));
               if (downstreamFormat === 'claude' && claudeContext.doneSent) {
                 shouldTerminateEarly = true;
                 break;
               }
-              if (downstreamFormat === 'openai' && streamContext.doneSent) {
+              if (streamContext.doneSent) {
                 shouldTerminateEarly = true;
                 break;
               }
@@ -529,7 +484,7 @@ async function handleChatProxyRequest(
             if (downstreamFormat === 'openai') {
               reply.raw.write(`data: ${eventBlock.data}\n\n`);
             } else {
-              writeLines(serializeNormalizedStreamEvent('claude', {
+              writeLines(anthropicMessagesTransformer.serializeStreamEvent({
                 contentDelta: eventBlock.data,
               }, streamContext, claudeContext));
               if (claudeContext.doneSent) {
@@ -585,18 +540,13 @@ async function handleChatProxyRequest(
           },
         });
 
-        let estimatedCost = await estimateProxyCost({
+        const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
           site: selected.site,
           account: selected.account,
           modelName,
-          promptTokens: resolvedUsage.promptTokens,
-          completionTokens: resolvedUsage.completionTokens,
-          totalTokens: resolvedUsage.totalTokens,
+          parsedUsage,
+          resolvedUsage,
         });
-
-        if (resolvedUsage.estimatedCostFromQuota > 0 && (resolvedUsage.recoveredFromSelfLog || estimatedCost <= 0)) {
-          estimatedCost = resolvedUsage.estimatedCostFromQuota;
-        }
 
         tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
         recordDownstreamCostUsage(request, estimatedCost);
@@ -613,6 +563,7 @@ async function handleChatProxyRequest(
           resolvedUsage.completionTokens,
           resolvedUsage.totalTokens,
           estimatedCost,
+          billingDetails,
           successfulUpstreamPath,
         );
         return;
@@ -628,8 +579,8 @@ async function handleChatProxyRequest(
 
       const latency = Date.now() - startTime;
       const parsedUsage = parseProxyUsage(upstreamData);
-      const normalizedFinal = normalizeUpstreamFinalResponse(upstreamData, modelName, rawText);
-      const downstreamResponse = serializeFinalResponse(downstreamFormat, normalizedFinal, parsedUsage);
+      const normalizedFinal = downstreamTransformer.transformFinalResponse(upstreamData, modelName, rawText);
+      const downstreamResponse = downstreamTransformer.serializeFinalResponse(normalizedFinal, parsedUsage);
 
       const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
         site: selected.site,
@@ -647,18 +598,13 @@ async function handleChatProxyRequest(
         },
       });
 
-      let estimatedCost = await estimateProxyCost({
+      const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
         site: selected.site,
         account: selected.account,
         modelName,
-        promptTokens: resolvedUsage.promptTokens,
-        completionTokens: resolvedUsage.completionTokens,
-        totalTokens: resolvedUsage.totalTokens,
+        parsedUsage,
+        resolvedUsage,
       });
-
-      if (resolvedUsage.estimatedCostFromQuota > 0 && (resolvedUsage.recoveredFromSelfLog || estimatedCost <= 0)) {
-        estimatedCost = resolvedUsage.estimatedCostFromQuota;
-      }
 
       tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
       recordDownstreamCostUsage(request, estimatedCost);
@@ -675,6 +621,7 @@ async function handleChatProxyRequest(
         resolvedUsage.completionTokens,
         resolvedUsage.totalTokens,
         estimatedCost,
+        billingDetails,
         successfulUpstreamPath,
       );
 
@@ -716,9 +663,11 @@ async function logProxy(
   completionTokens = 0,
   totalTokens = 0,
   estimatedCost = 0,
+  billingDetails: unknown = null,
   upstreamPath: string | null = null,
 ) {
   try {
+    const createdAt = formatUtcSqlDateTime(new Date());
     const normalizedErrorMessage = composeProxyLogMessage({
       downstreamPath,
       upstreamPath,
@@ -737,9 +686,10 @@ async function logProxy(
       completionTokens,
       totalTokens,
       estimatedCost,
+      billingDetails: billingDetails ? JSON.stringify(billingDetails) : null,
       errorMessage: normalizedErrorMessage,
       retryCount,
-      createdAt: new Date().toISOString(),
+      createdAt,
     }).run();
   } catch (error) {
     console.warn('[proxy/chat] failed to write proxy log', error);

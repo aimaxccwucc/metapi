@@ -5,13 +5,14 @@ import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
-import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage, pullSseDataEvents } from '../../services/proxyUsageParser.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
-import { withExplicitProxyRequestInit } from '../../services/siteProxy.js';
+import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { composeProxyLogMessage } from './logPathMeta.js';
+import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
+import { resolveProxyLogBilling } from './proxyBilling.js';
 
 const MAX_RETRIES = 2;
 
@@ -56,7 +57,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       const startTime = Date.now();
 
       try {
-        const upstream = await fetch(targetUrl, withExplicitProxyRequestInit(selected.site.proxyUrl, {
+        const upstream = await fetch(targetUrl, withSiteRecordProxyRequestInit(selected.site, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -105,7 +106,14 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           }
 
           const decoder = new TextDecoder();
-          let parsedUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+          let parsedUsage: ReturnType<typeof parseProxyUsage> = {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            promptTokensIncludeCache: null,
+          };
           let sseBuffer = '';
           try {
             while (true) {
@@ -152,22 +160,18 @@ export async function completionsProxyRoute(app: FastifyInstance) {
               totalTokens: parsedUsage.totalTokens,
             },
           });
-          let estimatedCost = await estimateProxyCost({
+          const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
             site: selected.site,
             account: selected.account,
             modelName: selected.actualModel || requestedModel,
-            promptTokens: resolvedUsage.promptTokens,
-            completionTokens: resolvedUsage.completionTokens,
-            totalTokens: resolvedUsage.totalTokens,
+            parsedUsage,
+            resolvedUsage,
           });
-          if (resolvedUsage.estimatedCostFromQuota > 0 && (resolvedUsage.recoveredFromSelfLog || estimatedCost <= 0)) {
-            estimatedCost = resolvedUsage.estimatedCostFromQuota;
-          }
           tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
           recordDownstreamCostUsage(request, estimatedCost);
           logProxy(
             selected, requestedModel, 'success', 200, latency, null, retryCount,
-            resolvedUsage.promptTokens, resolvedUsage.completionTokens, resolvedUsage.totalTokens, estimatedCost,
+            resolvedUsage.promptTokens, resolvedUsage.completionTokens, resolvedUsage.totalTokens, estimatedCost, billingDetails,
           );
           return;
         }
@@ -190,23 +194,19 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             totalTokens: parsedUsage.totalTokens,
           },
         });
-        let estimatedCost = await estimateProxyCost({
+        const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
           site: selected.site,
           account: selected.account,
           modelName: selected.actualModel || requestedModel,
-          promptTokens: resolvedUsage.promptTokens,
-          completionTokens: resolvedUsage.completionTokens,
-          totalTokens: resolvedUsage.totalTokens,
+          parsedUsage,
+          resolvedUsage,
         });
-        if (resolvedUsage.estimatedCostFromQuota > 0 && (resolvedUsage.recoveredFromSelfLog || estimatedCost <= 0)) {
-          estimatedCost = resolvedUsage.estimatedCostFromQuota;
-        }
 
         tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected, requestedModel, 'success', 200, latency, null, retryCount,
-          resolvedUsage.promptTokens, resolvedUsage.completionTokens, resolvedUsage.totalTokens, estimatedCost,
+          resolvedUsage.promptTokens, resolvedUsage.completionTokens, resolvedUsage.totalTokens, estimatedCost, billingDetails,
         );
         return reply.send(data);
       } catch (err: any) {
@@ -240,8 +240,10 @@ async function logProxy(
   completionTokens = 0,
   totalTokens = 0,
   estimatedCost = 0,
+  billingDetails: unknown = null,
 ) {
   try {
+    const createdAt = formatUtcSqlDateTime(new Date());
     const normalizedErrorMessage = composeProxyLogMessage({
       downstreamPath: '/v1/completions',
       errorMessage,
@@ -259,9 +261,10 @@ async function logProxy(
       completionTokens,
       totalTokens,
       estimatedCost,
+      billingDetails: billingDetails ? JSON.stringify(billingDetails) : null,
       errorMessage: normalizedErrorMessage,
       retryCount,
-      createdAt: new Date().toISOString(),
+      createdAt,
     }).run();
   } catch (error) {
     console.warn('[proxy/completions] failed to write proxy log', error);

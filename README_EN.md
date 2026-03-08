@@ -330,44 +330,23 @@ After starting, visit `http://localhost:4000` and log in with your `AUTH_TOKEN`!
 > If running outside Compose without explicitly setting `AUTH_TOKEN`, the default is `change-me-admin-token` (for local debugging only).
 > If you change the admin token in the Settings panel, use the new token for subsequent logins.
 
-### Release Package (Linux / macOS / Windows)
+### Desktop App (Windows / macOS / Linux)
 
-If you prefer not to use Docker, download a pre-built Release package:
+For personal-computer deployments, download the desktop installer from [Releases](https://github.com/cita-777/metapi/releases):
 
-1. Go to [Releases](https://github.com/cita-777/metapi/releases) and download the archive for your platform
-2. Extract and enter the directory
-3. Set environment variables and start
+1. Download the installer for your platform
+2. Install and launch Metapi Desktop
+3. The desktop shell starts the local service automatically and stores data under the app data directory
 
-Linux / macOS:
+Desktop builds include:
 
-```bash
-export AUTH_TOKEN=your-admin-token
-export PROXY_TOKEN=your-proxy-sk-token
-export PORT=4000
-export DATA_DIR=./data
-./start.sh
-```
-
-Windows (PowerShell):
-
-```powershell
-$env:AUTH_TOKEN="your-admin-token"
-$env:PROXY_TOKEN="your-proxy-sk-token"
-$env:PORT="4000"
-$env:DATA_DIR="./data"
-.\start.bat
-```
-
-`start.sh` / `start.bat` will:
-
-- Check whether `better-sqlite3` matches the current Node.js ABI
-- If ABI mismatch is detected, automatically run `npm rebuild better-sqlite3`
-- If rebuild fails, fall back to `npm ci --omit=dev` to reinstall runtime dependencies
-- Then run database migrations and start the service
+- Embedded local Metapi service, started automatically by Electron
+- Tray menu for reopen / restart backend / launch at login
+- In-app update checks backed by GitHub Releases
 
 > [!NOTE]
-> The Release package requires Node.js installed locally (supports 20+, recommends 22 LTS).  
-> If your local Node major version differs from the one used during packaging (for example, package built with Node 22 while local is Node 24), first startup may trigger automatic rebuild and requires network access.
+> Server deployments are now Docker-first.  
+> GitHub Release assets are intended for the desktop app rather than raw Node.js server archives.
 
 ### Upgrade
 

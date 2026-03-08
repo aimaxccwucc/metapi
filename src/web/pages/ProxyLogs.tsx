@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+﻿import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { ModelBadge } from '../components/BrandIcon.js';
@@ -26,6 +26,36 @@ interface ProxyLog {
   promptTokens?: number;
   completionTokens?: number;
   estimatedCost?: number;
+  billingDetails?: {
+    quotaType: number;
+    usage: {
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+      billablePromptTokens: number;
+      promptTokensIncludeCache: boolean | null;
+    };
+    pricing: {
+      modelRatio: number;
+      completionRatio: number;
+      cacheRatio: number;
+      cacheCreationRatio: number;
+      groupRatio: number;
+    };
+    breakdown: {
+      inputPerMillion: number;
+      outputPerMillion: number;
+      cacheReadPerMillion: number;
+      cacheCreationPerMillion: number;
+      inputCost: number;
+      outputCost: number;
+      cacheReadCost: number;
+      cacheCreationCost: number;
+      totalCost: number;
+    };
+  } | null;
 }
 
 const PAGE_SIZES = [20, 50, 100];
@@ -50,6 +80,57 @@ function latencyBgColor(ms: number) {
   if (ms >= 3000) return 'color-mix(in srgb, var(--color-danger) 12%, transparent)';
   if (ms >= 1000) return 'color-mix(in srgb, var(--color-warning) 12%, transparent)';
   return 'color-mix(in srgb, var(--color-success) 12%, transparent)';
+}
+
+function formatCompactNumber(value: number, digits = 6) {
+  if (!Number.isFinite(value)) return '0';
+  const formatted = value.toFixed(digits).replace(/\.?0+$/, '');
+  return formatted || '0';
+}
+
+function formatPerMillionPrice(value: number) {
+  return `$${formatCompactNumber(value)} / 1M tokens`;
+}
+
+function formatBillingDetailSummary(log: ProxyLog) {
+  const detail = log.billingDetails;
+  if (!detail) return null;
+  return `模型倍率 ${formatCompactNumber(detail.pricing.modelRatio)}，输出倍率 ${formatCompactNumber(detail.pricing.completionRatio)}，缓存倍率 ${formatCompactNumber(detail.pricing.cacheRatio)}，缓存创建倍率 ${formatCompactNumber(detail.pricing.cacheCreationRatio)}，分组倍率 ${formatCompactNumber(detail.pricing.groupRatio)}`;
+}
+
+function buildBillingProcessLines(log: ProxyLog) {
+  const detail = log.billingDetails;
+  if (!detail) return [];
+
+  const lines = [
+    `提示价格：${formatPerMillionPrice(detail.breakdown.inputPerMillion)}`,
+    `补全价格：${formatPerMillionPrice(detail.breakdown.outputPerMillion)}`,
+  ];
+
+  if (detail.usage.cacheReadTokens > 0) {
+    lines.push(`缓存价格：${formatPerMillionPrice(detail.breakdown.cacheReadPerMillion)} (缓存倍率: ${formatCompactNumber(detail.pricing.cacheRatio)})`);
+  }
+
+  if (detail.usage.cacheCreationTokens > 0) {
+    lines.push(`缓存创建价格：${formatPerMillionPrice(detail.breakdown.cacheCreationPerMillion)} (缓存创建倍率: ${formatCompactNumber(detail.pricing.cacheCreationRatio)})`);
+  }
+
+  const parts = [
+    `提示 ${detail.usage.billablePromptTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.inputPerMillion)}`,
+  ];
+
+  if (detail.usage.cacheReadTokens > 0) {
+    parts.push(`缓存 ${detail.usage.cacheReadTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.cacheReadPerMillion)}`);
+  }
+
+  if (detail.usage.cacheCreationTokens > 0) {
+    parts.push(`缓存创建 ${detail.usage.cacheCreationTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.cacheCreationPerMillion)}`);
+  }
+
+  parts.push(`补全 ${detail.usage.completionTokens.toLocaleString()} tokens / 1M tokens * $${formatCompactNumber(detail.breakdown.outputPerMillion)} = $${detail.breakdown.totalCost.toFixed(6)}`);
+  lines.push(parts.join(' + '));
+
+  return lines;
 }
 
 export default function ProxyLogs() {
@@ -185,7 +266,7 @@ export default function ProxyLogs() {
                 <th style={{ width: 28 }} />
                 <th>时间</th>
                 <th>模型</th>
-                <th>状态</th>
+                <th>{tr('状态')}</th>
                 <th style={{ textAlign: 'center' }}>用时</th>
                 <th style={{ textAlign: 'right' }}>输入</th>
                 <th style={{ textAlign: 'right' }}>输出</th>
@@ -196,6 +277,8 @@ export default function ProxyLogs() {
             <tbody>
               {paged.map(log => {
                 const pathMeta = parseProxyLogPathMeta(log.errorMessage);
+                const billingDetailSummary = formatBillingDetailSummary(log);
+                const billingProcessLines = buildBillingProcessLines(log);
                 return (
                 <React.Fragment key={log.id}>
                   <tr
@@ -244,13 +327,13 @@ export default function ProxyLogs() {
                       </span>
                     </td>
                     <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
-                      {log.promptTokens?.toLocaleString() || '—'}
+                      {log.promptTokens?.toLocaleString() || '-'}
                     </td>
                     <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
-                      {log.completionTokens?.toLocaleString() || '—'}
+                      {log.completionTokens?.toLocaleString() || '-'}
                     </td>
                     <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>
-                      {typeof log.estimatedCost === 'number' ? `$${log.estimatedCost.toFixed(6)}` : '—'}
+                      {typeof log.estimatedCost === 'number' ? `$${log.estimatedCost.toFixed(6)}` : '-'}
                     </td>
                     <td style={{ textAlign: 'center' }}>
                       {log.retryCount > 0 ? (
@@ -273,35 +356,63 @@ export default function ProxyLogs() {
                           lineHeight: 1.9,
                           color: 'var(--color-text-secondary)',
                         }}>
-                          {/* 日志详情 section */}
+                          {/* 鏃ュ織璇︽儏 section */}
                           <div style={{ display: 'flex', gap: 6 }}>
                             <span style={{ fontWeight: 600, color: 'var(--color-warning)', flexShrink: 0 }}>日志详情</span>
-                            <span>
-                              请求模型: <strong style={{ color: 'var(--color-text-primary)' }}>{log.modelRequested}</strong>
-                              {log.modelActual && log.modelActual !== log.modelRequested && (
-                                <> → 实际模型: <strong style={{ color: 'var(--color-text-primary)' }}>{log.modelActual}</strong></>
+                            <div>
+                              <div>
+                                请求模型: <strong style={{ color: 'var(--color-text-primary)' }}>{log.modelRequested}</strong>
+                                {log.modelActual && log.modelActual !== log.modelRequested && (
+                                  <>{' -> '}实际模型: <strong style={{ color: 'var(--color-text-primary)' }}>{log.modelActual}</strong></>
+                                )}
+                                ，状态: <strong style={{ color: log.status === 'success' ? 'var(--color-success)' : 'var(--color-danger)' }}>{log.status === 'success' ? '成功' : '失败'}</strong>
+                                ，用时: <strong style={{ color: latencyColor(log.latencyMs) }}>{formatLatency(log.latencyMs)}</strong>
+                                ，站点: <strong style={{ color: 'var(--color-text-primary)' }}>{log.siteName || '未知站点'}</strong>
+                                ，账号: <strong style={{ color: 'var(--color-text-primary)' }}>{log.username || '未知账号'}</strong>
+                              </div>
+                              {billingDetailSummary && (
+                                <div style={{ color: 'var(--color-text-muted)' }}>{billingDetailSummary}</div>
                               )}
-                              ，状态: <strong style={{ color: log.status === 'success' ? 'var(--color-success)' : 'var(--color-danger)' }}>{log.status === 'success' ? '成功' : '失败'}</strong>
-                              ，用时 <strong style={{ color: latencyColor(log.latencyMs) }}>{formatLatency(log.latencyMs)}</strong>
-                              ，站点: <strong style={{ color: 'var(--color-text-primary)' }}>{log.siteName || '未知站点'}</strong>
-                              ，账号: <strong style={{ color: 'var(--color-text-primary)' }}>{log.username || '未知账号'}</strong>
-                            </span>
+                            </div>
                           </div>
 
-                          {/* 计费过程 section */}
+                          {log.billingDetails && log.billingDetails.usage.cacheReadTokens > 0 && (
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <span style={{ fontWeight: 600, color: 'var(--color-warning)', flexShrink: 0 }}>缓存 Tokens</span>
+                              <span>{log.billingDetails.usage.cacheReadTokens.toLocaleString()}</span>
+                            </div>
+                          )}
+
+                          {log.billingDetails && log.billingDetails.usage.cacheCreationTokens > 0 && (
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <span style={{ fontWeight: 600, color: 'var(--color-warning)', flexShrink: 0 }}>缓存创建 Tokens</span>
+                              <span>{log.billingDetails.usage.cacheCreationTokens.toLocaleString()}</span>
+                            </div>
+                          )}
+
+                          {/* 璁¤垂杩囩▼ section */}
                           <div style={{ display: 'flex', gap: 6 }}>
                             <span style={{ fontWeight: 600, color: 'var(--color-info)', flexShrink: 0 }}>计费过程</span>
-                            <span>
-                              输入 {log.promptTokens?.toLocaleString() || 0} tokens
-                              {' + '}输出 {log.completionTokens?.toLocaleString() || 0} tokens
-                              {' = '}总计 {log.totalTokens?.toLocaleString() || 0} tokens
-                              {typeof log.estimatedCost === 'number' && (
-                                <>，预估费用 <strong style={{ color: 'var(--color-text-primary)' }}>${log.estimatedCost.toFixed(6)}</strong></>
-                              )}
-                            </span>
+                            {billingProcessLines.length > 0 ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                {billingProcessLines.map((line, index) => (
+                                  <span key={`${log.id}-billing-${index}`}>{line}</span>
+                                ))}
+                                <span style={{ color: 'var(--color-text-muted)' }}>仅供参考，以实际扣费为准</span>
+                              </div>
+                            ) : (
+                              <span>
+                                输入 {log.promptTokens?.toLocaleString() || 0} tokens
+                                {' + '}输出 {log.completionTokens?.toLocaleString() || 0} tokens
+                                {' = '}总计 {log.totalTokens?.toLocaleString() || 0} tokens
+                                {typeof log.estimatedCost === 'number' && (
+                                  <>，预估费用 <strong style={{ color: 'var(--color-text-primary)' }}>${log.estimatedCost.toFixed(6)}</strong></>
+                                )}
+                              </span>
+                            )}
                           </div>
 
-                          {/* 下游请求路径 */}
+                          {/* 涓嬫父璇锋眰璺緞 */}
                           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                             <span style={{ fontWeight: 600, color: 'var(--color-primary)', flexShrink: 0 }}>下游请求路径</span>
                             {pathMeta.downstreamPath ? (
@@ -317,7 +428,7 @@ export default function ProxyLogs() {
                             )}
                           </div>
 
-                          {/* 上游请求路径 */}
+                          {/* 涓婃父璇锋眰璺緞 */}
                           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                             <span style={{ fontWeight: 600, color: 'var(--color-primary)', flexShrink: 0 }}>上游请求路径</span>
                             {pathMeta.upstreamPath ? (
@@ -333,7 +444,7 @@ export default function ProxyLogs() {
                             )}
                           </div>
 
-                          {/* 错误信息 */}
+                          {/* 閿欒淇℃伅 */}
                           {pathMeta.errorMessage.trim().length > 0 && (
                             <div style={{ display: 'flex', gap: 6 }}>
                               <span style={{ fontWeight: 600, color: 'var(--color-danger)', flexShrink: 0 }}>错误信息</span>
@@ -401,3 +512,4 @@ export default function ProxyLogs() {
     </div>
   );
 }
+

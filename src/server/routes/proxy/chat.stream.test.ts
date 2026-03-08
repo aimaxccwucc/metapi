@@ -10,6 +10,7 @@ const refreshModelsAndRebuildRoutesMock = vi.fn();
 const reportProxyAllFailedMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
 const estimateProxyCostMock = vi.fn(async (_arg?: any) => 0);
+const buildProxyBillingDetailsMock = vi.fn(async (_arg?: any) => null);
 const fetchModelPricingCatalogMock = vi.fn(async (_arg?: any): Promise<any> => null);
 const resolveProxyUsageWithSelfLogFallbackMock = vi.fn(async ({ usage }: any) => ({
   ...usage,
@@ -50,6 +51,7 @@ vi.mock('../../services/alertRules.js', () => ({
 
 vi.mock('../../services/modelPricingService.js', () => ({
   estimateProxyCost: (arg: any) => estimateProxyCostMock(arg),
+  buildProxyBillingDetails: (arg: any) => buildProxyBillingDetailsMock(arg),
   fetchModelPricingCatalog: (arg: any) => fetchModelPricingCatalogMock(arg),
 }));
 
@@ -92,6 +94,7 @@ describe('chat proxy stream behavior', () => {
     reportProxyAllFailedMock.mockReset();
     reportTokenExpiredMock.mockReset();
     estimateProxyCostMock.mockClear();
+    buildProxyBillingDetailsMock.mockClear();
     fetchModelPricingCatalogMock.mockReset();
     resolveProxyUsageWithSelfLogFallbackMock.mockClear();
     dbInsertMock.mockClear();
@@ -1904,6 +1907,173 @@ describe('chat proxy stream behavior', () => {
 
     const body = response.json();
     expect(body?.choices?.[0]?.message?.content).toContain('ok via responses fallback after 502');
+  });
+
+  it('continues to /v1/responses when /v1/messages dispatch is denied for /v1/chat/completions', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://generic.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-generic',
+      actualModel: 'gpt-5.2-codex',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'Unsupported endpoint /v1/chat/completions', type: 'unsupported_endpoint' },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'This group does not allow /v1/messages dispatch', type: 'forbidden' },
+      }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_dispatch_denied_fallback',
+        object: 'response',
+        model: 'gpt-5.2-codex',
+        status: 'completed',
+        output_text: 'ok via responses after messages dispatch denied',
+        usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-5.2-codex',
+        stream: false,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
+    const [thirdUrl] = fetchMock.mock.calls[2] as [string, any];
+    expect(firstUrl).toContain('/v1/chat/completions');
+    expect(secondUrl).toContain('/v1/messages');
+    expect(thirdUrl).toContain('/v1/responses');
+    expect(response.json()?.choices?.[0]?.message?.content).toContain('ok via responses');
+  });
+
+  it('prefers /v1/responses immediately after explicit legacy protocol rejection on /v1/chat/completions', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://generic.example.com', platform: 'sub2api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-generic',
+      actualModel: 'gpt-5.2-codex',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          message: 'Unsupported legacy protocol: /v1/chat/completions is not supported. Please use /v1/responses.',
+          type: 'upstream_error',
+        },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_legacy_protocol_preferred',
+        object: 'response',
+        model: 'gpt-5.2-codex',
+        status: 'completed',
+        output_text: 'ok via direct responses preference',
+        usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-5.2-codex',
+        stream: false,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
+    expect(firstUrl).toContain('/v1/chat/completions');
+    expect(secondUrl).toContain('/v1/responses');
+    expect(secondUrl).not.toContain('/v1/messages');
+    expect(response.json()?.choices?.[0]?.message?.content).toContain('ok via direct responses preference');
+  });
+
+  it('keeps messages-first semantics for claude-family models on generic upstreams', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://generic.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-generic',
+      actualModel: 'claude-haiku-4-5-20251001',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'This group does not allow /v1/messages dispatch', type: 'forbidden' },
+      }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          message: 'Unsupported legacy protocol: /v1/chat/completions is not supported. Please use /v1/responses.',
+          type: 'upstream_error',
+        },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_claude_generic_messages_first',
+        object: 'response',
+        model: 'claude-haiku-4-5-20251001',
+        status: 'completed',
+        output_text: 'ok via responses after preserving messages-first order',
+        usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'claude-haiku-4-5-20251001',
+        stream: false,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
+    const [thirdUrl] = fetchMock.mock.calls[2] as [string, any];
+    expect(firstUrl).toContain('/v1/messages');
+    expect(secondUrl).toContain('/v1/chat/completions');
+    expect(thirdUrl).toContain('/v1/responses');
+    expect(response.json()?.choices?.[0]?.message?.content).toContain('ok via responses');
   });
 
   it('forces openai platform to use /v1/chat/completions for claude downstream requests', async () => {

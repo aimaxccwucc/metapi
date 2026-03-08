@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { sql } from 'drizzle-orm';
-import { formatLocalDate } from '../../services/localTimeService.js';
+import { formatLocalDate, formatUtcSqlDateTime } from '../../services/localTimeService.js';
 
 type DbModule = typeof import('../../db/index.js');
 
@@ -151,6 +151,95 @@ describe('stats dashboard filters disabled sites', () => {
       success: 2,
       failed: 1,
       total: 3,
+    });
+  });
+
+  it('returns recent RPM and TPM stats using only active-site proxy logs', async () => {
+    const activeSite = await db.insert(schema.sites).values({
+      name: 'active-performance-site',
+      url: 'https://active-performance.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const disabledSite = await db.insert(schema.sites).values({
+      name: 'disabled-performance-site',
+      url: 'https://disabled-performance.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    await db.run(sql`update sites set status = 'disabled' where id = ${disabledSite.id}`);
+
+    const activeAccount = await db.insert(schema.accounts).values({
+      siteId: activeSite.id,
+      username: 'active-performance-user',
+      accessToken: 'active-performance-token',
+      balance: 100,
+      status: 'active',
+    }).returning().get();
+
+    const disabledAccount = await db.insert(schema.accounts).values({
+      siteId: disabledSite.id,
+      username: 'disabled-performance-user',
+      accessToken: 'disabled-performance-token',
+      balance: 100,
+      status: 'active',
+    }).returning().get();
+
+    const now = Date.now();
+    const withinWindow = formatUtcSqlDateTime(new Date(now - 30_000));
+    const outsideWindow = formatUtcSqlDateTime(new Date(now - 90_000));
+
+    await db.insert(schema.proxyLogs).values([
+      {
+        accountId: activeAccount.id,
+        status: 'success',
+        totalTokens: 1200,
+        createdAt: withinWindow,
+      },
+      {
+        accountId: activeAccount.id,
+        status: 'failed',
+        totalTokens: 600,
+        createdAt: withinWindow,
+      },
+      {
+        accountId: activeAccount.id,
+        status: 'success',
+        totalTokens: null,
+        createdAt: withinWindow,
+      },
+      {
+        accountId: activeAccount.id,
+        status: 'success',
+        totalTokens: 9999,
+        createdAt: outsideWindow,
+      },
+      {
+        accountId: disabledAccount.id,
+        status: 'success',
+        totalTokens: 7777,
+        createdAt: withinWindow,
+      },
+    ]).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/stats/dashboard',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      performance?: {
+        windowSeconds: number;
+        requestsPerMinute: number;
+        tokensPerMinute: number;
+      };
+    };
+
+    expect(body.performance).toEqual({
+      windowSeconds: 60,
+      requestsPerMinute: 3,
+      tokensPerMinute: 1800,
     });
   });
 });

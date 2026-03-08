@@ -4,10 +4,18 @@ import { clearAuthSession, getAuthToken } from '../authSession.js';
 import {
   DEBUG_TABS,
   DEFAULT_INPUTS,
+  DEFAULT_MODE_STATE,
   DEFAULT_PARAMETER_ENABLED,
   MODEL_TESTER_STORAGE_KEY,
   MESSAGE_STATUS,
   buildApiPayload,
+  buildEmbeddingsRequestEnvelope,
+  buildImagesEditRequestEnvelope,
+  buildImagesGenerationsRequestEnvelope,
+  buildRawProxyRequestEnvelope,
+  buildSearchRequestEnvelope,
+  buildVideoCreateRequestEnvelope,
+  buildVideoInspectRequestEnvelope,
   countConversationTurns,
   collectModelTesterModelNames,
   createLoadingAssistantMessage,
@@ -24,7 +32,10 @@ import {
   type ChatMessage,
   type DebugTab,
   type ModelTesterInputs,
+  type ModelTesterModeState,
   type ParameterEnabled,
+  type PlaygroundMode,
+  type PlaygroundMultipartFile,
   type TestTargetFormat,
   type TestChatPayload,
 } from './helpers/modelTesterSession.js';
@@ -45,8 +56,46 @@ type DebugTimelineEntry = {
   text: string;
 };
 
+type UploadState = {
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+};
+
 const POLL_INTERVAL_MS = 1200;
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const fileToDataUrl = async (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error('read file failed'));
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+    reader.readAsDataURL(file);
+  });
+
+const summarizeModeRequest = (
+  mode: PlaygroundMode,
+  input: string,
+  modeState: ModelTesterModeState,
+  videoAction: 'get' | 'delete',
+): string => {
+  if (mode === 'embeddings') return input.trim() || modeState.embeddingsInput.trim() || 'Embedding request';
+  if (mode === 'search') return input.trim() || modeState.searchQuery.trim() || 'Search request';
+  if (mode === 'images.generate' || mode === 'images.edit') return input.trim() || modeState.imagesPrompt.trim() || 'Image request';
+  if (mode === 'videos.create') return input.trim() || modeState.videosPrompt.trim() || 'Video request';
+  if (mode === 'videos.inspect') {
+    const id = input.trim() || modeState.videosInspectId.trim();
+    return `${videoAction.toUpperCase()} ${id || 'video'}`;
+  }
+  return input.trim();
+};
+
+const readFileAsDataUrl = (file: File): Promise<string> => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+  reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+  reader.readAsDataURL(file);
+});
 
 const formatJson = (value: unknown): string => {
   if (typeof value === 'string') {
@@ -518,6 +567,29 @@ const toNumber = (value: string, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const splitCsvOrLines = (value: string): string[] =>
+  value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const CONVERSATION_MODE_OPTIONS: Array<{ value: PlaygroundMode; label: string }> = [
+  { value: 'conversation', label: '对话' },
+  { value: 'embeddings', label: 'Embeddings' },
+  { value: 'search', label: 'Search' },
+  { value: 'images.generate', label: '图片生成' },
+  { value: 'images.edit', label: '图片编辑' },
+  { value: 'videos.create', label: '视频创建' },
+  { value: 'videos.inspect', label: '视频查询/删除' },
+];
+
+const PROTOCOL_OPTIONS: Array<{ value: PlaygroundProtocol; label: string }> = [
+  { value: 'openai', label: 'OpenAI (/v1/chat/completions)' },
+  { value: 'responses', label: 'OpenAI Responses (/v1/responses)' },
+  { value: 'claude', label: 'Claude (/v1/messages)' },
+  { value: 'gemini', label: 'Gemini Native (/gemini/v1beta/models/*)' },
+];
+
 const inputBaseStyle: React.CSSProperties = {
   width: '100%',
   padding: '10px 14px',
@@ -568,6 +640,7 @@ export default function ModelTester() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [inputs, setInputs] = useState<ModelTesterInputs>(DEFAULT_INPUTS);
+  const [modeState, setModeState] = useState<ModelTesterModeState>(DEFAULT_MODE_STATE);
   const [parameterEnabled, setParameterEnabled] = useState<ParameterEnabled>(DEFAULT_PARAMETER_ENABLED);
 
   const [sending, setSending] = useState(false);
@@ -586,10 +659,21 @@ export default function ModelTester() {
   const [debugPreview, setDebugPreview] = useState('');
   const [debugTimeline, setDebugTimeline] = useState<DebugTimelineEntry[]>([]);
   const [debugTimestamp, setDebugTimestamp] = useState('');
+  const [nonConversationResult, setNonConversationResult] = useState<unknown>(null);
+
+  const [searchQueryValue, setSearchQueryValue] = useState('');
+  const [searchAllowedDomains, setSearchAllowedDomains] = useState('');
+  const [searchBlockedDomains, setSearchBlockedDomains] = useState('');
+  const [searchMaxResults, setSearchMaxResults] = useState(10);
+  const [embeddingInputText, setEmbeddingInputText] = useState('');
+  const [assetPrompt, setAssetPrompt] = useState('');
+  const [videoInspectId, setVideoInspectId] = useState('');
+  const [videoInspectAction, setVideoInspectAction] = useState<'GET' | 'DELETE'>('GET');
+  const [imageSourceFile, setImageSourceFile] = useState<UploadState | null>(null);
+  const [imageMaskFile, setImageMaskFile] = useState<UploadState | null>(null);
 
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
-
   const chatEndRef = useRef<HTMLDivElement>(null);
   const restoredSessionRef = useRef<ReturnType<typeof parseModelTesterSession>>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
@@ -605,7 +689,26 @@ export default function ModelTester() {
   }, []);
 
   const updateInput = useCallback(<K extends keyof ModelTesterInputs>(key: K, value: ModelTesterInputs[K]) => {
-    setInputs((prev) => ({ ...prev, [key]: value }));
+    setInputs((prev) => {
+      if (key === 'protocol') {
+        return {
+          ...prev,
+          protocol: value as ModelTesterInputs['protocol'],
+        };
+      }
+      return { ...prev, [key]: value };
+    });
+  }, []);
+
+  const updateModeState = useCallback(<K extends keyof ModelTesterModeState>(key: K, value: ModelTesterModeState[K]) => {
+    setModeState((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
+  const updateProtocol = useCallback((protocol: PlaygroundProtocol) => {
+    setInputs((prev) => ({
+      ...prev,
+      protocol,
+    }));
   }, []);
 
   const toggleParameter = useCallback((key: keyof ParameterEnabled) => {
@@ -620,6 +723,7 @@ export default function ModelTester() {
     setMessages(restored.messages);
     setInput(restored.input);
     setInputs(restored.inputs);
+    setModeState(restored.modeState);
     setParameterEnabled(restored.parameterEnabled);
     setPendingPayload(restored.pendingPayload);
     setPendingJobId(restored.pendingJobId || null);
@@ -627,6 +731,13 @@ export default function ModelTester() {
     setCustomRequestBody(restored.customRequestBody);
     setShowDebugPanel(restored.showDebugPanel);
     setActiveDebugTab(restored.activeDebugTab);
+    setEmbeddingInputText(restored.modeState.embeddingsInput);
+    setSearchQueryValue(restored.modeState.searchQuery);
+    setSearchAllowedDomains(restored.modeState.searchAllowedDomains);
+    setSearchBlockedDomains(restored.modeState.searchBlockedDomains);
+    setAssetPrompt(restored.modeState.imagesPrompt || restored.modeState.videosPrompt);
+    setVideoInspectId(restored.modeState.videosInspectId);
+    setVideoInspectAction(restored.inputs.videoInspectAction === 'delete' ? 'DELETE' : 'GET');
 
     if (restored.pendingJobId) {
       setSending(true);
@@ -687,6 +798,17 @@ export default function ModelTester() {
       inputs,
       parameterEnabled,
       messages,
+      modeState: {
+        embeddingsInput: embeddingInputText,
+        searchQuery: searchQueryValue,
+        searchAllowedDomains,
+        searchBlockedDomains,
+        imagesPrompt: inputs.mode === 'images.generate' || inputs.mode === 'images.edit' ? assetPrompt : '',
+        imagesMaskDataUrl: imageMaskFile?.dataUrl || '',
+        videosPrompt: inputs.mode === 'videos.create' ? assetPrompt : '',
+        videosInspectId: videoInspectId,
+        extraJson: customRequestBody,
+      },
       pendingPayload,
       pendingJobId,
       customRequestMode,
@@ -701,13 +823,341 @@ export default function ModelTester() {
     input,
     inputs,
     messages,
+    assetPrompt,
+    customRequestBody,
+    embeddingInputText,
+    imageMaskFile?.dataUrl,
     parameterEnabled,
     pendingJobId,
     pendingPayload,
+    searchAllowedDomains,
+    searchBlockedDomains,
+    searchQueryValue,
     showDebugPanel,
+    videoInspectId,
   ]);
 
+  const handleUploadChange = useCallback(async (
+    fileList: FileList | null,
+    setter: React.Dispatch<React.SetStateAction<UploadState | null>>,
+  ) => {
+    const file = fileList?.[0];
+    if (!file) {
+      setter(null);
+      return;
+    }
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      setter({
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        dataUrl,
+      });
+    } catch (readError: any) {
+      setError(readError?.message || '读取文件失败');
+    }
+  }, []);
+
+  const buildConversationMessagesWithSystem = useCallback((baseMessages: ChatMessage[]) => {
+    if (!inputs.systemPrompt.trim()) return baseMessages;
+    return [
+      createMessage('system', inputs.systemPrompt.trim()),
+      ...baseMessages,
+    ];
+  }, [inputs.systemPrompt]);
+
+  const buildClaudeBodyFromMessages = useCallback((baseMessages: ChatMessage[]) => {
+    const effectiveMessages = buildConversationMessagesWithSystem(baseMessages);
+    const systemContents = effectiveMessages
+      .filter((message) => message.role === 'system' || message.role === 'developer')
+      .map((message) => message.content.trim())
+      .filter(Boolean);
+    const downstreamMessages = effectiveMessages
+      .filter((message) => message.role !== 'system' && message.role !== 'developer')
+      .map((message) => ({
+        role: message.role === 'assistant' ? 'assistant' : 'user',
+        content: message.content,
+      }));
+
+    return {
+      model: inputs.model,
+      stream: inputs.stream,
+      max_tokens: parameterEnabled.max_tokens ? inputs.max_tokens : DEFAULT_INPUTS.max_tokens,
+      ...(systemContents.length > 0 ? { system: systemContents.join('\n\n') } : {}),
+      ...(parameterEnabled.temperature ? { temperature: inputs.temperature } : {}),
+      ...(parameterEnabled.top_p ? { top_p: inputs.top_p } : {}),
+      messages: downstreamMessages,
+    };
+  }, [buildConversationMessagesWithSystem, inputs.max_tokens, inputs.model, inputs.stream, inputs.temperature, inputs.top_p, parameterEnabled.max_tokens, parameterEnabled.temperature, parameterEnabled.top_p]);
+
+  const buildResponsesBodyFromMessages = useCallback((baseMessages: ChatMessage[]) => {
+    const effectiveMessages = buildConversationMessagesWithSystem(baseMessages);
+    const systemContents = effectiveMessages
+      .filter((message) => message.role === 'system' || message.role === 'developer')
+      .map((message) => message.content.trim())
+      .filter(Boolean);
+    const downstreamMessages = effectiveMessages
+      .filter((message) => message.role !== 'system' && message.role !== 'developer')
+      .map((message) => ({
+        role: message.role === 'assistant' ? 'assistant' : 'user',
+        content: message.content,
+      }));
+
+    return {
+      model: inputs.model,
+      stream: inputs.stream,
+      ...(parameterEnabled.temperature ? { temperature: inputs.temperature } : {}),
+      ...(parameterEnabled.top_p ? { top_p: inputs.top_p } : {}),
+      ...(parameterEnabled.max_tokens ? { max_output_tokens: inputs.max_tokens } : {}),
+      ...(systemContents.length > 0 ? { instructions: systemContents.join('\n\n') } : {}),
+      input: downstreamMessages.length === 1 && downstreamMessages[0].role === 'user' && systemContents.length === 0
+        ? downstreamMessages[0].content
+        : downstreamMessages,
+    };
+  }, [buildConversationMessagesWithSystem, inputs.max_tokens, inputs.model, inputs.stream, inputs.temperature, inputs.top_p, parameterEnabled.max_tokens, parameterEnabled.temperature, parameterEnabled.top_p]);
+
+  const buildGeminiBodyFromMessages = useCallback((baseMessages: ChatMessage[]) => {
+    const effectiveMessages = buildConversationMessagesWithSystem(baseMessages);
+    const systemContents = effectiveMessages
+      .filter((message) => message.role === 'system' || message.role === 'developer')
+      .map((message) => message.content.trim())
+      .filter(Boolean);
+    const contents = effectiveMessages
+      .filter((message) => message.role !== 'system' && message.role !== 'developer')
+      .map((message) => ({
+        role: message.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: message.content }],
+      }));
+
+    return {
+      ...(systemContents.length > 0 ? { systemInstruction: { parts: [{ text: systemContents.join('\n\n') }] } } : {}),
+      contents,
+      generationConfig: {
+        ...(parameterEnabled.temperature ? { temperature: inputs.temperature } : {}),
+        ...(parameterEnabled.top_p ? { topP: inputs.top_p } : {}),
+        ...(parameterEnabled.max_tokens ? { maxOutputTokens: inputs.max_tokens } : {}),
+      },
+    };
+  }, [buildConversationMessagesWithSystem, inputs.max_tokens, inputs.temperature, inputs.top_p, parameterEnabled.max_tokens, parameterEnabled.temperature, parameterEnabled.top_p]);
+
+  const buildConversationProxyEnvelope = useCallback((baseMessages: ChatMessage[]): ProxyTestEnvelope => {
+    const normalizedMessages = buildConversationMessagesWithSystem(baseMessages);
+
+    if (customRequestMode) {
+      const path = inputs.protocol === 'gemini'
+        ? `/gemini/v1beta/models/${encodeURIComponent(inputs.model)}:generateContent${inputs.stream ? '?alt=sse' : ''}`
+        : inputs.protocol === 'claude'
+          ? '/v1/messages'
+          : inputs.protocol === 'responses'
+            ? '/v1/responses'
+            : '/v1/chat/completions';
+
+      return {
+        method: 'POST',
+        path,
+        requestKind: 'json',
+        stream: inputs.stream,
+        jobMode: false,
+        rawMode: true,
+        rawJsonText: customRequestBody,
+      };
+    }
+
+    if (inputs.protocol === 'claude') {
+      return {
+        method: 'POST',
+        path: '/v1/messages',
+        requestKind: 'json',
+        stream: inputs.stream,
+        jobMode: false,
+        rawMode: false,
+        jsonBody: buildClaudeBodyFromMessages(baseMessages),
+      };
+    }
+
+    if (inputs.protocol === 'responses') {
+      return {
+        method: 'POST',
+        path: '/v1/responses',
+        requestKind: 'json',
+        stream: inputs.stream,
+        jobMode: false,
+        rawMode: false,
+        jsonBody: buildResponsesBodyFromMessages(baseMessages),
+      };
+    }
+
+    if (inputs.protocol === 'gemini') {
+      return {
+        method: 'POST',
+        path: `/gemini/v1beta/models/${encodeURIComponent(inputs.model)}:generateContent${inputs.stream ? '?alt=sse' : ''}`,
+        requestKind: 'json',
+        stream: inputs.stream,
+        jobMode: false,
+        rawMode: false,
+        jsonBody: buildGeminiBodyFromMessages(baseMessages),
+      };
+    }
+
+    const openAiEnvelope = buildApiPayload(normalizedMessages, { ...inputs, protocol: 'openai' }, parameterEnabled);
+    const openAiPayload = (openAiEnvelope.jsonBody && typeof openAiEnvelope.jsonBody === 'object')
+      ? { ...(openAiEnvelope.jsonBody as Record<string, unknown>) }
+      : {};
+
+    return {
+      method: 'POST',
+      path: '/v1/chat/completions',
+      requestKind: 'json',
+      stream: inputs.stream,
+      jobMode: false,
+      rawMode: false,
+      jsonBody: openAiPayload,
+    };
+  }, [buildApiPayload, buildClaudeBodyFromMessages, buildConversationMessagesWithSystem, buildGeminiBodyFromMessages, buildResponsesBodyFromMessages, customRequestBody, customRequestMode, inputs, parameterEnabled]);
+
+  const buildModeProxyEnvelope = useCallback((): ProxyTestEnvelope | null => {
+    if (inputs.mode === 'embeddings') {
+      const trimmed = embeddingInputText.trim();
+      if (!trimmed) return null;
+      return {
+        method: 'POST',
+        path: '/v1/embeddings',
+        requestKind: 'json',
+        stream: false,
+        jobMode: false,
+        rawMode: customRequestMode,
+        ...(customRequestMode
+          ? { rawJsonText: customRequestBody }
+          : { jsonBody: { model: inputs.model, input: trimmed } }),
+      };
+    }
+
+    if (inputs.mode === 'search') {
+      if (!searchQueryValue.trim()) return null;
+      return {
+        method: 'POST',
+        path: '/v1/search',
+        requestKind: 'json',
+        stream: false,
+        jobMode: false,
+        rawMode: customRequestMode,
+        ...(customRequestMode
+          ? { rawJsonText: customRequestBody }
+          : {
+            jsonBody: {
+              model: inputs.model || '__search',
+              query: searchQueryValue.trim(),
+              max_results: Math.max(1, Math.min(20, Math.trunc(searchMaxResults || 10))),
+              ...(splitCsvOrLines(searchAllowedDomains).length > 0 ? { allowed_domains: splitCsvOrLines(searchAllowedDomains) } : {}),
+              ...(splitCsvOrLines(searchBlockedDomains).length > 0 ? { blocked_domains: splitCsvOrLines(searchBlockedDomains) } : {}),
+            },
+          }),
+      };
+    }
+
+    if (inputs.mode === 'images.generate') {
+      if (!assetPrompt.trim()) return null;
+      return {
+        method: 'POST',
+        path: '/v1/images/generations',
+        requestKind: 'json',
+        stream: false,
+        jobMode: false,
+        rawMode: customRequestMode,
+        ...(customRequestMode
+          ? { rawJsonText: customRequestBody }
+          : { jsonBody: { model: inputs.model, prompt: assetPrompt.trim() } }),
+      };
+    }
+
+    if (inputs.mode === 'images.edit') {
+      if (!assetPrompt.trim() || !imageSourceFile) return null;
+      return {
+        method: 'POST',
+        path: '/v1/images/edits',
+        requestKind: 'multipart',
+        stream: false,
+        jobMode: false,
+        rawMode: false,
+        multipartFields: {
+          model: inputs.model,
+          prompt: assetPrompt.trim(),
+        },
+        multipartFiles: [
+          {
+            field: 'image',
+            name: imageSourceFile.name,
+            mimeType: imageSourceFile.mimeType,
+            dataUrl: imageSourceFile.dataUrl,
+          },
+          ...(imageMaskFile ? [{
+            field: 'mask',
+            name: imageMaskFile.name,
+            mimeType: imageMaskFile.mimeType,
+            dataUrl: imageMaskFile.dataUrl,
+          }] : []),
+        ],
+      };
+    }
+
+    if (inputs.mode === 'videos.create') {
+      if (!assetPrompt.trim()) return null;
+      if (imageSourceFile) {
+        return {
+          method: 'POST',
+          path: '/v1/videos',
+          requestKind: 'multipart',
+          stream: false,
+          jobMode: false,
+          rawMode: false,
+          multipartFields: {
+            model: inputs.model,
+            prompt: assetPrompt.trim(),
+          },
+          multipartFiles: [
+            {
+              field: 'input_reference',
+              name: imageSourceFile.name,
+              mimeType: imageSourceFile.mimeType,
+              dataUrl: imageSourceFile.dataUrl,
+            },
+          ],
+        };
+      }
+
+      return {
+        method: 'POST',
+        path: '/v1/videos',
+        requestKind: 'json',
+        stream: false,
+        jobMode: false,
+        rawMode: customRequestMode,
+        ...(customRequestMode
+          ? { rawJsonText: customRequestBody }
+          : { jsonBody: { model: inputs.model, prompt: assetPrompt.trim() } }),
+      };
+    }
+
+    if (inputs.mode === 'videos.inspect') {
+      if (!videoInspectId.trim()) return null;
+      return {
+        method: videoInspectAction,
+        path: `/v1/videos/${encodeURIComponent(videoInspectId.trim())}`,
+        requestKind: 'empty',
+        stream: false,
+        jobMode: false,
+        rawMode: false,
+      };
+    }
+
+    return null;
+  }, [assetPrompt, customRequestBody, customRequestMode, embeddingInputText, imageMaskFile, imageSourceFile, inputs.mode, inputs.model, searchAllowedDomains, searchBlockedDomains, searchMaxResults, searchQueryValue, videoInspectAction, videoInspectId]);
+
   const previewPayload = useMemo(() => {
+    if (inputs.mode !== 'conversation') {
+      return buildModeProxyEnvelope();
+    }
     if (customRequestMode) {
       const raw = customRequestBody.trim();
       if (!raw) return null;
@@ -717,15 +1167,18 @@ export default function ModelTester() {
         return { _error: '自定义请求体中的 JSON 无效', raw };
       }
     }
-    return buildApiPayload(messages, inputs, parameterEnabled);
-  }, [customRequestBody, customRequestMode, inputs, messages, parameterEnabled]);
+    if (inputs.protocol === 'gemini') {
+      return buildConversationProxyEnvelope(messages);
+    }
+    return buildApiPayload(buildConversationMessagesWithSystem(messages), inputs, parameterEnabled);
+  }, [buildConversationMessagesWithSystem, buildConversationProxyEnvelope, buildModeProxyEnvelope, customRequestBody, customRequestMode, inputs, messages, parameterEnabled]);
 
   useEffect(() => {
     setDebugPreview(formatJson(previewPayload));
   }, [previewPayload]);
 
   const finalizeJob = useCallback((jobId: string) => {
-    void api.deleteTestChatJob(jobId).catch(() => { });
+    void api.deleteProxyTestJob(jobId).catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -737,7 +1190,7 @@ export default function ModelTester() {
     const pollTask = async () => {
       while (active) {
         try {
-          const status = await api.getTestChatJob(pendingJobId) as ChatJobResponse;
+          const status = await api.getProxyTestJob(pendingJobId) as ChatJobResponse;
           if (!active) return;
 
           if (status.status === 'pending') {
@@ -807,24 +1260,27 @@ export default function ModelTester() {
     () => filteredModels.map((item) => ({ value: item, label: item })),
     [filteredModels],
   );
-  const targetFormatOptions = useMemo<Array<{ value: TestTargetFormat; label: string }>>(() => ([
-    { value: 'openai', label: 'OpenAI (/v1/chat/completions)' },
-    { value: 'responses', label: 'OpenAI Responses (/v1/responses)' },
-    { value: 'claude', label: 'Claude (/v1/messages)' },
-  ]), []);
-
   const canSend = useMemo(() => {
     if (sending || pendingJobId || !inputs.model) return false;
+    if (inputs.mode !== 'conversation') {
+      if (inputs.mode === 'embeddings') return Boolean(embeddingInputText.trim());
+      if (inputs.mode === 'search') return Boolean(searchQueryValue.trim());
+      if (inputs.mode === 'images.generate') return Boolean(assetPrompt.trim());
+      if (inputs.mode === 'images.edit') return Boolean(assetPrompt.trim()) && Boolean(imageSourceFile);
+      if (inputs.mode === 'videos.create') return Boolean(assetPrompt.trim());
+      if (inputs.mode === 'videos.inspect') return Boolean(videoInspectId.trim());
+      return false;
+    }
     const hasPrompt = input.trim().length > 0;
     if (!customRequestMode) return hasPrompt;
     return hasPrompt || customRequestBody.trim().length > 0;
-  }, [customRequestBody, customRequestMode, input, inputs.model, pendingJobId, sending]);
+  }, [assetPrompt, customRequestBody, customRequestMode, embeddingInputText, imageSourceFile, input, inputs.mode, inputs.model, pendingJobId, searchQueryValue, sending, videoInspectId]);
 
   const startChatJob = useCallback(async (payload: TestChatPayload) => {
     try {
       setError('');
       setPendingPayload(payload);
-      const created = await api.startTestChatJob(payload) as { jobId: string };
+      const created = await api.startProxyTestJob(payload) as { jobId: string };
       setPendingJobId(created.jobId);
       setSending(true);
       pushDebug('info', `已创建任务 ${created.jobId}。`);
@@ -860,7 +1316,7 @@ export default function ModelTester() {
     };
 
     try {
-      const response = await api.testChatStream(payload, controller.signal);
+      const response = await api.proxyTestStream(payload, controller.signal);
       if (response.status === 401 || response.status === 403) {
         const hadToken = Boolean(getAuthToken(localStorage));
         clearAuthSession(localStorage);
@@ -966,6 +1422,124 @@ export default function ModelTester() {
     }
   }, [pushDebug]);
 
+  const startProxyStream = useCallback(async (
+    envelope: ProxyTestEnvelope,
+    nextMessages: ChatMessage[],
+  ) => {
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
+    streamStopRequestedRef.current = false;
+    setSending(true);
+    setPendingJobId(null);
+    setPendingPayload(null);
+    setMessages(nextMessages);
+    setError('');
+    setActiveDebugTab(DEBUG_TABS.RESPONSE);
+    pushDebug('info', `已开始代理流式请求：${envelope.path}`);
+
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    const rawEvents: string[] = [];
+    const appendRawEvent = (raw: string) => {
+      rawEvents.push(raw);
+      if (rawEvents.length > 500) {
+        rawEvents.splice(0, rawEvents.length - 500);
+      }
+      setDebugResponse(rawEvents.join('\n'));
+    };
+
+    try {
+      const response = await api.proxyTestStream(envelope, controller.signal);
+      if (!response.ok) {
+        throw new Error(await parseStreamErrorText(response));
+      }
+      if (!response.body) {
+        throw new Error('流式响应体为空');
+      }
+
+      const reader = response.body.getReader();
+      let doneReceived = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split(/\r?\n\r?\n/);
+        buffer = chunks.pop() || '';
+
+        for (const chunk of chunks) {
+          const parsed = parseSseBlock(chunk);
+          if (!parsed.data) continue;
+          appendRawEvent(parsed.data);
+
+          if (parsed.data === '[DONE]') {
+            doneReceived = true;
+            continue;
+          }
+
+          let eventPayload: any;
+          try {
+            eventPayload = JSON.parse(parsed.data);
+          } catch {
+            continue;
+          }
+
+          if (eventPayload?.error) {
+            throw new Error(extractErrorMessage(eventPayload));
+          }
+
+          const delta = parseAnyStreamDelta(eventPayload);
+          if (delta.reasoningDelta || delta.contentDelta) {
+            setMessages((prev) => applyAssistantDelta(prev, {
+              reasoningDelta: delta.reasoningDelta,
+              contentDelta: delta.contentDelta,
+            }));
+          }
+          if (delta.done) doneReceived = true;
+        }
+      }
+
+      setMessages((prev) => {
+        const idx = findLastLoadingAssistantIndex(prev);
+        if (idx === -1) return prev;
+        return replaceMessageAt(prev, idx, {
+          ...finalizeIncompleteMessage(prev[idx]),
+          status: MESSAGE_STATUS.COMPLETE,
+          isThinkingComplete: true,
+        });
+      });
+
+      setError('');
+      pushDebug(doneReceived ? 'info' : 'warn', doneReceived
+        ? '代理流式传输已成功完成。'
+        : '代理流式传输未收到 [DONE] 信号，已在本地完成。');
+    } catch (streamError: any) {
+      const abortedByUser = controller.signal.aborted && streamStopRequestedRef.current;
+      const abortedUnexpectedly = controller.signal.aborted
+        || streamError?.name === 'AbortError'
+        || streamError?.message === 'This operation was aborted'
+        || streamError?.message === 'The user aborted a request.';
+
+      if (abortedByUser) {
+        setMessages((prev) => applyAssistantStopped(prev));
+        setError('生成已停止。');
+      } else if (abortedUnexpectedly) {
+        setMessages((prev) => applyAssistantError(prev, '流式连接中断，请重试。'));
+        setError('流式连接中断，请重试。');
+      } else {
+        const message = streamError?.message || '流式请求失败';
+        setMessages((prev) => applyAssistantError(prev, message));
+        setError(message);
+      }
+    } finally {
+      if (streamAbortRef.current === controller) streamAbortRef.current = null;
+      streamStopRequestedRef.current = false;
+      setSending(false);
+    }
+  }, [pushDebug]);
+
   const dispatchPayload = useCallback(async (
     nextMessages: ChatMessage[],
     payload: TestChatPayload,
@@ -989,28 +1563,80 @@ export default function ModelTester() {
     }
   }, [startChatJob, startStream]);
 
+  const dispatchProxyEnvelope = useCallback(async (envelope: ProxyTestEnvelope, nextMessages?: ChatMessage[]) => {
+    setError('');
+    setDebugRequest(formatJson(envelope.rawMode ? { path: envelope.path, rawJsonText: envelope.rawJsonText } : envelope));
+    setDebugResponse('');
+    setActiveDebugTab(DEBUG_TABS.REQUEST);
+    setDebugTimestamp(new Date().toISOString());
+
+    if (envelope.stream && nextMessages) {
+      await startProxyStream(envelope, nextMessages);
+      return;
+    }
+
+    setSending(true);
+    try {
+      const result = await api.proxyTest(envelope);
+      setDebugResponse(formatJson(result));
+      setActiveDebugTab(DEBUG_TABS.RESPONSE);
+      setNonConversationResult(result);
+
+      if (nextMessages) {
+        setMessages((prev) => applyAssistantSuccess(nextMessages, result));
+      }
+
+      setError('');
+      pushDebug('info', `代理请求成功：${envelope.path}`);
+    } catch (requestError: any) {
+      const message = requestError?.message || '请求失败';
+      if (nextMessages) {
+        setMessages((prev) => applyAssistantError(nextMessages, message));
+      }
+      setError(message);
+      setDebugResponse(formatJson({ error: { message } }));
+      setActiveDebugTab(DEBUG_TABS.RESPONSE);
+      pushDebug('error', `代理请求失败：${message}`);
+    } finally {
+      setSending(false);
+    }
+  }, [pushDebug, startProxyStream]);
+
   const buildPayloadWithMessages = useCallback((nextMessages: ChatMessage[]): {
     payload: TestChatPayload | null;
     syncedCustomBody?: string;
   } => {
-    if (!customRequestMode) {
-      return { payload: buildApiPayload(nextMessages, inputs, parameterEnabled) };
-    }
-
-    const syncedBody = syncMessagesToCustomRequestBody(customRequestBody, nextMessages, inputs);
-    const parsed = parseCustomRequestBody(syncedBody);
+    const effectiveMessages = buildConversationMessagesWithSystem(nextMessages);
     return {
-      payload: parsed
-        ? { ...parsed, targetFormat: parsed.targetFormat || inputs.targetFormat }
-        : null,
-      syncedCustomBody: syncedBody,
+      payload: customRequestMode
+        ? buildRawProxyRequestEnvelope(
+          'POST',
+          buildConversationProxyEnvelope(effectiveMessages).path,
+          'json',
+          customRequestBody,
+          { stream: inputs.stream, jobMode: !inputs.stream },
+        )
+        : buildApiPayload(
+          effectiveMessages,
+          { ...inputs, protocol: inputs.protocol as TestTargetFormat },
+          parameterEnabled,
+        ),
+      syncedCustomBody: customRequestMode
+        ? customRequestBody
+        : syncMessagesToCustomRequestBody(customRequestBody, effectiveMessages, inputs),
     };
-  }, [customRequestBody, customRequestMode, inputs, parameterEnabled]);
+  }, [buildConversationMessagesWithSystem, buildConversationProxyEnvelope, customRequestBody, customRequestMode, inputs, parameterEnabled]);
 
   const sendWithPrompt = useCallback(async (prompt: string, baseMessages: ChatMessage[]) => {
     const userMessage = createMessage('user', prompt);
     const loadingAssistant = createLoadingAssistantMessage();
     const nextMessages = [...baseMessages, userMessage, loadingAssistant];
+    const useProxyTransport = inputs.protocol === 'gemini' || customRequestMode;
+    if (useProxyTransport) {
+      await dispatchProxyEnvelope(buildConversationProxyEnvelope(nextMessages), nextMessages);
+      return;
+    }
+
     const { payload, syncedCustomBody } = buildPayloadWithMessages(nextMessages);
 
     if (!payload) {
@@ -1020,10 +1646,24 @@ export default function ModelTester() {
     }
 
     await dispatchPayload(nextMessages, payload, { syncedCustomBody });
-  }, [buildPayloadWithMessages, dispatchPayload, pushDebug]);
+  }, [buildConversationProxyEnvelope, buildPayloadWithMessages, customRequestMode, dispatchPayload, dispatchProxyEnvelope, inputs.protocol, pushDebug]);
+
+  const sendModeRequest = useCallback(async () => {
+    const envelope = buildModeProxyEnvelope();
+    if (!envelope) {
+      setError('请先补全当前模式所需的输入。');
+      return;
+    }
+    await dispatchProxyEnvelope(envelope);
+  }, [buildModeProxyEnvelope, dispatchProxyEnvelope]);
 
   const send = useCallback(async () => {
     if (!canSend) return;
+
+    if (inputs.mode !== 'conversation') {
+      await sendModeRequest();
+      return;
+    }
 
     const trimmed = input.trim();
     if (trimmed.length > 0) {
@@ -1041,11 +1681,17 @@ export default function ModelTester() {
     }
 
     const nextMessages = [...messages, createLoadingAssistantMessage()];
-    await dispatchPayload(nextMessages, {
-      ...payload,
-      targetFormat: payload.targetFormat || inputs.targetFormat,
-    });
-  }, [canSend, customRequestBody, customRequestMode, dispatchPayload, input, inputs.targetFormat, messages, pushDebug, sendWithPrompt]);
+    await dispatchPayload(
+      nextMessages,
+      buildRawProxyRequestEnvelope(
+        'POST',
+        buildConversationProxyEnvelope(nextMessages).path,
+        'json',
+        customRequestBody,
+        { stream: inputs.stream, jobMode: !inputs.stream },
+      ),
+    );
+  }, [canSend, customRequestBody, customRequestMode, dispatchPayload, input, inputs.mode, messages, pushDebug, sendModeRequest, sendWithPrompt]);
 
   const retryPending = useCallback(async () => {
     if (sending || pendingJobId || !pendingPayload) return;
@@ -1083,7 +1729,7 @@ export default function ModelTester() {
       const jobId = pendingJobId;
       setPendingJobId(null);
       try {
-        await api.deleteTestChatJob(jobId);
+        await api.deleteProxyTestJob(jobId);
       } catch {
         // no-op
       }
@@ -1098,7 +1744,7 @@ export default function ModelTester() {
 
   const clearChat = useCallback(() => {
     if (pendingJobId) {
-      void api.deleteTestChatJob(pendingJobId).catch(() => { });
+      void api.deleteProxyTestJob(pendingJobId).catch(() => { });
     }
     if (streamAbortRef.current) {
       streamStopRequestedRef.current = true;
@@ -1123,6 +1769,17 @@ export default function ModelTester() {
     setDebugPreview('');
     setDebugTimeline([]);
     setDebugTimestamp('');
+    setNonConversationResult(null);
+    setSearchQueryValue('');
+    setSearchAllowedDomains('');
+    setSearchBlockedDomains('');
+    setSearchMaxResults(10);
+    setEmbeddingInputText('');
+    setAssetPrompt('');
+    setVideoInspectId('');
+    setVideoInspectAction('GET');
+    setImageSourceFile(null);
+    setImageMaskFile(null);
     localStorage.removeItem(MODEL_TESTER_STORAGE_KEY);
     pushDebug('info', '对话已清除。');
   }, [pendingJobId, pushDebug]);
@@ -1357,13 +2014,17 @@ export default function ModelTester() {
         <div className="stat-summary-card stat-summary-orange">
           <div className="stat-summary-card-label">模式</div>
           <div className="stat-summary-card-value" style={{ fontSize: 14 }}>
-            {(customRequestMode ? '自定义请求' : (inputs.stream ? '流式' : '任务模式'))}
+            {inputs.mode === 'conversation'
+              ? (customRequestMode ? '自定义请求' : (inputs.stream ? '流式' : '任务模式'))
+              : inputs.mode}
             {' / '}
-            {inputs.targetFormat === 'claude'
+            {inputs.protocol === 'claude'
               ? 'Claude'
-              : inputs.targetFormat === 'responses'
+              : inputs.protocol === 'responses'
                 ? 'OpenAI Responses'
-                : 'OpenAI'}
+                : inputs.protocol === 'gemini'
+                  ? 'Gemini'
+                  : 'OpenAI'}
           </div>
         </div>
       </div>
@@ -1379,6 +2040,21 @@ export default function ModelTester() {
       >
         <div className="card" style={{ padding: 16, minHeight: 680, maxHeight: 740, overflowY: 'auto' }}>
           <h3 style={{ margin: '0 0 12px', fontSize: 15 }}>设置</h3>
+
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, fontWeight: 600 }}>
+              测试模式
+            </div>
+            <ModernSelect
+              value={inputs.mode}
+              onChange={(next) => {
+                if (!next) return;
+                updateInput('mode', next as PlaygroundMode);
+              }}
+              options={CONVERSATION_MODE_OPTIONS}
+              placeholder="请选择测试模式"
+            />
+          </div>
 
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, fontWeight: 600 }}>模型</div>
@@ -1439,21 +2115,41 @@ export default function ModelTester() {
 
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, fontWeight: 600 }}>
-              下游协议
+              协议 / 输出格式
             </div>
             <ModernSelect
-              value={inputs.targetFormat}
+              value={inputs.protocol}
               onChange={(next) => {
                 if (!next) return;
-                updateInput('targetFormat', next as TestTargetFormat);
+                updateProtocol(next as PlaygroundProtocol);
               }}
-              options={targetFormatOptions}
-              placeholder="请选择下游协议"
+              options={PROTOCOL_OPTIONS}
+              placeholder="请选择协议"
             />
             <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
-              用于模拟不同客户端接入格式（OpenAI / Claude）。
+              对话模式下可模拟 OpenAI / Responses / Claude / Gemini Native。
             </div>
           </div>
+
+          {inputs.mode === 'conversation' && (
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, fontWeight: 600 }}>
+                System Prompt
+              </div>
+              <textarea
+                value={inputs.systemPrompt}
+                onChange={(event) => updateInput('systemPrompt', event.target.value)}
+                rows={4}
+                placeholder="可选的系统提示词，会在发送时独立注入请求。"
+                style={{
+                  ...inputBaseStyle,
+                  resize: 'vertical',
+                  fontFamily: 'inherit',
+                  lineHeight: 1.5,
+                }}
+              />
+            </div>
+          )}
 
           <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ fontSize: 13, fontWeight: 600 }}>流式输出</div>
@@ -1462,11 +2158,17 @@ export default function ModelTester() {
                 type="checkbox"
                 checked={inputs.stream}
                 onChange={(event) => updateInput('stream', event.target.checked)}
-                disabled={customRequestMode}
+                disabled={customRequestMode || inputs.mode !== 'conversation'}
               />
               启用
             </label>
           </div>
+
+          {inputs.mode !== 'conversation' && (
+            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 14 }}>
+              当前模式默认走同步请求；Search / Embeddings / Images / Videos 会通过通用 proxy tester 直达对应接口。
+            </div>
+          )}
 
           <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ fontSize: 13, fontWeight: 600 }}>自定义请求体</div>
@@ -1498,19 +2200,23 @@ export default function ModelTester() {
                 <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={formatCustomBody}>
                   格式化 JSON
                 </button>
-                <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={syncMessageToBody}>
-                  消息 -&gt; 请求体
-                </button>
-                <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={syncBodyToMessage}>
-                  请求体 -&gt; 消息
-                </button>
+                {inputs.mode === 'conversation' && (
+                  <>
+                    <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={syncMessageToBody}>
+                      消息 -&gt; 请求体
+                    </button>
+                    <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={syncBodyToMessage}>
+                      请求体 -&gt; 消息
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>
 
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8, fontWeight: 600 }}>
-            采样参数
-          </div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8, fontWeight: 600 }}>
+              采样参数
+            </div>
 
           <ParameterRow
             title="温度"
@@ -1644,7 +2350,62 @@ export default function ModelTester() {
           </div>
 
           <div style={{ flex: 1, minHeight: 280, overflowY: 'auto', padding: 18, background: 'var(--color-bg)' }}>
-            {messages.length === 0 ? (
+            {inputs.mode !== 'conversation' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div style={{
+                  padding: 14,
+                  border: '1px solid var(--color-border-light)',
+                  borderRadius: 'var(--radius-md)',
+                  background: 'var(--color-bg-card)',
+                }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>
+                    {inputs.mode === 'embeddings' ? 'Embeddings 结果'
+                      : inputs.mode === 'search' ? 'Search 结果'
+                        : inputs.mode.startsWith('images') ? '图片结果'
+                          : '视频任务结果'}
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                    新模式走通用 proxy tester；结果同时会写入右侧调试面板。
+                  </div>
+                </div>
+
+                {Array.isArray((nonConversationResult as any)?.data) && (nonConversationResult as any).data.some((item: any) => item?.url || item?.b64_json) && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                    {(nonConversationResult as any).data.map((item: any, index: number) => {
+                      const imageSrc = typeof item?.url === 'string'
+                        ? item.url
+                        : (typeof item?.b64_json === 'string' ? `data:image/png;base64,${item.b64_json}` : '');
+                      if (!imageSrc) return null;
+                      return (
+                        <div key={`image-${index}`} style={{
+                          border: '1px solid var(--color-border-light)',
+                          borderRadius: 'var(--radius-md)',
+                          overflow: 'hidden',
+                          background: 'var(--color-bg-card)',
+                        }}>
+                          <img src={imageSrc} alt={`generated-${index}`} style={{ width: '100%', display: 'block' }} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <pre style={{
+                  margin: 0,
+                  padding: 14,
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid var(--color-border-light)',
+                  background: 'var(--color-bg-card)',
+                  fontSize: 12,
+                  lineHeight: 1.6,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  fontFamily: 'var(--font-mono)',
+                }}>
+                  {nonConversationResult ? formatJson(nonConversationResult) : '// 暂无结果'}
+                </pre>
+              </div>
+            ) : messages.length === 0 ? (
               <div className="empty-state" style={{ padding: '40px 0' }}>
                 <svg className="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M8 10h.01M12 14h.01M16 10h.01M9 16h6M12 3C7.03 3 3 6.582 3 11c0 2.2 1.003 4.193 2.63 5.64V21l3.376-1.847A10.76 10.76 0 0012 19c4.97 0 9-3.582 9-8s-4.03-8-9-8z" />
@@ -1820,54 +2581,151 @@ export default function ModelTester() {
               </div>
             )}
 
-            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
-              <textarea
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault();
+            {inputs.mode === 'conversation' ? (
+              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+                <textarea
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      if (sending) {
+                        void stopGenerating();
+                        return;
+                      }
+                      void send();
+                    }
+                  }}
+                  placeholder={customRequestMode
+                    ? '自定义模式下输入可选。回车发送时将优先使用右侧自定义请求体。'
+                    : '输入提示词...（回车发送，Shift+回车换行）'}
+                  rows={3}
+                  style={{ ...inputBaseStyle, resize: 'none', flex: 1 }}
+                />
+                <button
+                  onClick={() => {
+                    if (sending) {
+                      void stopGenerating();
+                      return;
+                    }
                     void send();
-                  }
-                }}
-                placeholder={customRequestMode
-                  ? '自定义模式下输入可选。回车发送提示词并同步到自定义请求体。'
-                  : '输入提示词...（回车发送，Shift+回车换行）'}
-                rows={3}
-                style={{ ...inputBaseStyle, resize: 'none', flex: 1 }}
-              />
-              <button
-                onClick={() => { void send(); }}
-                disabled={!canSend}
-                className="btn btn-primary"
-                style={{
-                  height: 78,
-                  padding: '0 20px',
-                  fontSize: 14,
-                  fontWeight: 600,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 4,
-                  minWidth: 88,
-                }}
-              >
-                {sending ? (
+                  }}
+                  disabled={sending ? false : !canSend}
+                  className="btn btn-primary"
+                  style={{
+                    height: 78,
+                    padding: '0 20px',
+                    fontSize: 14,
+                    fontWeight: 600,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 4,
+                    minWidth: 88,
+                  }}
+                >
+                  {sending ? (
+                    <>
+                      <span style={{ fontSize: 18, lineHeight: 1 }}>■</span>
+                      <span style={{ fontSize: 11 }}>停止</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                      </svg>
+                      <span style={{ fontSize: 11 }}>发送</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {inputs.mode === 'embeddings' && (
+                  <textarea
+                    value={embeddingInputText}
+                    onChange={(event) => setEmbeddingInputText(event.target.value)}
+                    rows={4}
+                    placeholder="输入 embeddings 测试文本，支持单条或多行。"
+                    style={{ ...inputBaseStyle, resize: 'vertical' }}
+                  />
+                )}
+                {inputs.mode === 'search' && (
                   <>
-                    <span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />
-                    <span style={{ fontSize: 11 }}>发送中</span>
-                  </>
-                ) : (
-                  <>
-                    <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                    </svg>
-                    <span style={{ fontSize: 11 }}>发送</span>
+                    <textarea
+                      value={searchQueryValue}
+                      onChange={(event) => setSearchQueryValue(event.target.value)}
+                      rows={3}
+                      placeholder="输入搜索查询"
+                      style={{ ...inputBaseStyle, resize: 'vertical' }}
+                    />
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 120px', gap: 10 }}>
+                      <input value={searchAllowedDomains} onChange={(event) => setSearchAllowedDomains(event.target.value)} placeholder="allowed_domains (逗号分隔)" style={inputBaseStyle} />
+                      <input value={searchBlockedDomains} onChange={(event) => setSearchBlockedDomains(event.target.value)} placeholder="blocked_domains (逗号分隔)" style={inputBaseStyle} />
+                      <input value={searchMaxResults} onChange={(event) => setSearchMaxResults(toNumber(event.target.value, 10))} type="number" min={1} max={20} style={inputBaseStyle} />
+                    </div>
                   </>
                 )}
-              </button>
-            </div>
+                {(inputs.mode === 'images.generate' || inputs.mode === 'images.edit' || inputs.mode === 'videos.create') && (
+                  <>
+                    <textarea
+                      value={assetPrompt}
+                      onChange={(event) => setAssetPrompt(event.target.value)}
+                      rows={3}
+                      placeholder={inputs.mode === 'videos.create' ? '输入视频生成提示词' : '输入图片提示词'}
+                      style={{ ...inputBaseStyle, resize: 'vertical' }}
+                    />
+                    {(inputs.mode === 'images.edit' || inputs.mode === 'videos.create') && (
+                      <div style={{ display: 'grid', gridTemplateColumns: inputs.mode === 'images.edit' ? '1fr 1fr' : '1fr', gap: 10 }}>
+                        <label style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                          <div style={{ marginBottom: 6 }}>{inputs.mode === 'images.edit' ? '原图' : '参考图'}</div>
+                          <input type="file" accept="image/*" onChange={(event) => { void handleUploadChange(event.target.files, setImageSourceFile); }} />
+                        </label>
+                        {inputs.mode === 'images.edit' && (
+                          <label style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                            <div style={{ marginBottom: 6 }}>Mask</div>
+                            <input type="file" accept="image/*" onChange={(event) => { void handleUploadChange(event.target.files, setImageMaskFile); }} />
+                          </label>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+                {inputs.mode === 'videos.inspect' && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 160px', gap: 10 }}>
+                    <input
+                      value={videoInspectId}
+                      onChange={(event) => setVideoInspectId(event.target.value)}
+                      placeholder="输入 public video id"
+                      style={inputBaseStyle}
+                    />
+                    <ModernSelect
+                      value={videoInspectAction}
+                      onChange={(next) => {
+                        if (!next) return;
+                        setVideoInspectAction(next as 'GET' | 'DELETE');
+                      }}
+                      options={[
+                        { value: 'GET', label: 'GET' },
+                        { value: 'DELETE', label: 'DELETE' },
+                      ]}
+                    />
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <button
+                    onClick={() => { void send(); }}
+                    disabled={!canSend}
+                    className="btn btn-primary"
+                    style={{ minWidth: 120, height: 42 }}
+                  >
+                    发送请求
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

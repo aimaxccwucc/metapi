@@ -8,6 +8,8 @@ import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import { clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
 import { tr } from '../i18n.js';
 import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
+import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
+import { resolveInitialConnectionSegment } from './helpers/defaultConnectionSegment.js';
 import {
   buildSiteSaveAction,
   emptySiteForm,
@@ -106,6 +108,7 @@ export default function Sites() {
     try {
       const rows = await api.getSites();
       setSites(rows || []);
+      setSelectedSiteIds((current) => current.filter((id) => (rows || []).some((site: SiteRow) => site.id === id)));
     } catch {
       toast.error('加载站点列表失败');
     } finally {
@@ -203,8 +206,7 @@ export default function Sites() {
       url: form.url.trim(),
       externalCheckinUrl: form.externalCheckinUrl.trim(),
       platform: form.platform.trim(),
-      apiKey: form.apiKey.trim(),
-      proxyUrl: form.proxyUrl.trim(),
+      useSystemProxy: !!form.useSystemProxy,
       globalWeight: Number(parsedGlobalWeight.toFixed(3)),
     };
     if (!payload.name || !payload.url) {
@@ -216,8 +218,23 @@ export default function Sites() {
     try {
       const action = buildSiteSaveAction(editor, payload);
       if (action.kind === 'add') {
-        await api.addSite(action.payload);
+        const created = await api.addSite(action.payload);
         toast.success(`站点 "${payload.name}" 已添加`);
+        const createdSiteId = Number(created?.id) || 0;
+        if (createdSiteId > 0) {
+          const createdPlatform = typeof created?.platform === 'string' && created.platform.trim()
+            ? created.platform.trim()
+            : payload.platform;
+          const initialSegment = resolveInitialConnectionSegment(createdPlatform);
+          const params = new URLSearchParams({
+            create: '1',
+            siteId: String(createdSiteId),
+          });
+          if (initialSegment === 'apikey') {
+            params.set('segment', 'apikey');
+          }
+          navigate(`/accounts?${params.toString()}`);
+        }
       } else {
         await api.updateSite(action.id, action.payload);
         toast.success(`站点 "${payload.name}" 已更新`);
@@ -396,6 +413,38 @@ export default function Sites() {
         </div>
       </div>
 
+      {selectedSiteIds.length > 0 && (
+        <div className="card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ fontSize: 13, fontWeight: 600 }}>已选 {selectedSiteIds.length} 项</span>
+          <button
+            data-testid="sites-batch-enable-system-proxy"
+            onClick={() => runBatchAction('enableSystemProxy')}
+            disabled={batchActionLoading}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+          >
+            批量开启系统代理
+          </button>
+          <button
+            onClick={() => runBatchAction('disableSystemProxy')}
+            disabled={batchActionLoading}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+          >
+            批量关闭系统代理
+          </button>
+          <button onClick={() => runBatchAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+            批量启用
+          </button>
+          <button onClick={() => runBatchAction('disable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+            批量禁用
+          </button>
+          <button onClick={() => runBatchAction('delete')} disabled={batchActionLoading} className="btn btn-link btn-link-danger">
+            批量删除
+          </button>
+        </div>
+      )}
+
       <div className="info-tip" style={{ marginBottom: 12 }}>
         站点权重说明：最终站点倍率 = 站点全局权重 × 设置页中下游 API Key 的站点倍率。它会与路由策略因子（基础权重、价值分、成本、余额、使用频次）共同作用。数值越大，该站点在同优先级下越容易被选中。建议范围 0.5-3，默认 1；长期不建议超过 5。
       </div>
@@ -514,36 +563,24 @@ export default function Sites() {
                 color: 'var(--color-text-primary)',
               }}
             />
-            <input
-              placeholder="API Key（可选）"
-              value={form.apiKey}
-              onChange={(e) => setForm((prev) => ({ ...prev, apiKey: e.target.value }))}
-              style={{
-                width: '100%',
-                padding: '10px 14px',
-                border: '1px solid var(--color-border)',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: 13,
-                outline: 'none',
-                background: 'var(--color-bg)',
-                color: 'var(--color-text-primary)',
-              }}
-            />
-            <input
-              placeholder="出站代理 URL（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）"
-              value={form.proxyUrl}
-              onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
-              style={{
-                width: '100%',
-                padding: '10px 14px',
-                border: '1px solid var(--color-border)',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: 13,
-                outline: 'none',
-                background: 'var(--color-bg)',
-                color: 'var(--color-text-primary)',
-              }}
-            />
+            <label style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '10px 14px',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 13,
+              background: 'var(--color-bg)',
+              color: 'var(--color-text-primary)',
+            }}>
+              <input
+                type="checkbox"
+                checked={form.useSystemProxy}
+                onChange={(e) => setForm((prev) => ({ ...prev, useSystemProxy: e.target.checked }))}
+              />
+              使用系统代理
+            </label>
             <input
               placeholder="站点全局权重（默认 1）"
               value={form.globalWeight}
@@ -579,6 +616,13 @@ export default function Sites() {
           <table className="data-table sites-table">
             <thead>
               <tr>
+                <th style={{ width: 44 }}>
+                  <input
+                    type="checkbox"
+                    checked={sortedSites.length > 0 && selectedSiteIds.length === sortedSites.length}
+                    onChange={(e) => toggleSelectAllVisible(e.target.checked)}
+                  />
+                </th>
                 <th>名称</th>
                 <th>外部签到站URL</th>
                 <th>总余额</th>
@@ -594,12 +638,22 @@ export default function Sites() {
               {sortedSites.map((site, i) => (
                 <tr
                   key={site.id}
+                  data-testid={`site-row-${site.id}`}
                   ref={(node) => {
                     if (node) rowRefs.current.set(site.id, node);
                     else rowRefs.current.delete(site.id);
                   }}
-                  className={`animate-slide-up stagger-${Math.min(i + 1, 5)} ${highlightSiteId === site.id ? 'row-focus-highlight' : ''}`}
+                  onClick={(event) => handleSiteRowClick(site.id, event)}
+                  className={`animate-slide-up stagger-${Math.min(i + 1, 5)} row-selectable ${selectedSiteIds.includes(site.id) ? 'row-selected' : ''} ${highlightSiteId === site.id ? 'row-focus-highlight' : ''}`.trim()}
                 >
+                  <td>
+                    <input
+                      data-testid={`site-select-${site.id}`}
+                      type="checkbox"
+                      checked={selectedSiteIds.includes(site.id)}
+                      onChange={(e) => toggleSiteSelection(site.id, e.target.checked)}
+                    />
+                  </td>
                   <td style={{ fontWeight: 600 }}>
                     <a
                       href={site.url}

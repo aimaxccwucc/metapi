@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { VChart } from '@visactor/react-vchart';
 import { InlineBrandIcon } from './BrandIcon.js';
+import { formatCompactTokenMetric } from '../numberFormat.js';
+import { useThemeLabelColor } from './useThemeLabelColor.js';
 
 type TabKey = 'spend' | 'trend' | 'calls' | 'rank';
 
@@ -55,19 +57,7 @@ function EmptyBlock() {
 
 export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('spend');
-
-  /* VChart uses Canvas — CSS variables don't work. Read the computed value. */
-  const [labelColor, setLabelColor] = useState('#9ca3af');
-  useEffect(() => {
-    const read = () => {
-      const c = getComputedStyle(document.documentElement).getPropertyValue('--color-text-secondary').trim();
-      if (c) setLabelColor(c);
-    };
-    read();
-    const obs = new MutationObserver(read);
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-    return () => obs.disconnect();
-  }, []);
+  const labelColor = useThemeLabelColor();
 
   const totals = {
     spend: toSafeNumber(data?.totals?.spend),
@@ -135,7 +125,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
         </div>
         <div className="stat-summary-card stat-summary-green">
           <div className="stat-summary-card-label">总 Tokens</div>
-          <div className="stat-summary-card-value">{Math.round(totals.tokens).toLocaleString()}</div>
+          <div className="stat-summary-card-value">{formatCompactTokenMetric(totals.tokens)}</div>
         </div>
       </div>
 

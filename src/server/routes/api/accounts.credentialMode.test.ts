@@ -122,8 +122,54 @@ describe('accounts credential mode', () => {
     expect((accounts[0]?.apiToken || '').startsWith('sk-')).toBe(true);
     expect(accounts[0]?.checkinEnabled).toBe(false);
 
+    const accountTokens = await db.select().from(schema.accountTokens).all();
+    expect(accountTokens).toHaveLength(0);
+
     const parsedExtra = JSON.parse(accounts[0]?.extraConfig || '{}') as { credentialMode?: string };
     expect(parsedExtra.credentialMode).toBe('apikey');
+  });
+
+  it('marks apikey connection healthy in account list after model discovery succeeds', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'Healthy API Key Site',
+      url: 'https://healthy-apikey.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'Wong',
+      accessToken: '',
+      apiToken: 'sk-healthy-apikey',
+      checkinEnabled: false,
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-5.4',
+      available: true,
+      latencyMs: 1200,
+      checkedAt: '2026-03-07T07:35:00.000Z',
+    }).run();
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: '/api/accounts',
+    });
+    expect(listResponse.statusCode).toBe(200);
+
+    const list = listResponse.json() as Array<{
+      id: number;
+      runtimeHealth?: { state?: string; reason?: string };
+      capabilities?: { proxyOnly?: boolean };
+    }>;
+    expect(list).toHaveLength(1);
+    expect(list[0]?.capabilities?.proxyOnly).toBe(true);
+    expect(list[0]?.runtimeHealth).toMatchObject({
+      state: 'healthy',
+      reason: '模型探测成功',
+    });
   });
 
   it('stores managed refresh token for sub2api session account', async () => {

@@ -30,7 +30,7 @@ async function flushMicrotasks() {
   });
 }
 
-describe('Accounts rebind panel focus', () => {
+describe('Accounts rebind modal', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -39,7 +39,7 @@ describe('Accounts rebind panel focus', () => {
     vi.clearAllMocks();
   });
 
-  it('highlights rebind panel when clicking rebind action', async () => {
+  it('opens centered rebind modal when clicking rebind action', async () => {
     apiMock.getAccounts.mockResolvedValue([
       {
         id: 1,
@@ -48,6 +48,7 @@ describe('Accounts rebind panel focus', () => {
         balanceUsed: 0,
         todayReward: 0,
         todaySpend: 0,
+        accessToken: 'session-token',
         status: 'expired',
         checkinEnabled: true,
         siteId: 10,
@@ -81,12 +82,14 @@ describe('Accounts rebind panel focus', () => {
       });
       await flushMicrotasks();
 
-      const panel = root.root.find((node) => (
+      const modal = root.root.find((node) => (
         node.type === 'div'
         && typeof node.props.className === 'string'
-        && node.props.className.includes('rebind-panel')
+        && node.props.className.includes('modal-content')
       ));
-      expect(String(panel.props.className)).toContain('rebind-panel-highlight');
+      expect(String(modal.props.className)).toContain('modal-content');
+      expect(JSON.stringify(root.toJSON())).toContain('重新绑定 Session Token');
+      expect(JSON.stringify(root.toJSON())).toContain('粘贴新的 Session Token');
     } finally {
       root?.unmount();
     }

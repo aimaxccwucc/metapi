@@ -187,4 +187,114 @@ describe('accounts verify-token shield detection', () => {
     });
     expect(undiciFetchMock).toHaveBeenCalled();
   });
+
+  it('falls back to needsUserId diagnosis when verifyToken hangs', async () => {
+    vi.useFakeTimers();
+    verifyTokenMock.mockImplementationOnce(() => new Promise(() => {}));
+    undiciFetchMock.mockResolvedValue({
+      text: async () => JSON.stringify({ success: false, message: 'missing New-Api-User' }),
+      headers: {
+        get: (name: string) => (name.toLowerCase() === 'content-type' ? 'application/json; charset=utf-8' : null),
+      },
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Needs User Id',
+      url: 'https://needs-user-id.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const responsePromise = app.inject({
+      method: 'POST',
+      url: '/api/accounts/verify-token',
+      payload: {
+        siteId: site.id,
+        accessToken: 'slow-session-token',
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(10_100);
+    const response = await responsePromise;
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: false,
+      needsUserId: true,
+    });
+    expect(undiciFetchMock).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('short-circuits to needsUserId before heavy verification when probe already confirms it', async () => {
+    verifyTokenMock.mockResolvedValueOnce({
+      tokenType: 'session',
+      userInfo: { username: 'should-not-run' },
+      balance: null,
+      apiToken: null,
+    });
+    undiciFetchMock.mockResolvedValue({
+      text: async () => JSON.stringify({ success: false, message: 'missing New-Api-User' }),
+      headers: {
+        get: (name: string) => (name.toLowerCase() === 'content-type' ? 'application/json; charset=utf-8' : null),
+      },
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Needs User Id Fast',
+      url: 'https://needs-user-id-fast.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts/verify-token',
+      payload: {
+        siteId: site.id,
+        accessToken: 'token-without-user-id',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: false,
+      needsUserId: true,
+    });
+    expect(verifyTokenMock).not.toHaveBeenCalled();
+  });
+
+  it('returns invalidUserId when the provided user id does not match the token', async () => {
+    verifyTokenMock.mockResolvedValueOnce({ tokenType: 'unknown' });
+    undiciFetchMock.mockResolvedValue({
+      text: async () => JSON.stringify({ success: false, message: 'user id mismatch' }),
+      headers: {
+        get: (name: string) => (name.toLowerCase() === 'content-type' ? 'application/json; charset=utf-8' : null),
+      },
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Wrong User Id',
+      url: 'https://wrong-user-id.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts/verify-token',
+      payload: {
+        siteId: site.id,
+        accessToken: 'token-with-wrong-user-id',
+        platformUserId: 2,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: false,
+      invalidUserId: true,
+    });
+    expect(response.json()).not.toMatchObject({
+      needsUserId: true,
+    });
+    expect(undiciFetchMock).toHaveBeenCalled();
+  });
 });

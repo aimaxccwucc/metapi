@@ -116,9 +116,10 @@ describe('downstreamApiKeyService', () => {
     expect(service.isModelAllowedByPolicy('gemini-2.0-flash', result.policy)).toBe(false);
   });
 
-  it('treats selected groups as additional allowed model scope (union semantics)', async () => {
+  it('treats selected groups as additional allowed exposed route scope (union semantics)', async () => {
     const claudeGroup = await db.insert(schema.tokenRoutes).values({
       modelPattern: 're:^claude-(opus|sonnet)-4-6$',
+      displayName: 'claude-4-6-group',
       enabled: true,
     }).returning().get();
 
@@ -128,8 +129,10 @@ describe('downstreamApiKeyService', () => {
       siteWeightMultipliers: {},
     };
 
-    expect(service.isModelAllowedByPolicy('claude-opus-4-6', policy)).toBe(false);
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
+    expect(service.isModelAllowedByPolicy('claude-4-6-group', policy)).toBe(false);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-4-6-group', policy)).toBe(true);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(false);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gpt-4o-mini', policy)).toBe(true);
     expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gemini-2.0-flash', policy)).toBe(false);
   });
 
@@ -149,7 +152,7 @@ describe('downstreamApiKeyService', () => {
     expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-sonnet-4-6', policy)).toBe(false);
   });
 
-  it('authorizes models by selected route display name alias', async () => {
+  it('only authorizes selected route display name alias, not models covered by group pattern', async () => {
     const aliasRoute = await db.insert(schema.tokenRoutes).values({
       modelPattern: 're:^claude-(opus|sonnet)-4-5$',
       displayName: 'claude-opus-4-6',
@@ -163,8 +166,8 @@ describe('downstreamApiKeyService', () => {
     };
 
     expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-6', policy)).toBe(true);
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-sonnet-4-5', policy)).toBe(true);
-    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-5', policy)).toBe(true);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-sonnet-4-5', policy)).toBe(false);
+    expect(await service.isModelAllowedByPolicyOrAllowedRoutes('claude-opus-4-5', policy)).toBe(false);
     expect(await service.isModelAllowedByPolicyOrAllowedRoutes('gpt-4o-mini', policy)).toBe(false);
   });
 

@@ -122,4 +122,69 @@ describe('settings database runtime config api', () => {
     expect(body.success).toBe(false);
     expect(body.message || '').toContain('SQLite');
   });
+
+  it('saves and loads ssl setting correctly', async () => {
+    const putResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/database/runtime',
+      payload: {
+        dialect: 'mysql',
+        connectionString: 'mysql://root:pass@tidb.example.com:4000/db',
+        ssl: true,
+      },
+    });
+
+    expect(putResponse.statusCode).toBe(200);
+    const putBody = putResponse.json() as {
+      success?: boolean;
+      saved?: { dialect?: string; ssl?: boolean };
+    };
+    expect(putBody.success).toBe(true);
+    expect(putBody.saved?.ssl).toBe(true);
+
+    const dbSsl = await db.select().from(schema.settings).where(eq(schema.settings.key, 'db_ssl')).get();
+    expect(dbSsl?.value).toBe(JSON.stringify(true));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/database/runtime',
+    });
+    const getBody = getResponse.json() as {
+      success?: boolean;
+      saved?: { ssl?: boolean };
+    };
+    expect(getBody.success).toBe(true);
+    expect(getBody.saved?.ssl).toBe(true);
+  });
+
+  it('defaults ssl to false when not provided', async () => {
+    const putResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/database/runtime',
+      payload: {
+        dialect: 'postgres',
+        connectionString: 'postgres://user:pass@db.example.com:5432/mydb',
+      },
+    });
+
+    expect(putResponse.statusCode).toBe(200);
+    const putBody = putResponse.json() as {
+      success?: boolean;
+      saved?: { ssl?: boolean };
+    };
+    expect(putBody.success).toBe(true);
+    expect(putBody.saved?.ssl).toBe(false);
+  });
+
+  it('includes ssl in active runtime state', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/settings/database/runtime',
+    });
+
+    const body = response.json() as {
+      active?: { ssl?: boolean };
+    };
+    expect(typeof body.active?.ssl).toBe('boolean');
+  });
 });

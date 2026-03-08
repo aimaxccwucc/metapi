@@ -279,6 +279,47 @@ describe('balanceService auto relogin', () => {
     expect(reportTokenExpiredMock).not.toHaveBeenCalled();
   });
 
+  it('skips balance refresh for api-key-only accounts without expiring them', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 10,
+          username: 'wong-key',
+          accessToken: '',
+          apiToken: 'sk-only-token',
+          balance: 5,
+          balanceUsed: 1,
+          quota: 6,
+          status: 'active',
+          extraConfig: JSON.stringify({
+            credentialMode: 'apikey',
+          }),
+        },
+        sites: {
+          id: 10,
+          name: 'wong',
+          url: 'https://wzw.pp.ua',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    const { refreshBalance } = await import('./balanceService.js');
+    const result = await refreshBalance(10);
+
+    expect(result).toEqual({
+      balance: 5,
+      used: 1,
+      quota: 6,
+      skipped: true,
+      reason: 'proxy_only',
+    });
+    expect(adapterMock.getBalance).not.toHaveBeenCalled();
+    expect(adapterMock.login).not.toHaveBeenCalled();
+    expect(reportTokenExpiredMock).not.toHaveBeenCalled();
+    expect(setAccountRuntimeHealthMock).not.toHaveBeenCalled();
+  });
+
   it('keeps degraded health when checkin is unsupported but balance refresh succeeds', async () => {
     selectAllMock.mockReturnValue([
       {

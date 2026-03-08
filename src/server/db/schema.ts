@@ -8,6 +8,7 @@ export const sites = sqliteTable('sites', {
   externalCheckinUrl: text('external_checkin_url'),
   platform: text('platform').notNull(), // 'new-api' | 'one-api' | 'veloera' | 'one-hub' | 'done-hub' | 'sub2api' | 'openai' | 'claude' | 'gemini'
   proxyUrl: text('proxy_url'),
+  useSystemProxy: integer('use_system_proxy', { mode: 'boolean' }).default(false),
   status: text('status').notNull().default('active'), // 'active' | 'disabled'
   healthStatus: text('health_status').notNull().default('unknown'), // 'alive' | 'unreachable' | 'unknown'
   healthReason: text('health_reason'),
@@ -111,6 +112,8 @@ export const tokenRoutes = sqliteTable('token_routes', {
   displayName: text('display_name'),
   displayIcon: text('display_icon'),
   modelMapping: text('model_mapping'), // JSON
+  decisionSnapshot: text('decision_snapshot'), // JSON
+  decisionRefreshedAt: text('decision_refreshed_at'),
   enabled: integer('enabled', { mode: 'boolean' }).default(true),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),
@@ -158,6 +161,7 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   completionTokens: integer('completion_tokens'),
   totalTokens: integer('total_tokens'),
   estimatedCost: real('estimated_cost'),
+  billingDetails: text('billing_details'),
   errorMessage: text('error_message'),
   retryCount: integer('retry_count').default(0),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
@@ -166,6 +170,28 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   accountCreatedIdx: index('proxy_logs_account_created_at_idx').on(table.accountId, table.createdAt),
   statusCreatedIdx: index('proxy_logs_status_created_at_idx').on(table.status, table.createdAt),
   modelActualCreatedIdx: index('proxy_logs_model_actual_created_at_idx').on(table.modelActual, table.createdAt),
+}));
+
+export const proxyVideoTasks = sqliteTable('proxy_video_tasks', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  publicId: text('public_id').notNull(),
+  upstreamVideoId: text('upstream_video_id').notNull(),
+  siteUrl: text('site_url').notNull(),
+  tokenValue: text('token_value').notNull(),
+  requestedModel: text('requested_model'),
+  actualModel: text('actual_model'),
+  channelId: integer('channel_id'),
+  accountId: integer('account_id'),
+  statusSnapshot: text('status_snapshot'),
+  upstreamResponseMeta: text('upstream_response_meta'),
+  lastUpstreamStatus: integer('last_upstream_status'),
+  lastPolledAt: text('last_polled_at'),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  publicIdUnique: uniqueIndex('proxy_video_tasks_public_id_unique').on(table.publicId),
+  upstreamVideoIdIdx: index('proxy_video_tasks_upstream_video_id_idx').on(table.upstreamVideoId),
+  createdAtIdx: index('proxy_video_tasks_created_at_idx').on(table.createdAt),
 }));
 
 export const settings = sqliteTable('settings', {

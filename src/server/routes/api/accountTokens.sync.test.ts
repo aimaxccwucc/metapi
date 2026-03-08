@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { and, eq, sql } from 'drizzle-orm';
+import { mergeAccountExtraConfig } from '../../services/accountExtraConfig.js';
 
 const getApiTokensMock = vi.fn();
 const getApiTokenMock = vi.fn();
@@ -135,6 +136,80 @@ describe('account tokens sync routes with site status', () => {
       .where(eq(schema.accountTokens.accountId, account.id))
       .all();
     expect(tokenRows.length).toBe(0);
+  });
+
+  it('rejects sync and token management for apikey connections', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active', accessToken: '' });
+    await db.update(schema.accounts)
+      .set({
+        apiToken: 'sk-proxy-only',
+        checkinEnabled: false,
+        extraConfig: mergeAccountExtraConfig(null, { credentialMode: 'apikey' }),
+      })
+      .where(eq(schema.accounts.id, account.id))
+      .run();
+
+    const syncResponse = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+    expect(syncResponse.statusCode).toBe(400);
+    expect(syncResponse.json()).toMatchObject({
+      success: false,
+      message: 'API Key 连接不支持同步账号令牌',
+    });
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/api/account-tokens',
+      payload: {
+        accountId: account.id,
+        name: 'should-fail',
+      },
+    });
+    expect(createResponse.statusCode).toBe(400);
+    expect(createResponse.json()).toMatchObject({
+      success: false,
+      message: 'API Key 连接不支持创建账号令牌',
+    });
+
+    const groupsResponse = await app.inject({
+      method: 'GET',
+      url: `/api/account-tokens/groups/${account.id}`,
+    });
+    expect(groupsResponse.statusCode).toBe(400);
+    expect(groupsResponse.json()).toMatchObject({
+      success: false,
+      message: 'API Key 连接不支持拉取账号令牌分组',
+    });
+  });
+
+  it('hides legacy mirrored tokens for apikey connections from list API', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active', accessToken: '' });
+    await db.update(schema.accounts)
+      .set({
+        apiToken: 'sk-hidden-legacy',
+        checkinEnabled: false,
+        extraConfig: mergeAccountExtraConfig(null, { credentialMode: 'apikey' }),
+      })
+      .where(eq(schema.accounts.id, account.id))
+      .run();
+
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-hidden-legacy',
+      enabled: true,
+      isDefault: true,
+    }).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/account-tokens',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual([]);
   });
 
   it('sync-all skips disabled-site accounts and syncs active-site accounts', async () => {

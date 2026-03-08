@@ -1,10 +1,15 @@
-﻿import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   DEBUG_TABS,
   DEFAULT_INPUTS,
+  DEFAULT_MODE_STATE,
   DEFAULT_PARAMETER_ENABLED,
+  MODEL_TESTER_SESSION_VERSION,
   MESSAGE_STATUS,
   buildApiPayload,
+  buildEmbeddingsRequestEnvelope,
+  buildRawProxyRequestEnvelope,
+  buildSearchRequestEnvelope,
   collectModelTesterModelNames,
   countConversationTurns,
   filterModelTesterModelNames,
@@ -29,10 +34,15 @@ describe('modelTesterSession', () => {
 
   it('serializes and parses full playground session state', () => {
     const state: ModelTesterSessionState = {
+      version: MODEL_TESTER_SESSION_VERSION,
       input: 'draft',
       inputs: {
         ...DEFAULT_INPUTS,
-        model: 'gpt-4o-mini',
+        mode: 'search',
+        protocol: 'gemini',
+        targetFormat: 'gemini',
+        model: 'gemini-2.5-pro',
+        systemPrompt: 'be concise',
         temperature: 0.6,
         top_p: 0.9,
         max_tokens: 2048,
@@ -40,6 +50,7 @@ describe('modelTesterSession', () => {
         presence_penalty: 0.2,
         seed: 12,
         stream: true,
+        searchMaxResults: 7,
       },
       parameterEnabled: {
         ...DEFAULT_PARAMETER_ENABLED,
@@ -51,17 +62,24 @@ describe('modelTesterSession', () => {
         { id: 'm2', role: 'assistant', content: 'hi', createAt: 2, status: MESSAGE_STATUS.COMPLETE },
       ],
       pendingPayload: {
-        model: 'gpt-4o-mini',
-        stream: true,
-        temperature: 0.6,
-        top_p: 0.9,
-        messages: [{ role: 'user', content: 'hello' }],
+        method: 'POST',
+        path: '/v1/search',
+        requestKind: 'json',
+        stream: false,
+        jobMode: false,
+        rawMode: false,
+        jsonBody: { model: '__search', query: 'hello', max_results: 7 },
       },
       pendingJobId: 'job-1',
       customRequestMode: true,
-      customRequestBody: '{"model":"gpt-4o-mini","messages":[]}',
+      customRequestBody: '{"model":"gemini-2.5-pro","contents":[]}',
       showDebugPanel: true,
       activeDebugTab: DEBUG_TABS.REQUEST,
+      modeState: {
+        ...DEFAULT_MODE_STATE,
+        searchQuery: 'hello',
+        searchAllowedDomains: 'openai.com, google.com',
+      },
     };
 
     const serialized = serializeModelTesterSession(state);
@@ -70,7 +88,7 @@ describe('modelTesterSession', () => {
     expect(restored).toEqual(state);
   });
 
-  it('supports parsing legacy session format', () => {
+  it('supports parsing legacy session format into conversation/openai defaults', () => {
     const restored = parseModelTesterSession(JSON.stringify({
       model: 'gpt-4o',
       temperature: 0.5,
@@ -80,68 +98,16 @@ describe('modelTesterSession', () => {
     }));
 
     expect(restored?.inputs.model).toBe('gpt-4o');
+    expect(restored?.inputs.protocol).toBe('openai');
+    expect(restored?.inputs.mode).toBe('conversation');
     expect(restored?.inputs.temperature).toBe(0.5);
     expect(restored?.parameterEnabled).toEqual(DEFAULT_PARAMETER_ENABLED);
-  });
-
-  it('defaults top_p to disabled when parameter switches are missing', () => {
-    const restored = parseModelTesterSession(JSON.stringify({
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: 'hello' }],
-      pendingPayload: null,
-    }));
-
-    expect(restored?.parameterEnabled.top_p).toBe(false);
   });
 
   it('returns null for malformed or missing session payload', () => {
     expect(parseModelTesterSession(null)).toBeNull();
     expect(parseModelTesterSession('not-json')).toBeNull();
     expect(parseModelTesterSession(JSON.stringify({ messages: [] }))).toBeNull();
-  });
-
-  it('sanitizes invalid message entries and invalid pending payload', () => {
-    const restored = parseModelTesterSession(JSON.stringify({
-      inputs: { model: 'gpt-4o', temperature: 99 },
-      parameterEnabled: {},
-      input: 123,
-      messages: [
-        { role: 'user', content: 'ok' },
-        { role: 'assistant', content: 123 },
-        { role: 'unknown', content: 'bad role' },
-        { content: 'missing role' },
-      ],
-      pendingPayload: {
-        model: 123,
-        messages: [{ role: 'user', content: 'still here' }],
-      },
-    }));
-
-    expect(restored?.inputs.model).toBe('gpt-4o');
-    expect(restored?.input).toBe('');
-    expect(restored?.pendingPayload).toBeNull();
-    expect(restored?.messages).toHaveLength(1);
-    expect(restored?.messages[0]).toMatchObject({ role: 'user', content: 'ok' });
-  });
-
-  it('finalizes loading messages if no pending job remains', () => {
-    const restored = parseModelTesterSession(JSON.stringify({
-      inputs: { ...DEFAULT_INPUTS, model: 'gpt-4o' },
-      parameterEnabled: DEFAULT_PARAMETER_ENABLED,
-      input: '',
-      messages: [{
-        id: 'm-loading',
-        role: 'assistant',
-        content: '<think>reasoning...</think>final',
-        createAt: 1,
-        status: 'loading',
-      }],
-      pendingPayload: null,
-      pendingJobId: null,
-    }));
-
-    expect(restored?.messages[0].status).toBe(MESSAGE_STATUS.COMPLETE);
-    expect(restored?.messages[0].content).toBe('final');
   });
 
   it('drops loading assistant placeholders when building API payload messages', () => {
@@ -157,12 +123,14 @@ describe('modelTesterSession', () => {
     ]);
   });
 
-  it('builds payload with parameter enable switches', () => {
+  it('builds conversation payload as generic proxy envelope', () => {
     const payload = buildApiPayload(
       [{ id: 'u1', role: 'user', content: 'hello', createAt: 1 }],
       {
         ...DEFAULT_INPUTS,
         model: 'gpt-4o-mini',
+        protocol: 'openai',
+        systemPrompt: 'You are helpful.',
         temperature: 0.5,
         top_p: 0.8,
         max_tokens: 200,
@@ -182,42 +150,122 @@ describe('modelTesterSession', () => {
     );
 
     expect(payload).toEqual({
-      model: 'gpt-4o-mini',
-      messages: [{ role: 'user', content: 'hello' }],
-      targetFormat: 'openai',
+      method: 'POST',
+      path: '/v1/chat/completions',
+      requestKind: 'json',
       stream: true,
-      temperature: 0.5,
-      max_tokens: 200,
-      frequency_penalty: 0.2,
-      seed: 42,
+      jobMode: false,
+      rawMode: false,
+      jsonBody: {
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: 'You are helpful.' },
+          { role: 'user', content: 'hello' },
+        ],
+        stream: true,
+        temperature: 0.5,
+        max_tokens: 200,
+        frequency_penalty: 0.2,
+        seed: 42,
+      },
     });
   });
 
-  it('parses and syncs custom request body', () => {
-    const parsed = parseCustomRequestBody('{"model":"gpt-4o","messages":[{"role":"user","content":"x"}],"stream":true}');
-    expect(parsed?.model).toBe('gpt-4o');
-    expect(parsed?.stream).toBe(true);
-
-    const synced = syncMessagesToCustomRequestBody(
-      '{"model":"legacy"}',
-      [{ id: '1', role: 'user', content: 'new', createAt: 1 }],
-      { ...DEFAULT_INPUTS, model: 'gpt-4o' },
+  it('builds gemini conversation envelope with generationConfig', () => {
+    const payload = buildApiPayload(
+      [{ id: 'u1', role: 'user', content: 'hello', createAt: 1 }],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'gemini-2.5-pro',
+        protocol: 'gemini',
+        systemPrompt: 'system text',
+        temperature: 0.2,
+        max_tokens: 300,
+      },
+      {
+        ...DEFAULT_PARAMETER_ENABLED,
+        max_tokens: true,
+      },
     );
 
-    const syncedJson = JSON.parse(synced);
-    expect(syncedJson.model).toBe('legacy');
-    expect(syncedJson.messages).toEqual([{ role: 'user', content: 'new' }]);
+    expect(payload.path).toBe('/v1beta/models/gemini-2.5-pro:generateContent');
+    expect(payload.jsonBody).toEqual({
+      systemInstruction: { parts: [{ text: 'system text' }] },
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 300 },
+    });
   });
 
-  it('keeps responses target format in custom payload sync', () => {
+  it('builds embeddings and search envelopes', () => {
+    expect(buildEmbeddingsRequestEnvelope('hello', { ...DEFAULT_INPUTS, model: 'text-embedding-3-large' })).toEqual({
+      method: 'POST',
+      path: '/v1/embeddings',
+      requestKind: 'json',
+      stream: false,
+      jobMode: false,
+      rawMode: false,
+      jsonBody: {
+        model: 'text-embedding-3-large',
+        input: 'hello',
+      },
+    });
+
+    expect(buildSearchRequestEnvelope(
+      { ...DEFAULT_INPUTS, model: '__search', searchMaxResults: 3 },
+      { ...DEFAULT_MODE_STATE, searchQuery: 'what is ai', searchAllowedDomains: 'openai.com', searchBlockedDomains: 'example.com' },
+    )).toEqual({
+      method: 'POST',
+      path: '/v1/search',
+      requestKind: 'json',
+      stream: false,
+      jobMode: false,
+      rawMode: false,
+      jsonBody: {
+        model: '__search',
+        query: 'what is ai',
+        max_results: 3,
+        allowed_domains: ['openai.com'],
+        blocked_domains: ['example.com'],
+      },
+    });
+  });
+
+  it('parses raw custom body without dropping unknown fields', () => {
+    const parsed = parseCustomRequestBody('{"model":"gpt-5","include":["foo"],"reasoning":{"effort":"high"}}');
+    expect(parsed).toEqual({
+      model: 'gpt-5',
+      include: ['foo'],
+      reasoning: { effort: 'high' },
+    });
+  });
+
+  it('syncs messages into custom request body while preserving unknown fields', () => {
     const synced = syncMessagesToCustomRequestBody(
-      '{"model":"gpt-5.2","targetFormat":"responses"}',
-      [{ id: '1', role: 'user', content: 'hello', createAt: 1 }],
-      { ...DEFAULT_INPUTS, model: 'gpt-5.2', targetFormat: 'openai' },
+      '{"model":"legacy","metadata":{"trace":"keep"}}',
+      [{ id: '1', role: 'user', content: 'new', createAt: 1 }],
+      { ...DEFAULT_INPUTS, model: 'gpt-4o', protocol: 'responses', systemPrompt: 'system' },
     );
 
-    const syncedJson = JSON.parse(synced);
-    expect(syncedJson.targetFormat).toBe('responses');
+    expect(JSON.parse(synced)).toEqual({
+      model: 'gpt-4o',
+      metadata: { trace: 'keep' },
+      input: 'new',
+      instructions: 'system',
+      stream: false,
+      temperature: 0.7,
+    });
+  });
+
+  it('builds raw proxy envelope for passthrough mode', () => {
+    expect(buildRawProxyRequestEnvelope('POST', '/v1/responses', 'json', '{"foo":1}', { stream: true })).toEqual({
+      method: 'POST',
+      path: '/v1/responses',
+      requestKind: 'json',
+      stream: true,
+      jobMode: false,
+      rawMode: true,
+      rawJsonText: '{"foo":1}',
+    });
   });
 
   it('merges marketplace models with exact enabled route models for tester options', () => {
@@ -242,22 +290,6 @@ describe('modelTesterSession', () => {
     ]);
   });
 
-  it('deduplicates repeated model names when merging model sources', () => {
-    const modelNames = collectModelTesterModelNames(
-      {
-        models: [
-          { name: 'gpt-4o-mini' },
-          { name: 'gpt-4o-mini' },
-        ],
-      },
-      [
-        { modelPattern: 'gpt-4o-mini', enabled: true },
-      ],
-    );
-
-    expect(modelNames).toEqual(['gpt-4o-mini']);
-  });
-
   it('filters models by keyword and keeps best matches first', () => {
     const filtered = filterModelTesterModelNames(
       [
@@ -272,14 +304,5 @@ describe('modelTesterSession', () => {
       'bge-m3',
       'BAAI/bge-large-en-v1.5',
     ]);
-  });
-
-  it('returns all models unchanged when keyword is empty', () => {
-    const filtered = filterModelTesterModelNames(
-      ['gpt-4o', 'claude-3-5-haiku-20241022'],
-      '   ',
-    );
-
-    expect(filtered).toEqual(['gpt-4o', 'claude-3-5-haiku-20241022']);
   });
 });

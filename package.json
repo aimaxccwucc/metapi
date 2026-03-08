@@ -1,7 +1,8 @@
 {
   "name": "metapi",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Meta-layer management and unified proxy for AI API aggregation platforms",
+  "main": "dist/desktop/main.js",
   "keywords": [
     "ai",
     "api-gateway",
@@ -22,14 +23,20 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"tsx watch src/server/index.ts\" \"vite\"",
+    "dev:server": "tsx scripts/dev/run-server.ts --watch",
+    "dev": "concurrently \"npm run dev:server\" \"vite\"",
+    "dev:desktop": "concurrently \"npm run dev:server\" \"vite\" \"tsc -p tsconfig.desktop.json --watch --preserveWatchOutput\" \"wait-on tcp:127.0.0.1:4000 http://127.0.0.1:5173 file:dist/desktop/main.js && cross-env METAPI_DESKTOP_DEV_SERVER_URL=http://127.0.0.1:5173 METAPI_DESKTOP_EXTERNAL_SERVER_URL=http://127.0.0.1:4000 electron dist/desktop/main.js\"",
     "build:web": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
-    "build": "npm run build:web && npm run build:server",
+    "build:desktop": "tsc -p tsconfig.desktop.json",
+    "build": "npm run build:web && npm run build:server && npm run build:desktop",
+    "dist:desktop": "npm run build && electron-builder --config electron-builder.yml --publish never",
+    "package:desktop": "electron-builder --config electron-builder.yml --publish never",
     "docs:dev": "vitepress dev docs --host 0.0.0.0 --port 4173",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs --host 0.0.0.0 --port 4173",
     "start": "node dist/server/index.js",
+    "start:desktop": "electron dist/desktop/main.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/server/db/migrate.ts",
     "smoke:db": "tsx scripts/dev/db-smoke.ts",
@@ -49,7 +56,10 @@
     "better-sqlite3": "^11.3.0",
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.36.4",
+    "electron-log": "^5.2.4",
+    "electron-updater": "^6.6.2",
     "fastify": "^5.7.4",
+    "get-port": "^7.1.0",
     "minimatch": "^10.2.4",
     "minimist": "^1.2.8",
     "mysql2": "^3.15.3",
@@ -68,8 +78,12 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "@electron/notarize": "^3.1.0",
     "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
     "drizzle-kit": "^0.28.1",
+    "electron": "^35.0.1",
+    "electron-builder": "^26.0.12",
     "mermaid": "^11.12.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -82,9 +96,15 @@
     "vite": "^6.0.3",
     "vitepress": "^1.6.4",
     "vitepress-plugin-mermaid": "^2.0.17",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "wait-on": "^8.0.3"
   },
   "overrides": {
     "minimist": "^1.2.8"
+  },
+  "author": {
+    "name": "cita-777",
+    "email": "cita-777@users.noreply.github.com",
+    "url": "https://github.com/cita-777"
   }
 }

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { calculateModelUsageCost, fallbackTokenCost, type PricingModel } from './modelPricingService.js';
+import {
+  calculateModelUsageBreakdown,
+  calculateModelUsageCost,
+  fallbackTokenCost,
+  type PricingModel,
+} from './modelPricingService.js';
 
 describe('modelPricingService', () => {
   it('calculates token-based cost from model ratio and completion ratio', () => {
@@ -92,6 +97,86 @@ describe('modelPricingService', () => {
     );
 
     expect(cost).toBe(0.004);
+  });
+
+  it('splits cache read and cache creation costs from prompt cost', () => {
+    const model: PricingModel = {
+      modelName: 'gpt-4o',
+      quotaType: 0,
+      modelRatio: 2.5,
+      completionRatio: 5,
+      cacheRatio: 0.1,
+      cacheCreationRatio: 1.25,
+      modelPrice: null,
+      enableGroups: ['default'],
+    };
+
+    const detail = calculateModelUsageBreakdown(
+      model,
+      {
+        promptTokens: 146638,
+        completionTokens: 172,
+        totalTokens: 146810,
+        cacheReadTokens: 145692,
+        cacheCreationTokens: 945,
+        promptTokensIncludeCache: true,
+      },
+      { default: 1 },
+    );
+
+    expect(detail).toMatchObject({
+      usage: {
+        billablePromptTokens: 1,
+        cacheReadTokens: 145692,
+        cacheCreationTokens: 945,
+      },
+      pricing: {
+        modelRatio: 2.5,
+        completionRatio: 5,
+        cacheRatio: 0.1,
+        cacheCreationRatio: 1.25,
+        groupRatio: 1,
+      },
+      breakdown: {
+        inputPerMillion: 5,
+        outputPerMillion: 25,
+        cacheReadPerMillion: 0.5,
+        cacheCreationPerMillion: 6.25,
+        inputCost: 0.000005,
+        outputCost: 0.0043,
+        cacheReadCost: 0.072846,
+        cacheCreationCost: 0.005906,
+        totalCost: 0.083057,
+      },
+    });
+  });
+
+  it('keeps prompt tokens intact when upstream reports cache tokens separately', () => {
+    const model: PricingModel = {
+      modelName: 'claude-sonnet',
+      quotaType: 0,
+      modelRatio: 3,
+      completionRatio: 5,
+      cacheRatio: 0.3,
+      cacheCreationRatio: 1.25,
+      modelPrice: null,
+      enableGroups: ['default'],
+    };
+
+    const cost = calculateModelUsageCost(
+      model,
+      {
+        promptTokens: 120,
+        completionTokens: 30,
+        totalTokens: 150,
+        cacheReadTokens: 1000,
+        cacheCreationTokens: 40,
+        promptTokensIncludeCache: false,
+      },
+      { default: 1 },
+    );
+
+    expect(cost).toBe(0.00372);
   });
 
   it('uses platform-specific fallback token divisor', () => {

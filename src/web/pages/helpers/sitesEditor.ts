@@ -3,8 +3,7 @@ export type SiteForm = {
   url: string;
   externalCheckinUrl: string;
   platform: string;
-  apiKey: string;
-  proxyUrl: string;
+  useSystemProxy: boolean;
   globalWeight: string;
 };
 
@@ -17,12 +16,12 @@ type SiteSaveAction =
   | { kind: 'update'; id: number; payload: SiteForm };
 
 export function emptySiteForm(): SiteForm {
-  return { name: '', url: '', externalCheckinUrl: '', platform: '', apiKey: '', proxyUrl: '', globalWeight: '1' };
+  return { name: '', url: '', externalCheckinUrl: '', platform: '', useSystemProxy: false, globalWeight: '1' };
 }
 
 export function siteFormFromSite(site: Partial<SiteForm> & {
-  proxyUrl?: string | null;
   externalCheckinUrl?: string | null;
+  useSystemProxy?: boolean | null;
   globalWeight?: number | string | null;
 }): SiteForm {
   const globalWeightRaw = Number(site.globalWeight);
@@ -32,8 +31,7 @@ export function siteFormFromSite(site: Partial<SiteForm> & {
     url: site.url ?? '',
     externalCheckinUrl: site.externalCheckinUrl ?? '',
     platform: site.platform ?? '',
-    apiKey: site.apiKey ?? '',
-    proxyUrl: site.proxyUrl ?? '',
+    useSystemProxy: !!site.useSystemProxy,
     globalWeight,
   };
 }

@@ -313,6 +313,84 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
+  it('preserves multimodal user content when converting chat to messages', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-3-7-sonnet',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'anthropic',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'describe this' },
+              { type: 'image_url', image_url: { url: 'https://example.com/cat.png' } },
+            ],
+          },
+        ],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.body.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'describe this' },
+          {
+            type: 'image',
+            cache_control: { type: 'ephemeral' },
+            source: {
+              type: 'url',
+              url: 'https://example.com/cat.png',
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('preserves multimodal user content when converting chat to responses', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-4.1',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'describe this' },
+              { type: 'image_url', image_url: { url: 'https://example.com/cat.png' } },
+            ],
+          },
+        ],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'describe this' },
+          { type: 'input_image', image_url: { url: 'https://example.com/cat.png' } },
+        ],
+      },
+    ]);
+  });
+
   it('applies global responses standardization and drops non-standard fields', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'responses',
@@ -418,5 +496,284 @@ describe('buildUpstreamEndpointRequest', () => {
 
     expect(request.headers['content-type']).toBeUndefined();
     expect(request.headers['Content-Type']).toBe('application/json');
+  });
+
+  it('preserves structured responses content blocks instead of flattening them', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {},
+      downstreamFormat: 'responses',
+      responsesOriginalBody: {
+        model: 'gpt-5.2',
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [
+              { type: 'input_text', text: 'describe this image' },
+              { type: 'input_image', image_url: 'https://example.com/cat.png' },
+              {
+                type: 'input_audio',
+                input_audio: {
+                  data: 'UklGRg==',
+                  format: 'wav',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'describe this image' },
+          { type: 'input_image', image_url: 'https://example.com/cat.png' },
+          {
+            type: 'input_audio',
+            input_audio: {
+              data: 'UklGRg==',
+              format: 'wav',
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('preserves multimodal OpenAI user content when converting to Anthropic messages', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-sonnet-4-5',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'claude',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'claude-sonnet-4-5',
+        messages: [
+          {
+            role: 'system',
+            content: 'be careful',
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'describe this image' },
+              { type: 'image_url', image_url: { url: 'https://example.com/cat.png' } },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.body.system).toBe('be careful');
+    expect(request.body.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'describe this image' },
+          {
+            type: 'image',
+            cache_control: { type: 'ephemeral' },
+            source: {
+              type: 'url',
+              url: 'https://example.com/cat.png',
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('preserves assistant reasoning blocks for Anthropic and strips cache_control from thinking blocks', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-sonnet-4-5',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'claude',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'claude-sonnet-4-5',
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'reasoning',
+                text: 'internal thinking',
+                cache_control: { type: 'ephemeral' },
+              },
+              {
+                type: 'text',
+                text: 'final answer',
+                cache_control: { type: 'ephemeral' },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'internal thinking',
+          },
+          {
+            type: 'text',
+            text: 'final answer',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('preserves multimodal OpenAI user content when converting to Responses input', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-5.2',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.2',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'describe the upload' },
+              { type: 'image_url', image_url: { url: 'https://example.com/cat.png' } },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'describe the upload' },
+          { type: 'input_image', image_url: { url: 'https://example.com/cat.png' } },
+        ],
+      },
+    ]);
+  });
+
+  it('preserves Anthropic image and tool_result blocks instead of flattening to plain text', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-opus-4-6',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'claude',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'gpt-5.2',
+        messages: [
+          {
+            role: 'system',
+            content: 'system prompt',
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'look at this' },
+              { type: 'image_url', image_url: 'https://example.com/cat.png' },
+            ],
+          },
+          {
+            role: 'assistant',
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: 'lookup',
+                  arguments: '{"topic":"cat"}',
+                },
+              },
+            ],
+          },
+          {
+            role: 'tool',
+            tool_call_id: 'call_1',
+            content: '{"ok":true}',
+          },
+          {
+            role: 'user',
+            content: 'thanks',
+          },
+        ],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.body.system).toBe('system prompt');
+    expect(request.body.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            source: {
+              type: 'url',
+              url: 'https://example.com/cat.png',
+            },
+          },
+        ],
+      },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_1',
+            name: 'lookup',
+            input: { topic: 'cat' },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'call_1',
+            content: '{"ok":true}',
+          },
+          {
+            type: 'text',
+            text: 'thanks',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      },
+    ]);
   });
 });

@@ -6,6 +6,9 @@ import { embeddingsProxyRoute } from './embeddings.js';
 import { completionsProxyRoute } from './completions.js';
 import { responsesProxyRoute } from './responses.js';
 import { imagesProxyRoute } from './images.js';
+import { searchProxyRoute } from './search.js';
+import { geminiProxyRoute } from './gemini.js';
+import { videosProxyRoute } from './videos.js';
 
 export async function proxyRoutes(app: FastifyInstance) {
   // Auth middleware for all /v1 routes
@@ -19,5 +22,8 @@ export async function proxyRoutes(app: FastifyInstance) {
   await app.register(responsesProxyRoute);
   await app.register(modelsProxyRoute);
   await app.register(embeddingsProxyRoute);
+  await app.register(searchProxyRoute);
   await app.register(imagesProxyRoute);
+  await app.register(videosProxyRoute);
+  await app.register(geminiProxyRoute);
 }

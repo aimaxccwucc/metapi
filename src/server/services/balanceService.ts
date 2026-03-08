@@ -5,6 +5,7 @@ import { appendSessionTokenRebindHint, isTokenExpiredError } from './alertRules.
 import { reportTokenExpired } from './alertService.js';
 import {
   getAutoReloginConfig,
+  getCredentialModeFromExtraConfig,
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
   resolvePlatformUserId,
@@ -13,10 +14,16 @@ import { decryptAccountPassword } from './accountCredentialService.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
-import { withExplicitProxyRequestInit } from './siteProxy.js';
+import { resolveProxyUrlForSite, withExplicitProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
+}
+
+function isApiKeyConnection(account: typeof schema.accounts.$inferSelect): boolean {
+  const explicit = getCredentialModeFromExtraConfig(account.extraConfig);
+  if (explicit && explicit !== 'auto') return explicit === 'apikey';
+  return !(account.accessToken || '').trim();
 }
 
 function shouldAttemptAutoRelogin(message?: string | null): boolean {
@@ -196,7 +203,7 @@ async function refreshSub2ApiManagedSession(params: {
   const { fetch } = await import('undici');
   let payload: unknown = null;
   try {
-    const response = await fetch(endpoint, withExplicitProxyRequestInit(params.site.proxyUrl, {
+    const response = await fetch(endpoint, withSiteRecordProxyRequestInit(params.site, {
       method: 'POST',
       headers,
       body: JSON.stringify({ refresh_token: refreshToken }),
@@ -428,6 +435,16 @@ export async function refreshBalance(accountId: number) {
   const adapter = getAdapter(site.platform);
   if (!adapter) return null;
 
+  if (isApiKeyConnection(account)) {
+    return {
+      balance: account.balance ?? 0,
+      used: account.balanceUsed ?? 0,
+      quota: account.quota ?? 0,
+      skipped: true,
+      reason: 'proxy_only',
+    };
+  }
+
   const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
   let activeAccessToken = account.accessToken;
   let activeExtraConfig = account.extraConfig;
@@ -544,7 +561,7 @@ export async function refreshBalance(accountId: number) {
         accessToken: activeAccessToken,
         platform: site.platform,
         platformUserId,
-        proxyUrl: site.proxyUrl,
+        proxyUrl: resolveProxyUrlForSite(site),
       });
       if (typeof fallbackIncome === 'number' && Number.isFinite(fallbackIncome)) {
         balanceInfo.todayIncome = fallbackIncome;

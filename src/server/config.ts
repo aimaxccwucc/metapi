@@ -1,4 +1,7 @@
 import 'dotenv/config';
+import type { FastifyServerOptions } from 'fastify';
+
+const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
 
 function parseBoolean(value: string | undefined, fallback = false): boolean {
   if (value === undefined) return fallback;
@@ -28,7 +31,13 @@ function parseDbType(value: string | undefined): 'sqlite' | 'mysql' | 'postgres'
   return 'sqlite';
 }
 
-const dataDir = process.env.DATA_DIR || './data';
+function parseListenHost(env: NodeJS.ProcessEnv): string {
+  const requestedHost = (env.HOST || '0.0.0.0').trim() || '0.0.0.0';
+  if (parseBoolean(env.METAPI_DESKTOP, false)) {
+    return '127.0.0.1';
+  }
+  return requestedHost;
+}
 
 export const config = {
   authToken: process.env.AUTH_TOKEN || 'change-me-admin-token',

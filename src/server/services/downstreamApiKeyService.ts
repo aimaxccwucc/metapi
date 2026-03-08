@@ -68,6 +68,10 @@ function maskSecret(value: string): string {
   return `${value.slice(0, 4)}****${value.slice(-4)}`;
 }
 
+function getExposedRouteName(route: { modelPattern: string; displayName: string | null }): string {
+  return (route.displayName || '').trim() || route.modelPattern.trim();
+}
+
 function normalizePositiveNumberOrNull(value: unknown): number | null {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
@@ -191,11 +195,7 @@ async function isModelMatchedByAllowedRoutes(model: string, allowedRouteIds: num
     ))
     .all();
 
-  return routes.some((route) => {
-    if (matchesDownstreamModelPattern(model, route.modelPattern)) return true;
-    const alias = (route.displayName || '').trim();
-    return !!alias && alias === model;
-  });
+  return routes.some((route) => getExposedRouteName(route) === model);
 }
 
 export async function isModelAllowedByPolicyOrAllowedRoutes(model: string, policy: DownstreamRoutingPolicy): Promise<boolean> {

@@ -1,5 +1,13 @@
 import { fetchModelPricingCatalog } from '../../services/modelPricingService.js';
-import type { DownstreamFormat } from './chatFormats.js';
+import type { DownstreamFormat } from '../../transformers/shared/normalized.js';
+import {
+  convertOpenAiBodyToResponsesBody as convertOpenAiBodyToResponsesBodyViaTransformer,
+  sanitizeResponsesBodyForProxy as sanitizeResponsesBodyForProxyViaTransformer,
+} from '../../transformers/openai/responses/conversion.js';
+import {
+  convertOpenAiBodyToAnthropicMessagesBody,
+  sanitizeAnthropicMessagesBody,
+} from '../../transformers/anthropic/messages/conversion.js';
 
 export type UpstreamEndpoint = 'chat' | 'messages' | 'responses';
 export type EndpointPreference = DownstreamFormat | 'responses';
@@ -170,660 +178,6 @@ function toFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function sanitizeMessagesBodyForAnthropic(body: Record<string, unknown>): Record<string, unknown> {
-  const sanitized: Record<string, unknown> = { ...body };
-  const hasTemperature = toFiniteNumber(sanitized.temperature) !== null;
-  const hasTopP = toFiniteNumber(sanitized.top_p) !== null;
-  // Some Anthropic-compatible upstreams reject requests carrying both fields.
-  if (hasTemperature && hasTopP) {
-    delete sanitized.top_p;
-  }
-
-  // Claude Code may send thinking.type = "adaptive". Many Anthropic-compatible
-  // upstreams only accept enabled/disabled.
-  const thinking = sanitized.thinking;
-  if (isRecord(thinking)) {
-    const rawType = asTrimmedString(thinking.type).toLowerCase();
-    if (rawType === 'adaptive') {
-      const budgetTokens = toFiniteNumber(thinking.budget_tokens);
-      if (budgetTokens !== null && budgetTokens > 0) {
-        sanitized.thinking = {
-          ...thinking,
-          type: 'enabled',
-          budget_tokens: Math.trunc(budgetTokens),
-        };
-      } else {
-        sanitized.thinking = { type: 'disabled' };
-      }
-    } else if (rawType && rawType !== 'enabled' && rawType !== 'disabled') {
-      sanitized.thinking = { type: 'disabled' };
-    }
-  }
-
-  return sanitized;
-}
-
-function normalizeContentText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((item) => {
-        if (typeof item === 'string') return item;
-        if (!isRecord(item)) return '';
-        const text = asTrimmedString(item.text ?? item.content ?? item.output_text);
-        return text;
-      })
-      .filter((item) => item.length > 0)
-      .join('\n');
-  }
-  if (isRecord(content)) {
-    const text = asTrimmedString(content.text ?? content.content ?? content.output_text);
-    return text;
-  }
-  return '';
-}
-
-function safeJsonStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '';
-  }
-}
-
-function parseJsonString(raw: string): unknown {
-  const trimmed = raw.trim();
-  if (!trimmed) return {};
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return { value: raw };
-  }
-}
-
-function normalizeOpenAiToolArguments(raw: unknown): string {
-  if (typeof raw === 'string') return raw;
-  if (raw === undefined || raw === null) return '';
-  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw);
-  if (Array.isArray(raw) || isRecord(raw)) {
-    return safeJsonStringify(raw);
-  }
-  return '';
-}
-
-function normalizeAnthropicToolInput(raw: unknown): unknown {
-  if (raw === undefined || raw === null) return {};
-  if (isRecord(raw) || Array.isArray(raw)) return raw;
-  if (typeof raw === 'string') return parseJsonString(raw);
-  if (typeof raw === 'number' || typeof raw === 'boolean') return raw;
-  return {};
-}
-
-function normalizeToolMessageContent(raw: unknown): string {
-  const contentText = normalizeContentText(raw).trim();
-  if (contentText) return contentText;
-
-  if (raw === undefined || raw === null) return '';
-  if (typeof raw === 'string') return raw;
-  if (typeof raw === 'number' || typeof raw === 'boolean') return String(raw);
-  if (Array.isArray(raw) || isRecord(raw)) return safeJsonStringify(raw);
-  return '';
-}
-
-function convertOpenAiToolsToAnthropic(rawTools: unknown): unknown {
-  if (!Array.isArray(rawTools)) return rawTools;
-
-  const converted = rawTools
-    .map((item) => {
-      if (!isRecord(item)) return null;
-
-      const type = asTrimmedString(item.type).toLowerCase();
-      if (type === 'function' && isRecord(item.function)) {
-        const fn = item.function;
-        const name = asTrimmedString(fn.name);
-        if (!name) return null;
-
-        const mapped: Record<string, unknown> = { name };
-        const description = asTrimmedString(fn.description);
-        if (description) mapped.description = description;
-        if (fn.parameters !== undefined) mapped.input_schema = fn.parameters;
-        if (item.cache_control !== undefined) mapped.cache_control = item.cache_control;
-        return mapped;
-      }
-
-      if (asTrimmedString(item.name) && item.input_schema !== undefined) {
-        return item;
-      }
-
-      return null;
-    })
-    .filter((item): item is Record<string, unknown> => !!item);
-
-  return converted.length > 0 ? converted : rawTools;
-}
-
-function convertOpenAiToolChoiceToAnthropic(rawToolChoice: unknown): unknown {
-  if (rawToolChoice === undefined) return undefined;
-
-  if (typeof rawToolChoice === 'string') {
-    const normalized = rawToolChoice.trim().toLowerCase();
-    if (normalized === 'required') return { type: 'any' };
-    if (normalized === 'none') return { type: 'none' };
-    if (normalized === 'auto') return { type: 'auto' };
-    if (normalized === 'any') return { type: 'any' };
-    return rawToolChoice;
-  }
-
-  if (!isRecord(rawToolChoice)) return rawToolChoice;
-
-  const type = asTrimmedString(rawToolChoice.type).toLowerCase();
-  if (type === 'function' && isRecord(rawToolChoice.function)) {
-    const name = asTrimmedString(rawToolChoice.function.name);
-    return name ? { type: 'tool', name } : { type: 'any' };
-  }
-
-  if (type === 'tool' || type === 'auto' || type === 'any' || type === 'none') {
-    return rawToolChoice;
-  }
-
-  return rawToolChoice;
-}
-
-function convertOpenAiToolsToResponses(rawTools: unknown): unknown {
-  if (!Array.isArray(rawTools)) return rawTools;
-
-  const converted = rawTools
-    .map((item) => {
-      if (!isRecord(item)) return null;
-
-      const type = asTrimmedString(item.type).toLowerCase();
-      if (type === 'function' && isRecord(item.function)) {
-        const fn = item.function;
-        const name = asTrimmedString(fn.name);
-        if (!name) return null;
-
-        const mapped: Record<string, unknown> = {
-          type: 'function',
-          name,
-        };
-        const description = asTrimmedString(fn.description);
-        if (description) mapped.description = description;
-        if (fn.parameters !== undefined) mapped.parameters = fn.parameters;
-        if (fn.strict !== undefined) mapped.strict = fn.strict;
-        return mapped;
-      }
-
-      if (type === 'function' && asTrimmedString(item.name)) {
-        return item;
-      }
-
-      if (type === 'image_generation') {
-        return item;
-      }
-
-      return null;
-    })
-    .filter((item): item is Record<string, unknown> => !!item);
-
-  return converted.length > 0 ? converted : rawTools;
-}
-
-function convertOpenAiToolChoiceToResponses(rawToolChoice: unknown): unknown {
-  if (rawToolChoice === undefined) return undefined;
-  if (typeof rawToolChoice === 'string') return rawToolChoice;
-  if (!isRecord(rawToolChoice)) return rawToolChoice;
-
-  const type = asTrimmedString(rawToolChoice.type).toLowerCase();
-  if (type === 'function' && isRecord(rawToolChoice.function)) {
-    const name = asTrimmedString(rawToolChoice.function.name);
-    if (!name) return 'required';
-    return { type: 'function', name };
-  }
-
-  return rawToolChoice;
-}
-
-function toResponsesInputMessageFromText(text: string): Record<string, unknown> {
-  return {
-    type: 'message',
-    role: 'user',
-    content: [{ type: 'input_text', text }],
-  };
-}
-
-function normalizeResponsesMessageItem(item: Record<string, unknown>): Record<string, unknown> {
-  const type = asTrimmedString(item.type).toLowerCase();
-  if (type === 'function_call' || type === 'function_call_output') {
-    return item;
-  }
-
-  const role = asTrimmedString(item.role).toLowerCase();
-  const textContent = normalizeContentText(item.content ?? item.text).trim();
-
-  if (type === 'message') {
-    if (!textContent) return item;
-    const normalizedRole = role || 'user';
-    const textType = normalizedRole === 'assistant' ? 'output_text' : 'input_text';
-    return {
-      ...item,
-      role: normalizedRole,
-      content: [{ type: textType, text: textContent }],
-    };
-  }
-
-  if (role) {
-    if (!textContent) return item;
-    const textType = role === 'assistant' ? 'output_text' : 'input_text';
-    return {
-      type: 'message',
-      role,
-      content: [{ type: textType, text: textContent }],
-    };
-  }
-
-  if (textContent) {
-    return toResponsesInputMessageFromText(textContent);
-  }
-
-  return item;
-}
-
-function normalizeResponsesInputForCompatibility(input: unknown): unknown {
-  if (typeof input === 'string') {
-    const normalized = input.trim();
-    if (!normalized) return input;
-    return [toResponsesInputMessageFromText(normalized)];
-  }
-
-  if (Array.isArray(input)) {
-    return input.map((item) => {
-      if (typeof item === 'string') {
-        const normalized = item.trim();
-        return normalized ? toResponsesInputMessageFromText(normalized) : item;
-      }
-      if (!isRecord(item)) return item;
-      return normalizeResponsesMessageItem(item);
-    });
-  }
-
-  if (isRecord(input)) {
-    return [normalizeResponsesMessageItem(input)];
-  }
-
-  return input;
-}
-
-function normalizeResponsesBodyForCompatibility(
-  body: Record<string, unknown>,
-): Record<string, unknown> {
-  const nextInput = normalizeResponsesInputForCompatibility(body.input);
-  if (nextInput === body.input) return body;
-  return {
-    ...body,
-    input: nextInput,
-  };
-}
-
-const ALLOWED_RESPONSES_FIELDS = new Set([
-  'model',
-  'input',
-  'instructions',
-  'max_output_tokens',
-  'max_completion_tokens',
-  'temperature',
-  'top_p',
-  'truncation',
-  'tools',
-  'tool_choice',
-  'parallel_tool_calls',
-  'metadata',
-  'reasoning',
-  'store',
-  'stream',
-  'user',
-  'previous_response_id',
-  'text',
-  'audio',
-  'include',
-  'response_format',
-  'service_tier',
-  'stop',
-  'n',
-]);
-
-function sanitizeResponsesBodyForProxy(
-  body: Record<string, unknown>,
-  modelName: string,
-  stream: boolean,
-): Record<string, unknown> {
-  let normalized = normalizeResponsesBodyForCompatibility({
-    ...body,
-    model: modelName,
-    stream,
-  });
-
-  if (normalized.input === undefined) {
-    if (Array.isArray((normalized as Record<string, unknown>).messages)) {
-      const converted = convertOpenAiBodyToResponsesBody(normalized, modelName, stream);
-      normalized = normalizeResponsesBodyForCompatibility(converted);
-    } else {
-      const prompt = asTrimmedString((normalized as Record<string, unknown>).prompt);
-      if (prompt) {
-        normalized = {
-          ...normalized,
-          input: [toResponsesInputMessageFromText(prompt)],
-        };
-      }
-    }
-  }
-
-  const sanitized: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(normalized)) {
-    if (!ALLOWED_RESPONSES_FIELDS.has(key)) continue;
-    if (key === 'max_completion_tokens') continue;
-    sanitized[key] = value;
-  }
-
-  const maxOutputTokens = toFiniteNumber(normalized.max_output_tokens);
-  if (maxOutputTokens !== null && maxOutputTokens > 0) {
-    sanitized.max_output_tokens = Math.trunc(maxOutputTokens);
-  } else {
-    const maxCompletionTokens = toFiniteNumber(normalized.max_completion_tokens);
-    if (maxCompletionTokens !== null && maxCompletionTokens > 0) {
-      sanitized.max_output_tokens = Math.trunc(maxCompletionTokens);
-    }
-  }
-
-  sanitized.model = modelName;
-  sanitized.stream = stream;
-  return sanitized;
-}
-
-function convertOpenAiBodyToMessagesBody(
-  openaiBody: Record<string, unknown>,
-  modelName: string,
-  stream: boolean,
-): Record<string, unknown> {
-  const rawMessages = Array.isArray(openaiBody.messages) ? openaiBody.messages : [];
-  const systemContents: string[] = [];
-  const messages: Array<{
-    role: 'user' | 'assistant';
-    content: string | Array<Record<string, unknown>>;
-  }> = [];
-
-  const appendAssistantMessage = (item: Record<string, unknown>) => {
-    const role = asTrimmedString(item.role).toLowerCase() || 'assistant';
-    if (role !== 'assistant') return;
-
-    const contentBlocks: Array<Record<string, unknown>> = [];
-
-    const textContent = normalizeContentText(item.content).trim();
-    if (textContent) {
-      contentBlocks.push({
-        type: 'text',
-        text: textContent,
-      });
-    }
-
-    const rawToolCalls = Array.isArray(item.tool_calls) ? item.tool_calls : [];
-    for (let index = 0; index < rawToolCalls.length; index += 1) {
-      const toolCall = rawToolCalls[index];
-      if (!isRecord(toolCall)) continue;
-      const functionPart = isRecord(toolCall.function) ? toolCall.function : {};
-
-      const id = asTrimmedString(toolCall.id) || `toolu_${Date.now()}_${index}`;
-      const name = (
-        asTrimmedString(functionPart.name)
-        || asTrimmedString(toolCall.name)
-        || `tool_${index}`
-      );
-      const input = normalizeAnthropicToolInput(functionPart.arguments ?? toolCall.arguments);
-
-      contentBlocks.push({
-        type: 'tool_use',
-        id,
-        name,
-        input,
-      });
-    }
-
-    if (contentBlocks.length <= 0) return;
-
-    if (contentBlocks.length === 1 && contentBlocks[0].type === 'text') {
-      const singleText = asTrimmedString(contentBlocks[0].text);
-      if (singleText) {
-        messages.push({
-          role: 'assistant',
-          content: singleText,
-        });
-      }
-      return;
-    }
-
-    messages.push({
-      role: 'assistant',
-      content: contentBlocks,
-    });
-  };
-
-  for (let messageIndex = 0; messageIndex < rawMessages.length; messageIndex += 1) {
-    const item = rawMessages[messageIndex];
-    if (!isRecord(item)) continue;
-    const role = asTrimmedString(item.role).toLowerCase() || 'user';
-
-    if (role === 'system' || role === 'developer') {
-      const content = normalizeContentText(item.content);
-      if (!content) continue;
-      systemContents.push(content);
-      continue;
-    }
-
-    if (role === 'tool') {
-      const toolResultBlocks: Array<Record<string, unknown>> = [];
-      let cursor = messageIndex;
-      while (cursor < rawMessages.length) {
-        const toolCandidate = rawMessages[cursor];
-        if (!isRecord(toolCandidate)) break;
-        const toolRole = asTrimmedString(toolCandidate.role).toLowerCase();
-        if (toolRole !== 'tool') break;
-
-        const toolUseId = (
-          asTrimmedString(toolCandidate.tool_call_id)
-          || asTrimmedString(toolCandidate.id)
-        );
-        const toolResultContent = normalizeToolMessageContent(toolCandidate.content).trim();
-        if (toolUseId && toolResultContent) {
-          toolResultBlocks.push({
-            type: 'tool_result',
-            tool_use_id: toolUseId,
-            content: toolResultContent,
-          });
-        }
-        cursor += 1;
-      }
-
-      if (toolResultBlocks.length > 0 && cursor < rawMessages.length) {
-        const nextItem = rawMessages[cursor];
-        if (isRecord(nextItem)) {
-          const nextRole = asTrimmedString(nextItem.role).toLowerCase();
-          if (nextRole === 'user') {
-            const userText = normalizeContentText(nextItem.content).trim();
-            if (userText) {
-              toolResultBlocks.push({
-                type: 'text',
-                text: userText,
-              });
-            }
-            cursor += 1;
-          }
-        }
-      }
-
-      if (toolResultBlocks.length > 0) {
-        messages.push({
-          role: 'user',
-          content: toolResultBlocks,
-        });
-      }
-
-      messageIndex = cursor - 1;
-      continue;
-    }
-
-    if (role === 'assistant') {
-      appendAssistantMessage(item);
-      continue;
-    }
-
-    const content = normalizeContentText(item.content).trim();
-    if (!content) continue;
-
-    messages.push({
-      role: 'user',
-      content,
-    });
-  }
-
-  const body: Record<string, unknown> = {
-    model: modelName,
-    stream,
-    messages,
-    max_tokens: toFiniteNumber(openaiBody.max_tokens) ?? 4096,
-  };
-
-  if (systemContents.length > 0) {
-    body.system = systemContents.join('\n\n');
-  }
-
-  const temperature = toFiniteNumber(openaiBody.temperature);
-  if (temperature !== null) body.temperature = temperature;
-
-  const topP = toFiniteNumber(openaiBody.top_p);
-  if (topP !== null) body.top_p = topP;
-
-  if (Array.isArray(openaiBody.stop) && openaiBody.stop.length > 0) {
-    body.stop_sequences = openaiBody.stop;
-  }
-
-  if (openaiBody.tools !== undefined) body.tools = convertOpenAiToolsToAnthropic(openaiBody.tools);
-
-  const anthropicToolChoice = convertOpenAiToolChoiceToAnthropic(openaiBody.tool_choice);
-  if (anthropicToolChoice !== undefined) body.tool_choice = anthropicToolChoice;
-
-  return body;
-}
-
-function convertOpenAiBodyToResponsesBody(
-  openaiBody: Record<string, unknown>,
-  modelName: string,
-  stream: boolean,
-): Record<string, unknown> {
-  const rawMessages = Array.isArray(openaiBody.messages) ? openaiBody.messages : [];
-  const systemContents: string[] = [];
-  const inputItems: Array<Record<string, unknown>> = [];
-
-  for (const item of rawMessages) {
-    if (!isRecord(item)) continue;
-    const role = asTrimmedString(item.role).toLowerCase() || 'user';
-
-    if (role === 'system' || role === 'developer') {
-      const content = normalizeContentText(item.content).trim();
-      if (!content) continue;
-      systemContents.push(content);
-      continue;
-    }
-
-    if (role === 'assistant') {
-      const textContent = normalizeContentText(item.content).trim();
-      if (textContent) {
-        inputItems.push({
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'output_text', text: textContent }],
-        });
-      }
-
-      const rawToolCalls = Array.isArray(item.tool_calls) ? item.tool_calls : [];
-      for (let index = 0; index < rawToolCalls.length; index += 1) {
-        const toolCall = rawToolCalls[index];
-        if (!isRecord(toolCall)) continue;
-        const functionPart = isRecord(toolCall.function) ? toolCall.function : {};
-        const callId = asTrimmedString(toolCall.id) || `call_${Date.now()}_${index}`;
-        const name = (
-          asTrimmedString(functionPart.name)
-          || asTrimmedString(toolCall.name)
-          || `tool_${index}`
-        );
-        const argumentsValue = normalizeOpenAiToolArguments(
-          functionPart.arguments ?? toolCall.arguments,
-        );
-
-        inputItems.push({
-          type: 'function_call',
-          call_id: callId,
-          name,
-          arguments: argumentsValue,
-        });
-      }
-      continue;
-    }
-
-    if (role === 'tool') {
-      const callId = asTrimmedString(item.tool_call_id) || asTrimmedString(item.id);
-      if (!callId) continue;
-
-      inputItems.push({
-        type: 'function_call_output',
-        call_id: callId,
-        output: normalizeToolMessageContent(item.content),
-      });
-      continue;
-    }
-
-    const content = normalizeContentText(item.content).trim();
-    if (!content) continue;
-    inputItems.push({
-      type: 'message',
-      role: 'user',
-      content: [{ type: 'input_text', text: content }],
-    });
-  }
-
-  const maxOutputTokens = (
-    toFiniteNumber(openaiBody.max_output_tokens)
-    ?? toFiniteNumber(openaiBody.max_completion_tokens)
-    ?? toFiniteNumber(openaiBody.max_tokens)
-    ?? 4096
-  );
-
-  const body: Record<string, unknown> = {
-    model: modelName,
-    stream,
-    max_output_tokens: maxOutputTokens,
-    input: inputItems,
-  };
-
-  if (systemContents.length > 0) {
-    body.instructions = systemContents.join('\n\n');
-  }
-
-  const temperature = toFiniteNumber(openaiBody.temperature);
-  if (temperature !== null) body.temperature = temperature;
-
-  const topP = toFiniteNumber(openaiBody.top_p);
-  if (topP !== null) body.top_p = topP;
-
-  if (openaiBody.metadata !== undefined) body.metadata = openaiBody.metadata;
-  if (openaiBody.reasoning !== undefined) body.reasoning = openaiBody.reasoning;
-  if (openaiBody.parallel_tool_calls !== undefined) body.parallel_tool_calls = openaiBody.parallel_tool_calls;
-
-  if (openaiBody.tools !== undefined) body.tools = convertOpenAiToolsToResponses(openaiBody.tools);
-
-  const responsesToolChoice = convertOpenAiToolChoiceToResponses(openaiBody.tool_choice);
-  if (responsesToolChoice !== undefined) body.tool_choice = responsesToolChoice;
-
-  return normalizeResponsesBodyForCompatibility(body);
-}
 
 function normalizeEndpointTypes(value: unknown): UpstreamEndpoint[] {
   const raw = asTrimmedString(value).toLowerCase();
@@ -955,7 +309,6 @@ export async function resolveUpstreamEndpointCandidates(
         id: context.site.id,
         url: context.site.url,
         platform: context.site.platform,
-        apiKey: context.site.apiKey ?? null,
       },
       account: {
         id: context.account.id,
@@ -1105,9 +458,9 @@ export function buildUpstreamEndpointRequest(input: {
           model: input.modelName,
           stream: input.stream,
         }
-        : convertOpenAiBodyToMessagesBody(input.openaiBody, input.modelName, input.stream)
+        : convertOpenAiBodyToAnthropicMessagesBody(input.openaiBody, input.modelName, input.stream)
     );
-    const sanitizedBody = sanitizeMessagesBodyForAnthropic(body);
+    const sanitizedBody = sanitizeAnthropicMessagesBody(body);
 
     const headers = ensureStreamAcceptHeader({
       ...commonHeaders,
@@ -1134,9 +487,9 @@ export function buildUpstreamEndpointRequest(input: {
           model: input.modelName,
           stream: input.stream,
         }
-        : convertOpenAiBodyToResponsesBody(input.openaiBody, input.modelName, input.stream)
+        : convertOpenAiBodyToResponsesBodyViaTransformer(input.openaiBody, input.modelName, input.stream)
     );
-    const body = sanitizeResponsesBodyForProxy(rawBody, input.modelName, input.stream);
+    const body = sanitizeResponsesBodyForProxyViaTransformer(rawBody, input.modelName, input.stream);
 
     const headers = ensureStreamAcceptHeader({
       ...commonHeaders,
@@ -1215,6 +568,49 @@ export function isUnsupportedMediaTypeError(status: number, upstreamErrorText?: 
   );
 }
 
+export function isEndpointDispatchDeniedError(status: number, upstreamErrorText?: string | null): boolean {
+  if (status !== 403) return false;
+  const text = (upstreamErrorText || '').toLowerCase();
+  if (!text) return false;
+
+  return (
+    /does\s+not\s+allow\s+\/v1\/[a-z0-9/_:-]+\s+dispatch/i.test(upstreamErrorText || '')
+    || text.includes('dispatch denied')
+  );
+}
+
+export function shouldPreferResponsesAfterLegacyChatError(input: {
+  status: number;
+  upstreamErrorText?: string | null;
+  downstreamFormat: EndpointPreference;
+  sitePlatform?: string | null;
+  modelName?: string | null;
+  requestedModelHint?: string | null;
+  currentEndpoint?: UpstreamEndpoint | null;
+}): boolean {
+  if (input.status < 400) return false;
+  if (input.downstreamFormat !== 'openai') return false;
+  if (input.currentEndpoint !== 'chat') return false;
+
+  const sitePlatform = normalizePlatformName(input.sitePlatform);
+  if (sitePlatform === 'openai' || sitePlatform === 'claude' || sitePlatform === 'gemini' || sitePlatform === 'anyrouter') {
+    return false;
+  }
+
+  const modelName = asTrimmedString(input.modelName);
+  const requestedModelHint = asTrimmedString(input.requestedModelHint);
+  if (isClaudeFamilyModel(modelName) || isClaudeFamilyModel(requestedModelHint)) {
+    return false;
+  }
+
+  const text = (input.upstreamErrorText || '').toLowerCase();
+  return (
+    text.includes('unsupported legacy protocol')
+    && text.includes('/v1/chat/completions')
+    && text.includes('/v1/responses')
+  );
+}
+
 export function isEndpointDowngradeError(status: number, upstreamErrorText?: string | null): boolean {
   if (status < 400) return false;
   const text = (upstreamErrorText || '').toLowerCase();
@@ -1239,6 +635,8 @@ export function isEndpointDowngradeError(status: number, upstreamErrorText?: str
   }
 
   return (
+    isEndpointDispatchDeniedError(status, upstreamErrorText)
+    || 
     text.includes('convert_request_failed')
     || text.includes('not found')
     || text.includes('unknown endpoint')
@@ -1292,3 +690,4 @@ export function isEndpointDowngradeError(status: number, upstreamErrorText?: str
     )
   );
 }
+

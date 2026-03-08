@@ -363,4 +363,81 @@ describe('/api/models/token-candidates', () => {
       },
     ]);
   });
+
+  it('does not pass deprecated site apiKey into pricing catalog lookup', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-e',
+      url: 'https://site-e.example.com',
+      platform: 'new-api',
+      status: 'active',
+      apiKey: 'sk-site-fallback',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'erin',
+      accessToken: '',
+      apiToken: null,
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-default-e',
+      tokenGroup: 'default',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'claude-opus-4-6',
+      available: true,
+    }).run();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'claude-opus-4-6',
+      available: true,
+    }).run();
+
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      models: [
+        {
+          modelName: 'claude-opus-4-6',
+          quotaType: 0,
+          modelDescription: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          ownerBy: null,
+          enableGroups: ['default', 'vip'],
+          groupPricing: {},
+        },
+      ],
+      groupRatio: { default: 1, vip: 2 },
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/models/token-candidates',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchModelPricingCatalogMock).toHaveBeenCalled();
+    expect(fetchModelPricingCatalogMock.mock.calls[0]?.[0]).toMatchObject({
+      site: {
+        id: site.id,
+        url: site.url,
+        platform: site.platform,
+      },
+      account: {
+        id: account.id,
+        accessToken: '',
+        apiToken: null,
+      },
+    });
+    expect(fetchModelPricingCatalogMock.mock.calls[0]?.[0]?.site?.apiKey).toBeUndefined();
+  });
 });

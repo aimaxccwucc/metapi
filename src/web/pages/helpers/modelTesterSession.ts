@@ -1,4 +1,4 @@
-﻿export const MESSAGE_STATUS = {
+export const MESSAGE_STATUS = {
   LOADING: 'loading',
   INCOMPLETE: 'incomplete',
   COMPLETE: 'complete',
@@ -13,8 +13,34 @@ export const DEBUG_TABS = {
 
 type MessageStatus = typeof MESSAGE_STATUS[keyof typeof MESSAGE_STATUS];
 export type DebugTab = typeof DEBUG_TABS[keyof typeof DEBUG_TABS];
-type ChatRole = 'user' | 'assistant' | 'system';
-export type TestTargetFormat = 'openai' | 'claude' | 'responses';
+
+export type PlaygroundMode =
+  | 'conversation'
+  | 'embeddings'
+  | 'search'
+  | 'images.generate'
+  | 'images.edit'
+  | 'videos.create'
+  | 'videos.inspect';
+
+export type PlaygroundProtocol = 'openai' | 'responses' | 'claude' | 'gemini';
+export type TestTargetFormat = PlaygroundProtocol;
+export type ProxyRequestKind = 'json' | 'multipart' | 'empty';
+export type ProxyRequestMethod = 'POST' | 'GET' | 'DELETE';
+export type VideoInspectAction = 'get' | 'delete';
+export type ChatRole = 'user' | 'assistant' | 'system' | 'developer' | 'tool';
+
+export type ConversationContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; url: string }
+  | { type: 'image_inline'; dataUrl: string; mimeType?: string | null }
+  | { type: 'input_audio'; dataUrl: string; mimeType?: string | null }
+  | { type: 'output_audio'; dataUrl: string; mimeType?: string | null }
+  | { type: 'tool_call'; name?: string; argumentsText?: string }
+  | { type: 'tool_result'; name?: string; outputText?: string }
+  | { type: 'function_response'; name?: string; outputText?: string }
+  | { type: 'reasoning'; text: string }
+  | { type: 'redacted_reasoning'; text: string };
 
 export type ChatMessage = {
   id: string;
@@ -26,6 +52,7 @@ export type ChatMessage = {
   isReasoningExpanded?: boolean;
   isThinkingComplete?: boolean;
   hasAutoCollapsed?: boolean;
+  parts?: ConversationContentPart[] | null;
 };
 
 type ApiChatMessage = {
@@ -33,9 +60,32 @@ type ApiChatMessage = {
   content: string;
 };
 
+export type PlaygroundMultipartFile = {
+  field: string;
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+};
+
+export type TesterProxyEnvelope = {
+  method: ProxyRequestMethod;
+  path: string;
+  requestKind: ProxyRequestKind;
+  stream: boolean;
+  jobMode: boolean;
+  rawMode: boolean;
+  jsonBody?: unknown;
+  rawJsonText?: string;
+  multipartFields?: Record<string, string>;
+  multipartFiles?: PlaygroundMultipartFile[];
+};
+
 export type ModelTesterInputs = {
+  mode: PlaygroundMode;
+  protocol: PlaygroundProtocol;
+  targetFormat: PlaygroundProtocol;
   model: string;
-  targetFormat: TestTargetFormat;
+  systemPrompt: string;
   temperature: number;
   top_p: number;
   max_tokens: number;
@@ -43,6 +93,8 @@ export type ModelTesterInputs = {
   presence_penalty: number;
   seed: number | null;
   stream: boolean;
+  searchMaxResults: number;
+  videoInspectAction: VideoInspectAction;
 };
 
 export type ParameterEnabled = {
@@ -54,37 +106,45 @@ export type ParameterEnabled = {
   seed: boolean;
 };
 
-export type TestChatPayload = {
-  model: string;
-  messages: ApiChatMessage[];
-  targetFormat?: TestTargetFormat;
-  stream?: boolean;
-  temperature?: number;
-  top_p?: number;
-  max_tokens?: number;
-  frequency_penalty?: number;
-  presence_penalty?: number;
-  seed?: number;
+export type ModelTesterModeState = {
+  embeddingsInput: string;
+  searchQuery: string;
+  searchAllowedDomains: string;
+  searchBlockedDomains: string;
+  imagesPrompt: string;
+  imagesMaskDataUrl: string;
+  videosPrompt: string;
+  videosInspectId: string;
+  extraJson: string;
 };
 
 export type ModelTesterSessionState = {
+  version?: number;
   input: string;
   inputs: ModelTesterInputs;
   parameterEnabled: ParameterEnabled;
   messages: ChatMessage[];
-  pendingPayload: TestChatPayload | null;
+  pendingPayload: TesterProxyEnvelope | null;
   pendingJobId?: string | null;
   customRequestMode: boolean;
   customRequestBody: string;
   showDebugPanel: boolean;
   activeDebugTab: DebugTab;
+  modeState: ModelTesterModeState;
 };
 
-export const MODEL_TESTER_STORAGE_KEY = 'metapi:model-tester:session:v4';
+export type TestChatPayload = TesterProxyEnvelope;
+export type ProxyTestEnvelope = TesterProxyEnvelope;
+
+export const MODEL_TESTER_SESSION_VERSION = 5;
+export const MODEL_TESTER_STORAGE_KEY = 'metapi:model-tester:session:v5';
 
 export const DEFAULT_INPUTS: ModelTesterInputs = {
-  model: '',
+  mode: 'conversation',
+  protocol: 'openai',
   targetFormat: 'openai',
+  model: '',
+  systemPrompt: '',
   temperature: 0.7,
   top_p: 1,
   max_tokens: 4096,
@@ -92,6 +152,8 @@ export const DEFAULT_INPUTS: ModelTesterInputs = {
   presence_penalty: 0,
   seed: null,
   stream: false,
+  searchMaxResults: 10,
+  videoInspectAction: 'get',
 };
 
 export const DEFAULT_PARAMETER_ENABLED: ParameterEnabled = {
@@ -103,10 +165,34 @@ export const DEFAULT_PARAMETER_ENABLED: ParameterEnabled = {
   seed: false,
 };
 
+export const DEFAULT_MODE_STATE: ModelTesterModeState = {
+  embeddingsInput: '',
+  searchQuery: '',
+  searchAllowedDomains: '',
+  searchBlockedDomains: '',
+  imagesPrompt: '',
+  imagesMaskDataUrl: '',
+  videosPrompt: '',
+  videosInspectId: '',
+  extraJson: '',
+};
+
 const THINK_TAG_REGEX = /<think>([\s\S]*?)<\/think>/g;
-const VALID_ROLES: ReadonlySet<string> = new Set(['user', 'assistant', 'system']);
+const VALID_ROLES: ReadonlySet<string> = new Set(['user', 'assistant', 'system', 'developer', 'tool']);
 const VALID_STATUS: ReadonlySet<string> = new Set(Object.values(MESSAGE_STATUS));
 const VALID_DEBUG_TABS: ReadonlySet<string> = new Set(Object.values(DEBUG_TABS));
+const VALID_MODES: ReadonlySet<string> = new Set([
+  'conversation',
+  'embeddings',
+  'search',
+  'images.generate',
+  'images.edit',
+  'videos.create',
+  'videos.inspect',
+]);
+const VALID_PROTOCOLS: ReadonlySet<string> = new Set(['openai', 'responses', 'claude', 'gemini']);
+const VALID_PROXY_METHODS: ReadonlySet<string> = new Set(['POST', 'GET', 'DELETE']);
+const VALID_REQUEST_KINDS: ReadonlySet<string> = new Set(['json', 'multipart', 'empty']);
 
 let messageCounter = 0;
 
@@ -125,11 +211,372 @@ const toNullableFiniteNumber = (value: unknown): number | null => {
   return null;
 };
 
+const sanitizeString = (value: unknown, fallback = ''): string =>
+  typeof value === 'string' ? value : fallback;
+
 const isExactModelPattern = (modelPattern: string): boolean => {
   const normalized = modelPattern.trim();
   if (!normalized) return false;
   if (normalized.toLowerCase().startsWith('re:')) return false;
   return !/[\*\?\[]/.test(normalized);
+};
+
+const splitCommaSeparated = (value: string): string[] =>
+  value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const createMessageId = (): string => {
+  messageCounter += 1;
+  return `msg-${Date.now()}-${messageCounter}`;
+};
+
+const getConversationPath = (protocol: PlaygroundProtocol, model: string): string => {
+  if (protocol === 'claude') return '/v1/messages';
+  if (protocol === 'responses') return '/v1/responses';
+  if (protocol === 'gemini') {
+    const encodedModel = encodeURIComponent(model);
+    return `/v1beta/models/${encodedModel}:generateContent`;
+  }
+  return '/v1/chat/completions';
+};
+
+const appendOptionalNumber = (target: Record<string, unknown>, key: string, enabled: boolean, value: number | null | undefined) => {
+  if (!enabled) return;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    target[key] = value;
+  }
+};
+
+const toGeminiContents = (messages: ApiChatMessage[]) =>
+  messages.map((message) => ({
+    role: message.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: message.content }],
+  }));
+
+const toOpenAiMessageContent = (message: ApiChatMessage): unknown => message.content;
+
+const toResponsesInput = (messages: ApiChatMessage[]) => {
+  if (messages.length === 1 && messages[0].role === 'user') {
+    return messages[0].content;
+  }
+  return messages.map((message) => ({
+    role: message.role === 'assistant' ? 'assistant' : 'user',
+    content: message.content,
+  }));
+};
+
+const toClaudeMessages = (messages: ApiChatMessage[]) =>
+  messages
+    .filter((message) => message.role !== 'system' && message.role !== 'developer')
+    .map((message) => ({
+      role: message.role === 'assistant' ? 'assistant' : 'user',
+      content: message.content,
+    }));
+
+const buildConversationJsonBody = (
+  messages: ChatMessage[],
+  inputs: ModelTesterInputs,
+  parameterEnabled: ParameterEnabled,
+): Record<string, unknown> => {
+  const apiMessages = toApiMessages(messages);
+  const systemPrompt = inputs.systemPrompt.trim();
+
+  if (inputs.protocol === 'responses') {
+    const body: Record<string, unknown> = {
+      model: inputs.model,
+      input: toResponsesInput(apiMessages.filter((message) => message.role !== 'system' && message.role !== 'developer')),
+      stream: inputs.stream,
+    };
+    if (systemPrompt) body.instructions = systemPrompt;
+    appendOptionalNumber(body, 'temperature', parameterEnabled.temperature, inputs.temperature);
+    appendOptionalNumber(body, 'top_p', parameterEnabled.top_p, inputs.top_p);
+    appendOptionalNumber(body, 'max_output_tokens', parameterEnabled.max_tokens, inputs.max_tokens);
+    if (parameterEnabled.seed && typeof inputs.seed === 'number') body.seed = inputs.seed;
+    return body;
+  }
+
+  if (inputs.protocol === 'claude') {
+    const body: Record<string, unknown> = {
+      model: inputs.model,
+      stream: inputs.stream,
+      messages: toClaudeMessages(apiMessages),
+      max_tokens: parameterEnabled.max_tokens ? inputs.max_tokens : DEFAULT_INPUTS.max_tokens,
+    };
+    if (systemPrompt) body.system = systemPrompt;
+    appendOptionalNumber(body, 'temperature', parameterEnabled.temperature, inputs.temperature);
+    appendOptionalNumber(body, 'top_p', parameterEnabled.top_p, inputs.top_p);
+    return body;
+  }
+
+  if (inputs.protocol === 'gemini') {
+    const body: Record<string, unknown> = {
+      contents: toGeminiContents(apiMessages.filter((message) => message.role !== 'system' && message.role !== 'developer')),
+    };
+    if (systemPrompt) {
+      body.systemInstruction = {
+        parts: [{ text: systemPrompt }],
+      };
+    }
+    const generationConfig: Record<string, unknown> = {};
+    appendOptionalNumber(generationConfig, 'temperature', parameterEnabled.temperature, inputs.temperature);
+    appendOptionalNumber(generationConfig, 'topP', parameterEnabled.top_p, inputs.top_p);
+    appendOptionalNumber(generationConfig, 'maxOutputTokens', parameterEnabled.max_tokens, inputs.max_tokens);
+    if (parameterEnabled.seed && typeof inputs.seed === 'number') generationConfig.seed = inputs.seed;
+    if (Object.keys(generationConfig).length > 0) {
+      body.generationConfig = generationConfig;
+    }
+    return body;
+  }
+
+  const openAiMessages = [
+    ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+    ...apiMessages.map((message) => ({
+      role: message.role === 'developer' ? 'system' : message.role,
+      content: toOpenAiMessageContent(message),
+    })),
+  ];
+
+  const body: Record<string, unknown> = {
+    model: inputs.model,
+    messages: openAiMessages,
+    stream: inputs.stream,
+  };
+  appendOptionalNumber(body, 'temperature', parameterEnabled.temperature, inputs.temperature);
+  appendOptionalNumber(body, 'top_p', parameterEnabled.top_p, inputs.top_p);
+  appendOptionalNumber(body, 'max_tokens', parameterEnabled.max_tokens, inputs.max_tokens);
+  appendOptionalNumber(body, 'frequency_penalty', parameterEnabled.frequency_penalty, inputs.frequency_penalty);
+  appendOptionalNumber(body, 'presence_penalty', parameterEnabled.presence_penalty, inputs.presence_penalty);
+  if (parameterEnabled.seed && typeof inputs.seed === 'number') body.seed = inputs.seed;
+  return body;
+};
+
+const parseMessage = (value: unknown, index: number): ChatMessage | null => {
+  if (!isRecord(value)) return null;
+  if (typeof value.role !== 'string' || !VALID_ROLES.has(value.role)) return null;
+  if (typeof value.content !== 'string') return null;
+
+  const parsed: ChatMessage = {
+    id: typeof value.id === 'string' && value.id.trim().length > 0
+      ? value.id
+      : `legacy-${index}-${Date.now()}`,
+    role: value.role as ChatRole,
+    content: value.content,
+    createAt: typeof value.createAt === 'number' && Number.isFinite(value.createAt)
+      ? value.createAt
+      : Date.now(),
+  };
+
+  if (typeof value.status === 'string' && VALID_STATUS.has(value.status)) {
+    parsed.status = value.status as MessageStatus;
+  }
+  if (typeof value.reasoningContent === 'string') {
+    parsed.reasoningContent = value.reasoningContent;
+  } else if (value.reasoningContent === null) {
+    parsed.reasoningContent = null;
+  }
+  if (typeof value.isReasoningExpanded === 'boolean') {
+    parsed.isReasoningExpanded = value.isReasoningExpanded;
+  }
+  if (typeof value.isThinkingComplete === 'boolean') {
+    parsed.isThinkingComplete = value.isThinkingComplete;
+  }
+  if (typeof value.hasAutoCollapsed === 'boolean') {
+    parsed.hasAutoCollapsed = value.hasAutoCollapsed;
+  }
+  if (Array.isArray(value.parts)) {
+    parsed.parts = value.parts as ConversationContentPart[];
+  }
+
+  return parsed;
+};
+
+const sanitizeMessages = (value: unknown): ChatMessage[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item, index) => parseMessage(item, index))
+    .filter((item): item is ChatMessage => item !== null);
+};
+
+const parseInputs = (value: unknown, fallbackModel = ''): ModelTesterInputs => {
+  if (!isRecord(value)) {
+    return {
+      ...DEFAULT_INPUTS,
+      model: fallbackModel,
+    };
+  }
+
+  const model = typeof value.model === 'string' && value.model.trim().length > 0
+    ? value.model
+    : fallbackModel;
+
+  const protocol = typeof value.protocol === 'string' && VALID_PROTOCOLS.has(value.protocol)
+    ? value.protocol as PlaygroundProtocol
+    : value.targetFormat === 'claude'
+      ? 'claude'
+      : value.targetFormat === 'responses'
+        ? 'responses'
+        : value.targetFormat === 'gemini'
+          ? 'gemini'
+          : DEFAULT_INPUTS.protocol;
+
+  return {
+    model,
+    mode: typeof value.mode === 'string' && VALID_MODES.has(value.mode)
+      ? value.mode as PlaygroundMode
+      : DEFAULT_INPUTS.mode,
+    protocol,
+    targetFormat: protocol,
+    systemPrompt: sanitizeString(value.systemPrompt),
+    temperature: toFiniteNumber(value.temperature, DEFAULT_INPUTS.temperature),
+    top_p: toFiniteNumber(value.top_p, DEFAULT_INPUTS.top_p),
+    max_tokens: toFiniteNumber(value.max_tokens, DEFAULT_INPUTS.max_tokens),
+    frequency_penalty: toFiniteNumber(value.frequency_penalty, DEFAULT_INPUTS.frequency_penalty),
+    presence_penalty: toFiniteNumber(value.presence_penalty, DEFAULT_INPUTS.presence_penalty),
+    seed: toNullableFiniteNumber(value.seed),
+    stream: toBoolean(value.stream, DEFAULT_INPUTS.stream),
+    searchMaxResults: Math.max(1, Math.min(20, Math.trunc(toFiniteNumber(value.searchMaxResults, DEFAULT_INPUTS.searchMaxResults)))),
+    videoInspectAction: value.videoInspectAction === 'delete' ? 'delete' : 'get',
+  };
+};
+
+const parseParameterEnabled = (value: unknown): ParameterEnabled => {
+  if (!isRecord(value)) {
+    return { ...DEFAULT_PARAMETER_ENABLED };
+  }
+
+  return {
+    temperature: toBoolean(value.temperature, DEFAULT_PARAMETER_ENABLED.temperature),
+    top_p: toBoolean(value.top_p, DEFAULT_PARAMETER_ENABLED.top_p),
+    max_tokens: toBoolean(value.max_tokens, DEFAULT_PARAMETER_ENABLED.max_tokens),
+    frequency_penalty: toBoolean(value.frequency_penalty, DEFAULT_PARAMETER_ENABLED.frequency_penalty),
+    presence_penalty: toBoolean(value.presence_penalty, DEFAULT_PARAMETER_ENABLED.presence_penalty),
+    seed: toBoolean(value.seed, DEFAULT_PARAMETER_ENABLED.seed),
+  };
+};
+
+const parseModeState = (value: unknown): ModelTesterModeState => {
+  if (!isRecord(value)) return { ...DEFAULT_MODE_STATE };
+  return {
+    embeddingsInput: sanitizeString(value.embeddingsInput),
+    searchQuery: sanitizeString(value.searchQuery),
+    searchAllowedDomains: sanitizeString(value.searchAllowedDomains),
+    searchBlockedDomains: sanitizeString(value.searchBlockedDomains),
+    imagesPrompt: sanitizeString(value.imagesPrompt),
+    imagesMaskDataUrl: sanitizeString(value.imagesMaskDataUrl),
+    videosPrompt: sanitizeString(value.videosPrompt),
+    videosInspectId: sanitizeString(value.videosInspectId),
+    extraJson: sanitizeString(value.extraJson),
+  };
+};
+
+const parseMultipartFiles = (value: unknown): PlaygroundMultipartFile[] => {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    if (
+      typeof item.field !== 'string'
+      || typeof item.name !== 'string'
+      || typeof item.mimeType !== 'string'
+      || typeof item.dataUrl !== 'string'
+    ) {
+      return [];
+    }
+    return [{
+      field: item.field,
+      name: item.name,
+      mimeType: item.mimeType,
+      dataUrl: item.dataUrl,
+    }];
+  });
+};
+
+const buildFallbackInputsFromLegacy = (value: Record<string, unknown>): ModelTesterInputs => {
+  const legacyModel = typeof value.model === 'string' ? value.model : '';
+  const inputs = parseInputs(value.inputs, legacyModel);
+
+  if (!value.inputs) {
+    inputs.protocol = value.targetFormat === 'claude'
+      ? 'claude'
+      : value.targetFormat === 'responses'
+        ? 'responses'
+        : value.targetFormat === 'gemini'
+          ? 'gemini'
+          : inputs.protocol;
+    inputs.temperature = toFiniteNumber(value.temperature, inputs.temperature);
+  }
+
+  return inputs;
+};
+
+const parsePendingPayload = (
+  value: unknown,
+  inputs: ModelTesterInputs,
+  parameterEnabled: ParameterEnabled,
+): TesterProxyEnvelope | null => {
+  if (!isRecord(value)) return null;
+
+  if (typeof value.path === 'string' && typeof value.method === 'string' && VALID_PROXY_METHODS.has(value.method)) {
+    const requestKind = typeof value.requestKind === 'string' && VALID_REQUEST_KINDS.has(value.requestKind)
+      ? value.requestKind as ProxyRequestKind
+      : 'json';
+
+    const pending: TesterProxyEnvelope = {
+      method: value.method as ProxyRequestMethod,
+      path: value.path,
+      requestKind,
+      stream: toBoolean(value.stream, false),
+      jobMode: toBoolean(value.jobMode, false),
+      rawMode: toBoolean(value.rawMode, false),
+    };
+
+    if ('jsonBody' in value) pending.jsonBody = value.jsonBody;
+    if (typeof value.rawJsonText === 'string') pending.rawJsonText = value.rawJsonText;
+    if (isRecord(value.multipartFields)) {
+      pending.multipartFields = Object.fromEntries(
+        Object.entries(value.multipartFields)
+          .filter(([, item]) => typeof item === 'string')
+          .map(([key, item]) => [key, item as string]),
+      );
+    }
+    const multipartFiles = parseMultipartFiles(value.multipartFiles);
+    if (multipartFiles.length > 0) pending.multipartFiles = multipartFiles;
+    return pending;
+  }
+
+  if (typeof value.model === 'string') {
+    const legacyMessages = sanitizeMessages(value.messages);
+    if (legacyMessages.length === 0) return null;
+    const legacyInputs: ModelTesterInputs = {
+      ...inputs,
+      model: value.model,
+      protocol: value.targetFormat === 'claude'
+        ? 'claude'
+        : value.targetFormat === 'responses'
+          ? 'responses'
+          : value.targetFormat === 'gemini'
+            ? 'gemini'
+            : inputs.protocol,
+      targetFormat: value.targetFormat === 'claude'
+        ? 'claude'
+        : value.targetFormat === 'responses'
+          ? 'responses'
+          : value.targetFormat === 'gemini'
+            ? 'gemini'
+            : inputs.targetFormat,
+      stream: toBoolean(value.stream, inputs.stream),
+      temperature: toFiniteNumber(value.temperature, inputs.temperature),
+      top_p: toFiniteNumber(value.top_p, inputs.top_p),
+      max_tokens: toFiniteNumber(value.max_tokens, inputs.max_tokens),
+      frequency_penalty: toFiniteNumber(value.frequency_penalty, inputs.frequency_penalty),
+      presence_penalty: toFiniteNumber(value.presence_penalty, inputs.presence_penalty),
+      seed: toNullableFiniteNumber(value.seed),
+    };
+    return buildConversationRequestEnvelope(legacyMessages, legacyInputs, parameterEnabled);
+  }
+
+  return null;
 };
 
 export const collectModelTesterModelNames = (
@@ -181,11 +628,6 @@ export const filterModelTesterModelNames = (models: string[], query: string): st
     .map((item) => item.name);
 };
 
-const createMessageId = (): string => {
-  messageCounter += 1;
-  return `msg-${Date.now()}-${messageCounter}`;
-};
-
 export const createMessage = (role: ChatRole, content: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({
   id: createMessageId(),
   role,
@@ -203,126 +645,11 @@ export const createLoadingAssistantMessage = (): ChatMessage =>
     hasAutoCollapsed: false,
   });
 
-const parseMessage = (value: unknown, index: number): ChatMessage | null => {
-  if (!isRecord(value)) return null;
-  if (typeof value.role !== 'string' || !VALID_ROLES.has(value.role)) return null;
-  if (typeof value.content !== 'string') return null;
-
-  const parsed: ChatMessage = {
-    id: typeof value.id === 'string' && value.id.trim().length > 0
-      ? value.id
-      : `legacy-${index}-${Date.now()}`,
-    role: value.role as ChatRole,
-    content: value.content,
-    createAt: typeof value.createAt === 'number' && Number.isFinite(value.createAt)
-      ? value.createAt
-      : Date.now(),
-  };
-
-  if (typeof value.status === 'string' && VALID_STATUS.has(value.status)) {
-    parsed.status = value.status as MessageStatus;
-  }
-  if (typeof value.reasoningContent === 'string') {
-    parsed.reasoningContent = value.reasoningContent;
-  } else if (value.reasoningContent === null) {
-    parsed.reasoningContent = null;
-  }
-  if (typeof value.isReasoningExpanded === 'boolean') {
-    parsed.isReasoningExpanded = value.isReasoningExpanded;
-  }
-  if (typeof value.isThinkingComplete === 'boolean') {
-    parsed.isThinkingComplete = value.isThinkingComplete;
-  }
-  if (typeof value.hasAutoCollapsed === 'boolean') {
-    parsed.hasAutoCollapsed = value.hasAutoCollapsed;
-  }
-
-  return parsed;
-};
-
-const sanitizeMessages = (value: unknown): ChatMessage[] => {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item, index) => parseMessage(item, index))
-    .filter((item): item is ChatMessage => item !== null);
-};
-
-const parseInputs = (value: unknown, fallbackModel = ''): ModelTesterInputs => {
-  if (!isRecord(value)) {
-    return {
-      ...DEFAULT_INPUTS,
-      model: fallbackModel,
-    };
-  }
-
-  const model = typeof value.model === 'string' && value.model.trim().length > 0
-    ? value.model
-    : fallbackModel;
-
-  return {
-    model,
-    targetFormat: value.targetFormat === 'claude'
-      ? 'claude'
-      : value.targetFormat === 'responses'
-        ? 'responses'
-        : DEFAULT_INPUTS.targetFormat,
-    temperature: toFiniteNumber(value.temperature, DEFAULT_INPUTS.temperature),
-    top_p: toFiniteNumber(value.top_p, DEFAULT_INPUTS.top_p),
-    max_tokens: toFiniteNumber(value.max_tokens, DEFAULT_INPUTS.max_tokens),
-    frequency_penalty: toFiniteNumber(value.frequency_penalty, DEFAULT_INPUTS.frequency_penalty),
-    presence_penalty: toFiniteNumber(value.presence_penalty, DEFAULT_INPUTS.presence_penalty),
-    seed: toNullableFiniteNumber(value.seed),
-    stream: toBoolean(value.stream, DEFAULT_INPUTS.stream),
-  };
-};
-
-const parseParameterEnabled = (value: unknown): ParameterEnabled => {
-  if (!isRecord(value)) {
-    return { ...DEFAULT_PARAMETER_ENABLED };
-  }
-
-  return {
-    temperature: toBoolean(value.temperature, DEFAULT_PARAMETER_ENABLED.temperature),
-    top_p: toBoolean(value.top_p, DEFAULT_PARAMETER_ENABLED.top_p),
-    max_tokens: toBoolean(value.max_tokens, DEFAULT_PARAMETER_ENABLED.max_tokens),
-    frequency_penalty: toBoolean(value.frequency_penalty, DEFAULT_PARAMETER_ENABLED.frequency_penalty),
-    presence_penalty: toBoolean(value.presence_penalty, DEFAULT_PARAMETER_ENABLED.presence_penalty),
-    seed: toBoolean(value.seed, DEFAULT_PARAMETER_ENABLED.seed),
-  };
-};
-
-const parsePendingPayload = (value: unknown): TestChatPayload | null => {
-  if (!isRecord(value)) return null;
-  if (typeof value.model !== 'string' || value.model.trim().length === 0) return null;
-
-  const payloadMessages = sanitizeMessages(value.messages).map((message) => ({
-    role: message.role,
-    content: message.content,
-  }));
-
-  if (payloadMessages.length === 0) return null;
-
-  const payload: TestChatPayload = {
-    model: value.model,
-    messages: payloadMessages,
-  };
-
-  if (value.targetFormat === 'claude' || value.targetFormat === 'openai' || value.targetFormat === 'responses') {
-    payload.targetFormat = value.targetFormat;
-  }
-  if (typeof value.stream === 'boolean') payload.stream = value.stream;
-  if (typeof value.temperature === 'number' && Number.isFinite(value.temperature)) payload.temperature = value.temperature;
-  if (typeof value.top_p === 'number' && Number.isFinite(value.top_p)) payload.top_p = value.top_p;
-  if (typeof value.max_tokens === 'number' && Number.isFinite(value.max_tokens)) payload.max_tokens = value.max_tokens;
-  if (typeof value.frequency_penalty === 'number' && Number.isFinite(value.frequency_penalty)) payload.frequency_penalty = value.frequency_penalty;
-  if (typeof value.presence_penalty === 'number' && Number.isFinite(value.presence_penalty)) payload.presence_penalty = value.presence_penalty;
-  if (typeof value.seed === 'number' && Number.isFinite(value.seed)) payload.seed = value.seed;
-
-  return payload;
-};
-
 export const serializeModelTesterSession = (state: ModelTesterSessionState): string =>
-  JSON.stringify(state);
+  JSON.stringify({
+    ...state,
+    version: MODEL_TESTER_SESSION_VERSION,
+  });
 
 export const processThinkTags = (content: string, reasoningContent = ''): { content: string; reasoningContent: string } => {
   if (!content || !content.includes('<think>')) {
@@ -389,22 +716,6 @@ export const finalizeIncompleteMessage = (message: ChatMessage): ChatMessage => 
   };
 };
 
-const buildFallbackInputsFromLegacy = (value: Record<string, unknown>): ModelTesterInputs => {
-  const legacyModel = typeof value.model === 'string' ? value.model : '';
-  const inputs = parseInputs(value.inputs, legacyModel);
-
-  if (!value.inputs) {
-    inputs.targetFormat = value.targetFormat === 'claude'
-      ? 'claude'
-      : value.targetFormat === 'responses'
-        ? 'responses'
-        : inputs.targetFormat;
-    inputs.temperature = toFiniteNumber(value.temperature, inputs.temperature);
-  }
-
-  return inputs;
-};
-
 export const parseModelTesterSession = (raw: string | null): ModelTesterSessionState | null => {
   if (typeof raw !== 'string' || raw.trim().length === 0) return null;
 
@@ -420,18 +731,23 @@ export const parseModelTesterSession = (raw: string | null): ModelTesterSessionS
   const inputs = buildFallbackInputsFromLegacy(parsed);
   if (!inputs.model) return null;
 
+  const parameterEnabled = parseParameterEnabled(parsed.parameterEnabled);
   const state: ModelTesterSessionState = {
+    version: typeof parsed.version === 'number' && Number.isFinite(parsed.version)
+      ? Math.trunc(parsed.version)
+      : MODEL_TESTER_SESSION_VERSION,
     input: typeof parsed.input === 'string' ? parsed.input : '',
     inputs,
-    parameterEnabled: parseParameterEnabled(parsed.parameterEnabled),
+    parameterEnabled,
     messages: sanitizeMessages(parsed.messages),
-    pendingPayload: parsePendingPayload(parsed.pendingPayload),
+    pendingPayload: parsePendingPayload(parsed.pendingPayload, inputs, parameterEnabled),
     customRequestMode: toBoolean(parsed.customRequestMode, false),
     customRequestBody: typeof parsed.customRequestBody === 'string' ? parsed.customRequestBody : '',
     showDebugPanel: toBoolean(parsed.showDebugPanel, false),
     activeDebugTab: typeof parsed.activeDebugTab === 'string' && VALID_DEBUG_TABS.has(parsed.activeDebugTab)
       ? parsed.activeDebugTab as DebugTab
       : DEBUG_TABS.PREVIEW,
+    modeState: parseModeState(parsed.modeState),
   };
 
   if (typeof parsed.pendingJobId === 'string' && parsed.pendingJobId.trim().length > 0) {
@@ -458,52 +774,134 @@ export const toApiMessages = (messages: ChatMessage[]): ApiChatMessage[] =>
       content: message.content,
     }));
 
+export const buildConversationRequestEnvelope = (
+  messages: ChatMessage[],
+  inputs: ModelTesterInputs,
+  parameterEnabled: ParameterEnabled,
+): TesterProxyEnvelope => ({
+  method: 'POST',
+  path: getConversationPath(inputs.protocol, inputs.model),
+  requestKind: 'json',
+  stream: inputs.stream,
+  jobMode: !inputs.stream,
+  rawMode: false,
+  jsonBody: buildConversationJsonBody(messages, inputs, parameterEnabled),
+});
+
+export const buildEmbeddingsRequestEnvelope = (
+  inputText: string,
+  inputs: ModelTesterInputs,
+): TesterProxyEnvelope => ({
+  method: 'POST',
+  path: '/v1/embeddings',
+  requestKind: 'json',
+  stream: false,
+  jobMode: false,
+  rawMode: false,
+  jsonBody: {
+    model: inputs.model,
+    input: inputText,
+  },
+});
+
+export const buildSearchRequestEnvelope = (
+  inputs: ModelTesterInputs,
+  modeState: ModelTesterModeState,
+): TesterProxyEnvelope => {
+  const jsonBody: Record<string, unknown> = {
+    model: inputs.model || '__search',
+    query: modeState.searchQuery,
+    max_results: inputs.searchMaxResults,
+  };
+  const allowedDomains = splitCommaSeparated(modeState.searchAllowedDomains);
+  const blockedDomains = splitCommaSeparated(modeState.searchBlockedDomains);
+  if (allowedDomains.length > 0) jsonBody.allowed_domains = allowedDomains;
+  if (blockedDomains.length > 0) jsonBody.blocked_domains = blockedDomains;
+  return {
+    method: 'POST',
+    path: '/v1/search',
+    requestKind: 'json',
+    stream: false,
+    jobMode: false,
+    rawMode: false,
+    jsonBody,
+  };
+};
+
+export const buildImagesGenerationsRequestEnvelope = (
+  inputs: ModelTesterInputs,
+  modeState: ModelTesterModeState,
+): TesterProxyEnvelope => ({
+  method: 'POST',
+  path: '/v1/images/generations',
+  requestKind: 'json',
+  stream: false,
+  jobMode: false,
+  rawMode: false,
+  jsonBody: {
+    model: inputs.model,
+    prompt: modeState.imagesPrompt,
+  },
+});
+
+export const buildImagesEditRequestEnvelope = (
+  inputs: ModelTesterInputs,
+  modeState: ModelTesterModeState,
+  files: PlaygroundMultipartFile[],
+): TesterProxyEnvelope => ({
+  method: 'POST',
+  path: '/v1/images/edits',
+  requestKind: 'multipart',
+  stream: false,
+  jobMode: false,
+  rawMode: false,
+  multipartFields: {
+    model: inputs.model,
+    prompt: modeState.imagesPrompt,
+  },
+  multipartFiles: files,
+});
+
+export const buildVideoCreateRequestEnvelope = (
+  inputs: ModelTesterInputs,
+  modeState: ModelTesterModeState,
+  files: PlaygroundMultipartFile[],
+): TesterProxyEnvelope => ({
+  method: 'POST',
+  path: '/v1/videos',
+  requestKind: files.length > 0 ? 'multipart' : 'json',
+  stream: false,
+  jobMode: false,
+  rawMode: false,
+  jsonBody: files.length > 0 ? undefined : { model: inputs.model, prompt: modeState.videosPrompt },
+  multipartFields: files.length > 0 ? { model: inputs.model, prompt: modeState.videosPrompt } : undefined,
+  multipartFiles: files.length > 0 ? files : undefined,
+});
+
+export const buildVideoInspectRequestEnvelope = (
+  inputs: ModelTesterInputs,
+  modeState: ModelTesterModeState,
+): TesterProxyEnvelope => ({
+  method: inputs.videoInspectAction === 'delete' ? 'DELETE' : 'GET',
+  path: `/v1/videos/${encodeURIComponent(modeState.videosInspectId.trim())}`,
+  requestKind: 'empty',
+  stream: false,
+  jobMode: false,
+  rawMode: false,
+});
+
 export const buildApiPayload = (
   messages: ChatMessage[],
   inputs: ModelTesterInputs,
   parameterEnabled: ParameterEnabled,
-): TestChatPayload => {
-  const payload: TestChatPayload = {
-    model: inputs.model,
-    messages: toApiMessages(messages),
-    targetFormat: inputs.targetFormat,
-    stream: inputs.stream,
-  };
+): TesterProxyEnvelope =>
+  buildConversationRequestEnvelope(messages, inputs, parameterEnabled);
 
-  const mapping: Array<{ key: keyof ParameterEnabled; field: keyof ModelTesterInputs }> = [
-    { key: 'temperature', field: 'temperature' },
-    { key: 'top_p', field: 'top_p' },
-    { key: 'max_tokens', field: 'max_tokens' },
-    { key: 'frequency_penalty', field: 'frequency_penalty' },
-    { key: 'presence_penalty', field: 'presence_penalty' },
-    { key: 'seed', field: 'seed' },
-  ];
-
-  for (const item of mapping) {
-    const enabled = parameterEnabled[item.key];
-    if (!enabled) continue;
-
-    const value = inputs[item.field];
-    if (item.field === 'seed') {
-      if (typeof value === 'number' && Number.isFinite(value)) {
-        payload.seed = value;
-      }
-      continue;
-    }
-
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      (payload as any)[item.field] = value;
-    }
-  }
-
-  return payload;
-};
-
-export const parseCustomRequestBody = (raw: string): TestChatPayload | null => {
+export const parseCustomRequestBody = (raw: string): Record<string, unknown> | null => {
   if (!raw.trim()) return null;
   try {
     const parsed = JSON.parse(raw);
-    return parsePendingPayload(parsed);
+    return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }
@@ -516,33 +914,128 @@ export const syncMessagesToCustomRequestBody = (
 ): string => {
   let payload: Record<string, unknown>;
   try {
-    payload = JSON.parse(currentBody || '{}');
+    const parsed = JSON.parse(currentBody || '{}');
+    payload = isRecord(parsed) ? parsed : {};
   } catch {
     payload = {};
   }
 
-  payload.model = typeof payload.model === 'string' && payload.model.trim().length > 0
-    ? payload.model
-    : inputs.model;
-  payload.targetFormat = payload.targetFormat === 'claude'
-    ? 'claude'
-    : payload.targetFormat === 'responses'
-      ? 'responses'
-      : inputs.targetFormat;
-  payload.stream = payload.stream !== undefined ? payload.stream : inputs.stream;
-  payload.messages = toApiMessages(messages);
+  const apiMessages = toApiMessages(messages);
+  const systemPrompt = inputs.systemPrompt.trim();
+  const conversationBody: Record<string, unknown> = {
+    model: inputs.model,
+    stream: payload.stream !== undefined ? payload.stream : inputs.stream,
+  };
+  if (typeof inputs.temperature === 'number' && Number.isFinite(inputs.temperature)) {
+    conversationBody.temperature = inputs.temperature;
+  }
 
-  return JSON.stringify(payload, null, 2);
+  if (inputs.protocol === 'responses') {
+    conversationBody.input = toResponsesInput(apiMessages.filter((message) => message.role !== 'system' && message.role !== 'developer'));
+    if (!('instructions' in payload) && systemPrompt) {
+      conversationBody.instructions = systemPrompt;
+    }
+  } else if (inputs.protocol === 'claude') {
+    conversationBody.messages = toClaudeMessages(apiMessages);
+    if (!('system' in payload) && systemPrompt) {
+      conversationBody.system = systemPrompt;
+    }
+  } else if (inputs.protocol === 'gemini') {
+    conversationBody.contents = toGeminiContents(apiMessages.filter((message) => message.role !== 'system' && message.role !== 'developer'));
+    if (!('systemInstruction' in payload) && systemPrompt) {
+      conversationBody.systemInstruction = { parts: [{ text: systemPrompt }] };
+    }
+  } else {
+    conversationBody.messages = [
+      ...((!('system' in payload) && systemPrompt) ? [{ role: 'system', content: systemPrompt }] : []),
+      ...apiMessages.map((message) => ({
+        role: message.role === 'developer' ? 'system' : message.role,
+        content: toOpenAiMessageContent(message),
+      })),
+    ];
+  }
+
+  return JSON.stringify({ ...payload, ...conversationBody }, null, 2);
 };
 
 export const syncCustomRequestBodyToMessages = (raw: string): ChatMessage[] | null => {
   const parsed = parseCustomRequestBody(raw);
-  if (!parsed?.messages || parsed.messages.length === 0) return null;
+  if (!parsed) return null;
 
-  return parsed.messages.map((item, index) => createMessage(item.role, item.content, {
+  const restored: Array<{ role: ChatRole; content: string }> = [];
+  const appendMessage = (role: ChatRole, content: string) => {
+    if (!content.trim()) return;
+    restored.push({ role, content });
+  };
+
+  if (typeof parsed.system === 'string') appendMessage('system', parsed.system);
+  if (typeof parsed.instructions === 'string') appendMessage('system', parsed.instructions);
+  if (isRecord(parsed.systemInstruction) && Array.isArray(parsed.systemInstruction.parts)) {
+    const systemText = parsed.systemInstruction.parts
+      .map((part) => (isRecord(part) && typeof part.text === 'string' ? part.text : ''))
+      .join('\n');
+    appendMessage('system', systemText);
+  }
+
+  if (Array.isArray(parsed.messages)) {
+    for (const item of parsed.messages) {
+      if (!isRecord(item) || typeof item.role !== 'string') continue;
+      if (typeof item.content === 'string') {
+        appendMessage(VALID_ROLES.has(item.role) ? item.role as ChatRole : 'user', item.content);
+        continue;
+      }
+      if (Array.isArray(item.content)) {
+        const text = item.content
+          .map((block) => {
+            if (isRecord(block) && typeof block.text === 'string') return block.text;
+            if (isRecord(block) && typeof block.content === 'string') return block.content;
+            return '';
+          })
+          .join('\n');
+        appendMessage(VALID_ROLES.has(item.role) ? item.role as ChatRole : 'user', text);
+      }
+    }
+  } else if (Array.isArray(parsed.input)) {
+    for (const item of parsed.input) {
+      if (!isRecord(item) || typeof item.role !== 'string') continue;
+      appendMessage(item.role === 'assistant' ? 'assistant' : 'user', sanitizeString(item.content));
+    }
+  } else if (typeof parsed.input === 'string') {
+    appendMessage('user', parsed.input);
+  } else if (Array.isArray(parsed.contents)) {
+    for (const item of parsed.contents) {
+      if (!isRecord(item)) continue;
+      const role = item.role === 'model' ? 'assistant' : 'user';
+      const text = Array.isArray(item.parts)
+        ? item.parts
+          .map((part) => (isRecord(part) && typeof part.text === 'string' ? part.text : ''))
+          .join('\n')
+        : '';
+      appendMessage(role, text);
+    }
+  }
+
+  if (restored.length === 0) return null;
+  return restored.map((item, index) => createMessage(item.role, item.content, {
     id: `custom-${index}-${Date.now()}`,
   }));
 };
+
+export const buildRawProxyRequestEnvelope = (
+  method: ProxyRequestMethod,
+  path: string,
+  requestKind: ProxyRequestKind,
+  rawJsonText: string,
+  options?: Partial<Pick<TesterProxyEnvelope, 'stream' | 'jobMode'>>,
+): TesterProxyEnvelope => ({
+  method,
+  path,
+  requestKind,
+  stream: options?.stream ?? false,
+  jobMode: options?.jobMode ?? false,
+  rawMode: true,
+  rawJsonText,
+});
 
 export const findLastLoadingAssistantIndex = (messages: ChatMessage[]): number => {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -559,3 +1052,4 @@ export const findLastLoadingAssistantIndex = (messages: ChatMessage[]): number =
 
 export const countConversationTurns = (messages: ChatMessage[]): number =>
   messages.reduce((turns, message) => turns + (message.role === 'user' ? 1 : 0), 0);
+

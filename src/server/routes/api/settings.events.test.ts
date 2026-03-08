@@ -40,6 +40,7 @@ describe('settings and auth events', () => {
 
     config.authToken = 'old-admin-token-123';
     config.proxyToken = 'sk-old-proxy-token-123';
+    config.systemProxyUrl = '';
     config.checkinCron = '0 8 * * *';
     config.balanceRefreshCron = '0 * * * *';
     config.routingFallbackUnitCost = 1;
@@ -189,6 +190,64 @@ describe('settings and auth events', () => {
     expect(getResponse.statusCode).toBe(200);
     const runtime = getResponse.json() as { routingFallbackUnitCost?: number };
     expect(runtime.routingFallbackUnitCost).toBe(0.25);
+  });
+
+  it('persists and returns system proxy url from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        systemProxyUrl: 'http://127.0.0.1:7890',
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { systemProxyUrl?: string };
+    expect(updated.systemProxyUrl).toBe('http://127.0.0.1:7890');
+    expect(config.systemProxyUrl).toBe('http://127.0.0.1:7890');
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'system_proxy_url')).get();
+    expect(saved).toBeTruthy();
+    expect(saved?.value).toBe(JSON.stringify('http://127.0.0.1:7890'));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as { systemProxyUrl?: string };
+    expect(runtime.systemProxyUrl).toBe('http://127.0.0.1:7890');
+  });
+
+  it('invalidates cached site proxy resolution when system proxy url changes', async () => {
+    await db.insert(schema.sites).values({
+      name: 'proxy-site',
+      url: 'https://proxy-site.example.com',
+      platform: 'new-api',
+      useSystemProxy: true,
+    }).run();
+
+    const { resolveSiteProxyUrlByRequestUrl } = await import('../../services/siteProxy.js');
+
+    const firstUpdate = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        systemProxyUrl: 'http://127.0.0.1:7890',
+      },
+    });
+    expect(firstUpdate.statusCode).toBe(200);
+    expect(await resolveSiteProxyUrlByRequestUrl('https://proxy-site.example.com/v1/chat/completions')).toBe('http://127.0.0.1:7890');
+
+    const secondUpdate = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        systemProxyUrl: 'http://127.0.0.1:7891',
+      },
+    });
+    expect(secondUpdate.statusCode).toBe(200);
+    expect(await resolveSiteProxyUrlByRequestUrl('https://proxy-site.example.com/v1/chat/completions')).toBe('http://127.0.0.1:7891');
   });
 
   it('rejects allowlist update that does not include current request IP', async () => {

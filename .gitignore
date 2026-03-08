@@ -1,13 +1,25 @@
 node_modules/
 dist/
+release/
 data/*
 !data/.gitkeep
 .env
 *.log
+*.tar.gz
 logs/
 tmp/*
 !tmp/.gitkeep
+
+# Local desktop/debug artifacts
+/.tmp-*
+/main.js
+/NUL
+
 .DS_Store
 Thumbs.db
 docker/data/
 docker/.env
+
+# Local planning docs
+docs/plan/
+docs/plans/

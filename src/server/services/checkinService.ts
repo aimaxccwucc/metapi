@@ -15,6 +15,7 @@ import {
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
+import { formatUtcSqlDateTime } from './localTimeService.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
 const CHECKIN_TRANSIENT_RETRY_DELAYS_MS = process.env.NODE_ENV === 'test'
@@ -250,6 +251,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   const site = rows[0].sites;
 
   if (isSiteDisabled(site.status)) {
+    const createdAt = formatUtcSqlDateTime(new Date());
     setAccountRuntimeHealth(account.id, {
       state: 'disabled',
       reason: '\u7ad9\u70b9\u5df2\u7981\u7528',
@@ -259,7 +261,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       accountId: account.id,
       status: 'skipped',
       message: 'site disabled',
-      createdAt: new Date().toISOString(),
+      createdAt,
     }).run();
 
     if (!options?.skipEvent) {
@@ -270,7 +272,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
         level: 'info',
         relatedId: accountId,
         relatedType: 'account',
-        createdAt: new Date().toISOString(),
+        createdAt,
       }).run();
     }
 
@@ -398,12 +400,13 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     }
   }
 
+  const createdAt = formatUtcSqlDateTime(new Date());
   await db.insert(schema.checkinLogs).values({
     accountId: account.id,
     status: normalizedStatus,
     message: logMessage,
     reward: logReward,
-    createdAt: new Date().toISOString(),
+    createdAt,
   }).run();
 
   if (!options?.skipEvent) {
@@ -416,7 +419,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       level: effectiveSuccess ? 'info' : 'error',
       relatedId: accountId,
       relatedType: 'account',
-      createdAt: new Date().toISOString(),
+      createdAt,
     }).run();
   }
 

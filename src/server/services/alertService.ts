@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { sendNotification } from './notifyService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { appendSessionTokenRebindHint } from './alertRules.js';
+import { formatUtcSqlDateTime } from './localTimeService.js';
 
 export async function reportTokenExpired(params: {
   accountId: number;
@@ -14,6 +15,7 @@ export async function reportTokenExpired(params: {
   const siteLabel = params.siteName || 'unknown-site';
   const detailText = params.detail ? appendSessionTokenRebindHint(params.detail) : '';
   const detail = detailText ? ` (${detailText})` : '';
+  const createdAt = formatUtcSqlDateTime(new Date());
 
   await db.insert(schema.events).values({
     type: 'token',
@@ -22,7 +24,7 @@ export async function reportTokenExpired(params: {
     level: 'error',
     relatedId: params.accountId,
     relatedType: 'account',
-    createdAt: new Date().toISOString(),
+    createdAt,
   }).run();
 
   await db.update(schema.accounts).set({
@@ -44,13 +46,14 @@ export async function reportTokenExpired(params: {
 }
 
 export async function reportProxyAllFailed(params: { model: string; reason: string }) {
+  const createdAt = formatUtcSqlDateTime(new Date());
   await db.insert(schema.events).values({
     type: 'proxy',
     title: '代理全部失败',
     message: `模型=${params.model}, 原因=${params.reason}`,
     level: 'error',
     relatedType: 'route',
-    createdAt: new Date().toISOString(),
+    createdAt,
   }).run();
 
   await sendNotification(

@@ -38,11 +38,18 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Upload built dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: metapi-dist-${{ github.sha }}
+          path: dist
+          if-no-files-found: error
+
   build-packages:
-    name: Build Package (${{ matrix.os }})
+    name: Build Desktop Package (${{ matrix.os }})
     needs: verify
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -58,73 +65,166 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Restore Electron cache (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/.cache/electron
+            ${{ runner.temp }}/.cache/electron-builder
+            ${{ env.LOCALAPPDATA }}\electron\Cache
+            ${{ env.LOCALAPPDATA }}\electron-builder\Cache
+          key: electron-cache-${{ runner.os }}-${{ hashFiles('package-lock.json', 'package.json', 'electron-builder.yml') }}
+          restore-keys: |
+            electron-cache-${{ runner.os }}-
+
+      - name: Restore Electron cache (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/.cache/electron
+            ${{ runner.temp }}/.cache/electron-builder
+            ${{ runner.temp }}/.cache/appimage-tools
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-cache-${{ runner.os }}-${{ hashFiles('package-lock.json', 'package.json', 'electron-builder.yml') }}
+          restore-keys: |
+            electron-cache-${{ runner.os }}-
+
+      - name: Restore Electron cache (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/.cache/electron
+            ${{ runner.temp }}/.cache/electron-builder
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: electron-cache-${{ runner.os }}-${{ hashFiles('package-lock.json', 'package.json', 'electron-builder.yml') }}
+          restore-keys: |
+            electron-cache-${{ runner.os }}-
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
+      - name: Download built dist
+        uses: actions/download-artifact@v4
+        with:
+          name: metapi-dist-${{ github.sha }}
+          path: dist
 
-      - name: Prune dev dependencies
-        run: npm prune --omit=dev
-
-      - name: Assemble archive (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euxo pipefail
-          ASSET_OS="$(echo "${RUNNER_OS}" | tr '[:upper:]' '[:lower:]')"
-          ASSET_ARCH="$(echo "${RUNNER_ARCH}" | tr '[:upper:]' '[:lower:]')"
-          ASSET_NAME="metapi-${GITHUB_REF_NAME}-${ASSET_OS}-${ASSET_ARCH}.tar.gz"
-
-          PACKAGE_DIR="release/metapi"
-          mkdir -p "$PACKAGE_DIR"
-
-          cp -R dist node_modules drizzle "$PACKAGE_DIR"/
-          cp package.json "$PACKAGE_DIR"/
-          [ -f .env.example ] && cp .env.example "$PACKAGE_DIR"/
-          [ -f LICENSE ] && cp LICENSE "$PACKAGE_DIR"/
-          cp scripts/release/start.sh "$PACKAGE_DIR"/start.sh
-          chmod +x "$PACKAGE_DIR"/start.sh
-
-          tar -czf "release/${ASSET_NAME}" -C release metapi
-          echo "ASSET_NAME=${ASSET_NAME}" >> "$GITHUB_ENV"
-
-      - name: Assemble archive (Windows)
+      - name: Build desktop artifacts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          npm_config_cache: ${{ runner.temp }}/.npm
+          ELECTRON_CACHE: ${{ runner.temp }}/.cache/electron
+          ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/.cache/electron-builder
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+          npm_config_electron_builder_binaries_mirror: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+          WIN_CSC_LINK_INPUT: ${{ secrets.CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD_INPUT: ${{ secrets.CSC_KEY_PASSWORD }}
         run: |
-          $assetOs = $env:RUNNER_OS.ToLower()
-          $assetArch = $env:RUNNER_ARCH.ToLower()
-          $assetName = "metapi-$env:GITHUB_REF_NAME-$assetOs-$assetArch.zip"
+          if ($env:WIN_CSC_LINK_INPUT) { $env:WIN_CSC_LINK = $env:WIN_CSC_LINK_INPUT }
+          if ($env:WIN_CSC_KEY_PASSWORD_INPUT) { $env:WIN_CSC_KEY_PASSWORD = $env:WIN_CSC_KEY_PASSWORD_INPUT }
+          for ($attempt = 1; $attempt -le 2; $attempt++) {
+            Write-Host "Desktop build attempt $attempt/2"
+            npm run package:desktop
+            if ($LASTEXITCODE -eq 0) {
+              break
+            }
+            if ($attempt -eq 2) {
+              exit $LASTEXITCODE
+            }
+            Start-Sleep -Seconds 90
+          }
 
-          $packageDir = "release\\metapi"
-          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
-
-          Copy-Item -Recurse -Force dist $packageDir
-          Copy-Item -Recurse -Force node_modules $packageDir
-          Copy-Item -Recurse -Force drizzle $packageDir
-          Copy-Item -Force package.json $packageDir
-          if (Test-Path ".env.example") { Copy-Item -Force .env.example $packageDir }
-          if (Test-Path "LICENSE") { Copy-Item -Force LICENSE $packageDir }
-          Copy-Item -Force scripts\\release\\start.bat "$packageDir\\start.bat"
-
-          Compress-Archive -Path $packageDir -DestinationPath "release\\$assetName" -Force
-          "ASSET_NAME=$assetName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Upload package (Unix)
-        if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: metapi-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}
-          path: release/*.tar.gz
-          if-no-files-found: error
-
-      - name: Upload package (Windows)
+      - name: Smoke test packaged native modules (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ELECTRON_RUN_AS_NODE: 1
+        run: |
+          $appRoot = Join-Path $PWD 'release\win-unpacked\resources\app'
+          $exePath = Join-Path $PWD 'release\win-unpacked\Metapi.exe'
+          Push-Location $appRoot
+          try {
+            & $exePath -e "require('./node_modules/better-sqlite3'); console.log('better-sqlite3 ok')"
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Build desktop artifacts (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          npm_config_cache: ${{ runner.temp }}/.npm
+          ELECTRON_CACHE: ${{ runner.temp }}/.cache/electron
+          ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/.cache/electron-builder
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+          npm_config_electron_builder_binaries_mirror: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            echo "Desktop build attempt ${attempt}/2"
+            if npm run package:desktop; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              exit 1
+            fi
+            sleep 90
+          done
+
+      - name: Build desktop artifacts (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          npm_config_cache: ${{ runner.temp }}/.npm
+          ELECTRON_CACHE: ${{ runner.temp }}/.cache/electron
+          ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/.cache/electron-builder
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+          npm_config_electron_builder_binaries_mirror: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+          APPLE_ID_INPUT: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD_INPUT: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID_INPUT: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APPLE_ID_INPUT:-}" ]; then export APPLE_ID="$APPLE_ID_INPUT"; fi
+          if [ -n "${APPLE_APP_SPECIFIC_PASSWORD_INPUT:-}" ]; then export APPLE_APP_SPECIFIC_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD_INPUT"; fi
+          if [ -n "${APPLE_TEAM_ID_INPUT:-}" ]; then export APPLE_TEAM_ID="$APPLE_TEAM_ID_INPUT"; fi
+          for attempt in 1 2; do
+            echo "Desktop build attempt ${attempt}/2"
+            if npm run package:desktop; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              exit 1
+            fi
+            sleep 90
+          done
+
+      - name: Upload desktop package
         uses: actions/upload-artifact@v4
         with:
-          name: metapi-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}
-          path: release/*.zip
+          name: metapi-desktop-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.deb
+            release/*.blockmap
+            release/latest*.yml
+            release/latest*.json
+            release/builder-debug.yml
           if-no-files-found: error
 
   publish-release:

@@ -1,6 +1,10 @@
 import { fetch } from 'undici';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
-import { withExplicitProxyRequestInit } from './siteProxy.js';
+import {
+  buildNewApiCookieCandidates,
+  fetchJsonWithShieldCookieRetry,
+} from './platforms/newApiShield.js';
+import { withExplicitProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
 
 const SELF_LOG_FETCH_TIMEOUT_MS = 8_000;
 const SELF_LOG_PAGE_SIZE = 20;
@@ -9,8 +13,8 @@ const MATCH_LOOKAHEAD_MS = 120_000;
 const MATCH_MAX_CREATED_DELTA_MS = 90_000;
 const MATCH_MAX_LATENCY_DELTA_MS = 12_000;
 const QUOTA_PER_UNIT = 500_000;
-const SUPPORTED_USAGE_FALLBACK_PLATFORMS = new Set(['done-hub', 'one-hub', 'new-api', 'anyrouter']);
-const ALWAYS_LOOKUP_SELF_LOG_PLATFORMS = new Set(['done-hub', 'one-hub']);
+const SUPPORTED_USAGE_FALLBACK_PLATFORMS = new Set(['done-hub', 'one-hub', 'new-api', 'anyrouter', 'sub2api']);
+const ALWAYS_LOOKUP_SELF_LOG_PLATFORMS = new Set(['done-hub', 'one-hub', 'anyrouter', 'sub2api']);
 const PLATFORM_REQUIRES_USER_HEADER = new Set(['new-api', 'anyrouter']);
 
 interface ProxyUsage {
@@ -24,6 +28,7 @@ interface ProxyUsageFallbackInput {
     url: string;
     platform: string;
     apiKey?: string | null;
+    useSystemProxy?: boolean | null;
     proxyUrl?: string | null;
   };
   account: {
@@ -45,22 +50,38 @@ interface ProxyUsageFallbackInput {
 interface ProxyUsageFallbackResult extends ProxyUsage {
   recoveredFromSelfLog: boolean;
   estimatedCostFromQuota: number;
+  selfLogBillingMeta: SelfLogBillingMeta | null;
+}
+
+export interface SelfLogBillingMeta {
+  modelRatio: number;
+  completionRatio: number;
+  cacheRatio: number;
+  cacheCreationRatio: number;
+  groupRatio: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  promptTokensIncludeCache: boolean;
 }
 
 export interface SelfLogItem {
   modelName: string;
   tokenName: string;
+  tokenValue?: string;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
   quota: number;
+  recoveredCost?: number;
   createdAtMs: number;
   requestTimeMs: number;
+  billingMeta: SelfLogBillingMeta | null;
 }
 
 interface SelfLogMatchInput {
   modelName: string;
   tokenName?: string | null;
+  tokenValue?: string | null;
   requestStartedAtMs: number;
   requestEndedAtMs: number;
   localLatencyMs: number;
@@ -78,6 +99,12 @@ function toPositiveInt(value: unknown): number {
 
 function roundCost(value: number): number {
   return Math.round(Math.max(0, value) * 1_000_000) / 1_000_000;
+}
+
+function normalizePositiveRatio(value: unknown, fallback: number): number {
+  const ratio = toNumber(value, Number.NaN);
+  if (Number.isFinite(ratio) && ratio >= 0) return ratio;
+  return fallback;
 }
 
 function toTimestampMs(value: unknown): number {
@@ -156,6 +183,10 @@ function modelNameMatches(left: string, right: string): boolean {
   return !!leftTail && leftTail === rightTail;
 }
 
+function normalizeTokenMatchValue(value: string | null | undefined): string {
+  return String(value || '').trim();
+}
+
 function getPayloadList(payload: unknown): unknown[] {
   const candidates = [
     payload,
@@ -177,25 +208,123 @@ function mapSelfLogItem(raw: unknown): SelfLogItem | null {
   if (!raw || typeof raw !== 'object') return null;
   const row = raw as Record<string, unknown>;
 
-  const modelName = String(row.model_name ?? row.modelName ?? '').trim();
+  const modelName = String(row.model_name ?? row.modelName ?? row.model ?? '').trim();
   if (!modelName) return null;
 
-  const promptTokens = toPositiveInt(row.prompt_tokens ?? row.promptTokens);
-  const completionTokens = toPositiveInt(row.completion_tokens ?? row.completionTokens);
+  const promptTokens = toPositiveInt(
+    row.prompt_tokens
+      ?? row.promptTokens
+      ?? row.input_tokens
+      ?? row.inputTokens,
+  );
+  const completionTokens = toPositiveInt(
+    row.completion_tokens
+      ?? row.completionTokens
+      ?? row.output_tokens
+      ?? row.outputTokens,
+  );
   const totalTokensRaw = toPositiveInt(row.total_tokens ?? row.totalTokens);
   const totalTokens = totalTokensRaw > 0 ? totalTokensRaw : (promptTokens + completionTokens);
   const createdAtMs = toTimestampMs(row.created_at ?? row.createdAt);
   if (createdAtMs <= 0) return null;
+  const recoveredCost = roundCost(toNumber(row.actual_cost ?? row.actualCost ?? row.total_cost ?? row.totalCost, 0));
+  const rawApiKey = row.api_key ?? row.apiKey;
+  const apiKeyRecord = rawApiKey && typeof rawApiKey === 'object'
+    ? rawApiKey as Record<string, unknown>
+    : null;
+  const tokenName = String(
+    row.token_name
+      ?? row.tokenName
+      ?? apiKeyRecord?.name
+      ?? '',
+  ).trim();
+  const tokenValue = normalizeTokenMatchValue(
+    typeof apiKeyRecord?.key === 'string' ? apiKeyRecord.key : '',
+  );
+  const requestTimeMs = toPositiveInt(
+    row.request_time
+      ?? row.requestTime
+      ?? row.duration_ms
+      ?? row.durationMs,
+  );
 
   return {
     modelName,
-    tokenName: String(row.token_name ?? row.tokenName ?? '').trim(),
+    tokenName,
+    ...(tokenValue ? { tokenValue } : {}),
     promptTokens,
     completionTokens,
     totalTokens,
     quota: toPositiveInt(row.quota),
+    ...(recoveredCost > 0 ? { recoveredCost } : {}),
     createdAtMs,
-    requestTimeMs: toPositiveInt(row.request_time ?? row.requestTime),
+    requestTimeMs,
+    billingMeta: parseSelfLogBillingMeta(row.other),
+  };
+}
+
+function parseSelfLogBillingMeta(rawOther: unknown): SelfLogBillingMeta | null {
+  let payload = rawOther;
+  if (typeof rawOther === 'string') {
+    const trimmed = rawOther.trim();
+    if (!trimmed) return null;
+    try {
+      payload = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!payload || typeof payload !== 'object') return null;
+  const other = payload as Record<string, unknown>;
+
+  const modelRatio = normalizePositiveRatio(other.model_ratio ?? other.modelRatio, 1);
+  const completionRatio = normalizePositiveRatio(
+    other.completion_ratio ?? other.completionRatio,
+    1,
+  );
+  const cacheRatio = normalizePositiveRatio(
+    other.cache_ratio ?? other.cacheRatio,
+    1,
+  );
+  const cacheCreationRatio = normalizePositiveRatio(
+    other.cache_creation_ratio
+      ?? other.cacheCreationRatio
+      ?? other.create_cache_ratio
+      ?? other.createCacheRatio,
+    1,
+  );
+  const groupRatio = normalizePositiveRatio(other.group_ratio ?? other.groupRatio, 1);
+  const cacheReadTokens = toPositiveInt(
+    other.cache_tokens ?? other.cacheTokens ?? other.cache_read_tokens ?? other.cacheReadTokens,
+  );
+  const cacheCreationTokens = toPositiveInt(
+    other.cache_creation_tokens
+      ?? other.cacheCreationTokens
+      ?? other.create_cache_tokens
+      ?? other.createCacheTokens,
+  );
+
+  const hasMeaningfulData = (
+    cacheReadTokens > 0
+    || cacheCreationTokens > 0
+    || modelRatio !== 1
+    || completionRatio !== 1
+    || cacheRatio !== 1
+    || cacheCreationRatio !== 1
+    || groupRatio !== 1
+  );
+  if (!hasMeaningfulData) return null;
+
+  return {
+    modelRatio,
+    completionRatio,
+    cacheRatio,
+    cacheCreationRatio,
+    groupRatio,
+    cacheReadTokens,
+    cacheCreationTokens,
+    promptTokensIncludeCache: true,
   };
 }
 
@@ -204,7 +333,6 @@ function buildTokenCandidates(input: ProxyUsageFallbackInput): string[] {
     input.account.accessToken,
     input.tokenValue,
     input.account.apiToken,
-    input.site.apiKey,
   ]
     .map((value) => (typeof value === 'string' ? value.trim() : ''))
     .filter(Boolean);
@@ -224,18 +352,68 @@ async function fetchSelfLogPayload(baseUrl: string, token: string, input: ProxyU
   }, SELF_LOG_FETCH_TIMEOUT_MS);
 
   try {
-    const query = `p=0&page=1&size=${SELF_LOG_PAGE_SIZE}&order=-created_at`;
+    const platform = String(input.site.platform || '').toLowerCase();
+    if (platform === 'sub2api') {
+      const query = new URLSearchParams({
+        page: '1',
+        page_size: String(SELF_LOG_PAGE_SIZE),
+        model: input.modelName,
+      });
+      const response = await fetch(`${baseUrl}/api/v1/usage?${query.toString()}`, withSiteRecordProxyRequestInit(input.site, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      }));
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const text = await response.text();
+      if (!text.trim()) return null;
+
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    }
+
+    const pageSizeParam = String(input.site.platform || '').toLowerCase() === 'anyrouter'
+      ? 'page_size'
+      : 'size';
+    const query = `p=0&page=1&${pageSizeParam}=${SELF_LOG_PAGE_SIZE}&order=-created_at`;
+    const url = `${baseUrl}/api/log/self?${query}`;
     const headers: Record<string, string> = {
       Authorization: `Bearer ${token}`,
     };
-    const platform = String(input.site.platform || '').toLowerCase();
     if (PLATFORM_REQUIRES_USER_HEADER.has(platform)) {
       const userId = resolveSelfLogUserId(input);
       if (userId) {
         headers['New-Api-User'] = String(userId);
       }
     }
-    const response = await fetch(`${baseUrl}/api/log/self?${query}`, withExplicitProxyRequestInit(input.site.proxyUrl, {
+
+    const shouldTryShieldCookie = platform === 'anyrouter' || token.includes('=');
+    if (shouldTryShieldCookie) {
+      for (const cookie of buildNewApiCookieCandidates(token)) {
+        const result = await fetchJsonWithShieldCookieRetry(url, {
+          method: 'GET',
+          headers: {
+            ...Object.fromEntries(
+              Object.entries(headers).filter(([key]) => key.toLowerCase() !== 'authorization'),
+            ),
+            Cookie: cookie,
+          },
+          signal: controller.signal,
+        });
+        if (result.data) return result.data;
+      }
+    }
+
+    const response = await fetch(url, withSiteRecordProxyRequestInit(input.site, {
       method: 'GET',
       headers,
       signal: controller.signal,
@@ -298,6 +476,14 @@ export function findBestSelfLogMatch(items: SelfLogItem[], input: SelfLogMatchIn
   ));
   if (candidates.length === 0) return null;
 
+  const tokenValue = normalizeTokenMatchValue(input.tokenValue);
+  if (tokenValue) {
+    const tokenValueMatched = candidates.filter((item) => normalizeTokenMatchValue(item.tokenValue) === tokenValue);
+    if (tokenValueMatched.length > 0) {
+      candidates = tokenValueMatched;
+    }
+  }
+
   const tokenName = String(input.tokenName || '').trim().toLowerCase();
   if (tokenName) {
     const tokenMatched = candidates.filter((item) => item.tokenName.trim().toLowerCase() === tokenName);
@@ -339,6 +525,11 @@ function toQuotaCost(quota: number): number {
   return roundCost(toPositiveInt(quota) / QUOTA_PER_UNIT);
 }
 
+function toRecoveredCost(item: SelfLogItem): number {
+  if (typeof item.recoveredCost === 'number' && item.recoveredCost > 0) return item.recoveredCost;
+  return toQuotaCost(item.quota);
+}
+
 export async function resolveProxyUsageWithSelfLogFallback(
   input: ProxyUsageFallbackInput,
 ): Promise<ProxyUsageFallbackResult> {
@@ -347,6 +538,7 @@ export async function resolveProxyUsageWithSelfLogFallback(
     ...normalizedUsage,
     recoveredFromSelfLog: false,
     estimatedCostFromQuota: 0,
+    selfLogBillingMeta: null,
   };
 
   const platform = String(input.site.platform || '').toLowerCase();
@@ -359,6 +551,7 @@ export async function resolveProxyUsageWithSelfLogFallback(
     const matched = findBestSelfLogMatch(items, {
       modelName: input.modelName,
       tokenName: input.tokenName,
+      tokenValue: input.tokenValue,
       requestStartedAtMs: input.requestStartedAtMs,
       requestEndedAtMs: input.requestEndedAtMs,
       localLatencyMs: input.localLatencyMs,
@@ -382,7 +575,8 @@ export async function resolveProxyUsageWithSelfLogFallback(
       completionTokens: resolvedTokens.completionTokens,
       totalTokens: resolvedTokens.totalTokens,
       recoveredFromSelfLog: true,
-      estimatedCostFromQuota: toQuotaCost(matched.quota),
+      estimatedCostFromQuota: toRecoveredCost(matched),
+      selfLogBillingMeta: matched.billingMeta,
     };
   } catch {
     return fallback;

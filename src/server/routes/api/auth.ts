@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
 import { config } from '../../config.js';
 import { eq } from 'drizzle-orm';
+import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 
 export async function authRoutes(app: FastifyInstance) {
   // Change admin auth token (requires old token verification)
@@ -32,13 +33,14 @@ export async function authRoutes(app: FastifyInstance) {
     config.authToken = newToken;
 
     try {
+      const createdAt = formatUtcSqlDateTime(new Date());
       await db.insert(schema.events).values({
         type: 'token',
         title: '管理员登录令牌已更新',
         message: '管理员登录 Token 已被修改，请使用新 Token 登录。',
         level: 'warning',
         relatedType: 'settings',
-        createdAt: new Date().toISOString(),
+        createdAt,
       }).run();
     } catch {}
 

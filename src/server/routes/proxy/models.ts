@@ -6,6 +6,12 @@ import { getDownstreamRoutingPolicy } from './downstreamPolicy.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { isModelAllowedByPolicyOrAllowedRoutes } from '../../services/downstreamApiKeyService.js';
 
+function isSearchPseudoModel(modelName: string): boolean {
+  const normalized = (modelName || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized === '__search' || /^__.+_search$/.test(normalized);
+}
+
 export async function modelsProxyRoute(app: FastifyInstance) {
   app.get('/v1/models', async (request) => {
     const downstreamPolicy = getDownstreamRoutingPolicy(request);
@@ -32,7 +38,9 @@ export async function modelsProxyRoute(app: FastifyInstance) {
       const deduped = Array.from(new Set([
         ...rows.map((r) => r.modelName),
         ...routeAliases,
-      ])).sort();
+      ]))
+        .filter((modelName) => !isSearchPseudoModel(modelName))
+        .sort();
       const allowed: string[] = [];
       for (const modelName of deduped) {
         if (!await isModelAllowedByPolicyOrAllowedRoutes(modelName, downstreamPolicy)) {
