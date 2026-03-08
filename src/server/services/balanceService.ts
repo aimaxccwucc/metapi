@@ -102,13 +102,25 @@ function parsePositiveNumber(value: unknown): number {
   return 0;
 }
 
-function parseIncomeFromContent(content: unknown): number {
+function parseIncomeFromContent(content: unknown, conversionFactor: number): number {
   if (typeof content !== 'string') return 0;
   const normalized = content.replace(/,/g, '');
   const match = normalized.match(/[-+]?\d+(?:\.\d+)?/);
   if (!match) return 0;
   const parsed = Number(match[0]);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+
+  const text = normalized.toLowerCase();
+  const explicitPointUnit = (
+    normalized.includes('点额度')
+    || normalized.includes('点数')
+    || text.includes('quota point')
+    || text.includes('quota points')
+  );
+  if (explicitPointUnit || parsed >= conversionFactor) {
+    return parsed / conversionFactor;
+  }
+
   return parsed;
 }
 
@@ -297,7 +309,7 @@ async function fetchTodayIncomeFromLogs(params: {
             totalIncome += quotaRaw / conversionFactor;
             continue;
           }
-          totalIncome += parseIncomeFromContent(item?.content);
+          totalIncome += parseIncomeFromContent(item?.content, conversionFactor);
         }
 
         const total = extractLogTotal(payload);

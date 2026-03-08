@@ -413,6 +413,53 @@ describe('balanceService auto relogin', () => {
     expect(parsedExtra.todayIncomeSnapshot?.latest).toBeCloseTo(2.08365, 6);
   });
 
+  it('converts quota-point content fallback to currency units', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 8,
+          username: 'linuxdo_1281',
+          accessToken: 'active-token',
+          status: 'active',
+          extraConfig: null,
+        },
+        sites: {
+          id: 10,
+          name: 'embedding',
+          url: 'https://router.tumuer.me',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.getBalance.mockResolvedValueOnce({ balance: 270.804386, used: 0, quota: 270.804386 });
+    undiciFetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ data: { items: [], total: 0 } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: {
+            items: [{ quota: 0, content: '用户签到，获得额度 1167510 点额度' }],
+            total: 1,
+          },
+        }),
+      });
+
+    const { refreshBalance } = await import('./balanceService.js');
+    const result = await refreshBalance(8);
+
+    expect(result).toEqual({ balance: 270.804386, used: 0, quota: 270.804386, todayIncome: 2.33502 });
+    const updateWithSnapshot = updateSetMock.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .find((payload) => typeof payload.extraConfig === 'string');
+    expect(updateWithSnapshot).toBeDefined();
+    const parsedExtra = JSON.parse(String(updateWithSnapshot?.extraConfig));
+    expect(parsedExtra.todayIncomeSnapshot?.latest).toBeCloseTo(2.33502, 6);
+  });
+
   it('does not send low balance reminder notification when balance is below threshold', async () => {
     selectAllMock.mockReturnValue([
       {

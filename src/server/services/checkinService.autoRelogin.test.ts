@@ -217,7 +217,7 @@ describe('checkinService auto relogin', () => {
     expect(Number(firstInsertPayload?.reward)).toBeCloseTo(2.5, 6);
   });
 
-  it('treats already checked in responses as successful checkins', async () => {
+  it('treats already checked in responses as skipped checkins', async () => {
     selectAllMock.mockReturnValue([
       {
         accounts: {
@@ -242,9 +242,9 @@ describe('checkinService auto relogin', () => {
     const result = await checkinAccount(9);
 
     expect(result.success).toBe(true);
-    expect(result.status).toBe('success');
+    expect(result.status).toBe('skipped');
     const firstInsertPayload = insertValuesMock.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(firstInsertPayload?.status).toBe('success');
+    expect(firstInsertPayload?.status).toBe('skipped');
     expect(notifyMock).not.toHaveBeenCalled();
   });
 

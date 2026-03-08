@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import ModernSelect from '../components/ModernSelect.js';
+import TaskDetailModal, { type BackgroundTaskDetail } from '../components/TaskDetailModal.js';
 import { tr } from '../i18n.js';
 
 type ProgramEvent = {
@@ -17,16 +18,7 @@ type ProgramEvent = {
   createdAt?: string | null;
 };
 
-type BackgroundTask = {
-  id: string;
-  type: string;
-  title: string;
-  status: 'pending' | 'running' | 'succeeded' | 'failed';
-  message?: string | null;
-  error?: string | null;
-  createdAt?: string | null;
-  updatedAt?: string | null;
-};
+type BackgroundTask = BackgroundTaskDetail;
 
 const PAGE_SIZE = 80;
 const TASK_POLL_INTERVAL_MS = 5000;
@@ -100,6 +92,111 @@ function taskStatusLabel(status: BackgroundTask['status']) {
   return { label: '排队中', cls: 'badge-warning' };
 }
 
+function normalizeTaskLookupText(value?: string | null) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9一-龥]+/g, '');
+}
+
+function isTaskEvent(row: ProgramEvent) {
+  return String(row.relatedType || '').toLowerCase().startsWith('task');
+}
+
+function extractTaskIdFromEvent(row: ProgramEvent): string | null {
+  const relatedType = String(row.relatedType || '').trim();
+  if (!relatedType) return null;
+
+  const lower = relatedType.toLowerCase();
+  if (!lower.startsWith('task:')) return null;
+
+  const taskId = relatedType.slice(5).trim();
+  return taskId || null;
+}
+
+function inferTaskStatusFromEvent(row: ProgramEvent): BackgroundTask['status'] {
+  const text = `${row.title || ''} ${row.message || ''}`.toLowerCase();
+
+  if (text.includes('失败') || text.includes('failed') || text.includes('error') || row.level === 'error') {
+    return 'failed';
+  }
+  if (text.includes('进行中') || text.includes('已开始') || text.includes('running')) {
+    return 'running';
+  }
+  if (text.includes('排队') || text.includes('pending')) {
+    return 'pending';
+  }
+  return 'succeeded';
+}
+
+function buildFallbackTaskFromEvent(row: ProgramEvent, taskId?: string | null): BackgroundTask {
+  return {
+    id: taskId || `legacy-task-event-${row.id}`,
+    type: row.type || 'status',
+    title: row.title || '任务详情',
+    status: inferTaskStatusFromEvent(row),
+    message: row.message || row.title || '未记录任务详情',
+    error: taskId ? null : '该历史日志未保存可追溯的任务 ID，只能展示事件摘要。',
+    result: null,
+    createdAt: row.createdAt || null,
+    updatedAt: row.createdAt || null,
+  };
+}
+
+function findTaskForEvent(row: ProgramEvent, tasks: BackgroundTask[]) {
+  const directTaskId = extractTaskIdFromEvent(row);
+  if (directTaskId) {
+    const directTask = tasks.find((task) => task.id === directTaskId);
+    if (directTask) return directTask;
+  }
+
+  const haystacks = [
+    normalizeTaskLookupText(row.title),
+    normalizeTaskLookupText(row.message),
+  ].filter((item) => item.length >= 6);
+
+  if (haystacks.length === 0) return null;
+
+  for (const task of tasks) {
+    const needles = [
+      normalizeTaskLookupText(task.id),
+      normalizeTaskLookupText(task.title),
+      normalizeTaskLookupText(task.message),
+    ].filter((item) => item.length >= 6);
+
+    if (needles.length === 0) continue;
+    if (haystacks.some((haystack) => needles.some((needle) => haystack.includes(needle)))) {
+      return task;
+    }
+  }
+
+  return null;
+}
+
+function resolveEventTask(row: ProgramEvent, tasks: BackgroundTask[]) {
+  const matchedTask = findTaskForEvent(row, tasks);
+  if (matchedTask) {
+    return {
+      task: matchedTask,
+      taskId: matchedTask.id,
+    };
+  }
+
+  const directTaskId = extractTaskIdFromEvent(row);
+  if (directTaskId) {
+    return {
+      task: buildFallbackTaskFromEvent(row, directTaskId),
+      taskId: directTaskId,
+    };
+  }
+
+  if (!isTaskEvent(row)) return null;
+
+  return {
+    task: buildFallbackTaskFromEvent(row),
+    taskId: null,
+  };
+}
+
 export default function ProgramLogs() {
   const [events, setEvents] = useState<ProgramEvent[]>([]);
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
@@ -116,6 +213,10 @@ export default function ProgramLogs() {
   const [clearing, setClearing] = useState(false);
   const [rowLoading, setRowLoading] = useState<Record<number, boolean>>({});
   const [taskRetryLoading, setTaskRetryLoading] = useState<Record<string, boolean>>({});
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTask, setSelectedTask] = useState<BackgroundTaskDetail | null>(null);
+  const [taskDetailLoading, setTaskDetailLoading] = useState(false);
+  const [taskDetailError, setTaskDetailError] = useState('');
   const toast = useToast();
 
   const loadTasks = async (silent = false) => {
@@ -166,11 +267,11 @@ export default function ProgramLogs() {
 
   useEffect(() => {
     loadTasks();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== 'visible') return;
+    const timer = globalThis.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
       void loadTasks(true);
     }, TASK_POLL_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+    return () => globalThis.clearInterval(timer);
   }, []);
 
   const visibleRows = useMemo(() => events, [events]);
@@ -181,6 +282,13 @@ export default function ProgramLogs() {
     succeeded: tasks.filter((item) => item.status === 'succeeded').length,
     failed: tasks.filter((item) => item.status === 'failed').length,
   }), [tasks]);
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    const latestTask = tasks.find((item) => item.id === selectedTaskId);
+    if (!latestTask) return;
+    setSelectedTask((prev) => ({ ...(prev || latestTask), ...latestTask }));
+  }, [tasks, selectedTaskId]);
 
   const withRowLoading = async (id: number, fn: () => Promise<void>) => {
     setRowLoading((prev) => ({ ...prev, [id]: true }));
@@ -217,6 +325,43 @@ export default function ProgramLogs() {
     } finally {
       setTaskRetryLoading((prev) => ({ ...prev, [taskId]: false }));
     }
+  };
+
+  const refreshTaskDetail = async (taskId: string, fallbackTask?: BackgroundTaskDetail | null) => {
+    if (fallbackTask) {
+      setSelectedTask((prev) => ({ ...(prev || fallbackTask), ...fallbackTask }));
+    }
+    setTaskDetailLoading(true);
+    setTaskDetailError('');
+    try {
+      const result = await api.getTask(taskId);
+      const detailTask = result?.task;
+      if (!detailTask) throw new Error('任务详情为空');
+      setSelectedTask(detailTask);
+    } catch (e: any) {
+      setTaskDetailError(e.message || '加载任务详情失败');
+    } finally {
+      setTaskDetailLoading(false);
+    }
+  };
+
+  const openTaskDetail = async (task: BackgroundTask, taskId: string | null = task.id) => {
+    const detailOpenId = taskId || task.id;
+    setSelectedTaskId(detailOpenId);
+    setSelectedTask(task);
+    if (!taskId) {
+      setTaskDetailLoading(false);
+      setTaskDetailError(task.error || '未找到可加载的任务详情。');
+      return;
+    }
+    await refreshTaskDetail(taskId, task);
+  };
+
+  const closeTaskDetail = () => {
+    setSelectedTaskId(null);
+    setSelectedTask(null);
+    setTaskDetailLoading(false);
+    setTaskDetailError('');
   };
 
   const markOneRead = async (id: number) => {
@@ -361,17 +506,23 @@ export default function ProgramLogs() {
                       ) : null}
                     </td>
                     <td style={{ textAlign: 'right' }}>
-                      {task.status === 'failed' ? (
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         <button
                           className="btn btn-link btn-link-primary"
-                          onClick={() => retryTask(task)}
-                          disabled={!!taskRetryLoading[task.id]}
+                          onClick={() => { void openTaskDetail(task); }}
                         >
-                          {taskRetryLoading[task.id] ? <span className="spinner spinner-sm" /> : '重试'}
+                          {tr('详情')}
                         </button>
-                      ) : (
-                        <span className="badge badge-muted" style={{ fontSize: 11 }}>-</span>
-                      )}
+                        {task.status === 'failed' ? (
+                          <button
+                            className="btn btn-link btn-link-primary"
+                            onClick={() => retryTask(task)}
+                            disabled={!!taskRetryLoading[task.id]}
+                          >
+                            {taskRetryLoading[task.id] ? <span className="spinner spinner-sm" /> : '重试'}
+                          </button>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -451,6 +602,7 @@ export default function ProgramLogs() {
               {visibleRows.map((row, idx) => {
                 const level = levelLabel(row.level || 'info');
                 const eventStatus = eventStatusLabel(row);
+                const eventTask = resolveEventTask(row, tasks);
                 return (
                   <tr key={row.id} className={`animate-slide-up stagger-${Math.min(idx + 1, 5)}`}>
                     <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
@@ -478,7 +630,15 @@ export default function ProgramLogs() {
                       </span>
                     </td>
                     <td style={{ textAlign: 'right' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+                        {eventTask ? (
+                          <button
+                            onClick={() => { void openTaskDetail(eventTask.task, eventTask.taskId); }}
+                            className="btn btn-link btn-link-primary"
+                          >
+                            {tr('详情')}
+                          </button>
+                        ) : null}
                         {row.read ? (
                           <span className="badge badge-muted" style={{ fontSize: 11 }}>已读</span>
                         ) : (
@@ -523,6 +683,14 @@ export default function ProgramLogs() {
           </button>
         </div>
       )}
+
+      <TaskDetailModal
+        open={!!selectedTaskId}
+        task={selectedTask}
+        loading={taskDetailLoading}
+        error={taskDetailError}
+        onClose={closeTaskDetail}
+      />
     </div>
   );
 }

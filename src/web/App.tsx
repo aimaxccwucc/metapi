@@ -447,7 +447,7 @@ function AppShell() {
         const newTaskEvents = rows
           .filter((row: any) => (
             (Number(row?.id) || 0) > latestTaskEventIdRef.current
-            && row?.relatedType === 'task'
+            && String(row?.relatedType || '').toLowerCase().startsWith('task')
             && !String(row?.title || '').includes('已开始')
           ))
           .sort((a: any, b: any) => (a.id || 0) - (b.id || 0))

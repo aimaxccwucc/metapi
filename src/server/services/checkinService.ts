@@ -349,7 +349,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   const shouldRefreshBalance = result.success || alreadyCheckedIn;
   const directCheckinSuccess = result.success && !alreadyCheckedIn && !unsupportedCheckin;
   const normalizedStatus: CheckinExecutionStatus = effectiveSuccess
-    ? ((unsupportedCheckin || manualVerificationRequired) ? 'skipped' : 'success')
+    ? ((alreadyCheckedIn || unsupportedCheckin || manualVerificationRequired) ? 'skipped' : 'success')
     : 'failed';
   let logReward = result.reward;
   let refreshedBalanceInfo: Awaited<ReturnType<typeof refreshBalance>> | null = null;

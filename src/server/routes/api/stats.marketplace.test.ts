@@ -6,6 +6,11 @@ import { join } from 'node:path';
 import { and, eq } from 'drizzle-orm';
 
 type DbModule = typeof import('../../db/index.js');
+const undiciFetchMock = vi.fn();
+
+vi.mock('undici', () => ({
+  fetch: (...args: unknown[]) => undiciFetchMock(...args),
+}));
 
 describe('/api/models/marketplace', () => {
   let app: FastifyInstance;
@@ -29,6 +34,7 @@ describe('/api/models/marketplace', () => {
   });
 
   beforeEach(async () => {
+    undiciFetchMock.mockReset();
     await db.delete(schema.proxyLogs).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
@@ -95,6 +101,7 @@ describe('/api/models/marketplace', () => {
         accounts: Array<{
           id: number;
           site: string;
+          siteUrl: string | null;
           username: string | null;
           tokens: Array<{ id: number; name: string; isDefault: boolean }>;
         }>;
@@ -108,6 +115,7 @@ describe('/api/models/marketplace', () => {
     expect(model?.accounts[0]).toMatchObject({
       id: account.id,
       site: 'site-no-token',
+      siteUrl: 'https://site-no-token.example.com',
       username: 'alice',
       tokens: [],
     });
@@ -158,5 +166,188 @@ describe('/api/models/marketplace', () => {
     expect(body.error).toBe('site_missing_api_key');
     expect(body.message).toContain('请先创建 Key');
     expect(body.siteId).toBe(site.id);
+  });
+
+  it('marks model unavailable when probe returns HTTP 200 with embedded error', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-probe-error',
+      url: 'https://site-probe-error.example.com',
+      platform: 'one-api',
+      status: 'active',
+      apiKey: '',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'probe-error-user',
+      accessToken: '',
+      apiToken: 'sk-probe-error',
+      status: 'active',
+      balance: 1,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4o-mini',
+      available: true,
+      latencyMs: 120,
+    }).run();
+
+    undiciFetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: 'gpt-4o-mini' }] }),
+        text: async () => JSON.stringify({ data: [{ id: 'gpt-4o-mini' }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ error: { message: 'No available channel for model gpt-4o-mini under group default' } }),
+        text: async () => JSON.stringify({ error: { message: 'No available channel for model gpt-4o-mini under group default' } }),
+      });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'gpt-4o-mini',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      success: boolean;
+      available: boolean;
+      reason: string;
+      probeStatusCode: number | null;
+    };
+    expect(body.success).toBe(true);
+    expect(body.available).toBe(false);
+    expect(body.probeStatusCode).toBe(200);
+    expect(body.reason).toContain('probe rejected model via chat');
+  });
+
+  it('marks model unavailable when probe returns mismatched model in HTTP 200 response', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-model-mismatch',
+      url: 'https://site-model-mismatch.example.com',
+      platform: 'one-api',
+      status: 'active',
+      apiKey: '',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'mismatch-user',
+      accessToken: '',
+      apiToken: 'sk-model-mismatch',
+      status: 'active',
+      balance: 1,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4o-mini',
+      available: true,
+      latencyMs: 120,
+    }).run();
+
+    undiciFetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: 'gpt-4o-mini' }] }),
+        text: async () => JSON.stringify({ data: [{ id: 'gpt-4o-mini' }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'resp_123', model: 'gpt-4o' }),
+        text: async () => JSON.stringify({ id: 'resp_123', model: 'gpt-4o' }),
+      });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'gpt-4o-mini',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      success: boolean;
+      available: boolean;
+      reason: string;
+      probeStatusCode: number | null;
+    };
+    expect(body.success).toBe(true);
+    expect(body.available).toBe(false);
+    expect(body.probeStatusCode).toBe(200);
+    expect(body.reason).toContain('probe returned mismatched model via chat');
+  });
+
+  it('keeps model available when probe HTTP 200 response has matching model and no error', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-probe-ok',
+      url: 'https://site-probe-ok.example.com',
+      platform: 'one-api',
+      status: 'active',
+      apiKey: '',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'probe-ok-user',
+      accessToken: '',
+      apiToken: 'sk-probe-ok',
+      status: 'active',
+      balance: 1,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4o-mini',
+      available: true,
+      latencyMs: 120,
+    }).run();
+
+    undiciFetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: 'gpt-4o-mini' }] }),
+        text: async () => JSON.stringify({ data: [{ id: 'gpt-4o-mini' }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'resp_456', model: 'gpt-4o-mini', choices: [{ message: { role: 'assistant', content: 'pong' } }] }),
+        text: async () => JSON.stringify({ id: 'resp_456', model: 'gpt-4o-mini', choices: [{ message: { role: 'assistant', content: 'pong' } }] }),
+      });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'gpt-4o-mini',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      success: boolean;
+      available: boolean;
+      reason: string;
+      probeStatusCode: number | null;
+    };
+    expect(body.success).toBe(true);
+    expect(body.available).toBe(true);
+    expect(body.probeStatusCode).toBe(200);
+    expect(body.reason).toContain('model accepted by realtime probe');
   });
 });

@@ -39,6 +39,7 @@ const MODELS_MARKETPLACE_PRICING_TTL_MS = 90_000;
 const MARKETPLACE_MODEL_TEST_TIMEOUT_MS = 15_000;
 const MARKETPLACE_AUTO_KEY_TIMEOUT_MS = 8_000;
 const MARKETPLACE_MODEL_PROBE_TIMEOUT_MS = 10_000;
+const MARKETPLACE_MODEL_TEST_KEY_SCAN_LIMIT = 8;
 
 type ModelsMarketplaceCacheEntry = {
   expiresAt: number;
@@ -99,6 +100,51 @@ function summarizeProbeError(rawText: string): string {
   return text.slice(0, 320);
 }
 
+function parseProbeJson(rawText: string): any | null {
+  const text = String(rawText || '').trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function extractProbeErrorMessage(payload: any): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const errorValue = payload.error;
+  if (typeof errorValue === 'string' && errorValue.trim()) {
+    return errorValue.trim().slice(0, 320);
+  }
+  if (errorValue && typeof errorValue === 'object') {
+    const nested = errorValue.message || errorValue.msg || errorValue.detail || errorValue.error;
+    if (typeof nested === 'string' && nested.trim()) {
+      return nested.trim().slice(0, 320);
+    }
+  }
+  const topLevel = payload.message || payload.detail;
+  if (typeof topLevel === 'string' && topLevel.trim()) {
+    return topLevel.trim().slice(0, 320);
+  }
+  return '';
+}
+
+function extractProbeModelName(payload: any): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const candidates = [
+    payload.model,
+    payload.response?.model,
+    payload.data?.model,
+    payload.meta?.model,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const normalized = candidate.trim();
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
 function classifyProbeFailureMessage(message: string): 'model_unavailable' | 'credential' | 'inconclusive' {
   const text = String(message || '').toLowerCase();
   if (!text) return 'inconclusive';
@@ -107,6 +153,7 @@ function classifyProbeFailureMessage(message: string): 'model_unavailable' | 'cr
     || /unknown model|no such model|unsupported model/i.test(text)
     || /模型.*(不存在|未找到|不支持|不可用)/i.test(text)
     || /当前分组不支持|未开通.*模型|not available for your/i.test(text)
+    || /no available channel|under group|group .*distributor/i.test(text)
   ) {
     return 'model_unavailable';
   }
@@ -201,6 +248,42 @@ async function probeModelAvailabilityViaRealtimeCall(input: {
       );
 
       if (response.ok) {
+        const responseText = await response.text();
+        const payload = parseProbeJson(responseText);
+        if (!payload || typeof payload !== 'object') {
+          attemptMessages.push(`${endpoint}:${response.status} probe returned non-json success response`);
+          continue;
+        }
+
+        const embeddedError = extractProbeErrorMessage(payload);
+        if (embeddedError) {
+          const classification = classifyProbeFailureMessage(embeddedError);
+          if (classification === 'model_unavailable') {
+            return {
+              available: false,
+              reason: `probe rejected model via ${endpoint}: ${embeddedError}`,
+              checkedUrl: probe.url,
+              statusCode: response.status,
+            };
+          }
+          attemptMessages.push(`${endpoint}:${response.status} ${embeddedError}`);
+          continue;
+        }
+
+        const returnedModel = extractProbeModelName(payload);
+        if (!returnedModel) {
+          attemptMessages.push(`${endpoint}:${response.status} missing model in successful probe response`);
+          continue;
+        }
+        if (returnedModel !== input.modelName) {
+          return {
+            available: false,
+            reason: `probe returned mismatched model via ${endpoint}: expected ${input.modelName}, got ${returnedModel}`,
+            checkedUrl: probe.url,
+            statusCode: response.status,
+          };
+        }
+
         return {
           available: true,
           reason: `probe succeeded via ${endpoint} (HTTP ${response.status})`,
@@ -267,8 +350,8 @@ export async function statsRoutes(app: FastifyInstance) {
       .innerJoin(schema.accounts, eq(schema.checkinLogs.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(and(
-        gte(schema.checkinLogs.createdAt, todayStartUtc),
-        lt(schema.checkinLogs.createdAt, todayEndUtc),
+        gte(sql`datetime(${schema.checkinLogs.createdAt})`, todayStartUtc),
+        lt(sql`datetime(${schema.checkinLogs.createdAt})`, todayEndUtc),
         eq(schema.sites.status, 'active'),
       ))
       .all();
@@ -338,8 +421,8 @@ export async function statsRoutes(app: FastifyInstance) {
       .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
       .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(and(
-        gte(schema.proxyLogs.createdAt, todayStartUtc),
-        lt(schema.proxyLogs.createdAt, todayEndUtc),
+        gte(sql`datetime(${schema.proxyLogs.createdAt})`, todayStartUtc),
+        lt(sql`datetime(${schema.proxyLogs.createdAt})`, todayEndUtc),
         eq(schema.sites.status, 'active'),
       ))
       .get();
@@ -584,6 +667,7 @@ export async function statsRoutes(app: FastifyInstance) {
       accountsById: Map<number, {
         id: number;
         site: string;
+        siteUrl: string | null;
         username: string | null;
         latency: number | null;
         unitCost: number | null;
@@ -608,6 +692,7 @@ export async function statsRoutes(app: FastifyInstance) {
         modelMap[m.modelName].accountsById.set(a.id, {
           id: a.id,
           site: s.name,
+          siteUrl: s.url,
           username: a.username,
           latency: m.latencyMs,
           unitCost: a.unitCost,
@@ -642,6 +727,7 @@ export async function statsRoutes(app: FastifyInstance) {
         modelMap[m.modelName].accountsById.set(a.id, {
           id: a.id,
           site: s.name,
+          siteUrl: s.url,
           username: a.username,
           latency: m.latencyMs,
           unitCost: a.unitCost,
@@ -1006,20 +1092,38 @@ export async function statsRoutes(app: FastifyInstance) {
       });
     }
 
+    const enabledTokens = await db.select()
+      .from(schema.accountTokens)
+      .where(and(eq(schema.accountTokens.accountId, account.id), eq(schema.accountTokens.enabled, true)))
+      .all();
+
     let preferredToken = await getPreferredAccountToken(account.id);
     const fallbackSiteApiKey = (site.apiKey || '').trim();
-    let modelCredential = (
-      (preferredToken?.token || '').trim()
-      || (account.apiToken || '').trim()
-      || fallbackSiteApiKey
-    );
     const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
     const accountAccessToken = (account.accessToken || '').trim();
     let autoKeyCreated = false;
     let autoKeyName: string | null = null;
     let autoKeyGroup: string | null = null;
+    let autoCreateAttempted = false;
 
-    if (!modelCredential && accountAccessToken) {
+    const credentialCandidates: Array<{ credential: string; source: string }> = [];
+    const pushCredentialCandidate = (credentialRaw: string | null | undefined, source: string) => {
+      const credential = String(credentialRaw || '').trim();
+      if (!credential) return;
+      if (credentialCandidates.some((item) => item.credential === credential)) return;
+      credentialCandidates.push({ credential, source });
+    };
+
+    pushCredentialCandidate(preferredToken?.token, `default:${preferredToken?.name || preferredToken?.id || 'token'}`);
+    pushCredentialCandidate(account.apiToken, 'account_api_token');
+    for (const token of enabledTokens) {
+      pushCredentialCandidate(token.token, `token:${token.name || token.id}`);
+    }
+    pushCredentialCandidate(fallbackSiteApiKey, 'site_api_key');
+
+    const tryCreateModelScopedKey = async (): Promise<string | null> => {
+      if (!accountAccessToken) return null;
+      autoCreateAttempted = true;
       try {
         const groups = await withTimeout(
           () => adapter.getUserGroups(site.url, accountAccessToken, platformUserId),
@@ -1047,21 +1151,30 @@ export async function statsRoutes(app: FastifyInstance) {
           );
           await syncTokensFromUpstream(account.id, upstreamTokens);
           preferredToken = await getPreferredAccountToken(account.id);
-          modelCredential = (
-            (preferredToken?.token || '').trim()
-            || (account.apiToken || '').trim()
-            || fallbackSiteApiKey
+          const createdToken = upstreamTokens.find((token) => String(token.name || '').trim() === generatedName);
+          const createdCredential = (
+            (createdToken?.key || '').trim()
+            || (preferredToken?.token || '').trim()
           );
-          autoKeyCreated = !!modelCredential;
-          autoKeyName = generatedName;
-          autoKeyGroup = targetGroup;
+          if (createdCredential) {
+            autoKeyCreated = true;
+            autoKeyName = generatedName;
+            autoKeyGroup = targetGroup;
+            pushCredentialCandidate(createdCredential, `auto:${generatedName}`);
+            return createdCredential;
+          }
         }
       } catch {
         // Keep conservative behavior: fall through to explicit hint below.
       }
+      return null;
+    };
+
+    if (credentialCandidates.length === 0) {
+      await tryCreateModelScopedKey();
     }
 
-    if (!modelCredential) {
+    if (credentialCandidates.length === 0) {
       return reply.code(400).send({
         success: false,
         error: 'site_missing_api_key',
@@ -1069,44 +1182,105 @@ export async function statsRoutes(app: FastifyInstance) {
         accountId: account.id,
         siteId: site.id,
         siteName: site.name,
-        autoCreateAttempted: !!accountAccessToken,
+        autoCreateAttempted,
         autoCreateSupported: !!accountAccessToken,
       });
     }
+
     const startedAt = Date.now();
     try {
-      const discoveredModels = await withTimeout(
-        () => adapter.getModels(site.url, modelCredential, platformUserId),
-        MARKETPLACE_MODEL_TEST_TIMEOUT_MS,
-        `model test timeout (${Math.round(MARKETPLACE_MODEL_TEST_TIMEOUT_MS / 1000)}s)`,
-      );
-      const normalizedSet = new Set(
-        (Array.isArray(discoveredModels) ? discoveredModels : [])
-          .map((item) => String(item || '').trim())
-          .filter((item) => item.length > 0),
-      );
-      let available = normalizedSet.has(modelName);
-      let reason = available ? 'model found in upstream list' : 'model not found in upstream list';
-      let probeCheckedUrl: string | null = null;
-      let probeStatusCode: number | null = null;
+      const checkCredentialAvailability = async (credential: string): Promise<{
+        available: boolean;
+        reason: string;
+        probeCheckedUrl: string | null;
+        probeStatusCode: number | null;
+      }> => {
+        const discoveredModels = await withTimeout(
+          () => adapter.getModels(site.url, credential, platformUserId),
+          MARKETPLACE_MODEL_TEST_TIMEOUT_MS,
+          `model test timeout (${Math.round(MARKETPLACE_MODEL_TEST_TIMEOUT_MS / 1000)}s)`,
+        );
+        const normalizedSet = new Set(
+          (Array.isArray(discoveredModels) ? discoveredModels : [])
+            .map((item) => String(item || '').trim())
+            .filter((item) => item.length > 0),
+        );
+        const listedInUpstream = normalizedSet.has(modelName);
+        const listReason = listedInUpstream ? 'model found in upstream list' : 'model not found in upstream list';
 
-      if (!available) {
         const probe = await probeModelAvailabilityViaRealtimeCall({
           baseUrl: site.url,
           platform: site.platform,
-          credential: modelCredential,
+          credential,
           modelName,
         });
-        probeCheckedUrl = probe.checkedUrl;
-        probeStatusCode = probe.statusCode;
+        const probeCheckedUrl = probe.checkedUrl;
+        const probeStatusCode = probe.statusCode;
         if (probe.available === true) {
-          available = true;
-          reason = `model accepted by realtime probe: ${probe.reason}`;
-        } else if (probe.available === false) {
-          reason = probe.reason;
-        } else {
-          reason = `${reason}; probe inconclusive: ${probe.reason}`;
+          return {
+            available: true,
+            reason: `${listReason}; model accepted by realtime probe: ${probe.reason}`,
+            probeCheckedUrl,
+            probeStatusCode,
+          };
         }
+        if (probe.available === false) {
+          return {
+            available: false,
+            reason: `${listReason}; ${probe.reason}`,
+            probeCheckedUrl,
+            probeStatusCode,
+          };
+        }
+
+        return {
+          available: false,
+          reason: `${listReason}; probe inconclusive: ${probe.reason}`,
+          probeCheckedUrl,
+          probeStatusCode,
+        };
+      };
+
+      let available = false;
+      let reason = 'model not found in upstream list';
+      let probeCheckedUrl: string | null = null;
+      let probeStatusCode: number | null = null;
+      let usedApiKey: string | null = null;
+      let usedApiKeySource: string | null = null;
+      let checkedCredentialCount = 0;
+      const checkedCredentialSet = new Set<string>();
+
+      for (const candidate of credentialCandidates.slice(0, MARKETPLACE_MODEL_TEST_KEY_SCAN_LIMIT)) {
+        checkedCredentialSet.add(candidate.credential);
+        checkedCredentialCount++;
+        const result = await checkCredentialAvailability(candidate.credential);
+        usedApiKey = candidate.credential;
+        usedApiKeySource = candidate.source;
+        reason = result.reason;
+        probeCheckedUrl = result.probeCheckedUrl;
+        probeStatusCode = result.probeStatusCode;
+        if (result.available) {
+          available = true;
+          break;
+        }
+      }
+
+      if (!available && accountAccessToken && !autoKeyCreated) {
+        const createdCredential = await tryCreateModelScopedKey();
+        if (createdCredential && !checkedCredentialSet.has(createdCredential)) {
+          checkedCredentialCount++;
+          const result = await checkCredentialAvailability(createdCredential);
+          usedApiKey = createdCredential;
+          usedApiKeySource = autoKeyName ? `auto:${autoKeyName}` : 'auto_created';
+          reason = result.reason;
+          probeCheckedUrl = result.probeCheckedUrl;
+          probeStatusCode = result.probeStatusCode;
+          available = result.available;
+        }
+      }
+
+      if (!available && credentialCandidates.length > MARKETPLACE_MODEL_TEST_KEY_SCAN_LIMIT) {
+        reason = `${reason}; scanned ${MARKETPLACE_MODEL_TEST_KEY_SCAN_LIMIT}/${credentialCandidates.length} keys`;
       }
 
       return {
@@ -1121,6 +1295,9 @@ export async function statsRoutes(app: FastifyInstance) {
         reason,
         probeCheckedUrl,
         probeStatusCode,
+        usedApiKey,
+        usedApiKeySource,
+        checkedCredentialCount,
         autoKeyCreated,
         autoKeyName,
         autoKeyGroup,

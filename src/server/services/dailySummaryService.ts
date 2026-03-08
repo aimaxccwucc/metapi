@@ -1,4 +1,4 @@
-import { and, eq, gte, lt } from 'drizzle-orm';
+import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { getLocalDayRangeUtc, formatLocalDateTime, getResolvedTimeZone } from './localTimeService.js';
 import { parseCheckinRewardAmount } from './checkinRewardParser.js';
@@ -45,8 +45,8 @@ export async function collectDailySummaryMetrics(now = new Date()): Promise<Dail
     .innerJoin(schema.accounts, eq(schema.checkinLogs.accountId, schema.accounts.id))
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(and(
-      gte(schema.checkinLogs.createdAt, startUtc),
-      lt(schema.checkinLogs.createdAt, endUtc),
+      gte(sql`datetime(${schema.checkinLogs.createdAt})`, startUtc),
+      lt(sql`datetime(${schema.checkinLogs.createdAt})`, endUtc),
       eq(schema.sites.status, 'active'),
     ))
     .all();
@@ -77,8 +77,8 @@ export async function collectDailySummaryMetrics(now = new Date()): Promise<Dail
     .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
     .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(and(
-      gte(schema.proxyLogs.createdAt, startUtc),
-      lt(schema.proxyLogs.createdAt, endUtc),
+      gte(sql`datetime(${schema.proxyLogs.createdAt})`, startUtc),
+      lt(sql`datetime(${schema.proxyLogs.createdAt})`, endUtc),
       eq(schema.sites.status, 'active'),
     ))
     .all();

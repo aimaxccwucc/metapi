@@ -39,45 +39,64 @@ function parseListenHost(env: NodeJS.ProcessEnv): string {
   return requestedHost;
 }
 
-export const config = {
-  authToken: process.env.AUTH_TOKEN || 'change-me-admin-token',
-  proxyToken: process.env.PROXY_TOKEN || 'change-me-proxy-sk-token',
-  accountCredentialSecret: process.env.ACCOUNT_CREDENTIAL_SECRET || process.env.AUTH_TOKEN || 'change-me-admin-token',
-  checkinCron: process.env.CHECKIN_CRON || '0 8 * * *',
-  balanceRefreshCron: process.env.BALANCE_REFRESH_CRON || '0 * * * *',
-  siteHealthRefreshCron: process.env.SITE_HEALTH_REFRESH_CRON || '*/15 * * * *',
-  webhookUrl: process.env.WEBHOOK_URL || '',
-  barkUrl: process.env.BARK_URL || '',
-  webhookEnabled: parseBoolean(process.env.WEBHOOK_ENABLED, true),
-  barkEnabled: parseBoolean(process.env.BARK_ENABLED, true),
-  serverChanEnabled: parseBoolean(process.env.SERVERCHAN_ENABLED, true),
-  serverChanKey: process.env.SERVERCHAN_KEY || '',
-  telegramEnabled: parseBoolean(process.env.TELEGRAM_ENABLED, false),
-  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
-  telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
-  smtpEnabled: parseBoolean(process.env.SMTP_ENABLED, false),
-  smtpHost: process.env.SMTP_HOST || '',
-  smtpPort: parseInt(process.env.SMTP_PORT || '587'),
-  smtpSecure: parseBoolean(process.env.SMTP_SECURE, false),
-  smtpUser: process.env.SMTP_USER || '',
-  smtpPass: process.env.SMTP_PASS || '',
-  smtpFrom: process.env.SMTP_FROM || '',
-  smtpTo: process.env.SMTP_TO || '',
-  notifyCooldownSec: Math.max(0, Math.trunc(parseNumber(process.env.NOTIFY_COOLDOWN_SEC, 300))),
-  adminIpAllowlist: parseCsvList(process.env.ADMIN_IP_ALLOWLIST),
-  port: Math.trunc(parseNumber(process.env.PORT, 4000)),
-  dataDir,
-  dbType: parseDbType(process.env.DB_TYPE),
-  dbUrl: (process.env.DB_URL || '').trim(),
-  routingFallbackUnitCost: Math.max(1e-6, parseNumber(process.env.ROUTING_FALLBACK_UNIT_COST, 1)),
-  tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(process.env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
-  proxyLogRetentionDays: Math.max(0, Math.trunc(parseNumber(process.env.PROXY_LOG_RETENTION_DAYS, 30))),
-  proxyLogRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(process.env.PROXY_LOG_RETENTION_PRUNE_INTERVAL_MINUTES, 30))),
-  routingWeights: {
-    baseWeightFactor: parseNumber(process.env.BASE_WEIGHT_FACTOR, 0.5),
-    valueScoreFactor: parseNumber(process.env.VALUE_SCORE_FACTOR, 0.5),
-    costWeight: parseNumber(process.env.COST_WEIGHT, 0.4),
-    balanceWeight: parseNumber(process.env.BALANCE_WEIGHT, 0.3),
-    usageWeight: parseNumber(process.env.USAGE_WEIGHT, 0.3),
-  },
-};
+export function buildConfig(env: NodeJS.ProcessEnv) {
+  const dataDir = env.DATA_DIR || './data';
+
+  return {
+    authToken: env.AUTH_TOKEN || 'change-me-admin-token',
+    proxyToken: env.PROXY_TOKEN || 'change-me-proxy-sk-token',
+    systemProxyUrl: env.SYSTEM_PROXY_URL || '',
+    accountCredentialSecret: env.ACCOUNT_CREDENTIAL_SECRET || env.AUTH_TOKEN || 'change-me-admin-token',
+    checkinCron: env.CHECKIN_CRON || '0 8 * * *',
+    balanceRefreshCron: env.BALANCE_REFRESH_CRON || '0 * * * *',
+    siteHealthRefreshCron: env.SITE_HEALTH_REFRESH_CRON || '*/15 * * * *',
+    webhookUrl: env.WEBHOOK_URL || '',
+    barkUrl: env.BARK_URL || '',
+    webhookEnabled: parseBoolean(env.WEBHOOK_ENABLED, true),
+    barkEnabled: parseBoolean(env.BARK_ENABLED, true),
+    serverChanEnabled: parseBoolean(env.SERVERCHAN_ENABLED, true),
+    serverChanKey: env.SERVERCHAN_KEY || '',
+    telegramEnabled: parseBoolean(env.TELEGRAM_ENABLED, false),
+    telegramBotToken: env.TELEGRAM_BOT_TOKEN || '',
+    telegramChatId: env.TELEGRAM_CHAT_ID || '',
+    smtpEnabled: parseBoolean(env.SMTP_ENABLED, false),
+    smtpHost: env.SMTP_HOST || '',
+    smtpPort: parseInt(env.SMTP_PORT || '587'),
+    smtpSecure: parseBoolean(env.SMTP_SECURE, false),
+    smtpUser: env.SMTP_USER || '',
+    smtpPass: env.SMTP_PASS || '',
+    smtpFrom: env.SMTP_FROM || '',
+    smtpTo: env.SMTP_TO || '',
+    notifyCooldownSec: Math.max(0, Math.trunc(parseNumber(env.NOTIFY_COOLDOWN_SEC, 300))),
+    adminIpAllowlist: parseCsvList(env.ADMIN_IP_ALLOWLIST),
+    port: Math.trunc(parseNumber(env.PORT, 4000)),
+    listenHost: parseListenHost(env),
+    dataDir,
+    dbType: parseDbType(env.DB_TYPE),
+    dbUrl: (env.DB_URL || '').trim(),
+    dbSsl: parseBoolean(env.DB_SSL, false),
+    requestBodyLimit: DEFAULT_REQUEST_BODY_LIMIT,
+    routingFallbackUnitCost: Math.max(1e-6, parseNumber(env.ROUTING_FALLBACK_UNIT_COST, 1)),
+    tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
+    proxyLogRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_DAYS, 30))),
+    proxyLogRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_PRUNE_INTERVAL_MINUTES, 30))),
+    routingWeights: {
+      baseWeightFactor: parseNumber(env.BASE_WEIGHT_FACTOR, 0.5),
+      valueScoreFactor: parseNumber(env.VALUE_SCORE_FACTOR, 0.5),
+      costWeight: parseNumber(env.COST_WEIGHT, 0.4),
+      balanceWeight: parseNumber(env.BALANCE_WEIGHT, 0.3),
+      usageWeight: parseNumber(env.USAGE_WEIGHT, 0.3),
+    },
+  };
+}
+
+export const config = buildConfig(process.env);
+
+export function buildFastifyOptions(
+  appConfig: ReturnType<typeof buildConfig>,
+): FastifyServerOptions {
+  return {
+    logger: true,
+    bodyLimit: appConfig.requestBodyLimit,
+  };
+}
