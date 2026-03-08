@@ -23,3 +23,6 @@ docker/.env
 # Local planning docs
 docs/plan/
 docs/plans/
+
+# Local agent state
+.serena/
