@@ -26,6 +26,17 @@ function normalizePinnedFlag(input: unknown): boolean | null {
   return null;
 }
 
+function normalizeUseSystemProxyFlag(input: unknown): boolean | null {
+  return normalizePinnedFlag(input);
+}
+
+function normalizeBatchIds(input: unknown): number[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((item) => Number.parseInt(String(item), 10))
+    .filter((id) => Number.isFinite(id) && id > 0);
+}
+
 function normalizeSortOrder(input: unknown): number | null {
   if (input === undefined || input === null || input === '') return null;
   const parsed = Number.parseInt(String(input), 10);
@@ -110,13 +121,14 @@ export async function sitesRoutes(app: FastifyInstance) {
     platform?: string;
     apiKey?: string;
     proxyUrl?: string | null;
+    useSystemProxy?: boolean;
     externalCheckinUrl?: string | null;
     status?: string;
     isPinned?: boolean;
     sortOrder?: number;
     globalWeight?: number;
   } }>('/api/sites', async (request, reply) => {
-    const { name, url, platform, apiKey, proxyUrl, externalCheckinUrl, status, isPinned, sortOrder, globalWeight } = request.body;
+    const { name, url, platform, apiKey, proxyUrl, useSystemProxy, externalCheckinUrl, status, isPinned, sortOrder, globalWeight } = request.body;
     const normalizedSiteUrl = normalizeSiteBaseUrl(url);
     const normalizedStatus = normalizeSiteStatus(status);
     if (status !== undefined && !normalizedStatus) {
@@ -125,6 +137,10 @@ export async function sitesRoutes(app: FastifyInstance) {
     const parsedProxyUrl = parseSiteProxyUrlInput(proxyUrl);
     if (!parsedProxyUrl.valid) {
       return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
+    }
+    const normalizedUseSystemProxy = normalizeUseSystemProxyFlag(useSystemProxy);
+    if (useSystemProxy !== undefined && normalizedUseSystemProxy === null) {
+      return reply.code(400).send({ error: 'Invalid useSystemProxy value. Expected boolean.' });
     }
     const normalizedExternalCheckinUrl = normalizeOptionalExternalCheckinUrl(externalCheckinUrl);
     if (!normalizedExternalCheckinUrl.valid) {
@@ -160,6 +176,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       platform: detectedPlatform,
       apiKey,
       proxyUrl: parsedProxyUrl.proxyUrl,
+      useSystemProxy: normalizedUseSystemProxy ?? false,
       externalCheckinUrl: normalizedExternalCheckinUrl.url,
       status: normalizedStatus ?? 'active',
       isPinned: normalizedPinned ?? false,
@@ -185,6 +202,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     platform?: string;
     apiKey?: string;
     proxyUrl?: string | null;
+    useSystemProxy?: boolean;
     externalCheckinUrl?: string | null;
     status?: string;
     isPinned?: boolean;
@@ -211,6 +229,10 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (!parsedProxyUrl.valid) {
       return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
     }
+    const normalizedUseSystemProxy = normalizeUseSystemProxyFlag(body.useSystemProxy);
+    if (body.useSystemProxy !== undefined && normalizedUseSystemProxy === null) {
+      return reply.code(400).send({ error: 'Invalid useSystemProxy value. Expected boolean.' });
+    }
     const normalizedExternalCheckinUrl = normalizeOptionalExternalCheckinUrl(body.externalCheckinUrl);
     if (!normalizedExternalCheckinUrl.valid) {
       return reply.code(400).send({ error: 'Invalid externalCheckinUrl. Expected a valid http(s) URL.' });
@@ -233,6 +255,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.platform !== undefined) updates.platform = body.platform;
     if (body.apiKey !== undefined) updates.apiKey = body.apiKey;
     if (parsedProxyUrl.present) updates.proxyUrl = parsedProxyUrl.proxyUrl;
+    if (body.useSystemProxy !== undefined) updates.useSystemProxy = normalizedUseSystemProxy;
     if (normalizedExternalCheckinUrl.present) updates.externalCheckinUrl = normalizedExternalCheckinUrl.url;
     if (body.status !== undefined) updates.status = normalizedStatus;
     if (body.isPinned !== undefined) updates.isPinned = normalizedPinned;
@@ -282,6 +305,73 @@ export async function sitesRoutes(app: FastifyInstance) {
     }
 
     return await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+  });
+
+  app.post<{ Body?: { ids?: number[]; action?: string } }>('/api/sites/batch', async (request, reply) => {
+    const ids = normalizeBatchIds(request.body?.ids);
+    const action = String(request.body?.action || '').trim();
+    if (ids.length === 0) {
+      return reply.code(400).send({ message: 'ids is required' });
+    }
+    if (!['enable', 'disable', 'delete', 'enableSystemProxy', 'disableSystemProxy'].includes(action)) {
+      return reply.code(400).send({ message: 'Invalid action' });
+    }
+
+    const successIds: number[] = [];
+    const failedItems: Array<{ id: number; message: string }> = [];
+
+    for (const id of ids) {
+      const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+      if (!existingSite) {
+        failedItems.push({ id, message: 'Site not found' });
+        continue;
+      }
+
+      try {
+        if (action === 'delete') {
+          await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
+        } else if (action === 'enableSystemProxy') {
+          await db.update(schema.sites)
+            .set({ useSystemProxy: true, updatedAt: new Date().toISOString() })
+            .where(eq(schema.sites.id, id))
+            .run();
+        } else if (action === 'disableSystemProxy') {
+          await db.update(schema.sites)
+            .set({ useSystemProxy: false, updatedAt: new Date().toISOString() })
+            .where(eq(schema.sites.id, id))
+            .run();
+        } else {
+          const nextStatus = action === 'enable' ? 'active' : 'disabled';
+          await db.update(schema.sites)
+            .set({ status: nextStatus, updatedAt: new Date().toISOString() })
+            .where(eq(schema.sites.id, id))
+            .run();
+
+          const now = new Date().toISOString();
+          if (nextStatus === 'disabled') {
+            await db.update(schema.accounts)
+              .set({ status: 'disabled', updatedAt: now })
+              .where(eq(schema.accounts.siteId, id))
+              .run();
+          } else {
+            await db.update(schema.accounts)
+              .set({ status: 'active', updatedAt: now })
+              .where(and(eq(schema.accounts.siteId, id), eq(schema.accounts.status, 'disabled')))
+              .run();
+          }
+        }
+        successIds.push(id);
+      } catch (error: any) {
+        failedItems.push({ id, message: error?.message || 'Batch operation failed' });
+      }
+    }
+
+    invalidateSiteProxyCache();
+    return {
+      success: true,
+      successIds,
+      failedItems,
+    };
   });
 
   // Delete a site

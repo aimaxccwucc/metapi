@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { eq } from 'drizzle-orm';
 
 type DbModule = typeof import('../../db/index.js');
 
@@ -88,5 +89,48 @@ describe('sites batch routes', () => {
 
     expect(response.statusCode).toBe(400);
     expect((response.json() as { message?: string }).message).toContain('action');
+  });
+
+  it('disables and re-enables related accounts in batch status updates', async () => {
+    const site = await db.insert(schema.sites).values({
+      id: 10,
+      name: 'batch-status-site',
+      url: 'https://batch-status.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'batch-user',
+      accessToken: 'batch-access-token',
+      status: 'active',
+    }).returning().get();
+
+    const disableResponse = await app.inject({
+      method: 'POST',
+      url: '/api/sites/batch',
+      payload: {
+        ids: [site.id],
+        action: 'disable',
+      },
+    });
+    expect(disableResponse.statusCode).toBe(200);
+
+    const disabledAccount = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    expect(disabledAccount?.status).toBe('disabled');
+
+    const enableResponse = await app.inject({
+      method: 'POST',
+      url: '/api/sites/batch',
+      payload: {
+        ids: [site.id],
+        action: 'enable',
+      },
+    });
+    expect(enableResponse.statusCode).toBe(200);
+
+    const enabledAccount = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
+    expect(enabledAccount?.status).toBe('active');
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
@@ -30,6 +30,7 @@ type SiteRow = {
   healthCheckedAt?: string | null;
   apiKey?: string;
   proxyUrl?: string | null;
+  useSystemProxy?: boolean;
   globalWeight?: number;
   isPinned?: boolean;
   sortOrder?: number;
@@ -92,6 +93,8 @@ export default function Sites() {
   const [togglingSiteId, setTogglingSiteId] = useState<number | null>(null);
   const [orderingSiteId, setOrderingSiteId] = useState<number | null>(null);
   const [pinningSiteId, setPinningSiteId] = useState<number | null>(null);
+  const [selectedSiteIds, setSelectedSiteIds] = useState<number[]>([]);
+  const [batchActionLoading, setBatchActionLoading] = useState(false);
   const [siteOpsLoading, setSiteOpsLoading] = useState<Record<string, boolean>>({});
   const editorPresence = useAnimatedVisibility(Boolean(editor), 220);
   const lastEditorRef = useRef<SiteEditorState | null>(null);
@@ -323,6 +326,54 @@ export default function Sites() {
     } finally {
       setOrderingSiteId(null);
     }
+  };
+
+  const toggleSiteSelection = (siteId: number, checked: boolean) => {
+    setSelectedSiteIds((current) => (
+      checked
+        ? Array.from(new Set([...current, siteId]))
+        : current.filter((id) => id !== siteId)
+    ));
+  };
+
+  const toggleSelectAllVisible = (checked: boolean) => {
+    if (!checked) {
+      setSelectedSiteIds([]);
+      return;
+    }
+    setSelectedSiteIds(sortedSites.map((site) => site.id));
+  };
+
+  const runBatchAction = async (action: 'enable' | 'disable' | 'delete' | 'enableSystemProxy' | 'disableSystemProxy') => {
+    if (selectedSiteIds.length === 0) return;
+    if (action === 'delete' && typeof globalThis.confirm === 'function' && !globalThis.confirm(`确认删除选中的 ${selectedSiteIds.length} 个站点？`)) return;
+
+    setBatchActionLoading(true);
+    try {
+      const result = await api.batchUpdateSites({
+        ids: selectedSiteIds,
+        action,
+      });
+      const successIds = Array.isArray(result?.successIds) ? result.successIds.map((id: unknown) => Number(id)) : [];
+      const failedItems = Array.isArray(result?.failedItems) ? result.failedItems : [];
+      if (failedItems.length > 0) {
+        toast.info(`批量操作完成：成功 ${successIds.length}，失败 ${failedItems.length}`);
+      } else {
+        toast.success(`批量操作完成：成功 ${successIds.length}`);
+      }
+      setSelectedSiteIds(failedItems.map((item: any) => Number(item.id)).filter((id: number) => Number.isFinite(id) && id > 0));
+      await load();
+    } catch (e: any) {
+      toast.error(e.message || '批量操作失败');
+    } finally {
+      setBatchActionLoading(false);
+    }
+  };
+
+  const handleSiteRowClick = (siteId: number, event: MouseEvent<HTMLTableRowElement>) => {
+    if (shouldIgnoreRowSelectionClick(event.target)) return;
+    const isSelected = selectedSiteIds.includes(siteId);
+    toggleSiteSelection(siteId, !isSelected);
   };
 
   const withSiteOpLoading = async (key: string, fn: () => Promise<void>) => {
