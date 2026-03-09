@@ -124,6 +124,33 @@ function formatBillingDetailSummary(log: ProxyLog) {
   return `模型倍率 ${formatCompactNumber(detail.pricing.modelRatio)}，输出倍率 ${formatCompactNumber(detail.pricing.completionRatio)}，缓存倍率 ${formatCompactNumber(detail.pricing.cacheRatio)}，缓存创建倍率 ${formatCompactNumber(detail.pricing.cacheCreationRatio)}，分组倍率 ${formatCompactNumber(detail.pricing.groupRatio)}`;
 }
 
+function isMediaProxyPath(path?: string | null) {
+  const normalized = String(path || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.includes('/images') || normalized.includes('/image') || normalized.includes('/videos') || normalized.includes('/video');
+}
+
+function isUnestimatedMediaLog(log: ProxyLog, pathMeta?: ReturnType<typeof parseProxyLogPathMeta>) {
+  const totalTokens = Number(log.totalTokens || 0);
+  const promptTokens = Number(log.promptTokens || 0);
+  const completionTokens = Number(log.completionTokens || 0);
+  const estimatedCost = typeof log.estimatedCost === 'number' ? log.estimatedCost : null;
+  const mediaByPath = isMediaProxyPath(pathMeta?.downstreamPath) || isMediaProxyPath(pathMeta?.upstreamPath);
+  const mediaByModel = /(?:image|images|video|videos|flux|kling|veo|wanx|seedream|gpt-image|gemini-.*image)/i.test(`${log.modelRequested} ${log.modelActual}`);
+  return (mediaByPath || mediaByModel)
+    && totalTokens === 0
+    && promptTokens === 0
+    && completionTokens === 0
+    && estimatedCost !== null
+    && estimatedCost <= 0;
+}
+
+function formatEstimatedCost(log: ProxyLog, pathMeta?: ReturnType<typeof parseProxyLogPathMeta>) {
+  if (isUnestimatedMediaLog(log, pathMeta)) return '暂不可估算';
+  if (typeof log.estimatedCost !== 'number') return '-';
+  return `$${log.estimatedCost.toFixed(6)}`;
+}
+
 function buildBillingProcessLines(log: ProxyLog) {
   const detail = log.billingDetails;
   if (!detail) return [];
@@ -268,7 +295,7 @@ function renderProxyLogTable(
                   {log.completionTokens?.toLocaleString() || '-'}
                 </td>
                 <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>
-                  {typeof log.estimatedCost === 'number' ? `$${log.estimatedCost.toFixed(6)}` : '-'}
+                  {formatEstimatedCost(log, pathMeta)}
                 </td>
                 <td style={{ textAlign: 'center' }}>
                   {log.retryCount > 0 ? (
@@ -338,8 +365,8 @@ function renderProxyLogTable(
                                 输入 {log.promptTokens?.toLocaleString() || 0} tokens
                                 {' + '}输出 {log.completionTokens?.toLocaleString() || 0} tokens
                                 {' = '}总计 {log.totalTokens?.toLocaleString() || 0} tokens
-                                {typeof log.estimatedCost === 'number' && (
-                                  <>，预估费用 <strong style={{ color: 'var(--color-text-primary)' }}>${log.estimatedCost.toFixed(6)}</strong></>
+                                {formatEstimatedCost(log, pathMeta) !== '-' && (
+                                  <>，预估费用 <strong style={{ color: 'var(--color-text-primary)' }}>{formatEstimatedCost(log, pathMeta)}</strong></>
                                 )}
                               </span>
                             )}
@@ -607,9 +634,14 @@ export default function ProxyLogs() {
     let successCount = 0;
     let totalCost = 0;
     let totalTokensAll = 0;
+    let estimatedCostCount = 0;
     for (const log of logs) {
       if (log.status === 'success') successCount += 1;
-      totalCost += log.estimatedCost || 0;
+      const pathMeta = parseProxyLogPathMeta(log.errorMessage);
+      if (!isUnestimatedMediaLog(log, pathMeta) && typeof log.estimatedCost === 'number') {
+        totalCost += log.estimatedCost;
+        estimatedCostCount += 1;
+      }
       totalTokensAll += log.totalTokens || 0;
     }
     const totalCount = logs.length;
@@ -619,6 +651,7 @@ export default function ProxyLogs() {
       failedCount: totalCount - successCount,
       totalCost,
       totalTokensAll,
+      estimatedCostCount,
     };
   }, [logs]);
 
@@ -650,7 +683,9 @@ export default function ProxyLogs() {
           <h2 className="page-title">{tr('使用日志')}</h2>
           {view === 'proxy' ? (
             <>
-              <span className="kpi-chip kpi-chip-success">消耗总额 ${proxySummary.totalCost.toFixed(4)}</span>
+              <span className="kpi-chip kpi-chip-success">
+                消耗总额 {proxySummary.estimatedCostCount > 0 ? `$${proxySummary.totalCost.toFixed(4)}` : '暂不可估算'}
+              </span>
               <span className="kpi-chip kpi-chip-warning">{proxySummary.totalTokensAll.toLocaleString()} tokens</span>
             </>
           ) : (
