@@ -350,4 +350,274 @@ describe('/api/models/marketplace', () => {
     expect(body.probeStatusCode).toBe(200);
     expect(body.reason).toContain('model accepted by realtime probe');
   });
+
+  it('uses embeddings probe for embedding models', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-embeddings',
+      url: 'https://site-embeddings.example.com',
+      platform: 'one-api',
+      status: 'active',
+      apiKey: '',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'embedding-user',
+      accessToken: '',
+      apiToken: 'sk-embedding',
+      status: 'active',
+      balance: 1,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'text-embedding-3-large',
+      available: true,
+      latencyMs: 80,
+    }).run();
+
+    undiciFetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: 'text-embedding-3-large' }] }),
+        text: async () => JSON.stringify({ data: [{ id: 'text-embedding-3-large' }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          object: 'list',
+          model: 'text-embedding-3-large',
+          data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
+        }),
+        text: async () => JSON.stringify({
+          object: 'list',
+          model: 'text-embedding-3-large',
+          data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
+        }),
+      });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'text-embedding-3-large',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      success: boolean;
+      available: boolean;
+      probeCheckedUrl: string | null;
+      reason: string;
+    };
+    expect(body.success).toBe(true);
+    expect(body.available).toBe(true);
+    expect(body.probeCheckedUrl).toBe('https://site-embeddings.example.com/v1/embeddings');
+    expect(body.reason).toContain('probe succeeded via embeddings');
+  });
+
+  it('uses images probe for image models', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-images',
+      url: 'https://site-images.example.com',
+      platform: 'one-api',
+      status: 'active',
+      apiKey: '',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'image-user',
+      accessToken: '',
+      apiToken: 'sk-image',
+      status: 'active',
+      balance: 1,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-image-1',
+      available: true,
+      latencyMs: 90,
+    }).run();
+
+    undiciFetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: 'gpt-image-1' }] }),
+        text: async () => JSON.stringify({ data: [{ id: 'gpt-image-1' }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          created: Date.now(),
+          data: [{ b64_json: 'ZmFrZQ==' }],
+        }),
+        text: async () => JSON.stringify({
+          created: Date.now(),
+          data: [{ b64_json: 'ZmFrZQ==' }],
+        }),
+      });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'gpt-image-1',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      success: boolean;
+      available: boolean;
+      probeCheckedUrl: string | null;
+      reason: string;
+    };
+    expect(body.success).toBe(true);
+    expect(body.available).toBe(true);
+    expect(body.probeCheckedUrl).toBe('https://site-images.example.com/v1/images/generations');
+    expect(body.reason).toContain('probe succeeded via images');
+  });
+
+  it('uses videos probe for video models', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-videos',
+      url: 'https://site-videos.example.com',
+      platform: 'one-api',
+      status: 'active',
+      apiKey: '',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'video-user',
+      accessToken: '',
+      apiToken: 'sk-video',
+      status: 'active',
+      balance: 1,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'sora_video2',
+      available: true,
+      latencyMs: 90,
+    }).run();
+
+    undiciFetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [{ id: 'sora_video2' }] }),
+        text: async () => JSON.stringify({ data: [{ id: 'sora_video2' }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: 'vid_upstream_123',
+          object: 'video',
+          status: 'queued',
+        }),
+        text: async () => JSON.stringify({
+          id: 'vid_upstream_123',
+          object: 'video',
+          status: 'queued',
+        }),
+      });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'sora_video2',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      success: boolean;
+      available: boolean;
+      probeCheckedUrl: string | null;
+      reason: string;
+    };
+    expect(body.success).toBe(true);
+    expect(body.available).toBe(true);
+    expect(body.probeCheckedUrl).toBe('https://site-videos.example.com/v1/videos');
+    expect(body.reason).toContain('probe succeeded via videos');
+  });
+
+  it('uses gemini native embedding probe for official gemini sites', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-gemini',
+      url: 'https://generativelanguage.googleapis.com',
+      platform: 'gemini',
+      status: 'active',
+      apiKey: '',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'gemini-user',
+      accessToken: '',
+      apiToken: 'gemini-key',
+      status: 'active',
+      balance: 1,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'text-embedding-004',
+      available: true,
+      latencyMs: 50,
+    }).run();
+
+    undiciFetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ models: [{ name: 'models/text-embedding-004' }] }),
+        text: async () => JSON.stringify({ models: [{ name: 'models/text-embedding-004' }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          embedding: { values: [0.1, 0.2, 0.3] },
+        }),
+        text: async () => JSON.stringify({
+          embedding: { values: [0.1, 0.2, 0.3] },
+        }),
+      });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'text-embedding-004',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      success: boolean;
+      available: boolean;
+      probeCheckedUrl: string | null;
+      reason: string;
+    };
+    expect(body.success).toBe(true);
+    expect(body.available).toBe(true);
+    expect(body.probeCheckedUrl).toBe('https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=gemini-key');
+    expect(body.reason).toContain('probe succeeded via gemini.embedContent');
+  });
 });

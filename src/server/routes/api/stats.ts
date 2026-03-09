@@ -89,6 +89,71 @@ type MarketplaceProbeResult = {
   statusCode: number | null;
 };
 
+type MarketplaceProbeKind = 'text' | 'embeddings' | 'image' | 'video';
+
+type MarketplaceProbeAttempt = {
+  kind: MarketplaceProbeKind;
+  label: string;
+  responseType:
+    | 'text-openai'
+    | 'text-gemini'
+    | 'embeddings-openai'
+    | 'embeddings-gemini'
+    | 'image-openai'
+    | 'video-openai';
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+};
+
+const EMBEDDING_MODEL_PATTERNS = [
+  /(?:^|[-_/])text-embedding/i,
+  /embedding/i,
+  /(?:^|[-_/])bge(?:$|[-_/])/i,
+  /(?:^|[-_/])e5(?:$|[-_/])/i,
+  /(?:^|[-_/])gte(?:$|[-_/])/i,
+  /voyage/i,
+  /jina[-_/]?embeddings?/i,
+];
+
+const IMAGE_MODEL_PATTERNS = [
+  /imagen/i,
+  /image-preview/i,
+  /gpt-4o-image/i,
+  /gpt-image/i,
+  /flux/i,
+  /midjourney/i,
+  /qwen[-/.]?image/i,
+  /z-image/i,
+  /imagine/i,
+  /cogview/i,
+];
+
+const IMAGE_NEGATIVE_PATTERNS = [
+  /video/i,
+  /veo/i,
+  /sora/i,
+  /cogvideo/i,
+];
+
+const VIDEO_MODEL_PATTERNS = [
+  /video/i,
+  /veo/i,
+  /sora/i,
+  /kling/i,
+  /wan/i,
+  /runway/i,
+  /cogvideo/i,
+];
+
+const VIDEO_NEGATIVE_PATTERNS = [
+  /image/i,
+  /imagen/i,
+  /flux/i,
+  /midjourney/i,
+  /cogview/i,
+];
+
 function summarizeProbeError(rawText: string): string {
   const text = String(rawText || '').trim();
   if (!text) return '';
@@ -166,17 +231,140 @@ function classifyProbeFailureMessage(message: string): 'model_unavailable' | 'cr
   return 'inconclusive';
 }
 
-function buildProbeEndpoints(platform: string): Array<'chat' | 'responses' | 'messages'> {
+function normalizeProbeBaseUrl(baseUrl: string): string {
+  return String(baseUrl || '').trim().replace(/\/+$/, '');
+}
+
+function isVersionedBase(baseUrl: string): boolean {
+  return /\/v\d+(?:beta)?(?:\.\d+)?(?:\/|$)/i.test(baseUrl);
+}
+
+function isOpenAiCompatGeminiBase(baseUrl: string): boolean {
+  return /\/openai(?:\/|$)/i.test(baseUrl);
+}
+
+function buildOpenAiCompatibleUrl(baseUrl: string, path: string): string {
+  const normalized = normalizeProbeBaseUrl(baseUrl);
+  if (
+    /(?:\/v\d+(?:beta)?(?:\.\d+)?(?:\/openai)?)$/i.test(normalized)
+    || isOpenAiCompatGeminiBase(normalized)
+  ) {
+    return `${normalized}/${path}`;
+  }
+  return `${normalized}/v1/${path}`;
+}
+
+function buildAnthropicUrl(baseUrl: string, path: string): string {
+  const normalized = normalizeProbeBaseUrl(baseUrl);
+  if (/(?:\/v\d+(?:beta)?(?:\.\d+)?)$/i.test(normalized)) {
+    return `${normalized}/${path}`;
+  }
+  return `${normalized}/v1/${path}`;
+}
+
+function buildGeminiNativeUrl(
+  baseUrl: string,
+  modelName: string,
+  action: 'generateContent' | 'embedContent',
+  credential: string,
+): string {
+  const normalized = normalizeProbeBaseUrl(baseUrl);
+  const versionedBase = isVersionedBase(normalized) ? normalized : `${normalized}/v1beta`;
+  return `${versionedBase}/models/${encodeURIComponent(modelName)}:${action}?key=${encodeURIComponent(credential)}`;
+}
+
+function normalizeProbeModelCandidates(modelName: string): string[] {
+  const normalized = String(modelName || '').trim().toLowerCase();
+  if (!normalized) return [];
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex >= 0 && slashIndex < normalized.length - 1) {
+    return Array.from(new Set([normalized, normalized.slice(slashIndex + 1)]));
+  }
+  return [normalized];
+}
+
+function matchesProbePattern(modelName: string, patterns: RegExp[]): boolean {
+  return normalizeProbeModelCandidates(modelName)
+    .some((candidate) => patterns.some((pattern) => pattern.test(candidate)));
+}
+
+function inferProbeKindFromModelName(modelName: string): MarketplaceProbeKind | null {
+  if (!modelName.trim()) return null;
+
+  const isVideo = matchesProbePattern(modelName, VIDEO_MODEL_PATTERNS)
+    && !matchesProbePattern(modelName, VIDEO_NEGATIVE_PATTERNS);
+  if (isVideo) return 'video';
+
+  const isImage = matchesProbePattern(modelName, IMAGE_MODEL_PATTERNS)
+    && !matchesProbePattern(modelName, IMAGE_NEGATIVE_PATTERNS);
+  if (isImage) return 'image';
+
+  if (matchesProbePattern(modelName, EMBEDDING_MODEL_PATTERNS)) return 'embeddings';
+  return null;
+}
+
+function inferProbeKindFromEndpointTypes(endpointTypes: string[]): MarketplaceProbeKind | null {
+  const normalized = endpointTypes
+    .map((item) => String(item || '').trim().toLowerCase())
+    .filter(Boolean);
+
+  if (normalized.some((item) => item.includes('/v1/embeddings') || item === 'embeddings')) {
+    return 'embeddings';
+  }
+  if (normalized.some((item) => item.includes('/v1/videos') || item === 'videos' || item === 'video')) {
+    return 'video';
+  }
+  if (
+    normalized.some((item) =>
+      item.includes('/v1/images')
+      || item === 'images'
+      || item === 'image_generation'
+      || item === 'image-generation')
+  ) {
+    return 'image';
+  }
+  return null;
+}
+
+function getCachedMarketplaceEndpointTypes(modelName: string): string[] {
+  const normalized = modelName.trim().toLowerCase();
+  if (!normalized) return [];
+
+  const pricingCache = readModelsMarketplaceCache(true);
+  const matchedModel = Array.isArray(pricingCache)
+    ? pricingCache.find((item) => String(item?.name || '').trim().toLowerCase() === normalized)
+    : null;
+
+  if (matchedModel && Array.isArray((matchedModel as any).supportedEndpointTypes)) {
+    return (matchedModel as any).supportedEndpointTypes
+      .map((item: unknown) => String(item || '').trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function resolveMarketplaceProbeKind(modelName: string): MarketplaceProbeKind {
+  const heuristicKind = inferProbeKindFromModelName(modelName);
+  if (heuristicKind) return heuristicKind;
+
+  const metadataKind = inferProbeKindFromEndpointTypes(getCachedMarketplaceEndpointTypes(modelName));
+  if (metadataKind) return metadataKind;
+
+  return 'text';
+}
+
+function buildTextProbeEndpoints(platform: string): Array<'chat' | 'responses' | 'messages'> {
   const normalized = String(platform || '').trim().toLowerCase();
   if (normalized === 'claude') return ['messages', 'chat', 'responses'];
   return ['chat', 'responses', 'messages'];
 }
 
-function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' | 'responses' | 'messages') {
-  const normalizedBase = String(baseUrl || '').trim().replace(/\/+$/, '');
+function buildTextProbeRequest(baseUrl: string, platform: string, modelName: string, endpoint: 'chat' | 'responses' | 'messages') {
+  const normalizedBase = normalizeProbeBaseUrl(baseUrl);
   if (endpoint === 'responses') {
     return {
-      url: `${normalizedBase}/v1/responses`,
+      url: buildOpenAiCompatibleUrl(normalizedBase, 'responses'),
       body: {
         model: modelName,
         input: 'ping',
@@ -187,7 +375,9 @@ function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' 
   }
   if (endpoint === 'messages') {
     return {
-      url: `${normalizedBase}/v1/messages`,
+      url: platform === 'claude'
+        ? buildAnthropicUrl(normalizedBase, 'messages')
+        : buildOpenAiCompatibleUrl(normalizedBase, 'messages'),
       body: {
         model: modelName,
         max_tokens: 1,
@@ -196,7 +386,7 @@ function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' 
     };
   }
   return {
-    url: `${normalizedBase}/v1/chat/completions`,
+    url: buildOpenAiCompatibleUrl(normalizedBase, 'chat/completions'),
     body: {
       model: modelName,
       messages: [{ role: 'user', content: 'ping' }],
@@ -207,18 +397,112 @@ function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' 
   };
 }
 
-async function probeModelAvailabilityViaRealtimeCall(input: {
+function buildProbeAttempts(input: {
   baseUrl: string;
   platform: string;
   credential: string;
   modelName: string;
-}): Promise<MarketplaceProbeResult> {
-  const { fetch } = await import('undici');
-  const endpointOrder = buildProbeEndpoints(input.platform);
-  const attemptMessages: string[] = [];
+  kind: MarketplaceProbeKind;
+}): MarketplaceProbeAttempt[] {
+  const normalizedPlatform = String(input.platform || '').trim().toLowerCase();
+  const normalizedBase = normalizeProbeBaseUrl(input.baseUrl);
 
-  for (const endpoint of endpointOrder) {
-    const probe = buildProbeRequest(input.baseUrl, input.modelName, endpoint);
+  if (normalizedPlatform === 'gemini' && !isOpenAiCompatGeminiBase(normalizedBase)) {
+    if (input.kind === 'embeddings') {
+      return [{
+        kind: input.kind,
+        label: 'gemini.embedContent',
+        responseType: 'embeddings-gemini',
+        url: buildGeminiNativeUrl(normalizedBase, input.modelName, 'embedContent', input.credential),
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: {
+          model: `models/${input.modelName}`,
+          content: {
+            parts: [{ text: 'ping' }],
+          },
+        },
+      }];
+    }
+
+    return [{
+      kind: input.kind,
+      label: 'gemini.generateContent',
+      responseType: 'text-gemini',
+      url: buildGeminiNativeUrl(normalizedBase, input.modelName, 'generateContent', input.credential),
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: {
+        contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+        generationConfig: {
+          maxOutputTokens: 1,
+          temperature: 0,
+        },
+      },
+    }];
+  }
+
+  if (input.kind === 'embeddings') {
+    return [{
+      kind: input.kind,
+      label: 'embeddings',
+      responseType: 'embeddings-openai',
+      url: buildOpenAiCompatibleUrl(normalizedBase, 'embeddings'),
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.credential}`,
+      },
+      body: {
+        model: input.modelName,
+        input: 'ping',
+      },
+    }];
+  }
+
+  if (input.kind === 'image') {
+    return [{
+      kind: input.kind,
+      label: 'images',
+      responseType: 'image-openai',
+      url: buildOpenAiCompatibleUrl(normalizedBase, 'images/generations'),
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.credential}`,
+      },
+      body: {
+        model: input.modelName,
+        prompt: 'ping',
+        n: 1,
+      },
+    }];
+  }
+
+  if (input.kind === 'video') {
+    return [{
+      kind: input.kind,
+      label: 'videos',
+      responseType: 'video-openai',
+      url: buildOpenAiCompatibleUrl(normalizedBase, 'videos'),
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${input.credential}`,
+      },
+      body: {
+        model: input.modelName,
+        prompt: 'ping',
+      },
+    }];
+  }
+
+  return buildTextProbeEndpoints(input.platform).map((endpoint) => {
+    const probe = buildTextProbeRequest(normalizedBase, normalizedPlatform, input.modelName, endpoint);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Accept: 'application/json,text/event-stream,text/plain,*/*',
@@ -230,15 +514,109 @@ async function probeModelAvailabilityViaRealtimeCall(input: {
       headers.Authorization = `Bearer ${input.credential}`;
     }
 
+    return {
+      kind: input.kind,
+      label: endpoint,
+      responseType: 'text-openai' as const,
+      url: probe.url,
+      headers,
+      body: probe.body,
+    };
+  });
+}
+
+function evaluateSuccessfulProbePayload(
+  attempt: MarketplaceProbeAttempt,
+  payload: any,
+  modelName: string,
+): { available: boolean | null; reason?: string } {
+  if (attempt.responseType === 'text-openai') {
+    const returnedModel = extractProbeModelName(payload);
+    if (!returnedModel) {
+      return { available: null, reason: 'missing model in successful probe response' };
+    }
+    if (returnedModel !== modelName) {
+      return {
+        available: false,
+        reason: `probe returned mismatched model via ${attempt.label}: expected ${modelName}, got ${returnedModel}`,
+      };
+    }
+    return { available: true, reason: `probe succeeded via ${attempt.label}` };
+  }
+
+  if (attempt.responseType === 'text-gemini') {
+    if (Array.isArray(payload?.candidates) && payload.candidates.length > 0) {
+      return { available: true, reason: `probe succeeded via ${attempt.label}` };
+    }
+    if (payload?.promptFeedback || payload?.usageMetadata) {
+      return { available: true, reason: `probe succeeded via ${attempt.label}` };
+    }
+    return { available: null, reason: 'missing candidates in successful Gemini probe response' };
+  }
+
+  if (attempt.responseType === 'embeddings-openai') {
+    const returnedModel = extractProbeModelName(payload);
+    if (returnedModel && returnedModel !== modelName) {
+      return {
+        available: false,
+        reason: `probe returned mismatched model via ${attempt.label}: expected ${modelName}, got ${returnedModel}`,
+      };
+    }
+    if (Array.isArray(payload?.data) && payload.data.length > 0) {
+      return { available: true, reason: `probe succeeded via ${attempt.label}` };
+    }
+    return { available: null, reason: 'missing embeddings data in successful probe response' };
+  }
+
+  if (attempt.responseType === 'embeddings-gemini') {
+    if (Array.isArray(payload?.embedding?.values) && payload.embedding.values.length > 0) {
+      return { available: true, reason: `probe succeeded via ${attempt.label}` };
+    }
+    return { available: null, reason: 'missing embedding values in successful Gemini probe response' };
+  }
+
+  if (attempt.responseType === 'image-openai') {
+    if (Array.isArray(payload?.data) && payload.data.length > 0) {
+      return { available: true, reason: `probe succeeded via ${attempt.label}` };
+    }
+    if ((typeof payload?.id === 'string' && payload.id.trim()) || typeof payload?.created === 'number') {
+      return { available: true, reason: `probe succeeded via ${attempt.label}` };
+    }
+    return { available: null, reason: 'missing generated image payload in successful probe response' };
+  }
+
+  if (
+    (typeof payload?.id === 'string' && payload.id.trim())
+    || (typeof payload?.status === 'string' && payload.status.trim())
+    || payload?.object === 'video'
+  ) {
+    return { available: true, reason: `probe succeeded via ${attempt.label}` };
+  }
+
+  return { available: null, reason: 'missing video task payload in successful probe response' };
+}
+
+async function probeModelAvailabilityViaRealtimeCall(input: {
+  baseUrl: string;
+  platform: string;
+  credential: string;
+  modelName: string;
+  kind: MarketplaceProbeKind;
+}): Promise<MarketplaceProbeResult> {
+  const { fetch } = await import('undici');
+  const attempts = buildProbeAttempts(input);
+  const attemptMessages: string[] = [];
+
+  for (const attempt of attempts) {
     try {
       const response = await withTimeout(
         async () => {
           return await fetch(
-            probe.url,
-            await withSiteProxyRequestInit(probe.url, {
+            attempt.url,
+            await withSiteProxyRequestInit(attempt.url, {
               method: 'POST',
-              headers,
-              body: JSON.stringify(probe.body),
+              headers: attempt.headers,
+              body: JSON.stringify(attempt.body),
               signal: AbortSignal.timeout(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS),
             }),
           );
@@ -251,7 +629,7 @@ async function probeModelAvailabilityViaRealtimeCall(input: {
         const responseText = await response.text();
         const payload = parseProbeJson(responseText);
         if (!payload || typeof payload !== 'object') {
-          attemptMessages.push(`${endpoint}:${response.status} probe returned non-json success response`);
+          attemptMessages.push(`${attempt.label}:${response.status} probe returned non-json success response`);
           continue;
         }
 
@@ -261,35 +639,34 @@ async function probeModelAvailabilityViaRealtimeCall(input: {
           if (classification === 'model_unavailable') {
             return {
               available: false,
-              reason: `probe rejected model via ${endpoint}: ${embeddedError}`,
-              checkedUrl: probe.url,
+              reason: `probe rejected model via ${attempt.label}: ${embeddedError}`,
+              checkedUrl: attempt.url,
               statusCode: response.status,
             };
           }
-          attemptMessages.push(`${endpoint}:${response.status} ${embeddedError}`);
+          attemptMessages.push(`${attempt.label}:${response.status} ${embeddedError}`);
           continue;
         }
 
-        const returnedModel = extractProbeModelName(payload);
-        if (!returnedModel) {
-          attemptMessages.push(`${endpoint}:${response.status} missing model in successful probe response`);
-          continue;
-        }
-        if (returnedModel !== input.modelName) {
+        const evaluated = evaluateSuccessfulProbePayload(attempt, payload, input.modelName);
+        if (evaluated.available === false) {
           return {
             available: false,
-            reason: `probe returned mismatched model via ${endpoint}: expected ${input.modelName}, got ${returnedModel}`,
-            checkedUrl: probe.url,
+            reason: evaluated.reason || `probe rejected model via ${attempt.label}`,
+            checkedUrl: attempt.url,
             statusCode: response.status,
           };
         }
-
-        return {
-          available: true,
-          reason: `probe succeeded via ${endpoint} (HTTP ${response.status})`,
-          checkedUrl: probe.url,
-          statusCode: response.status,
-        };
+        if (evaluated.available === true) {
+          return {
+            available: true,
+            reason: `${evaluated.reason || `probe succeeded via ${attempt.label}`} (HTTP ${response.status})`,
+            checkedUrl: attempt.url,
+            statusCode: response.status,
+          };
+        }
+        attemptMessages.push(`${attempt.label}:${response.status} ${evaluated.reason || 'probe returned inconclusive success payload'}`);
+        continue;
       }
 
       const responseText = await response.text();
@@ -298,16 +675,16 @@ async function probeModelAvailabilityViaRealtimeCall(input: {
       if (classification === 'model_unavailable') {
         return {
           available: false,
-          reason: `probe rejected model via ${endpoint}: ${summarized}`,
-          checkedUrl: probe.url,
+          reason: `probe rejected model via ${attempt.label}: ${summarized}`,
+          checkedUrl: attempt.url,
           statusCode: response.status,
         };
       }
 
-      attemptMessages.push(`${endpoint}:${response.status} ${summarized}`);
+      attemptMessages.push(`${attempt.label}:${response.status} ${summarized}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || 'unknown error');
-      attemptMessages.push(`${endpoint}: ${message}`);
+      attemptMessages.push(`${attempt.label}: ${message}`);
     }
   }
 
@@ -1230,6 +1607,8 @@ export async function statsRoutes(app: FastifyInstance) {
 
     const startedAt = Date.now();
     try {
+      const probeKind = resolveMarketplaceProbeKind(modelName);
+
       const checkCredentialAvailability = async (credential: string): Promise<{
         available: boolean;
         reason: string;
@@ -1254,6 +1633,7 @@ export async function statsRoutes(app: FastifyInstance) {
           platform: site.platform,
           credential,
           modelName,
+          kind: probeKind,
         });
         const probeCheckedUrl = probe.checkedUrl;
         const probeStatusCode = probe.statusCode;
