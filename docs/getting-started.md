@@ -8,9 +8,18 @@
 
 ## 前置条件
 
-- Docker 与 Docker Compose（推荐）
-- 或下载 [Release 包](https://github.com/cita-777/metapi/releases) + Node.js 20+（免 Docker 运行）
-- 或 Node.js 20+ 与 npm（本地开发）
+按你的使用场景准备对应环境：
+
+| 场景 | 推荐方式 | 需要准备 |
+|------|----------|----------|
+| 云服务器 / NAS / 家用主机长期运行 | Docker / Docker Compose | Docker 与 Docker Compose |
+| 免费云部署（24h 在线） | Render + TiDB + UptimeRobot | 注册 Render / TiDB Cloud / UptimeRobot 免费账号，详见 [Render 部署指南](./deployment.md#render-一键部署免费-24h-运行) |
+| 个人电脑本地使用 | 桌面版安装包 | 从 [Releases](https://github.com/cita-777/metapi/releases) 下载对应系统的桌面安装包 |
+| 二次开发 / 调试 | 本地开发 | Node.js 20+ 与 npm |
+
+> [!NOTE]
+> - 当前不再把 `Release` 压缩包 + Node.js 运行时作为独立部署路径。
+> - 想直接运行成品，请用 Docker 或桌面版；想改代码，请走本地开发流程。
 
 ## 方式一：Docker Compose 部署（推荐）
 
@@ -68,6 +77,22 @@ docker compose up -d
 2. 安装并启动 Metapi Desktop
 3. 桌面壳会自动启动本地服务并保存数据，无需手动准备 Node.js 环境
 
+| 项目 | 说明 |
+|------|------|
+| 管理界面 | 应用启动后会直接打开桌面窗口，不需要假设固定的 `http://localhost:4000` |
+| 本地后端地址 | 桌面版把内置服务绑定到 `127.0.0.1`，默认会在 `4310..4399` 中挑选空闲端口；只有显式设置 `METAPI_DESKTOP_SERVER_PORT` 时才会固定 |
+| 数据目录 | 保存在 `app.getPath('userData')/data`，不是仓库里的 `./data` |
+| 日志目录 | 保存在 `app.getPath('userData')/logs`；托盘菜单提供 `Open Logs Folder` |
+
+> [!TIP]
+> - Windows 下常见路径是 `%APPDATA%\Metapi\data` 和 `%APPDATA%\Metapi\logs`。
+> - 如果你要把本机其他客户端接到桌面版内置后端，先到日志里查当前端口，不要写死 `4000`。
+
+> [!WARNING]
+> **端口冲突排障：** 如果桌面版启动后报端口被占用，可能是 `4310..4399` 范围内的端口全被其他应用占用了。
+> - 设置环境变量 `METAPI_DESKTOP_SERVER_PORT=<指定端口>` 固定到一个空闲端口
+> - 或关闭占用这些端口的应用后重启 Metapi Desktop
+
 > [!NOTE]
 > 服务器部署统一推荐 Docker / Docker Compose，不再提供裸 Node.js 的 Release 压缩包。
 
@@ -83,6 +108,7 @@ npm run dev
 
 - 前端地址：`http://localhost:5173`（Vite dev server）
 - 后端地址：`http://localhost:4000`
+- 这是源码开发流程，不是免 Docker 的成品部署包
 
 ## 首次使用流程
 
@@ -91,6 +117,8 @@ npm run dev
 > [!TIP] 从 ALL-API-Hub 迁移（可选）
 > 如果你使用过 ALL-API-Hub，Metapi 兼容其导出的备份设置，可直接导入，无需手动逐项配置。
 >
+> 导入后刷新账号状态可能出现个别账号令牌过期，点击重新绑定按钮按照下面步骤2的方法获取Access Token或者Cookie等即可。
+>
 > ![ALL-API-Hub备份导入](./screenshots/allapi-hub-backup.png)
 
 ### 步骤 1：添加站点
@@ -98,22 +126,19 @@ npm run dev
 进入 **站点管理**，添加你使用的上游中转站：
 
 - 填写站点名称（自己想怎么取就怎么取）和 URL
-- 选择平台类型（New API / One API / OneHub / DoneHub / Veloera / AnyRouter / Sub2API），通常可自动检测
-- 填写站点的管理员 API Key（可选，部分功能需要）
+- 选择平台类型（`new-api` / `one-api` / `one-hub` / `done-hub` / `veloera` / `anyrouter` / `sub2api` / `openai` / `claude` / `gemini` / `cliproxyapi`），通常可自动检测，检测有误或者因为防护页导致检测失败可以手动选择。
+- 可选是否开启系统代理，方便国内机器访问国外中转站。
+- 可选站点权重，站点权重越大，路由将更加频繁使用这个站点的模型。
+
+如果你不确定该选哪个平台，先看 [上游接入](./upstream-integration.md)。
 
 ![站点管理](./screenshots/site-management.png)
 
-### 步骤 2：添加账号
+### 步骤 2：添加账号(可签到、查询余额等)
 
-首先前往你想添加的公益站，进入下图界面：
+进入 **连接管理中的账号管理**，为每个站点添加已注册的账号：
 
 ![账号管理](./screenshots/account-management.png)
-
-进入 **账号管理**，为每个站点添加已注册的账号：
-
-
-
-![账号余额](./screenshots/account-balance.png)
 
 - 填入用户名和访问凭证
 
@@ -121,30 +146,59 @@ npm run dev
 
 - 系统会自动登录并获取余额信息
 
-![账号余额](./screenshots/account-balance.png)
+  ![账号余额](./screenshots/account-balance.png)
 
 - 启用自动签到（如站点支持）
 
-### 步骤 3：同步 Token
+### 步骤 3：添加 API Key（Base URL+Key模式，只可获取模型和使用模型）
 
-进入 **Token 管理**：
+首先你需要在步骤1中，确保添加了（`new-api` / `one-api` / `one-hub` / `done-hub` / `veloera` / `anyrouter` / `sub2api` / `openai` / `claude` / `gemini` / `cliproxyapi`）的类型的Base URL。
 
-- 点击「同步」从上游账号拉取 API Key
+- 进入 **连接管理中的API Key管理**，为每个站点添加你的API Key：
 
-- 或手动添加已有的 API Key，如下图所示。
+![API Key 管理](./screenshots/api-key-management.png)
+
+### 步骤 4：同步账号令牌
+
+进入 **连接管理中的账号令牌管理**：
+
+- 点击「同步」从上游账号拉取 账号令牌
+
+- 或手动添加已有的账号令牌，添加后上游站点的令牌管理页面会同步出现令牌，如下图所示。
 
   ![Token管理](./screenshots/token-management.png)
 
-### 步骤 4：检查路由
+### 步骤 5：路由管理
 
 进入 **路由管理**：
 
 - 系统会自动发现模型并生成路由规则
+- 点击右上角的刷新选中概率可以显示并将概率载入缓存中
 - 可以手动调整通道的优先级和权重
+- 关于路由权重参数调优，参考 [配置说明 → 智能路由](./configuration.md#智能路由)
+- 左侧可以进行品牌、站点、接口等的筛选，如下图所示：
+
+![路由筛选](./screenshots/routes-filter.png)
+
+- **可以通过创建群组，从而对上游模型进行匹配和重定向，如果建立下图群组，下游访问Metapi时获取的claude-opus-4-6模型将在命中样本中智能选取，日志中可以看见映射。** ![路由群组示例](./screenshots/route-group.png)
+
+- **可以在使用日志中看见下游的请求模型和实际分配给下游使用的模型**
+
+  ![日志中的模型映射](./screenshots/proxy-logs-mapping.png)
 
 ### 步骤 5：验证代理
 
-使用 curl 快速验证：
+**Metapi还有更多功能，可以在设置中寻找，请尽情探索，有建议可以提出Issue改进。**
+
+按运行方式选择验证入口：
+
+| 运行方式 | 管理界面 | 代理接口基地址 |
+|----------|----------|----------------|
+| Docker / Docker Compose | `http://localhost:4000` | `http://localhost:4000` |
+| 本地开发 | `http://localhost:5173` | `http://localhost:4000` |
+| 桌面版 | 直接使用桌面窗口 | 通常是4312，先从日志里的 `Proxy API:` 行确认当前 `http://127.0.0.1:<port>` |
+
+### Docker / 本地开发：直接用 curl 验证
 
 ```bash
 # 检查模型列表
@@ -158,10 +212,27 @@ curl -sS http://localhost:4000/v1/chat/completions \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-返回正常响应，说明一切就绪。
+### 桌面版：先确认当前端口再验证
+
+打开托盘菜单的 `Open Logs Folder`，在最新日志里查找类似下面的启动信息：
+
+```text
+Dashboard: http://127.0.0.1:4312
+Proxy API: http://127.0.0.1:4312/v1/chat/completions
+```
+
+然后把日志里的实际端口替换进 curl：
+
+```bash
+curl -sS http://127.0.0.1:4312/v1/models \
+  -H "Authorization: Bearer your-proxy-sk-token"
+```
+
+返回正常响应，说明代理链路已经可用。
 
 ## 下一步
 
+- [上游接入](./upstream-integration.md) — 当前代码支持哪些上游、默认该走哪个连接分段
 - [部署指南](./deployment.md) — 反向代理、HTTPS、升级策略
 - [配置说明](./configuration.md) — 详细环境变量与路由参数
 - [客户端接入](./client-integration.md) — 对接 Open WebUI、Cherry Studio 等

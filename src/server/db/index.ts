@@ -7,7 +7,9 @@ import { drizzle as drizzlePgProxy } from 'drizzle-orm/pg-proxy';
 import * as schema from './schema.js';
 import { ensureSiteSchemaCompatibility, type SiteSchemaInspector } from './siteSchemaCompatibility.js';
 import { ensureRouteGroupingSchemaCompatibility } from './routeGroupingSchemaCompatibility.js';
+import { ensureProxyFileSchemaCompatibility } from './proxyFileSchemaCompatibility.js';
 import { config } from '../config.js';
+import { ensureRuntimeDatabaseReady } from '../runtimeDatabaseBootstrap.js';
 import { mkdirSync } from 'fs';
 import { dirname, resolve } from 'path';
 
@@ -25,6 +27,7 @@ const TABLES_WITH_NUMERIC_ID = new Set([
   'route_channels',
   'proxy_logs',
   'proxy_video_tasks',
+  'proxy_files',
   'downstream_api_keys',
   'events',
 ]);
@@ -183,6 +186,35 @@ function ensureProxyVideoTaskSchema() {
   `);
 }
 
+function ensureProxyFileSchema() {
+  const sqlite = requireSqliteConnection();
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS proxy_files (
+      id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      public_id text NOT NULL,
+      owner_type text NOT NULL,
+      owner_id text NOT NULL,
+      filename text NOT NULL,
+      mime_type text NOT NULL,
+      purpose text,
+      byte_size integer NOT NULL,
+      sha256 text NOT NULL,
+      content_base64 text NOT NULL,
+      created_at text DEFAULT (datetime('now')),
+      updated_at text DEFAULT (datetime('now')),
+      deleted_at text
+    );
+  `);
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS proxy_files_public_id_unique
+    ON proxy_files(public_id);
+  `);
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS proxy_files_owner_lookup_idx
+    ON proxy_files(owner_type, owner_id, deleted_at);
+  `);
+}
+
 function ensureSiteStatusSchema() {
   const sqlite = requireSqliteConnection();
   if (!tableExists('sites')) {
@@ -236,6 +268,17 @@ function ensureSiteUseSystemProxySchema() {
     SET use_system_proxy = 0
     WHERE use_system_proxy IS NULL;
   `);
+}
+
+function ensureSiteCustomHeadersSchema() {
+  const sqlite = requireSqliteConnection();
+  if (!tableExists('sites')) {
+    return;
+  }
+
+  if (!tableColumnExists('sites', 'custom_headers')) {
+    sqlite.exec(`ALTER TABLE sites ADD COLUMN custom_headers text;`);
+  }
 }
 
 function ensureSiteExternalCheckinUrlSchema() {
@@ -355,6 +398,12 @@ export async function ensureRouteGroupingCompatibilityColumns(): Promise<void> {
   await ensureRouteGroupingSchemaCompatibility(inspector);
 }
 
+export async function ensureProxyFileCompatibilityColumns(): Promise<void> {
+  const inspector = createRuntimeSchemaInspector();
+  if (!inspector) return;
+  await ensureProxyFileSchemaCompatibility(inspector);
+}
+
 function ensureRouteGroupingSchema() {
   const sqlite = requireSqliteConnection();
   if (!tableExists('token_routes') || !tableExists('route_channels')) {
@@ -377,8 +426,24 @@ function ensureRouteGroupingSchema() {
     sqlite.exec(`ALTER TABLE token_routes ADD COLUMN decision_refreshed_at text;`);
   }
 
+  if (!tableColumnExists('token_routes', 'routing_strategy')) {
+    sqlite.exec(`ALTER TABLE token_routes ADD COLUMN routing_strategy text DEFAULT 'weighted';`);
+  }
+
   if (!tableColumnExists('route_channels', 'source_model')) {
     sqlite.exec(`ALTER TABLE route_channels ADD COLUMN source_model text;`);
+  }
+
+  if (!tableColumnExists('route_channels', 'last_selected_at')) {
+    sqlite.exec(`ALTER TABLE route_channels ADD COLUMN last_selected_at text;`);
+  }
+
+  if (!tableColumnExists('route_channels', 'consecutive_fail_count')) {
+    sqlite.exec(`ALTER TABLE route_channels ADD COLUMN consecutive_fail_count integer NOT NULL DEFAULT 0;`);
+  }
+
+  if (!tableColumnExists('route_channels', 'cooldown_level')) {
+    sqlite.exec(`ALTER TABLE route_channels ADD COLUMN cooldown_level integer NOT NULL DEFAULT 0;`);
   }
 }
 
@@ -764,12 +829,14 @@ function initSqliteDb() {
   ensureSiteStatusSchema();
   ensureSiteProxySchema();
   ensureSiteUseSystemProxySchema();
+  ensureSiteCustomHeadersSchema();
   ensureSiteExternalCheckinUrlSchema();
   ensureSiteGlobalWeightSchema();
   ensureRouteGroupingSchema();
   ensureDownstreamApiKeySchema();
   ensureProxyLogBillingDetailsSchema();
   ensureProxyVideoTaskSchema();
+  ensureProxyFileSchema();
 
   const rawDb = drizzleSqliteProxy(
     (sqlText, params, method) => sqliteProxyQuery(sqlText, params, method as SqlMethod),
@@ -900,6 +967,11 @@ export async function switchRuntimeDatabase(nextDialect: RuntimeDbDialect, nextD
 
   try {
     activeDb = initDb();
+    await ensureRuntimeDatabaseReady({
+      dialect: nextDialect,
+      connectionString: nextDbUrl,
+      ssl: config.dbSsl,
+    });
   } catch (error) {
     await closeDbConnections();
     runtimeDbDialect = previousDialect;

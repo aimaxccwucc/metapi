@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { buildSiteSaveAction, emptySiteForm, siteFormFromSite } from './sitesEditor.js';
+import {
+  buildSiteSaveAction,
+  emptySiteCustomHeader,
+  emptySiteForm,
+  serializeSiteCustomHeaders,
+  siteFormFromSite,
+} from './sitesEditor.js';
 
 describe('buildSiteSaveAction', () => {
   it('returns add action in add mode', () => {
@@ -10,8 +16,9 @@ describe('buildSiteSaveAction', () => {
         url: 'https://a.example.com/',
         externalCheckinUrl: 'https://checkin.a.example.com',
         platform: 'new-api',
-        proxyUrl: 'http://127.0.0.1:7890',
-        globalWeight: '1.2',
+        customHeaders: '{"x-site-token":"alpha"}',
+        useSystemProxy: false,
+        globalWeight: 1.2,
       },
     );
 
@@ -22,8 +29,9 @@ describe('buildSiteSaveAction', () => {
         url: 'https://a.example.com/',
         externalCheckinUrl: 'https://checkin.a.example.com',
         platform: 'new-api',
-        proxyUrl: 'http://127.0.0.1:7890',
-        globalWeight: '1.2',
+        customHeaders: '{"x-site-token":"alpha"}',
+        useSystemProxy: false,
+        globalWeight: 1.2,
       },
     });
   });
@@ -36,8 +44,9 @@ describe('buildSiteSaveAction', () => {
         url: 'https://b.example.com',
         externalCheckinUrl: '',
         platform: 'one-api',
-        proxyUrl: '',
-        globalWeight: '0.8',
+        useSystemProxy: true,
+        customHeaders: '',
+        globalWeight: 0.8,
       },
     );
 
@@ -49,8 +58,9 @@ describe('buildSiteSaveAction', () => {
         url: 'https://b.example.com',
         externalCheckinUrl: '',
         platform: 'one-api',
-        proxyUrl: '',
-        globalWeight: '0.8',
+        useSystemProxy: true,
+        customHeaders: '',
+        globalWeight: 0.8,
       },
     });
   });
@@ -64,8 +74,9 @@ describe('buildSiteSaveAction', () => {
           url: 'https://c.example.com',
           externalCheckinUrl: '',
           platform: '',
-          proxyUrl: '',
-          globalWeight: '1',
+          useSystemProxy: false,
+          customHeaders: '',
+          globalWeight: 1,
         },
       ),
     ).toThrow('editingSiteId is required in edit mode');
@@ -73,14 +84,48 @@ describe('buildSiteSaveAction', () => {
 
   it('does not expose deprecated apiKey in site editor state', () => {
     expect(emptySiteForm()).not.toHaveProperty('apiKey');
+    expect(emptySiteForm().customHeaders).toEqual([emptySiteCustomHeader()]);
     expect(siteFormFromSite({
       name: 'site-d',
       url: 'https://d.example.com',
       externalCheckinUrl: null,
       platform: 'new-api',
       proxyUrl: null,
+      customHeaders: '{"x-site-token":"alpha"}',
       globalWeight: 1,
       apiKey: 'sk-legacy-site-key',
     })).not.toHaveProperty('apiKey');
+  });
+
+  it('parses custom headers json into key value rows', () => {
+    expect(siteFormFromSite({
+      name: 'site-e',
+      customHeaders: '{"x-site-token":"alpha","cf-access-client-id":"beta"}',
+    }).customHeaders).toEqual([
+      { key: 'x-site-token', value: 'alpha' },
+      { key: 'cf-access-client-id', value: 'beta' },
+    ]);
+  });
+
+  it('serializes key value rows into json', () => {
+    expect(serializeSiteCustomHeaders([
+      { key: 'x-site-token', value: 'alpha' },
+      { key: 'cf-access-client-id', value: 'beta' },
+      emptySiteCustomHeader(),
+    ])).toEqual({
+      valid: true,
+      customHeaders: '{"x-site-token":"alpha","cf-access-client-id":"beta"}',
+    });
+  });
+
+  it('rejects duplicate custom header names case-insensitively', () => {
+    expect(serializeSiteCustomHeaders([
+      { key: 'Authorization', value: 'Bearer a' },
+      { key: 'authorization', value: 'Bearer b' },
+    ])).toEqual({
+      valid: false,
+      customHeaders: '',
+      error: '请求头 "authorization" 重复了',
+    });
   });
 });

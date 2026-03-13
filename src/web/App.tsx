@@ -3,6 +3,7 @@ import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import { ToastProvider, useToast } from './components/Toast.js';
 import SearchModal from './components/SearchModal.js';
 import NotificationPanel from './components/NotificationPanel.js';
+import TooltipLayer from './components/TooltipLayer.js';
 import { api } from './api.js';
 import { clearAuthSession, hasValidAuthSession, persistAuthSession } from './authSession.js';
 import {
@@ -15,6 +16,8 @@ import { I18nProvider, useI18n } from './i18n.js';
 import { resolveLoginErrorMessage } from './loginError.js';
 import { SITE_DOCS_URL } from './docsLink.js';
 import { useAnimatedVisibility } from './components/useAnimatedVisibility.js';
+import { useIsMobile } from './components/useIsMobile.js';
+import { MobileDrawer } from './components/MobileDrawer.js';
 const Dashboard = lazy(() => import('./pages/Dashboard.js'));
 const Sites = lazy(() => import('./pages/Sites.js'));
 const Accounts = lazy(() => import('./pages/Accounts.js'));
@@ -150,7 +153,7 @@ function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (text: str
               reason = text;
             }
           }
-        } catch {}
+        } catch { }
         setError(t(resolveLoginErrorMessage(res.status, reason)));
         setLoading(false);
       }
@@ -376,12 +379,14 @@ function AppShell() {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const themeMenuPresence = useAnimatedVisibility(showThemeMenu, 160);
   const userMenuPresence = useAnimatedVisibility(showUserMenu, 160);
   const [unreadCount, setUnreadCount] = useState(0);
   const notifBtnRef = useRef<HTMLButtonElement>(null);
   const latestTaskEventIdRef = useRef(0);
   const toast = useToast();
+  const isMobile = useIsMobile(768);
   const resolvedTheme: 'light' | 'dark' = themeMode === 'system'
     ? (systemPrefersDark ? 'dark' : 'light')
     : themeMode;
@@ -413,6 +418,10 @@ function AppShell() {
       localStorage.setItem('theme', themeMode);
     }
   }, [resolvedTheme, themeMode]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-layout', isMobile ? 'mobile' : 'desktop');
+  }, [isMobile]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -544,6 +553,17 @@ function AppShell() {
   return (
     <>
       <header className="topbar">
+        {isMobile && (
+          <button
+            className="topbar-icon-btn"
+            aria-label="Open navigation"
+            onClick={() => setDrawerOpen(true)}
+          >
+            <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+        )}
         <div className="topbar-logo">
           <img src="/logo.png" alt="Metapi" style={{ width: 28, height: 28, borderRadius: 6 }} />
           <span className="topbar-logo-text">Metapi</span>
@@ -558,20 +578,19 @@ function AppShell() {
         <div className="topbar-right">
           <button
             className="topbar-icon-btn"
-            data-tooltip={language === 'zh' ? 'Switch to English' : '切换到中文'}
             aria-label={language === 'zh' ? 'Switch to English' : '切换到中文'}
             onClick={toggleLanguage}
             style={{ minWidth: 36, fontSize: 12, fontWeight: 700 }}
           >
             {language === 'zh' ? 'EN' : '中'}
           </button>
-          <button className="topbar-search-trigger" data-tooltip={t('搜索 (Ctrl+K)')} aria-label={t('搜索 (Ctrl+K)')} onClick={() => setShowSearch(true)}>
+          <button className="topbar-search-trigger" aria-label={t('搜索 (Ctrl+K)')} onClick={() => setShowSearch(true)}>
             <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
             <span className="topbar-search-label">{t('搜索')}</span>
             <kbd className="topbar-search-kbd">Ctrl K</kbd>
           </button>
           <div style={{ position: 'relative' }}>
-            <button ref={notifBtnRef} className="topbar-icon-btn" data-tooltip={t('通知')} aria-label={t('通知')} onClick={() => setShowNotifications(!showNotifications)}>
+            <button ref={notifBtnRef} className="topbar-icon-btn" aria-label={t('通知')} onClick={() => setShowNotifications(!showNotifications)}>
               <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
               {unreadCount > 0 && (
                 <span className="topbar-badge">
@@ -584,9 +603,6 @@ function AppShell() {
           <div ref={themeMenuRef} style={{ position: 'relative' }}>
             <button
               className="topbar-icon-btn"
-              data-tooltip={themeMode === 'system'
-                ? `${t('跟随系统')} (${resolvedThemeLabel})`
-                : (themeMode === 'light' ? t('浅色模式') : t('深色模式'))}
               aria-label={themeMode === 'system'
                 ? `${t('跟随系统')} (${resolvedThemeLabel})`
                 : (themeMode === 'light' ? t('浅色模式') : t('深色模式'))}
@@ -632,7 +648,6 @@ function AppShell() {
           <div ref={userMenuRef} style={{ position: 'relative' }}>
             <div
               className="topbar-avatar"
-              data-tooltip={displayName}
               aria-label={displayName}
               onClick={() => {
                 setShowUserMenu(!showUserMenu);
@@ -671,32 +686,73 @@ function AppShell() {
       </header>
 
       <div className="app-layout">
-        <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
-          {sidebarGroups.map((group) => (
-            <div key={group.label} className="sidebar-group">
-              {!sidebarCollapsed && <div className="sidebar-group-label">{t(group.label)}</div>}
-              {group.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.to === '/' || item.to === '/settings'}
-                  className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
-                  data-tooltip={sidebarCollapsed ? t(item.label) : undefined}
-                  aria-label={sidebarCollapsed ? t(item.label) : undefined}
-                >
-                  {item.icon}
-                  {!sidebarCollapsed && <span>{t(item.label)}</span>}
-                </NavLink>
-              ))}
+        {isMobile ? (
+          <MobileDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)}>
+            <div className="mobile-drawer-header">
+              <img src="/logo.png" alt="Metapi" />
+              <span>Metapi</span>
             </div>
-          ))}
-          <button className="sidebar-collapse-btn" onClick={() => setSidebarCollapsed(!sidebarCollapsed)}>
-            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ transform: sidebarCollapsed ? 'rotate(180deg)' : 'none', transition: 'transform 0.3s ease', flexShrink: 0 }}>
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
-            </svg>
-            {!sidebarCollapsed && <span>{t('收起侧边栏')}</span>}
-          </button>
-        </aside>
+            <nav className="mobile-nav">
+              {sidebarGroups.map((group) => (
+                <div key={group.label} className="mobile-nav-group">
+                  <div className="mobile-nav-label">{t(group.label)}</div>
+                  {group.items.map((item) => (
+                    <NavLink
+                      key={item.to}
+                      to={item.to}
+                      end={item.to === '/' || item.to === '/settings'}
+                      className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
+                      onClick={() => setDrawerOpen(false)}
+                    >
+                      {item.icon}
+                      <span>{t(item.label)}</span>
+                    </NavLink>
+                  ))}
+                </div>
+              ))}
+              <div className="mobile-nav-group">
+                <div className="mobile-nav-label">{t('更多')}</div>
+                {topNavItems.filter(n => n.to !== '/').map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
+                    onClick={() => setDrawerOpen(false)}
+                  >
+                    <span>{t(item.label)}</span>
+                  </NavLink>
+                ))}
+              </div>
+            </nav>
+          </MobileDrawer>
+        ) : (
+          <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
+            {sidebarGroups.map((group) => (
+              <div key={group.label} className="sidebar-group">
+                {!sidebarCollapsed && <div className="sidebar-group-label">{t(group.label)}</div>}
+                {group.items.map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.to === '/' || item.to === '/settings'}
+                    className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
+                    data-tooltip={sidebarCollapsed ? t(item.label) : undefined}
+                    aria-label={sidebarCollapsed ? t(item.label) : undefined}
+                  >
+                    {item.icon}
+                    {!sidebarCollapsed && <span>{t(item.label)}</span>}
+                  </NavLink>
+                ))}
+              </div>
+            ))}
+            <button className="sidebar-collapse-btn" onClick={() => setSidebarCollapsed(!sidebarCollapsed)}>
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ transform: sidebarCollapsed ? 'rotate(180deg)' : 'none', transition: 'transform 0.3s ease', flexShrink: 0 }}>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+              </svg>
+              {!sidebarCollapsed && <span>{t('收起侧边栏')}</span>}
+            </button>
+          </aside>
+        )}
 
         <main className="main-content">
           <PageTransition>
@@ -741,6 +797,7 @@ export default function App() {
     <I18nProvider>
       <ToastProvider>
         <AppShell />
+        <TooltipLayer />
       </ToastProvider>
     </I18nProvider>
   );

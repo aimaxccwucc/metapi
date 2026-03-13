@@ -137,4 +137,49 @@ describe('responses proxy compact upstream routing', () => {
     const [targetUrl] = fetchMock.mock.calls[0] as [string, any];
     expect(targetUrl).toContain('/v1/responses/compact');
   });
+
+  it('preserves native response.compaction payloads instead of coercing them into object=response', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'cmp_123',
+      object: 'response.compaction',
+      input_tokens: 1234,
+      output_tokens: 321,
+      total_tokens: 1555,
+      output: [
+        {
+          id: 'rs_123',
+          type: 'compaction',
+          encrypted_content: 'enc-compact-payload',
+        },
+      ],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses/compact',
+      payload: {
+        model: 'gpt-5.2',
+        input: 'hello',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      id: 'cmp_123',
+      object: 'response.compaction',
+      input_tokens: 1234,
+      output_tokens: 321,
+      total_tokens: 1555,
+      output: [
+        {
+          id: 'rs_123',
+          type: 'compaction',
+          encrypted_content: 'enc-compact-payload',
+        },
+      ],
+    });
+  });
 });

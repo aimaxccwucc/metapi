@@ -49,7 +49,12 @@ describe('backupService', () => {
       name: 'roundtrip-site',
       url: 'https://roundtrip.example.com',
       platform: 'new-api',
+      externalCheckinUrl: 'https://checkin.roundtrip.example.com',
       proxyUrl: 'http://127.0.0.1:8080',
+      useSystemProxy: true,
+      customHeaders: JSON.stringify({
+        'cf-access-client-id': 'roundtrip-client',
+      }),
       status: 'active',
       isPinned: true,
       sortOrder: 9,
@@ -128,6 +133,9 @@ describe('backupService', () => {
     const restoredChannel = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.routeId, route.id)).get();
 
     expect(restoredSite?.proxyUrl).toBe('http://127.0.0.1:8080');
+    expect(restoredSite?.externalCheckinUrl).toBe('https://checkin.roundtrip.example.com');
+    expect(restoredSite?.useSystemProxy).toBe(true);
+    expect(restoredSite?.customHeaders).toBe('{"cf-access-client-id":"roundtrip-client"}');
     expect(restoredSite?.isPinned).toBe(true);
     expect(restoredSite?.sortOrder).toBe(9);
 

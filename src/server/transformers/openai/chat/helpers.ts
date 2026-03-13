@@ -1,9 +1,14 @@
 import type {
+  OpenAiChatChoice,
+  OpenAiChatChoiceDelta,
   OpenAiChatNormalizedFinalResponse,
   OpenAiChatNormalizedStreamEvent,
   OpenAiChatRequestMetadata,
+  OpenAiChatToolCall,
   OpenAiChatUsageDetails,
 } from './model.js';
+import { fromTransformerMetadataRecord } from '../../shared/normalized.js';
+import { extractInlineThinkTags } from '../../shared/thinkTagParser.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -31,11 +36,20 @@ function toStringArray(value: unknown): string[] {
     .filter((item) => item.length > 0);
 }
 
+function toFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+  }
+  return undefined;
+}
+
 function toNumericRecord(value: unknown): Record<string, number> | undefined {
   if (!isRecord(value)) return undefined;
   const entries = Object.entries(value)
     .map(([key, raw]) => {
-      const numeric = typeof raw === 'number' ? raw : Number(raw);
+      const numeric = toFiniteNumber(raw);
       if (!Number.isFinite(numeric)) return null;
       return [key, numeric] as const;
     })
@@ -62,6 +76,122 @@ function annotationUrl(annotation: Record<string, unknown>): string {
   const direct = typeof annotation.url === 'string' ? annotation.url : '';
   const nested = urlCitation && typeof urlCitation.url === 'string' ? urlCitation.url : '';
   return (direct || nested).trim();
+}
+
+function extractTextPart(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (!isRecord(value)) return '';
+
+  if (typeof value.text === 'string') return value.text;
+  if (typeof value.output_text === 'string') return value.output_text;
+  if (typeof value.content === 'string') return value.content;
+  if (typeof value.reasoning_content === 'string') return value.reasoning_content;
+  if (typeof value.reasoning === 'string') return value.reasoning;
+
+  if (Array.isArray(value.content)) {
+    return value.content.map((item) => extractTextPart(item)).join('');
+  }
+
+  if (Array.isArray(value.parts)) {
+    return value.parts.map((item) => extractTextPart(item)).join('');
+  }
+
+  return '';
+}
+
+function joinNonEmpty(parts: string[]): string {
+  return parts.map((item) => item.trim()).filter((item) => item.length > 0).join('\n\n');
+}
+
+function extractTextAndReasoning(value: unknown): { content: string; reasoning: string } {
+  if (typeof value === 'string') return extractInlineThinkTags(value);
+  if (Array.isArray(value)) {
+    const contentParts: string[] = [];
+    const reasoningParts: string[] = [];
+
+    for (const item of value) {
+      if (!isRecord(item)) {
+        if (typeof item === 'string') {
+          const parsed = extractInlineThinkTags(item);
+          if (parsed.content) contentParts.push(parsed.content);
+          if (parsed.reasoning) reasoningParts.push(parsed.reasoning);
+        }
+        continue;
+      }
+
+      const type = typeof item.type === 'string' ? item.type : '';
+      if ((type === 'reasoning' || type === 'thinking') && typeof item.text === 'string') {
+        reasoningParts.push(item.text);
+        continue;
+      }
+      if ((type === 'reasoning' || type === 'thinking') && typeof item.reasoning === 'string') {
+        reasoningParts.push(item.reasoning);
+        continue;
+      }
+      const parsed = extractInlineThinkTags(extractTextPart(item));
+      if (parsed.content) contentParts.push(parsed.content);
+      if (parsed.reasoning) reasoningParts.push(parsed.reasoning);
+    }
+
+    return {
+      content: contentParts.join(''),
+      reasoning: reasoningParts.join(''),
+    };
+  }
+
+  if (!isRecord(value)) return { content: '', reasoning: '' };
+  const parsed = extractInlineThinkTags(extractTextPart(value.content ?? value));
+  return {
+    content: parsed.content,
+    reasoning: joinNonEmpty([
+      typeof value.reasoning_content === 'string' ? value.reasoning_content : '',
+      typeof value.reasoning === 'string' ? value.reasoning : '',
+      parsed.reasoning,
+    ]),
+  };
+}
+
+function collectToolCalls(value: unknown): OpenAiChatToolCall[] {
+  if (!Array.isArray(value)) return [];
+  const toolCalls: OpenAiChatToolCall[] = [];
+
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const functionPart = isRecord(item.function) ? item.function : null;
+    if (!functionPart) continue;
+    const name = typeof functionPart.name === 'string' ? functionPart.name : '';
+    const id = typeof item.id === 'string' ? item.id : '';
+    const args = typeof functionPart.arguments === 'string' ? functionPart.arguments : '';
+    if (!id && !name && !args) continue;
+    toolCalls.push({
+      id,
+      name,
+      arguments: args,
+    });
+  }
+
+  return toolCalls;
+}
+
+function collectToolCallDeltas(value: unknown): OpenAiChatChoiceDelta['toolCallDeltas'] {
+  if (!Array.isArray(value)) return undefined;
+  const deltas = value
+    .map((item, itemIndex) => {
+      if (!isRecord(item)) return null;
+      const functionPart = isRecord(item.function) ? item.function : {};
+      const index = toFiniteNumber(item.index);
+      const delta = {
+        index: index !== undefined ? Math.max(0, Math.trunc(index)) : itemIndex,
+        id: typeof item.id === 'string' && item.id.trim() ? item.id : undefined,
+        name: typeof functionPart.name === 'string' && functionPart.name.trim() ? functionPart.name : undefined,
+        argumentsDelta: typeof functionPart.arguments === 'string' ? functionPart.arguments : undefined,
+      };
+      if (!delta.id && !delta.name && !delta.argumentsDelta) return null;
+      return delta;
+    })
+    .filter((item): item is NonNullable<typeof item> => !!item);
+
+  return deltas.length > 0 ? deltas : undefined;
 }
 
 export function dedupeAnnotations(input: unknown): Array<Record<string, unknown>> {
@@ -98,6 +228,104 @@ export function dedupeCitations(input: unknown): string[] {
   return Array.from(citations);
 }
 
+export function extractChoiceAnnotations(choice: unknown): Array<Record<string, unknown>> {
+  if (!isRecord(choice)) return [];
+  const choiceMessage = asRecord(choice.message);
+  const choiceDelta = asRecord(choice.delta);
+  return dedupeAnnotations([
+    ...(Array.isArray(choice.annotations) ? choice.annotations : []),
+    ...(Array.isArray(choiceMessage?.annotations) ? choiceMessage.annotations : []),
+    ...(Array.isArray(choiceDelta?.annotations) ? choiceDelta.annotations : []),
+  ]);
+}
+
+export function extractChoiceCitations(
+  choice: unknown,
+  sharedCitations: Iterable<string> = [],
+): string[] {
+  const citations = new Set<string>(sharedCitations);
+  for (const annotation of extractChoiceAnnotations(choice)) {
+    const url = annotationUrl(annotation);
+    if (url) citations.add(url);
+  }
+  if (isRecord(choice)) {
+    for (const citation of dedupeCitations(choice.citations)) citations.add(citation);
+  }
+  return Array.from(citations);
+}
+
+export function extractChatChoices(payload: unknown): OpenAiChatChoice[] {
+  const record = asRecord(payload);
+  if (!record || !Array.isArray(record.choices)) return [];
+
+  const sharedCitations = dedupeCitations(record.citations);
+  const choices: OpenAiChatChoice[] = [];
+
+  for (const [index, choice] of record.choices.entries()) {
+    const choiceRecord = asRecord(choice);
+    if (!choiceRecord) continue;
+    const message = asRecord(choiceRecord.message) ?? asRecord(choiceRecord.delta) ?? {};
+    const parsed = extractTextAndReasoning(message.content ?? message);
+    const toolCalls = collectToolCalls(message.tool_calls);
+    const annotations = extractChoiceAnnotations(choiceRecord);
+    const citations = extractChoiceCitations(choiceRecord, sharedCitations);
+    const finishReason = typeof choiceRecord.finish_reason === 'string' && choiceRecord.finish_reason.length > 0
+      ? choiceRecord.finish_reason
+      : (toolCalls.length > 0 ? 'tool_calls' : 'stop');
+
+    choices.push({
+      index: toFiniteNumber(choiceRecord.index) !== undefined ? Math.max(0, Math.trunc(toFiniteNumber(choiceRecord.index)!)) : index,
+      ...(message.role === 'assistant' ? { role: 'assistant' as const } : {}),
+      content: parsed.content || (toolCalls.length > 0 ? '' : ''),
+      reasoningContent: typeof message.reasoning_content === 'string'
+        ? message.reasoning_content
+        : parsed.reasoning,
+      toolCalls,
+      finishReason,
+      ...(annotations.length > 0 ? { annotations } : {}),
+      ...(citations.length > 0 ? { citations } : {}),
+    });
+  }
+
+  return choices.sort((left, right) => left.index - right.index);
+}
+
+export function extractChatChoiceEvents(payload: unknown): OpenAiChatChoiceDelta[] {
+  const record = asRecord(payload);
+  if (!record || !Array.isArray(record.choices)) return [];
+
+  const sharedCitations = dedupeCitations(record.citations);
+  const choiceEvents: OpenAiChatChoiceDelta[] = [];
+
+  for (const [index, choice] of record.choices.entries()) {
+    const choiceRecord = asRecord(choice);
+    if (!choiceRecord) continue;
+    const delta = asRecord(choiceRecord.delta) ?? {};
+    const parsed = extractTextAndReasoning(delta.content ?? delta);
+    const toolCallDeltas = collectToolCallDeltas(delta.tool_calls);
+    const annotations = extractChoiceAnnotations(choiceRecord);
+    const citations = extractChoiceCitations(choiceRecord, sharedCitations);
+    const choiceIndex = toFiniteNumber(choiceRecord.index) !== undefined
+      ? Math.max(0, Math.trunc(toFiniteNumber(choiceRecord.index)!))
+      : index;
+
+    choiceEvents.push({
+      index: choiceIndex,
+      ...(delta.role === 'assistant' ? { role: 'assistant' as const } : {}),
+      ...(parsed.content ? { contentDelta: parsed.content } : {}),
+      ...((typeof delta.reasoning_content === 'string' ? delta.reasoning_content : parsed.reasoning)
+        ? { reasoningDelta: (typeof delta.reasoning_content === 'string' ? delta.reasoning_content : parsed.reasoning) }
+        : {}),
+      ...(toolCallDeltas ? { toolCallDeltas } : {}),
+      finishReason: typeof choiceRecord.finish_reason === 'string' ? choiceRecord.finish_reason : null,
+      ...(annotations.length > 0 ? { annotations } : {}),
+      ...(citations.length > 0 ? { citations } : {}),
+    });
+  }
+
+  return choiceEvents;
+}
+
 function extractAnnotationsFromPayload(payload: Record<string, unknown>): Array<Record<string, unknown>> {
   const collected: Array<Record<string, unknown>> = [];
   const append = (value: unknown) => {
@@ -129,7 +357,9 @@ function extractCitationsFromPayload(
     citations.add(citation);
   }
 
-  const transformerMetadata = asRecord(payload.transformer_metadata) ?? asRecord(payload.transformerMetadata);
+  const transformerMetadata = fromTransformerMetadataRecord(
+    payload.transformer_metadata ?? payload.transformerMetadata,
+  );
   if (transformerMetadata) {
     for (const citation of dedupeCitations(transformerMetadata.citations)) {
       citations.add(citation);
@@ -216,18 +446,25 @@ export function extractChatRequestMetadata(body: unknown): OpenAiChatRequestMeta
   if (!raw) return undefined;
 
   const streamOptions = asRecord(raw.stream_options) ?? asRecord(raw.streamOptions);
+  const modalities = Array.isArray(raw.modalities)
+    ? raw.modalities.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : undefined;
+  const audio = asRecord(raw.audio) as OpenAiChatRequestMetadata['audio'] | null;
+  const reasoningBudget = toFiniteNumber(raw.reasoning_budget);
+  const topLogprobs = toFiniteNumber(raw.top_logprobs);
+  const logitBias = toNumericRecord(raw.logit_bias);
   const metadata: OpenAiChatRequestMetadata = {
-    ...(raw.modalities !== undefined ? { modalities: raw.modalities } : {}),
-    ...(raw.audio !== undefined ? { audio: raw.audio } : {}),
-    ...(raw.reasoning_effort !== undefined ? { reasoningEffort: raw.reasoning_effort } : {}),
-    ...(raw.reasoning_budget !== undefined ? { reasoningBudget: raw.reasoning_budget } : {}),
-    ...(raw.reasoning_summary !== undefined ? { reasoningSummary: raw.reasoning_summary } : {}),
-    ...(raw.service_tier !== undefined ? { serviceTier: raw.service_tier } : {}),
-    ...(raw.top_logprobs !== undefined ? { topLogprobs: raw.top_logprobs } : {}),
-    ...(raw.logit_bias !== undefined ? { logitBias: raw.logit_bias } : {}),
-    ...(raw.prompt_cache_key !== undefined ? { promptCacheKey: raw.prompt_cache_key } : {}),
-    ...(raw.safety_identifier !== undefined ? { safetyIdentifier: raw.safety_identifier } : {}),
-    ...(raw.verbosity !== undefined ? { verbosity: raw.verbosity } : {}),
+    ...(modalities && modalities.length > 0 ? { modalities } : {}),
+    ...(audio ? { audio } : {}),
+    ...(typeof raw.reasoning_effort === 'string' ? { reasoningEffort: raw.reasoning_effort } : {}),
+    ...(reasoningBudget !== undefined ? { reasoningBudget } : {}),
+    ...(typeof raw.reasoning_summary === 'string' ? { reasoningSummary: raw.reasoning_summary } : {}),
+    ...(typeof raw.service_tier === 'string' ? { serviceTier: raw.service_tier } : {}),
+    ...(topLogprobs !== undefined ? { topLogprobs } : {}),
+    ...(logitBias ? { logitBias } : {}),
+    ...(typeof raw.prompt_cache_key === 'string' ? { promptCacheKey: raw.prompt_cache_key } : {}),
+    ...(typeof raw.safety_identifier === 'string' ? { safetyIdentifier: raw.safety_identifier } : {}),
+    ...(typeof raw.verbosity === 'string' ? { verbosity: raw.verbosity } : {}),
     ...(raw.response_format !== undefined ? { responseFormat: raw.response_format } : {}),
     ...(streamOptions && streamOptions.include_usage !== undefined
       ? { streamOptionsIncludeUsage: Boolean(streamOptions.include_usage) }

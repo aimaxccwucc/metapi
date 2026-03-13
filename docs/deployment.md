@@ -4,6 +4,19 @@
 
 ---
 
+## 支持的运行方式
+
+| 场景 | 推荐方式 | 对外访问方式 | 数据位置 |
+|------|----------|--------------|----------|
+| 云服务器 / NAS / 家用主机长期运行 | Docker / Docker Compose / Zeabur | 固定服务地址，例如 `http://your-host:4000` 或反向代理域名 | 你挂载的 `DATA_DIR` / 持久化卷 |
+| 免费云部署（24h 在线） | Render + TiDB + UptimeRobot | Render 分配的 `.onrender.com` 域名或自定义域名 | TiDB Serverless（外部 MySQL 数据库） |
+| 个人电脑本地使用 | 桌面版安装包 | 桌面窗口；如需本机客户端直连，使用日志中打印的 `http://127.0.0.1:<port>` | Electron `app.getPath('userData')/data` |
+| 二次开发 / 调试 | 本地开发 | 前端 `http://localhost:5173`，后端默认 `http://localhost:4000` | 仓库内 `./data` 或自定义 `DATA_DIR` |
+
+> [!NOTE]
+> - 当前不再提供 `Release` 压缩包 + Node.js 运行时的独立部署路径。
+> - 生产/长期运行请用 Docker 系列方案；桌面版面向单机本地使用；源码运行请走本地开发流程。
+
 ## Zeabur 一键部署
 
 <a href="https://zeabur.com/templates/DOX5PR">
@@ -29,6 +42,89 @@
 | `PORT` | 内部监听端口（默认 `4000`，一般无需修改） |
 
 部署完成后，通过 Zeabur 分配的域名访问后台管理面板即可。
+
+---
+
+## Render 一键部署（免费 24h 运行）
+
+<a href="https://render.com/deploy?repo=https://github.com/cita-777/metapi">
+  <img alt="Deploy to Render" src="https://render.com/images/deploy-to-render-button.svg" height="28">
+</a>
+
+通过 **Render + TiDB + UptimeRobot** 组合，可以实现 **完全免费的 24 小时持续运行**：
+
+| 组件 | 作用 | 免费额度 |
+|------|------|----------|
+| [Render](https://render.com) | 运行 Metapi 容器 | Free Web Service（750 小时/月，闲置 15 分钟自动休眠） |
+| [TiDB Serverless](https://tidbcloud.com) | MySQL 兼容数据库，替代 SQLite 实现数据持久化 | 5 GiB 存储 + 5000 万 Request Units/月 |
+| [UptimeRobot](https://uptimerobot.com) | 每 5 分钟 ping 一次，防止 Render 免费实例休眠 | 50 个免费监控 |
+
+> [!IMPORTANT]
+> Render 免费版 **不支持持久化磁盘**，容器重启后本地文件会丢失。因此 **必须使用外部数据库**（推荐 TiDB Serverless），不能使用默认的 SQLite。
+
+### 步骤 1：注册 TiDB Serverless 并获取连接串
+
+1. 前往 [TiDB Cloud](https://tidbcloud.com) 注册账号
+2. 创建一个 **Serverless** 集群（免费）
+3. 在集群概览页点击 **Connect**，在弹出的面板中：
+   - **Connection Type**: Public
+   - **Database**: ⚠️ **必须改为 `test`**（默认是 `sys`，这是系统库，不允许建表！）
+   - 点击 **Generate Password** 生成密码并妥善保存
+4. 使用面板中显示的参数拼接 `DB_URL`：
+
+   ```
+   mysql://<USERNAME>:<PASSWORD>@<HOST>:4000/test?ssl={"rejectUnauthorized":true}
+   ```
+
+   > ⚠️ 注意：`<HOST>`、`<USERNAME>`、`<PASSWORD>` 从 Connect 面板中获取，**数据库名必须用 `test` 而非默认的 `sys`**。
+
+> [!TIP]
+> 这里只是以TiDB作为示例，你也可以使用其他提供免费额度的云数据库方案（如 Neon、Supabase 等），只需将 `DB_TYPE` 设为对应的 `mysql` 或 `postgres`，并填入正确的连接串即可。什么？你不会其他的？把步骤复制给Gemini问他怎么改。
+
+### 步骤 2：部署到 Render
+
+**方式一：一键部署（推荐）**
+
+1. 点击上方 **Deploy to Render** 按钮
+2. 如果你 Fork 了仓库，也可以使用你自己的仓库地址
+3. 在 Render 界面中填写环境变量（见下表）
+
+**方式二：手动创建**
+
+1. 在 [Render Dashboard](https://dashboard.render.com) 点击 **New → Web Service**
+2. 连接你的 GitHub 仓库（或使用公开仓库地址 `https://github.com/cita-777/metapi`）
+3. 配置：
+   - **Environment**: Docker
+   - **Dockerfile Path**: `./docker/Dockerfile`
+   - **Docker Build Context**: `.`（仓库根目录）
+   - **Instance Type**: Free
+4. 添加环境变量（见下表）
+
+### 环境变量配置
+
+| 变量 | 说明 | 示例值 |
+|------|------|--------|
+| `AUTH_TOKEN` | 管理后台登录令牌（**必填**） | 你的强密码 |
+| `PROXY_TOKEN` | 代理接口 Bearer Token（**必填**） | 你的代理密钥 |
+| `DB_TYPE` | 数据库类型（**必填**） | `mysql` |
+| `DB_URL` | TiDB 连接串（**必填**） | `mysql://user:pass@host:4000/db?ssl=...` |
+| `DB_SSL` | 启用 SSL 连接 | `true` |
+| `TZ` | 时区 | `Asia/Shanghai` |
+| `PORT` | 服务端口（默认即可） | `4000` |
+
+### 步骤 3：配置 UptimeRobot 防休眠
+
+Render 免费实例在 15 分钟无流量后会自动休眠。使用 UptimeRobot 定时 ping 可以保持实例 24h 在线：
+
+1. 前往 [UptimeRobot](https://uptimerobot.com) 注册免费账号
+2. 添加新监控：
+   - **Monitor Type**: HTTP(s)
+   - **URL**: `https://your-app.onrender.com`（替换为 Render 分配的域名）
+   - **Monitoring Interval**: 5 minutes
+3. 保存即可，UptimeRobot 会每 5 分钟访问一次你的服务，防止休眠
+
+> [!TIP]
+> 部署完成后，通过 Render 分配的 `.onrender.com` 域名访问后台，使用 `AUTH_TOKEN` 登录即可。也可以在 Render 设置中绑定自定义域名。
 
 ---
 
@@ -85,13 +181,11 @@ docker run -d --name metapi \
 
 ## 桌面版部署（Windows / macOS / Linux）
 
-个人电脑本地部署请直接使用 [Releases](https://github.com/cita-777/metapi/releases) 中的 Electron 安装包：
+桌面版面向个人电脑本地使用，基本安装与配置流程见 [快速上手 → 桌面版启动](./getting-started.md#方式二-桌面版启动-windows-macos-linux)。
 
-1. 下载与你系统匹配的桌面安装包
-2. 安装并启动 Metapi Desktop
-3. 桌面壳会自动启动本地服务并将数据保存到应用数据目录
+以下是部署相关的补充说明。
 
-桌面版特性：
+### 桌面版特性
 
 - 内置本地 Metapi 服务，无需手动准备 Node.js 运行环境
 - 托盘菜单支持重新打开窗口、重启后端、开机自启
@@ -104,10 +198,20 @@ docker run -d --name metapi \
 
 1. 通过应用内更新提示安装新版本，或从 Releases 下载最新安装包覆盖安装
 2. 用户数据目录会保留，升级后自动继续使用原有数据
+3. 如需排查启动问题，优先查看 `app.getPath('userData')/logs` 下的最新日志
+
+## 本地开发运行（源码调试）
+
+开发、调试或提交 PR 的完整流程见 [快速上手 → 本地开发启动](./getting-started.md#方式三-本地开发启动) 和 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+
+> [!NOTE]
+> 这条路径是开发流程，不是下载 `Release` 包后再手动跑 Node.js 的替代说法。
 
 ---
 
 ## 反向代理
+
+以下反向代理配置面向 Docker / 服务器模式。桌面版内置后端默认只绑定本机 `127.0.0.1`，通常不作为公网服务直接暴露。
 
 ### Nginx
 
@@ -169,67 +273,26 @@ docker image prune -f
 
 ## 回滚
 
-如果升级后出现问题：
+如果升级后出现问题，请参考 [运维手册 → 数据备份与恢复](./operations.md#数据备份) 进行回滚。
 
-1. **升级前备份**（建议每次升级前执行）：
-
-```bash
-cp -r data/ data-backup-$(date +%Y%m%d)/
-```
-
-2. **回滚到指定版本**：
-
-```bash
-# 修改 docker-compose.yml 中的 image tag
-# 例如：image: 1467078763/metapi:v1.0.0
-
-# 恢复数据
-rm -rf data/
-cp -r data-backup-20260228/ data/
-
-# 重启
-docker compose up -d
-```
+核心思路：升级前备份数据目录（或数据库），出问题时停止服务、还原数据、指定旧版镜像重启。
 
 ## 数据持久化
 
-Metapi 的所有运行数据存储在 SQLite 数据库中，位于 `DATA_DIR`（默认 `./data`）目录下。
+不同运行方式的数据目录不同：
 
-只要挂载了该目录，升级、重启都不会丢失数据。
+| 运行方式 | 数据目录 | 说明 |
+|----------|----------|------|
+| Docker / Docker Compose / Zeabur | 容器内 `DATA_DIR`（常见为 `/app/data`） | 需要映射到宿主机目录或平台持久化卷 |
+| Render + TiDB | TiDB Serverless（外部 MySQL） | 无本地持久化，数据全部存储在 TiDB 云端数据库 |
+| 本地开发 | `DATA_DIR`，默认 `./data` | 位于当前仓库工作目录 |
+| 桌面版 | `app.getPath('userData')/data` | 不在仓库目录里，升级桌面应用时会保留 |
 
-### 备份策略建议
+桌面版日志位于 `app.getPath('userData')/logs`；Docker / 本地开发模式的日志则跟随各自进程输出或你配置的日志目录。
 
-- 每日自动备份 `data/` 目录
-- 保留最近 7~30 天的备份
-- 重要操作前手动快照
+只要备份了对应的数据目录，升级、重启通常都不会丢失现有配置和 SQLite 数据。
 
-## 文档站部署
-
-Metapi 使用 [VitePress](https://vitepress.dev) 构建文档站，支持本地预览和 GitHub Pages 自动部署。
-
-### 本地预览
-
-```bash
-npm run docs:dev
-```
-
-访问 `http://localhost:4173` 查看文档站。
-
-### 构建静态站点
-
-```bash
-npm run docs:build
-```
-
-构建产物位于 `docs/.vitepress/dist/`，可部署到任意静态站点托管服务。
-
-### GitHub Pages 自动部署
-
-推送到 `main` 分支后，`.github/workflows/docs-pages.yml` 会自动构建并部署到 GitHub Pages。
-
-首次使用需在仓库设置中开启：
-
-`Settings → Pages → Build and deployment → Source: GitHub Actions`
+完整备份策略见 [运维手册 → 数据备份](./operations.md#数据备份)。
 
 ---
 

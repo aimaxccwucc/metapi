@@ -6,7 +6,8 @@ import TokenRoutes from './TokenRoutes.js';
 
 const { apiMock, getBrandMock } = vi.hoisted(() => ({
   apiMock: {
-    getRoutes: vi.fn(),
+    getRoutesSummary: vi.fn(),
+    getRouteChannels: vi.fn(),
     getModelTokenCandidates: vi.fn(),
     getRouteDecisionsBatch: vi.fn(),
     getRouteWideDecisionsBatch: vi.fn(),
@@ -55,22 +56,21 @@ describe('TokenRoutes refresh decision action', () => {
     vi.clearAllMocks();
     getBrandMock.mockReset();
     getBrandMock.mockReturnValue(null);
-    apiMock.getRoutes.mockResolvedValue([
+    apiMock.getRoutesSummary.mockResolvedValue([
       {
-        id: 1,
-        modelPattern: 'gpt-4o-mini',
-        displayName: 'gpt-4o-mini',
-        enabled: true,
-        channels: [],
+        id: 1, modelPattern: 'gpt-4o-mini', displayName: 'gpt-4o-mini',
+        displayIcon: null, modelMapping: null, enabled: true,
+        channelCount: 0, enabledChannelCount: 0, siteNames: [],
+        decisionSnapshot: null, decisionRefreshedAt: null,
       },
       {
-        id: 2,
-        modelPattern: 're:^claude-(opus|sonnet)-4-6$',
-        displayName: 'claude-group',
-        enabled: true,
-        channels: [],
+        id: 2, modelPattern: 're:^claude-(opus|sonnet)-4-6$', displayName: 'claude-group',
+        displayIcon: null, modelMapping: null, enabled: true,
+        channelCount: 0, enabledChannelCount: 0, siteNames: [],
+        decisionSnapshot: null, decisionRefreshedAt: null,
       },
     ]);
+    apiMock.getRouteChannels.mockResolvedValue([]);
     apiMock.getModelTokenCandidates.mockResolvedValue({ models: {} });
     apiMock.getRouteDecisionsBatch.mockResolvedValue({ decisions: {} });
     apiMock.getRouteWideDecisionsBatch.mockResolvedValue({ decisions: {} });

@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { fetch, File, FormData } from 'undici';
+import { fetch, File as UndiciFile, FormData as UndiciFormData } from 'undici';
 import { config } from '../../config.js';
 
 type UndiciRequestInit = Parameters<typeof fetch>[1];
@@ -90,6 +90,7 @@ const jobs = new Map<string, TestProxyJob>();
 
 const ALLOWED_PROXY_PATH_PATTERNS: RegExp[] = [
   /^\/v1\/chat\/completions(?:\?.*)?$/i,
+  /^\/v1\/files(?:\/[^/?#]+(?:\/content)?)?(?:\?.*)?$/i,
   /^\/v1\/responses(?:\/compact)?(?:\?.*)?$/i,
   /^\/v1\/messages(?:\?.*)?$/i,
   /^\/v1\/embeddings(?:\?.*)?$/i,
@@ -481,7 +482,9 @@ async function buildUpstreamRequestInit(
   }
 
   if (envelope.requestKind === 'multipart') {
-    const formData = new FormData();
+    const FormDataCtor = globalThis.FormData ?? UndiciFormData;
+    const FileCtor = globalThis.File ?? UndiciFile;
+    const formData = new FormDataCtor();
     for (const [field, value] of Object.entries(envelope.multipartFields || {})) {
       formData.append(field, value);
     }
@@ -490,14 +493,14 @@ async function buildUpstreamRequestInit(
       const bytes = Uint8Array.from(decoded.buffer);
       formData.append(
         file.field,
-        new File([bytes], file.name, { type: file.mimeType || decoded.mimeType }),
+        new FileCtor([bytes], file.name, { type: file.mimeType || decoded.mimeType }),
       );
     }
 
     return {
       method: envelope.method,
       headers,
-      body: formData,
+      body: formData as any,
     };
   }
 

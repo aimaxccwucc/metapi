@@ -25,7 +25,10 @@ type DbDialect = 'sqlite' | 'mysql' | 'postgres';
 type RuntimeSettings = {
   checkinCron: string;
   balanceRefreshCron: string;
-  siteHealthRefreshCron: string;
+  logCleanupCron: string;
+  logCleanupUsageLogsEnabled: boolean;
+  logCleanupProgramLogsEnabled: boolean;
+  logCleanupRetentionDays: number;
   routingFallbackUnitCost: number;
   routingWeights: RoutingWeights;
   systemProxyUrl: string;
@@ -180,7 +183,10 @@ export default function Settings() {
   const [runtime, setRuntime] = useState<RuntimeSettings>({
     checkinCron: '0 8 * * *',
     balanceRefreshCron: '0 * * * *',
-    siteHealthRefreshCron: '*/15 * * * *',
+    logCleanupCron: '0 6 * * *',
+    logCleanupUsageLogsEnabled: false,
+    logCleanupProgramLogsEnabled: false,
+    logCleanupRetentionDays: 30,
     routingFallbackUnitCost: 1,
     routingWeights: defaultWeights,
     systemProxyUrl: '',
@@ -354,7 +360,7 @@ export default function Settings() {
   const loadRouteSelectorRoutes = async () => {
     setSelectorLoading(true);
     try {
-      const rows = await api.getRoutes();
+      const rows = await api.getRoutesLite();
       setSelectorRoutes((Array.isArray(rows) ? rows : []).map((row: any) => ({
         id: row.id,
         modelPattern: row.modelPattern,
@@ -376,14 +382,19 @@ export default function Settings() {
         api.getAuthInfo(),
         api.getRuntimeSettings(),
         api.getDownstreamApiKeys(),
-        api.getRoutes(),
+        api.getRoutesLite(),
         api.getRuntimeDatabaseConfig(),
       ]);
       setMaskedToken(authInfo.masked || '****');
       setRuntime({
         checkinCron: runtimeInfo.checkinCron || '0 8 * * *',
         balanceRefreshCron: runtimeInfo.balanceRefreshCron || '0 * * * *',
-        siteHealthRefreshCron: runtimeInfo.siteHealthRefreshCron || '*/15 * * * *',
+        logCleanupCron: runtimeInfo.logCleanupCron || '0 6 * * *',
+        logCleanupUsageLogsEnabled: !!runtimeInfo.logCleanupUsageLogsEnabled,
+        logCleanupProgramLogsEnabled: !!runtimeInfo.logCleanupProgramLogsEnabled,
+        logCleanupRetentionDays: Number(runtimeInfo.logCleanupRetentionDays) >= 1
+          ? Math.trunc(Number(runtimeInfo.logCleanupRetentionDays))
+          : 30,
         routingFallbackUnitCost: Number(runtimeInfo.routingFallbackUnitCost) > 0
           ? Number(runtimeInfo.routingFallbackUnitCost)
           : 1,
@@ -455,9 +466,12 @@ export default function Settings() {
       await api.updateRuntimeSettings({
         checkinCron: runtime.checkinCron,
         balanceRefreshCron: runtime.balanceRefreshCron,
-        siteHealthRefreshCron: runtime.siteHealthRefreshCron,
+        logCleanupCron: runtime.logCleanupCron,
+        logCleanupUsageLogsEnabled: runtime.logCleanupUsageLogsEnabled,
+        logCleanupProgramLogsEnabled: runtime.logCleanupProgramLogsEnabled,
+        logCleanupRetentionDays: runtime.logCleanupRetentionDays,
       });
-      toast.success('Schedule settings saved');
+      toast.success('定时任务设置已保存');
     } catch (err: any) {
       toast.error(err?.message || '保存失败');
     } finally {
@@ -889,7 +903,7 @@ export default function Settings() {
 
         <div className="card animate-slide-up stagger-2" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>定时任务</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>签到 Cron</div>
               <input
@@ -906,13 +920,65 @@ export default function Settings() {
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
               />
             </div>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>站点健康检测 Cron</div>
-              <input
-                value={runtime.siteHealthRefreshCron}
-                onChange={(e) => setRuntime((prev) => ({ ...prev, siteHealthRefreshCron: e.target.value }))}
-                style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
-              />
+          </div>
+          <div
+            style={{
+              marginTop: 16,
+              paddingTop: 16,
+              borderTop: '1px solid var(--color-border-light)',
+              display: 'grid',
+              gap: 12,
+            }}
+          >
+            <div style={{ fontWeight: 600, fontSize: 13 }}>自动清理日志</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 160px', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>清理 Cron</div>
+                <input
+                  value={runtime.logCleanupCron}
+                  onChange={(e) => setRuntime((prev) => ({ ...prev, logCleanupCron: e.target.value }))}
+                  style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>保留天数</div>
+                <input
+                  type="number"
+                  min={1}
+                  value={runtime.logCleanupRetentionDays}
+                  onChange={(e) => setRuntime((prev) => {
+                    const nextValue = Number(e.target.value);
+                    return {
+                      ...prev,
+                      logCleanupRetentionDays: Number.isFinite(nextValue) && nextValue >= 1
+                        ? Math.trunc(nextValue)
+                        : prev.logCleanupRetentionDays,
+                    };
+                  })}
+                  style={inputStyle}
+                />
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-text-secondary)' }}>
+                <input
+                  type="checkbox"
+                  checked={runtime.logCleanupUsageLogsEnabled}
+                  onChange={(e) => setRuntime((prev) => ({ ...prev, logCleanupUsageLogsEnabled: e.target.checked }))}
+                />
+                清理使用日志
+              </label>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-text-secondary)' }}>
+                <input
+                  type="checkbox"
+                  checked={runtime.logCleanupProgramLogsEnabled}
+                  onChange={(e) => setRuntime((prev) => ({ ...prev, logCleanupProgramLogsEnabled: e.target.checked }))}
+                />
+                清理程序日志
+              </label>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
+              默认每天早上 6 点执行。按每次定时任务执行时间，清理早于“保留天数”的日志；两个选项都不勾选时不会实际删除日志。
             </div>
           </div>
           <div style={{ marginTop: 12 }}>
@@ -1770,4 +1836,3 @@ export default function Settings() {
     </div>
   );
 }
-

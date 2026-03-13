@@ -1,9 +1,11 @@
 import { type NormalizedFinalResponse, type NormalizedStreamEvent, type ParsedDownstreamChatRequest, type StreamTransformContext, type ClaudeDownstreamContext } from '../../shared/normalized.js';
+import { createChatEndpointStrategy } from '../../shared/chatEndpointStrategy.js';
 import { anthropicMessagesInbound } from './inbound.js';
 import { anthropicMessagesOutbound } from './outbound.js';
 import { anthropicMessagesStream, consumeAnthropicSseEvent } from './stream.js';
 import { anthropicMessagesUsage } from './usage.js';
 import { createAnthropicMessagesAggregateState } from './aggregator.js';
+import { isMessagesRequiredError, shouldRetryNormalizedMessagesBody } from './compatibility.js';
 export {
   ANTHROPIC_RAW_SSE_EVENT_NAMES,
   consumeAnthropicSseEvent,
@@ -20,6 +22,11 @@ export const anthropicMessagesTransformer = {
   outbound: anthropicMessagesOutbound,
   stream: anthropicMessagesStream,
   usage: anthropicMessagesUsage,
+  compatibility: {
+    createEndpointStrategy: createChatEndpointStrategy,
+    shouldRetryNormalizedBody: shouldRetryNormalizedMessagesBody,
+    isMessagesRequiredError,
+  },
   aggregator: {
     createState: createAnthropicMessagesAggregateState,
   },

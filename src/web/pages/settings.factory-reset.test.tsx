@@ -9,7 +9,7 @@ const { apiMock } = vi.hoisted(() => ({
     getAuthInfo: vi.fn(),
     getRuntimeSettings: vi.fn(),
     getDownstreamApiKeys: vi.fn(),
-    getRoutes: vi.fn(),
+    getRoutesLite: vi.fn(),
     getRuntimeDatabaseConfig: vi.fn(),
     factoryReset: vi.fn(),
   },
@@ -66,13 +66,17 @@ describe('Settings factory reset', () => {
     apiMock.getRuntimeSettings.mockResolvedValue({
       checkinCron: '0 8 * * *',
       balanceRefreshCron: '0 * * * *',
+      logCleanupCron: '0 6 * * *',
+      logCleanupUsageLogsEnabled: false,
+      logCleanupProgramLogsEnabled: false,
+      logCleanupRetentionDays: 30,
       routingFallbackUnitCost: 1,
       routingWeights: {},
       adminIpAllowlist: [],
       systemProxyUrl: '',
     });
     apiMock.getDownstreamApiKeys.mockResolvedValue({ items: [] });
-    apiMock.getRoutes.mockResolvedValue([]);
+    apiMock.getRoutesLite.mockResolvedValue([]);
     apiMock.getRuntimeDatabaseConfig.mockResolvedValue({
       active: { dialect: 'sqlite', connection: '(default sqlite path)', ssl: false },
       saved: null,

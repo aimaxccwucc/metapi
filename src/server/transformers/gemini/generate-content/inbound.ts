@@ -1,5 +1,8 @@
 type GeminiRecord = Record<string, unknown>;
-import { resolveGeminiThinkingConfigFromRequest } from './convert.js';
+import {
+  geminiThinkingConfigToReasoning,
+  resolveGeminiThinkingConfigFromRequest,
+} from './convert.js';
 
 function isRecord(value: unknown): value is GeminiRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -30,6 +33,37 @@ function cloneContents(value: unknown): unknown[] | undefined {
     });
 }
 
+function cloneThinkingConfig(value: unknown): GeminiRecord | undefined {
+  if (!isRecord(value)) return undefined;
+
+  const next: GeminiRecord = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'thinkingLevel') {
+      const normalizedLevel = typeof item === 'string' ? item.trim().toLowerCase() : '';
+      if (normalizedLevel === 'minimal') {
+        next.thinkingLevel = 'low';
+        continue;
+      }
+      if (normalizedLevel) {
+        next.thinkingLevel = normalizedLevel;
+        continue;
+      }
+    }
+
+    if (key === 'thinkingBudget') {
+      const numeric = typeof item === 'number' ? item : Number(item);
+      if (Number.isFinite(numeric)) {
+        next.thinkingBudget = Math.max(0, Math.trunc(numeric));
+        continue;
+      }
+    }
+
+    next[key] = cloneJsonValue(item);
+  }
+
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
 function cloneGenerationConfig(value: unknown): GeminiRecord | undefined {
   if (!isRecord(value)) return undefined;
   const allowedKeys = [
@@ -52,7 +86,12 @@ function cloneGenerationConfig(value: unknown): GeminiRecord | undefined {
   ];
   const next: GeminiRecord = {};
   for (const key of allowedKeys) {
-    if (value[key] !== undefined) next[key] = cloneJsonValue(value[key]);
+    if (value[key] === undefined) continue;
+    if (key === 'thinkingConfig') {
+      next[key] = cloneThinkingConfig(value[key]) ?? cloneJsonValue(value[key]);
+      continue;
+    }
+    next[key] = cloneJsonValue(value[key]);
   }
   return Object.keys(next).length > 0 ? next : undefined;
 }
@@ -69,6 +108,55 @@ function cloneTools(value: unknown): unknown[] | undefined {
       if (item.codeExecution !== undefined) next.codeExecution = cloneJsonValue(item.codeExecution);
       return Object.keys(next).length > 0 ? next : cloneJsonValue(item);
     });
+}
+
+function hasMeaningfulThinkingConfig(value: unknown): boolean {
+  return isRecord(value) && geminiThinkingConfigToReasoning(value) !== null;
+}
+
+function sanitizeThinkingConfig(value: unknown): GeminiRecord | undefined {
+  if (!isRecord(value)) return undefined;
+
+  const next = cloneJsonValue(value);
+  const normalizedReasoning = geminiThinkingConfigToReasoning(next);
+  if (normalizedReasoning) {
+    return next;
+  }
+
+  if ('thinkingLevel' in next) {
+    delete next.thinkingLevel;
+  }
+
+  if ('thinkingBudget' in next) {
+    const numeric = typeof next.thinkingBudget === 'number' ? next.thinkingBudget : Number(next.thinkingBudget);
+    if (Number.isFinite(numeric)) {
+      next.thinkingBudget = Math.max(0, Math.trunc(numeric));
+    } else {
+      delete next.thinkingBudget;
+    }
+  }
+
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function mergeThinkingConfig(
+  currentValue: unknown,
+  derivedThinkingConfig: GeminiRecord | null,
+): GeminiRecord | undefined {
+  const currentThinkingConfig = sanitizeThinkingConfig(currentValue);
+
+  if (!derivedThinkingConfig) {
+    return currentThinkingConfig;
+  }
+
+  if (!hasMeaningfulThinkingConfig(currentThinkingConfig)) {
+    return {
+      ...(currentThinkingConfig ?? {}),
+      ...cloneJsonValue(derivedThinkingConfig),
+    };
+  }
+
+  return currentThinkingConfig;
 }
 
 export type GeminiGenerateContentRequest = GeminiRecord;
@@ -96,8 +184,12 @@ export const geminiGenerateContentInbound = {
       const generationConfig = isRecord(next.generationConfig)
         ? { ...next.generationConfig }
         : {};
-      if (!isRecord(generationConfig.thinkingConfig)) {
-        generationConfig.thinkingConfig = derivedThinkingConfig;
+      const thinkingConfig = mergeThinkingConfig(
+        generationConfig.thinkingConfig,
+        derivedThinkingConfig,
+      );
+      if (thinkingConfig) {
+        generationConfig.thinkingConfig = thinkingConfig;
       }
       next.generationConfig = generationConfig;
     }

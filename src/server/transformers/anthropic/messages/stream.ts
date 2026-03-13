@@ -13,9 +13,25 @@ import { type AnthropicExtendedStreamEvent } from './aggregator.js';
 
 type AnthropicStreamPayload = Record<string, unknown>;
 
+type AnthropicBlockKind = 'thinking' | 'text' | 'tool_use' | 'redacted_thinking';
+
+type ExtendedToolBlockState = {
+  contentIndex: number;
+  id: string;
+  name: string;
+  open: boolean;
+  sourceIndex: number | null;
+};
+
 type ExtendedClaudeDownstreamContext = ClaudeDownstreamContext & {
+  toolBlocks: Record<number, ExtendedToolBlockState>;
   thinkingBlockIndex?: number | null;
+  thinkingSourceIndex?: number | null;
+  redactedBlockIndex?: number | null;
+  redactedSourceIndex?: number | null;
+  textSourceIndex?: number | null;
   pendingSignature?: string | null;
+  activeToolSlot?: number | null;
 };
 
 export const ANTHROPIC_RAW_SSE_EVENT_NAMES = new Set([
@@ -56,7 +72,12 @@ export function serializeAnthropicRawSseEvent(event: string, data: string): stri
 function ensureContext(context: ClaudeDownstreamContext): ExtendedClaudeDownstreamContext {
   const extended = context as ExtendedClaudeDownstreamContext;
   if (extended.thinkingBlockIndex === undefined) extended.thinkingBlockIndex = null;
+  if (extended.thinkingSourceIndex === undefined) extended.thinkingSourceIndex = null;
+  if (extended.redactedBlockIndex === undefined) extended.redactedBlockIndex = null;
+  if (extended.redactedSourceIndex === undefined) extended.redactedSourceIndex = null;
+  if (extended.textSourceIndex === undefined) extended.textSourceIndex = null;
   if (extended.pendingSignature === undefined) extended.pendingSignature = null;
+  if (extended.activeToolSlot === undefined) extended.activeToolSlot = null;
   return extended;
 }
 
@@ -132,6 +153,7 @@ function closeTextBlock(context: ExtendedClaudeDownstreamContext): string[] {
   if (context.textBlockIndex === null || context.textBlockIndex === undefined) return [];
   const index = context.textBlockIndex;
   context.textBlockIndex = null;
+  context.textSourceIndex = null;
   context.contentBlockStarted = false;
   return [
     serializeSse('content_block_stop', {
@@ -159,6 +181,13 @@ function emitPendingSignature(context: ExtendedClaudeDownstreamContext): string[
   ];
 }
 
+function bufferPendingSignature(
+  context: ExtendedClaudeDownstreamContext,
+  signature: string,
+): void {
+  context.pendingSignature = `${context.pendingSignature || ''}${signature}`;
+}
+
 function closeThinkingBlock(context: ExtendedClaudeDownstreamContext): string[] {
   if (context.thinkingBlockIndex === null || context.thinkingBlockIndex === undefined) return [];
   const index = context.thinkingBlockIndex;
@@ -170,7 +199,21 @@ function closeThinkingBlock(context: ExtendedClaudeDownstreamContext): string[] 
     }),
   ];
   context.thinkingBlockIndex = null;
+  context.thinkingSourceIndex = null;
   return events;
+}
+
+function closeRedactedBlock(context: ExtendedClaudeDownstreamContext): string[] {
+  if (context.redactedBlockIndex === null || context.redactedBlockIndex === undefined) return [];
+  const index = context.redactedBlockIndex;
+  context.redactedBlockIndex = null;
+  context.redactedSourceIndex = null;
+  return [
+    serializeSse('content_block_stop', {
+      type: 'content_block_stop',
+      index,
+    }),
+  ];
 }
 
 function closeToolBlocks(context: ExtendedClaudeDownstreamContext): string[] {
@@ -188,6 +231,21 @@ function closeToolBlocks(context: ExtendedClaudeDownstreamContext): string[] {
       index: block.contentIndex,
     }));
   }
+  context.activeToolSlot = null;
+  return events;
+}
+
+function emitPendingSignatureAsThinkingBlock(
+  context: ExtendedClaudeDownstreamContext,
+): string[] {
+  if (!context.pendingSignature) return [];
+  const signature = context.pendingSignature;
+  const events = [
+    ...ensureThinkingBlockStart(context),
+  ];
+  context.pendingSignature = signature;
+  events.push(...emitPendingSignature(context));
+  events.push(...closeThinkingBlock(context));
   return events;
 }
 
@@ -195,15 +253,41 @@ function closeAllBlocks(context: ExtendedClaudeDownstreamContext): string[] {
   return [
     ...closeTextBlock(context),
     ...closeThinkingBlock(context),
+    ...closeRedactedBlock(context),
     ...closeToolBlocks(context),
   ];
 }
 
-function ensureTextBlockStart(context: ExtendedClaudeDownstreamContext): string[] {
-  if (context.textBlockIndex !== null && context.textBlockIndex !== undefined) return [];
+function normalizeBlockIndex(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.trunc(value));
+}
+
+function allocateContentIndex(
+  context: ExtendedClaudeDownstreamContext,
+  preferredIndex?: number | null,
+): number {
+  const normalizedPreferred = normalizeBlockIndex(preferredIndex);
+  if (normalizedPreferred !== null) {
+    if (context.nextContentBlockIndex <= normalizedPreferred) {
+      context.nextContentBlockIndex = normalizedPreferred + 1;
+    }
+    return normalizedPreferred;
+  }
+
   const index = context.nextContentBlockIndex;
   context.nextContentBlockIndex += 1;
+  return index;
+}
+
+function ensureTextBlockStart(
+  context: ExtendedClaudeDownstreamContext,
+  preferredIndex?: number | null,
+): string[] {
+  if (context.textBlockIndex !== null && context.textBlockIndex !== undefined) return [];
+  const index = allocateContentIndex(context, preferredIndex);
   context.textBlockIndex = index;
+  context.textSourceIndex = normalizeBlockIndex(preferredIndex) ?? index;
   context.contentBlockStarted = true;
   return [
     serializeSse('content_block_start', {
@@ -217,11 +301,14 @@ function ensureTextBlockStart(context: ExtendedClaudeDownstreamContext): string[
   ];
 }
 
-function ensureThinkingBlockStart(context: ExtendedClaudeDownstreamContext): string[] {
+function ensureThinkingBlockStart(
+  context: ExtendedClaudeDownstreamContext,
+  preferredIndex?: number | null,
+): string[] {
   if (context.thinkingBlockIndex !== null && context.thinkingBlockIndex !== undefined) return [];
-  const index = context.nextContentBlockIndex;
-  context.nextContentBlockIndex += 1;
+  const index = allocateContentIndex(context, preferredIndex);
   context.thinkingBlockIndex = index;
+  context.thinkingSourceIndex = normalizeBlockIndex(preferredIndex) ?? index;
   return [
     serializeSse('content_block_start', {
       type: 'content_block_start',
@@ -229,6 +316,27 @@ function ensureThinkingBlockStart(context: ExtendedClaudeDownstreamContext): str
       content_block: {
         type: 'thinking',
         thinking: '',
+      },
+    }),
+  ];
+}
+
+function ensureRedactedBlockStart(
+  context: ExtendedClaudeDownstreamContext,
+  data: string,
+  preferredIndex?: number | null,
+): string[] {
+  if (context.redactedBlockIndex !== null && context.redactedBlockIndex !== undefined) return [];
+  const index = allocateContentIndex(context, preferredIndex);
+  context.redactedBlockIndex = index;
+  context.redactedSourceIndex = normalizeBlockIndex(preferredIndex) ?? index;
+  return [
+    serializeSse('content_block_start', {
+      type: 'content_block_start',
+      index,
+      content_block: {
+        type: 'redacted_thinking',
+        data,
       },
     }),
   ];
@@ -242,12 +350,12 @@ function ensureToolBlockStart(
   let state = context.toolBlocks[toolSlot];
   if (!state) {
     state = {
-      contentIndex: context.nextContentBlockIndex,
+      contentIndex: allocateContentIndex(context),
       id: toolDelta.id || `toolu_${toolSlot}`,
       name: toolDelta.name || `tool_${toolSlot}`,
       open: false,
+      sourceIndex: toolSlot,
     };
-    context.nextContentBlockIndex += 1;
     context.toolBlocks[toolSlot] = state;
   } else {
     if (toolDelta.id) state.id = toolDelta.id;
@@ -269,7 +377,79 @@ function ensureToolBlockStart(
     }));
   }
 
+  context.activeToolSlot = toolSlot;
   return { events, contentIndex: state.contentIndex };
+}
+
+function ensureExplicitToolBlockStart(
+  context: ExtendedClaudeDownstreamContext,
+  sourceIndex?: number | null,
+): string[] {
+  const toolSlot = normalizeBlockIndex(sourceIndex) ?? 0;
+  const state = context.toolBlocks[toolSlot];
+  const toolDelta: NonNullable<AnthropicExtendedStreamEvent['toolCallDeltas']>[number] = {
+    index: toolSlot,
+    id: state?.id,
+    name: state?.name,
+  };
+  return ensureToolBlockStart(context, toolDelta).events;
+}
+
+function closePreviousToolBlockIfNeeded(
+  context: ExtendedClaudeDownstreamContext,
+  toolSlot: number,
+): string[] {
+  const activeToolSlot = context.activeToolSlot;
+  if (activeToolSlot === null || activeToolSlot === undefined || activeToolSlot === toolSlot) {
+    return [];
+  }
+  return closeToolBlocks(context);
+}
+
+function isMatchingBlockIndex(
+  targetIndex: number,
+  contentIndex: number | null | undefined,
+  sourceIndex: number | null | undefined,
+): boolean {
+  if (sourceIndex !== null && sourceIndex !== undefined) return sourceIndex === targetIndex;
+  if (contentIndex !== null && contentIndex !== undefined) return contentIndex === targetIndex;
+  return false;
+}
+
+function handleExplicitBlockStart(
+  kind: AnthropicBlockKind,
+  sourceIndex: number | null,
+  context: ExtendedClaudeDownstreamContext,
+): string[] {
+  if (kind === 'thinking') {
+    return [
+      ...closeRedactedBlock(context),
+      ...closeToolBlocks(context),
+      ...closeTextBlock(context),
+      ...ensureThinkingBlockStart(context, sourceIndex),
+    ];
+  }
+
+  if (kind === 'text') {
+    return [
+      ...closeRedactedBlock(context),
+      ...closeToolBlocks(context),
+      ...closeThinkingBlock(context),
+      ...ensureTextBlockStart(context, sourceIndex),
+    ];
+  }
+
+  if (kind === 'tool_use') {
+    return [
+      ...closeRedactedBlock(context),
+      ...closeTextBlock(context),
+      ...closeThinkingBlock(context),
+      ...closePreviousToolBlockIfNeeded(context, normalizeBlockIndex(sourceIndex) ?? 0),
+      ...ensureExplicitToolBlockStart(context, sourceIndex),
+    ];
+  }
+
+  return [];
 }
 
 function buildDoneEvents(
@@ -282,6 +462,7 @@ function buildDoneEvents(
   const events = [
     ...ensureClaudeStartEvents(streamContext, context),
     ...closeAllBlocks(context),
+    ...emitPendingSignatureAsThinkingBlock(context),
     serializeSse('message_delta', {
       type: 'message_delta',
       delta: {
@@ -384,6 +565,17 @@ function normalizeAnthropicRawEvent(
     const blockType = asTrimmedString(contentBlock.type);
     const index = typeof payload.index === 'number' ? payload.index : undefined;
 
+    if (blockType === 'text') {
+      return {
+        anthropic: {
+          startBlock: {
+            kind: 'text',
+            index,
+          },
+        },
+      };
+    }
+
     if (blockType === 'thinking') {
       return {
         anthropic: {
@@ -409,6 +601,12 @@ function normalizeAnthropicRawEvent(
 
     if (blockType === 'tool_use') {
       return {
+        anthropic: {
+          startBlock: {
+            kind: 'tool_use',
+            index,
+          },
+        },
         toolCallDeltas: [{
           index: typeof index === 'number' ? index : 0,
           id: asTrimmedString(contentBlock.id) || undefined,
@@ -548,6 +746,8 @@ export const anthropicMessagesStream = {
     const context = ensureContext(downstreamContext);
     const anthropicEvent = event as AnthropicExtendedStreamEvent;
     const events: string[] = [];
+    const startBlock = anthropicEvent.anthropic?.startBlock;
+    const normalizedStartIndex = normalizeBlockIndex(startBlock?.index);
 
     const needsStart = (
       event.role === 'assistant'
@@ -562,43 +762,30 @@ export const anthropicMessagesStream = {
       events.push(...ensureClaudeStartEvents(streamContext, context));
     }
 
+    if (startBlock && startBlock.kind !== 'redacted_thinking') {
+      events.push(...handleExplicitBlockStart(startBlock.kind, normalizedStartIndex, context));
+    }
+
     if (anthropicEvent.anthropic?.signatureDelta) {
-      if (context.thinkingBlockIndex !== null && context.thinkingBlockIndex !== undefined) {
-        events.push(serializeSse('content_block_delta', {
-          type: 'content_block_delta',
-          index: context.thinkingBlockIndex,
-          delta: {
-            type: 'signature_delta',
-            signature: anthropicEvent.anthropic.signatureDelta,
-          },
-        }));
-      } else {
-        context.pendingSignature = anthropicEvent.anthropic.signatureDelta;
-      }
+      bufferPendingSignature(context, anthropicEvent.anthropic.signatureDelta);
     }
 
     if (anthropicEvent.anthropic?.redactedThinkingData) {
-      events.push(...closeAllBlocks(context));
-      const index = context.nextContentBlockIndex;
-      context.nextContentBlockIndex += 1;
-      events.push(serializeSse('content_block_start', {
-        type: 'content_block_start',
-        index,
-        content_block: {
-          type: 'redacted_thinking',
-          data: anthropicEvent.anthropic.redactedThinkingData,
-        },
-      }));
-      events.push(serializeSse('content_block_stop', {
-        type: 'content_block_stop',
-        index,
-      }));
+      events.push(...closeToolBlocks(context));
+      events.push(...closeTextBlock(context));
+      events.push(...closeThinkingBlock(context));
+      events.push(...ensureRedactedBlockStart(
+        context,
+        anthropicEvent.anthropic.redactedThinkingData,
+        normalizedStartIndex,
+      ));
     }
 
     if (event.reasoningDelta) {
+      events.push(...closeRedactedBlock(context));
       events.push(...closeToolBlocks(context));
       events.push(...closeTextBlock(context));
-      events.push(...ensureThinkingBlockStart(context));
+      events.push(...ensureThinkingBlockStart(context, normalizedStartIndex));
       events.push(serializeSse('content_block_delta', {
         type: 'content_block_delta',
         index: context.thinkingBlockIndex ?? 0,
@@ -610,9 +797,14 @@ export const anthropicMessagesStream = {
     }
 
     if (Array.isArray(event.toolCallDeltas) && event.toolCallDeltas.length > 0) {
+      events.push(...closeRedactedBlock(context));
       events.push(...closeTextBlock(context));
       events.push(...closeThinkingBlock(context));
       for (const toolDelta of event.toolCallDeltas) {
+        events.push(...closePreviousToolBlockIfNeeded(
+          context,
+          Number.isFinite(toolDelta.index) ? Math.max(0, Math.trunc(toolDelta.index)) : 0,
+        ));
         const toolBlock = ensureToolBlockStart(context, toolDelta);
         events.push(...toolBlock.events);
         if (toolDelta.argumentsDelta) {
@@ -629,9 +821,10 @@ export const anthropicMessagesStream = {
     }
 
     if (event.contentDelta) {
+      events.push(...closeRedactedBlock(context));
       events.push(...closeToolBlocks(context));
       events.push(...closeThinkingBlock(context));
-      events.push(...ensureTextBlockStart(context));
+      events.push(...ensureTextBlockStart(context, normalizedStartIndex));
       events.push(serializeSse('content_block_delta', {
         type: 'content_block_delta',
         index: context.textBlockIndex ?? 0,
@@ -647,15 +840,27 @@ export const anthropicMessagesStream = {
       && anthropicEvent.anthropic.stopBlockIndex !== null
     ) {
       const targetIndex = anthropicEvent.anthropic.stopBlockIndex;
-      if (context.thinkingBlockIndex === targetIndex) {
+      if (isMatchingBlockIndex(targetIndex, context.thinkingBlockIndex, context.thinkingSourceIndex)) {
         events.push(...closeThinkingBlock(context));
       }
-      if (context.textBlockIndex === targetIndex) {
+      if (isMatchingBlockIndex(targetIndex, context.textBlockIndex, context.textSourceIndex)) {
         events.push(...closeTextBlock(context));
       }
-      const matchingToolBlock = Object.values(context.toolBlocks).find((item) => item.open && item.contentIndex === targetIndex);
+      if (isMatchingBlockIndex(targetIndex, context.redactedBlockIndex, context.redactedSourceIndex)) {
+        events.push(...closeRedactedBlock(context));
+      }
+      const matchingToolBlock = Object.values(context.toolBlocks).find((item) => (
+        item.open
+        && isMatchingBlockIndex(targetIndex, item.contentIndex, item.sourceIndex)
+      ));
       if (matchingToolBlock) {
         matchingToolBlock.open = false;
+        if (typeof context.activeToolSlot === 'number') {
+          const activeState = context.toolBlocks[context.activeToolSlot];
+          if (activeState?.contentIndex === matchingToolBlock.contentIndex) {
+            context.activeToolSlot = null;
+          }
+        }
         events.push(serializeSse('content_block_stop', {
           type: 'content_block_stop',
           index: matchingToolBlock.contentIndex,

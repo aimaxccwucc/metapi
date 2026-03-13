@@ -10,6 +10,7 @@ import {
   MESSAGE_STATUS,
   buildApiPayload,
   buildEmbeddingsRequestEnvelope,
+  buildFileUploadRequestEnvelope,
   buildImagesEditRequestEnvelope,
   buildImagesGenerationsRequestEnvelope,
   buildRawProxyRequestEnvelope,
@@ -20,7 +21,7 @@ import {
   collectModelTesterModelNames,
   createLoadingAssistantMessage,
   createMessage,
-  getPreferredModelTesterModel,
+  createConversationUserMessage,
   filterModelTesterModelNames,
   finalizeIncompleteMessage,
   findLastLoadingAssistantIndex,
@@ -31,6 +32,8 @@ import {
   syncCustomRequestBodyToMessages,
   syncMessagesToCustomRequestBody,
   type ChatMessage,
+  type ConversationContentPart,
+  type ConversationUploadedFile,
   type DebugTab,
   type ModelTesterInputs,
   type ModelTesterModeState,
@@ -63,16 +66,19 @@ type UploadState = {
   dataUrl: string;
 };
 
+type ConversationFileState = UploadState & {
+  localId: string;
+  fileId?: string | null;
+  status: 'pending' | 'uploading' | 'uploaded' | 'error';
+  errorMessage?: string | null;
+};
+
 const POLL_INTERVAL_MS = 1200;
+const CONVERSATION_FILE_ACCEPT = '.pdf,.txt,.md,.markdown,.json,image/*,audio/*';
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-const fileToDataUrl = async (file: File): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error || new Error('read file failed'));
-    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
-    reader.readAsDataURL(file);
-  });
+const createConversationFileLocalId = () =>
+  `draft-file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 const summarizeModeRequest = (
   mode: PlaygroundMode,
@@ -672,10 +678,12 @@ export default function ModelTester() {
   const [videoInspectAction, setVideoInspectAction] = useState<'GET' | 'DELETE'>('GET');
   const [imageSourceFile, setImageSourceFile] = useState<UploadState | null>(null);
   const [imageMaskFile, setImageMaskFile] = useState<UploadState | null>(null);
+  const [conversationFiles, setConversationFiles] = useState<ConversationFileState[]>([]);
 
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const conversationFileInputRef = useRef<HTMLInputElement>(null);
   const restoredSessionRef = useRef<ReturnType<typeof parseModelTesterSession>>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamStopRequestedRef = useRef(false);
@@ -773,7 +781,9 @@ export default function ModelTester() {
         const currentModel = inputs.model || '';
         const nextModel = restoredModel && names.includes(restoredModel)
           ? restoredModel
-          : getPreferredModelTesterModel(names, inputs.mode, currentModel);
+          : currentModel && names.includes(currentModel)
+            ? currentModel
+            : names[0] || '';
 
         if (nextModel) {
           setInputs((prev) => ({ ...prev, model: nextModel }));
@@ -857,6 +867,107 @@ export default function ModelTester() {
       setError(readError?.message || '读取文件失败');
     }
   }, []);
+
+  const handleConversationFilesChange = useCallback(async (fileList: FileList | null) => {
+    const files = Array.from(fileList || []);
+    if (files.length <= 0) return;
+
+    try {
+      const nextFiles = await Promise.all(files.map(async (file) => ({
+        localId: createConversationFileLocalId(),
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        dataUrl: await readFileAsDataUrl(file),
+        fileId: null,
+        status: 'pending' as const,
+        errorMessage: null,
+      })));
+      setConversationFiles((prev) => [...prev, ...nextFiles]);
+      pushDebug('info', `已添加 ${nextFiles.length} 个会话附件。`);
+    } catch (readError: any) {
+      const message = readError?.message || '读取附件失败';
+      setError(message);
+      pushDebug('error', message);
+    }
+  }, [pushDebug]);
+
+  const removeConversationFile = useCallback((localId: string) => {
+    if (sending) return;
+    setConversationFiles((prev) => prev.filter((item) => item.localId !== localId));
+  }, [sending]);
+
+  const extractUploadedFilesFromMessage = useCallback((message: ChatMessage): ConversationUploadedFile[] => {
+    const parts = Array.isArray(message.parts) ? message.parts : [];
+    return parts.flatMap((part) => {
+      if (part.type !== 'input_file') return [];
+      const fileId = typeof part.fileId === 'string' ? part.fileId.trim() : '';
+      if (!fileId) return [];
+      return [{
+        fileId,
+        filename: typeof part.filename === 'string' && part.filename.trim() ? part.filename.trim() : null,
+        mimeType: typeof part.mimeType === 'string' && part.mimeType.trim() ? part.mimeType.trim() : null,
+      }];
+    });
+  }, []);
+
+  const uploadConversationFiles = useCallback(async (): Promise<ConversationUploadedFile[]> => {
+    if (conversationFiles.length <= 0) return [];
+
+    const uploaded: ConversationUploadedFile[] = [];
+    for (const item of conversationFiles) {
+      if (item.fileId) {
+        uploaded.push({
+          fileId: item.fileId,
+          filename: item.name,
+          mimeType: item.mimeType,
+        });
+        continue;
+      }
+
+      setConversationFiles((prev) => prev.map((entry) => (
+        entry.localId === item.localId
+          ? { ...entry, status: 'uploading', errorMessage: null }
+          : entry
+      )));
+      pushDebug('info', `正在上传附件：${item.name}`);
+
+      try {
+        const result = await api.proxyTest(buildFileUploadRequestEnvelope({
+          name: item.name,
+          mimeType: item.mimeType,
+          dataUrl: item.dataUrl,
+        })) as { id?: unknown; filename?: unknown; mime_type?: unknown };
+        const fileId = typeof result?.id === 'string' ? result.id.trim() : '';
+        if (!fileId) {
+          throw new Error('上传成功但未返回 file_id');
+        }
+        const filename = typeof result?.filename === 'string' && result.filename.trim()
+          ? result.filename.trim()
+          : item.name;
+        const mimeType = typeof result?.mime_type === 'string' && result.mime_type.trim()
+          ? result.mime_type.trim()
+          : item.mimeType;
+
+        setConversationFiles((prev) => prev.map((entry) => (
+          entry.localId === item.localId
+            ? { ...entry, fileId, name: filename, mimeType, status: 'uploaded', errorMessage: null }
+            : entry
+        )));
+        uploaded.push({ fileId, filename, mimeType });
+        pushDebug('info', `附件上传完成：${filename} -> ${fileId}`);
+      } catch (uploadError: any) {
+        const message = uploadError?.message || '附件上传失败';
+        setConversationFiles((prev) => prev.map((entry) => (
+          entry.localId === item.localId
+            ? { ...entry, status: 'error', errorMessage: message }
+            : entry
+        )));
+        throw new Error(`${item.name}: ${message}`);
+      }
+    }
+
+    return uploaded;
+  }, [conversationFiles, pushDebug]);
 
   const buildConversationMessagesWithSystem = useCallback((baseMessages: ChatMessage[]) => {
     if (!inputs.systemPrompt.trim()) return baseMessages;
@@ -1259,13 +1370,7 @@ export default function ModelTester() {
     () => filteredModels.map((item) => ({ value: item, label: item })),
     [filteredModels],
   );
-  useEffect(() => {
-    if (models.length === 0) return;
-    const preferredModel = getPreferredModelTesterModel(models, inputs.mode, inputs.model);
-    if (!preferredModel || preferredModel === inputs.model) return;
-    setInputs((prev) => ({ ...prev, model: preferredModel }));
-  }, [inputs.mode, inputs.model, models]);
-
+  const conversationFileSupported = inputs.protocol === 'openai' || inputs.protocol === 'responses';
   const canSend = useMemo(() => {
     if (sending || pendingJobId || !inputs.model) return false;
     if (inputs.mode !== 'conversation') {
@@ -1278,9 +1383,9 @@ export default function ModelTester() {
       return false;
     }
     const hasPrompt = input.trim().length > 0;
-    if (!customRequestMode) return hasPrompt;
+    if (!customRequestMode) return hasPrompt || (conversationFileSupported && conversationFiles.length > 0);
     return hasPrompt || customRequestBody.trim().length > 0;
-  }, [assetPrompt, customRequestBody, customRequestMode, embeddingInputText, imageSourceFile, input, inputs.mode, inputs.model, pendingJobId, searchQueryValue, sending, videoInspectId]);
+  }, [assetPrompt, conversationFileSupported, conversationFiles.length, customRequestBody, customRequestMode, embeddingInputText, imageSourceFile, input, inputs.mode, inputs.model, pendingJobId, searchQueryValue, sending, videoInspectId]);
 
   const startChatJob = useCallback(async (payload: TestChatPayload) => {
     try {
@@ -1633,8 +1738,12 @@ export default function ModelTester() {
     };
   }, [buildConversationMessagesWithSystem, buildConversationProxyEnvelope, customRequestBody, customRequestMode, inputs, parameterEnabled]);
 
-  const sendWithPrompt = useCallback(async (prompt: string, baseMessages: ChatMessage[]) => {
-    const userMessage = createMessage('user', prompt);
+  const sendWithPrompt = useCallback(async (
+    prompt: string,
+    baseMessages: ChatMessage[],
+    files: ConversationUploadedFile[] = [],
+  ) => {
+    const userMessage = createConversationUserMessage(prompt, files);
     const loadingAssistant = createLoadingAssistantMessage();
     const nextMessages = [...baseMessages, userMessage, loadingAssistant];
     const useProxyTransport = inputs.protocol === 'gemini' || customRequestMode;
@@ -1652,7 +1761,7 @@ export default function ModelTester() {
     }
 
     await dispatchPayload(nextMessages, payload, { syncedCustomBody });
-  }, [buildConversationProxyEnvelope, buildPayloadWithMessages, customRequestMode, dispatchPayload, dispatchProxyEnvelope, inputs.protocol, pushDebug]);
+  }, [buildConversationProxyEnvelope, buildPayloadWithMessages, createConversationUserMessage, customRequestMode, dispatchPayload, dispatchProxyEnvelope, inputs.protocol, pushDebug]);
 
   const sendModeRequest = useCallback(async () => {
     const envelope = buildModeProxyEnvelope();
@@ -1672,6 +1781,36 @@ export default function ModelTester() {
     }
 
     const trimmed = input.trim();
+    if (conversationFiles.length > 0 && customRequestMode) {
+      const message = '自定义请求模式不会自动注入会话附件，请先关闭自定义请求模式或移除附件。';
+      setError(message);
+      pushDebug('warn', message);
+      return;
+    }
+
+    if (conversationFiles.length > 0 && !conversationFileSupported) {
+      const message = '当前协议的会话附件仅支持 OpenAI / Responses；请切换协议或移除附件。';
+      setError(message);
+      pushDebug('warn', message);
+      return;
+    }
+
+    if (!customRequestMode && conversationFileSupported && conversationFiles.length > 0) {
+      setSending(true);
+      try {
+        const uploadedFiles = await uploadConversationFiles();
+        setInput('');
+        setConversationFiles([]);
+        await sendWithPrompt(trimmed, messages, uploadedFiles);
+      } catch (uploadError: any) {
+        const message = uploadError?.message || '附件上传失败';
+        setError(message);
+        pushDebug('error', message);
+        setSending(false);
+      }
+      return;
+    }
+
     if (trimmed.length > 0) {
       setInput('');
       await sendWithPrompt(trimmed, messages);
@@ -1697,7 +1836,7 @@ export default function ModelTester() {
         { stream: inputs.stream, jobMode: !inputs.stream },
       ),
     );
-  }, [canSend, customRequestBody, customRequestMode, dispatchPayload, input, inputs.mode, messages, pushDebug, sendModeRequest, sendWithPrompt]);
+  }, [canSend, conversationFileSupported, conversationFiles.length, customRequestBody, customRequestMode, dispatchPayload, input, inputs.mode, messages, pushDebug, sendModeRequest, sendWithPrompt, uploadConversationFiles]);
 
   const retryPending = useCallback(async () => {
     if (sending || pendingJobId || !pendingPayload) return;
@@ -1786,6 +1925,7 @@ export default function ModelTester() {
     setVideoInspectAction('GET');
     setImageSourceFile(null);
     setImageMaskFile(null);
+    setConversationFiles([]);
     localStorage.removeItem(MODEL_TESTER_STORAGE_KEY);
     pushDebug('info', '对话已清除。');
   }, [pendingJobId, pushDebug]);
@@ -1873,10 +2013,11 @@ export default function ModelTester() {
 
     const base = messages.slice(0, userIndex);
     const prompt = messages[userIndex].content;
+    const files = extractUploadedFilesFromMessage(messages[userIndex]);
     setEditingMessageId(null);
     setEditValue('');
-    void sendWithPrompt(prompt, base);
-  }, [messages, pendingJobId, sendWithPrompt, sending]);
+    void sendWithPrompt(prompt, base, files);
+  }, [extractUploadedFilesFromMessage, messages, pendingJobId, sendWithPrompt, sending]);
 
   const startEditMessage = useCallback((target: ChatMessage) => {
     if (sending) return;
@@ -1910,9 +2051,9 @@ export default function ModelTester() {
 
     if (retry && target.role === 'user') {
       const base = updated.slice(0, targetIndex);
-      void sendWithPrompt(nextContent, base);
+      void sendWithPrompt(nextContent, base, extractUploadedFilesFromMessage(target));
     }
-  }, [cancelEditMessage, editValue, editingMessageId, messages, sendWithPrompt]);
+  }, [cancelEditMessage, editValue, editingMessageId, extractUploadedFilesFromMessage, messages, sendWithPrompt]);
 
   const syncMessageToBody = useCallback(() => {
     const nextBody = syncMessagesToCustomRequestBody(customRequestBody, messages, inputs);
@@ -2428,6 +2569,9 @@ export default function ModelTester() {
                   const isError = message.status === MESSAGE_STATUS.ERROR;
                   const showReasoning = Boolean(message.reasoningContent);
                   const isEditing = editingMessageId === message.id;
+                  const fileParts = Array.isArray(message.parts)
+                    ? message.parts.filter((part): part is Extract<ConversationContentPart, { type: 'input_file' }> => part.type === 'input_file')
+                    : [];
 
                   return (
                     <div
@@ -2544,6 +2688,34 @@ export default function ModelTester() {
                           )}
                         </div>
 
+                        {!isEditing && fileParts.length > 0 && (
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                            {fileParts.map((part, index) => (
+                              <span
+                                key={`${message.id}-file-${part.fileId || part.filename || index}`}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 6,
+                                  padding: '4px 8px',
+                                  borderRadius: 999,
+                                  border: '1px solid var(--color-border-light)',
+                                  background: 'var(--color-bg-subtle)',
+                                  color: 'var(--color-text-secondary)',
+                                  fontSize: 11,
+                                  maxWidth: '100%',
+                                }}
+                                title={part.fileId || part.filename || '附件'}
+                              >
+                                <span>📎</span>
+                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {part.filename || part.fileId || '附件'}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
                         {!isEditing && (
                           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                             {!isLoading && (
@@ -2589,25 +2761,123 @@ export default function ModelTester() {
 
             {inputs.mode === 'conversation' ? (
               <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
-                <textarea
-                  value={input}
-                  onChange={(event) => setInput(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' && !event.shiftKey) {
-                      event.preventDefault();
-                      if (sending) {
-                        void stopGenerating();
-                        return;
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div style={{
+                    padding: '10px 12px',
+                    borderRadius: 'var(--radius-md)',
+                    border: '1px solid var(--color-border-light)',
+                    background: 'var(--color-bg-subtle)',
+                  }}>
+                    <input
+                      ref={conversationFileInputRef}
+                      type="file"
+                      multiple
+                      accept={CONVERSATION_FILE_ACCEPT}
+                      style={{ display: 'none' }}
+                      onChange={(event) => {
+                        void handleConversationFilesChange(event.target.files);
+                        event.target.value = '';
+                      }}
+                    />
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        style={{ border: '1px solid var(--color-border)', padding: '6px 10px' }}
+                        disabled={sending || customRequestMode || !conversationFileSupported}
+                        onClick={() => conversationFileInputRef.current?.click()}
+                      >
+                        添加文件
+                      </button>
+                      <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                        {customRequestMode
+                          ? '自定义请求模式不会自动上传这些附件；关闭自定义模式后可走标准 /v1/files 链路。'
+                          : !conversationFileSupported
+                            ? '当前协议暂不支持会话附件注入；请切换到 OpenAI 或 Responses。'
+                            : '支持 PDF / TXT / Markdown / JSON / 图片 / 音频；发送前会先上传到 /v1/files。'}
+                      </span>
+                    </div>
+                    {conversationFiles.length > 0 && (
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                        {conversationFiles.map((file) => {
+                          const statusText = file.status === 'uploading'
+                            ? '上传中'
+                            : file.status === 'uploaded'
+                              ? '已上传'
+                              : file.status === 'error'
+                                ? '失败'
+                                : '待上传';
+                          const statusColor = file.status === 'error'
+                            ? 'var(--color-danger)'
+                            : file.status === 'uploaded'
+                              ? 'var(--color-success)'
+                              : file.status === 'uploading'
+                                ? 'var(--color-warning)'
+                                : 'var(--color-text-muted)';
+
+                          return (
+                            <span
+                              key={file.localId}
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                maxWidth: '100%',
+                                padding: '6px 10px',
+                                borderRadius: 999,
+                                border: '1px solid var(--color-border-light)',
+                                background: 'var(--color-bg-card)',
+                                fontSize: 11,
+                              }}
+                              title={file.errorMessage || file.fileId || file.name}
+                            >
+                              <span>📎</span>
+                              <span style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {file.name}
+                              </span>
+                              <span style={{ color: statusColor }}>· {statusText}</span>
+                              {!sending && (
+                                <button
+                                  type="button"
+                                  onClick={() => removeConversationFile(file.localId)}
+                                  style={{
+                                    border: 'none',
+                                    background: 'transparent',
+                                    color: 'var(--color-text-muted)',
+                                    cursor: 'pointer',
+                                    padding: 0,
+                                  }}
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  <textarea
+                    value={input}
+                    onChange={(event) => setInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !event.shiftKey) {
+                        event.preventDefault();
+                        if (sending) {
+                          void stopGenerating();
+                          return;
+                        }
+                        void send();
                       }
-                      void send();
-                    }
-                  }}
-                  placeholder={customRequestMode
-                    ? '自定义模式下输入可选。回车发送时将优先使用右侧自定义请求体。'
-                    : '输入提示词...（回车发送，Shift+回车换行）'}
-                  rows={3}
-                  style={{ ...inputBaseStyle, resize: 'none', flex: 1 }}
-                />
+                    }}
+                    placeholder={customRequestMode
+                      ? '自定义模式下输入可选。回车发送时将优先使用右侧自定义请求体。'
+                      : '输入提示词，或只上传文件后直接发送…（回车发送，Shift+回车换行）'}
+                    rows={3}
+                    style={{ ...inputBaseStyle, resize: 'none', flex: 1 }}
+                  />
+                </div>
                 <button
                   onClick={() => {
                     if (sending) {

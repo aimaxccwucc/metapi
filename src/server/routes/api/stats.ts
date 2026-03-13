@@ -21,10 +21,13 @@ import {
   parseProxyLogBillingDetails,
   withProxyLogSelectFields,
 } from '../../services/proxyLogStore.js';
+import { getCredentialModeFromExtraConfig } from '../../services/accountExtraConfig.js';
 import {
+  formatLocalDateTime,
   formatUtcSqlDateTime,
   getLocalDayRangeUtc,
   getLocalRangeStartUtc,
+  parseStoredUtcDateTime,
   toLocalDayKeyFromStoredUtc,
 } from '../../services/localTimeService.js';
 
@@ -32,6 +35,12 @@ function parseBooleanFlag(raw?: string): boolean {
   if (!raw) return false;
   const normalized = raw.trim().toLowerCase();
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
+
+function isApiKeyConnection(account: { accessToken?: string | null; extraConfig?: string | null }): boolean {
+  const explicit = getCredentialModeFromExtraConfig(account.extraConfig);
+  if (explicit && explicit !== 'auto') return explicit === 'apikey';
+  return !(account.accessToken || '').trim();
 }
 
 const MODELS_MARKETPLACE_BASE_TTL_MS = 15_000;
@@ -709,6 +718,255 @@ function proxyCostSqlExpression() {
   `;
 }
 
+type ProxyLogStatusFilter = 'all' | 'success' | 'failed';
+
+function normalizeProxyLogPageSize(raw?: string): number {
+  const parsed = Number.parseInt(raw || '50', 10);
+  if (!Number.isFinite(parsed)) return 50;
+  return Math.max(1, Math.min(100, parsed));
+}
+
+function normalizeProxyLogOffset(raw?: string): number {
+  const parsed = Number.parseInt(raw || '0', 10);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, parsed);
+}
+
+function normalizeProxyLogStatusFilter(raw?: string): ProxyLogStatusFilter {
+  const normalized = (raw || '').trim().toLowerCase();
+  if (normalized === 'success') return 'success';
+  if (normalized === 'failed') return 'failed';
+  return 'all';
+}
+
+function normalizeProxyLogSearch(raw?: string): string {
+  return (raw || '').trim().toLowerCase();
+}
+
+function normalizeProxyLogSiteId(raw?: string): number | null {
+  const parsed = Number.parseInt(raw || '', 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function normalizeProxyLogTimeBoundary(raw?: string): string | null {
+  const text = (raw || '').trim();
+  if (!text) return null;
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return formatUtcSqlDateTime(parsed);
+}
+
+function buildProxyLogSearchCondition(search: string) {
+  if (!search) return null;
+  const likeTerm = `%${search}%`;
+  return sql<boolean>`(
+    lower(coalesce(${schema.proxyLogs.modelRequested}, '')) like ${likeTerm}
+    or lower(coalesce(${schema.proxyLogs.modelActual}, '')) like ${likeTerm}
+  )`;
+}
+
+function buildProxyLogStatusCondition(status: ProxyLogStatusFilter) {
+  if (status === 'success') {
+    return eq(schema.proxyLogs.status, 'success');
+  }
+  if (status === 'failed') {
+    return sql<boolean>`coalesce(${schema.proxyLogs.status}, '') <> 'success'`;
+  }
+  return null;
+}
+
+function buildProxyLogWhereClause(params: {
+  status?: ProxyLogStatusFilter;
+  search?: string;
+  siteId?: number | null;
+  fromUtc?: string | null;
+  toUtc?: string | null;
+}) {
+  const conditions = [
+    params.status ? buildProxyLogStatusCondition(params.status) : null,
+    params.search ? buildProxyLogSearchCondition(params.search) : null,
+    params.siteId ? eq(schema.sites.id, params.siteId) : null,
+    params.fromUtc ? gte(schema.proxyLogs.createdAt, params.fromUtc) : null,
+    params.toUtc ? lt(schema.proxyLogs.createdAt, params.toUtc) : null,
+  ].filter((condition): condition is NonNullable<typeof condition> => condition !== null);
+
+  if (conditions.length === 0) return undefined;
+  return conditions.length === 1 ? conditions[0] : and(...conditions);
+}
+
+function toRoundedMicroNumber(value: number | null | undefined): number {
+  return Math.round(Number(value || 0) * 1_000_000) / 1_000_000;
+}
+
+const SITE_AVAILABILITY_BUCKET_COUNT = 24;
+const SITE_AVAILABILITY_BUCKET_MS = 60 * 60 * 1000;
+
+type SiteAvailabilitySiteRow = {
+  id: number;
+  name: string;
+  url: string | null;
+  platform: string | null;
+  sortOrder: number | null;
+  isPinned: boolean | null;
+};
+
+type SiteAvailabilityLogRow = {
+  siteId: number | null;
+  createdAt: string | null;
+  status: string | null;
+  latencyMs: number | null;
+};
+
+type SiteAvailabilityBucketAccumulator = {
+  startUtc: string;
+  label: string;
+  totalRequests: number;
+  successCount: number;
+  failedCount: number;
+  latencyTotalMs: number;
+  latencyCount: number;
+};
+
+function roundPercent(value: number | null): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return Math.round(value * 10) / 10;
+}
+
+function buildSiteAvailabilitySummaries(
+  sites: SiteAvailabilitySiteRow[],
+  logs: SiteAvailabilityLogRow[],
+  now = new Date(),
+) {
+  const endLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), 0, 0, 0);
+  const startLocal = new Date(endLocal.getTime() - (SITE_AVAILABILITY_BUCKET_COUNT - 1) * SITE_AVAILABILITY_BUCKET_MS);
+  const startMs = startLocal.getTime();
+  const rangeMs = SITE_AVAILABILITY_BUCKET_COUNT * SITE_AVAILABILITY_BUCKET_MS;
+
+  const createBucketTemplate = (): SiteAvailabilityBucketAccumulator[] => (
+    Array.from({ length: SITE_AVAILABILITY_BUCKET_COUNT }, (_, index) => {
+      const bucketStart = new Date(startMs + index * SITE_AVAILABILITY_BUCKET_MS);
+      return {
+        startUtc: bucketStart.toISOString(),
+        label: formatLocalDateTime(bucketStart),
+        totalRequests: 0,
+        successCount: 0,
+        failedCount: 0,
+        latencyTotalMs: 0,
+        latencyCount: 0,
+      };
+    })
+  );
+
+  const siteMap = new Map<number, {
+    site: SiteAvailabilitySiteRow;
+    totalRequests: number;
+    successCount: number;
+    failedCount: number;
+    latencyTotalMs: number;
+    latencyCount: number;
+    buckets: SiteAvailabilityBucketAccumulator[];
+  }>();
+
+  for (const site of sites) {
+    siteMap.set(site.id, {
+      site,
+      totalRequests: 0,
+      successCount: 0,
+      failedCount: 0,
+      latencyTotalMs: 0,
+      latencyCount: 0,
+      buckets: createBucketTemplate(),
+    });
+  }
+
+  for (const log of logs) {
+    if (log.siteId == null) continue;
+    const target = siteMap.get(log.siteId);
+    if (!target) continue;
+
+    const parsed = parseStoredUtcDateTime(log.createdAt);
+    if (!parsed) continue;
+    const timestampMs = parsed.getTime();
+    const diffMs = timestampMs - startMs;
+    if (diffMs < 0 || diffMs >= rangeMs) continue;
+
+    const bucketIndex = Math.floor(diffMs / SITE_AVAILABILITY_BUCKET_MS);
+    const bucket = target.buckets[bucketIndex];
+    const isSuccess = (log.status || '').trim().toLowerCase() === 'success';
+
+    target.totalRequests += 1;
+    bucket.totalRequests += 1;
+    if (isSuccess) {
+      target.successCount += 1;
+      bucket.successCount += 1;
+    } else {
+      target.failedCount += 1;
+      bucket.failedCount += 1;
+    }
+
+    const latencyMs = Number(log.latencyMs);
+    if (Number.isFinite(latencyMs) && latencyMs >= 0) {
+      target.latencyTotalMs += latencyMs;
+      target.latencyCount += 1;
+      bucket.latencyTotalMs += latencyMs;
+      bucket.latencyCount += 1;
+    }
+  }
+
+  return sites.map((site) => {
+    const aggregate = siteMap.get(site.id)!;
+    return {
+      siteId: site.id,
+      siteName: site.name,
+      siteUrl: site.url,
+      platform: site.platform,
+      totalRequests: aggregate.totalRequests,
+      successCount: aggregate.successCount,
+      failedCount: aggregate.failedCount,
+      availabilityPercent: aggregate.totalRequests > 0
+        ? roundPercent((aggregate.successCount / aggregate.totalRequests) * 100)
+        : null,
+      averageLatencyMs: aggregate.latencyCount > 0
+        ? Math.round(aggregate.latencyTotalMs / aggregate.latencyCount)
+        : null,
+      buckets: aggregate.buckets.map((bucket) => ({
+        startUtc: bucket.startUtc,
+        label: bucket.label,
+        totalRequests: bucket.totalRequests,
+        successCount: bucket.successCount,
+        failedCount: bucket.failedCount,
+        availabilityPercent: bucket.totalRequests > 0
+          ? roundPercent((bucket.successCount / bucket.totalRequests) * 100)
+          : null,
+        averageLatencyMs: bucket.latencyCount > 0
+          ? Math.round(bucket.latencyTotalMs / bucket.latencyCount)
+          : null,
+      })),
+    };
+  });
+}
+
+function mapProxyLogRow(
+  row: {
+    proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
+    accounts: { username?: string | null } | null;
+    sites: { id?: number | null; name?: string | null; url?: string | null } | null;
+  },
+  options?: { includeBillingDetails?: boolean },
+) {
+  return {
+    ...row.proxy_logs,
+    ...(options?.includeBillingDetails
+      ? { billingDetails: parseProxyLogBillingDetails(row.proxy_logs.billingDetails) }
+      : {}),
+    username: row.accounts?.username || null,
+    siteId: row.sites?.id || null,
+    siteName: row.sites?.name || null,
+    siteUrl: row.sites?.url || null,
+  };
+}
+
 export async function statsRoutes(app: FastifyInstance) {
   const proxyLogBaseFields = getProxyLogBaseSelectFields();
 
@@ -820,6 +1078,49 @@ export async function statsRoutes(app: FastifyInstance) {
       extraConfig: account.extraConfig,
     }), 0);
     const modelAnalysis = buildModelAnalysis(recentProxyLogs, { days: 7 });
+    const activeSites = (await db.select({
+      id: schema.sites.id,
+      name: schema.sites.name,
+      url: schema.sites.url,
+      platform: schema.sites.platform,
+      sortOrder: schema.sites.sortOrder,
+      isPinned: schema.sites.isPinned,
+    }).from(schema.sites)
+      .where(eq(schema.sites.status, 'active'))
+      .all())
+      .sort((left: SiteAvailabilitySiteRow, right: SiteAvailabilitySiteRow) => {
+        const leftPinned = left.isPinned ? 1 : 0;
+        const rightPinned = right.isPinned ? 1 : 0;
+        if (leftPinned !== rightPinned) return rightPinned - leftPinned;
+        const leftOrder = Number(left.sortOrder || 0);
+        const rightOrder = Number(right.sortOrder || 0);
+        if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+        return String(left.name || '').localeCompare(String(right.name || ''));
+      });
+    const siteAvailabilityNow = new Date();
+    const siteAvailabilitySinceUtc = formatUtcSqlDateTime(new Date(
+      siteAvailabilityNow.getFullYear(),
+      siteAvailabilityNow.getMonth(),
+      siteAvailabilityNow.getDate(),
+      siteAvailabilityNow.getHours() - (SITE_AVAILABILITY_BUCKET_COUNT - 1),
+      0,
+      0,
+      0,
+    ));
+    const siteAvailabilityLogs = await db.select({
+      siteId: schema.sites.id,
+      createdAt: schema.proxyLogs.createdAt,
+      status: schema.proxyLogs.status,
+      latencyMs: schema.proxyLogs.latencyMs,
+    }).from(schema.proxyLogs)
+      .innerJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .where(and(
+        gte(schema.proxyLogs.createdAt, siteAvailabilitySinceUtc),
+        eq(schema.sites.status, 'active'),
+      ))
+      .all();
+    const siteAvailability = buildSiteAvailabilitySummaries(activeSites, siteAvailabilityLogs, siteAvailabilityNow);
 
     return {
       totalBalance,
@@ -835,15 +1136,101 @@ export async function statsRoutes(app: FastifyInstance) {
         requestsPerMinute,
         tokensPerMinute,
       },
+      siteAvailability,
       modelAnalysis,
     };
   });
 
   // Proxy logs
-  app.get<{ Querystring: { limit?: string; offset?: string } }>('/api/stats/proxy-logs', async (request) => {
-    const limit = parseInt(request.query.limit || '50', 10);
-    const offset = parseInt(request.query.offset || '0', 10);
-    const rows = await withProxyLogSelectFields(({ fields }) => (
+  app.get<{ Querystring: {
+    limit?: string;
+    offset?: string;
+    status?: string;
+    search?: string;
+    siteId?: string;
+    from?: string;
+    to?: string;
+  } }>('/api/stats/proxy-logs', async (request) => {
+    const limit = normalizeProxyLogPageSize(request.query.limit);
+    const offset = normalizeProxyLogOffset(request.query.offset);
+    const status = normalizeProxyLogStatusFilter(request.query.status);
+    const search = normalizeProxyLogSearch(request.query.search);
+    const siteId = normalizeProxyLogSiteId(request.query.siteId);
+    const fromUtc = normalizeProxyLogTimeBoundary(request.query.from);
+    const toUtc = normalizeProxyLogTimeBoundary(request.query.to);
+    const listWhere = buildProxyLogWhereClause({ status, search, siteId, fromUtc, toUtc });
+    const summaryWhere = buildProxyLogWhereClause({ search, siteId, fromUtc, toUtc });
+
+    const listRows = await withProxyLogSelectFields(({ fields }) => {
+      let query = db.select({
+        proxy_logs: fields,
+        accounts: schema.accounts,
+        sites: schema.sites,
+      }).from(schema.proxyLogs)
+        .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+        .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id));
+
+      if (listWhere) {
+        query = query.where(listWhere) as typeof query;
+      }
+
+      return query
+        .orderBy(desc(schema.proxyLogs.createdAt))
+        .limit(limit)
+        .offset(offset)
+        .all();
+    }, { includeBillingDetails: false }) as Array<{
+      proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
+      accounts: { username?: string | null } | null;
+      sites: { id?: number | null; name?: string | null; url?: string | null } | null;
+    }>;
+
+    let totalQuery = db.select({
+      total: sql<number>`count(*)`,
+    }).from(schema.proxyLogs)
+      .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+      .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id));
+    if (listWhere) {
+      totalQuery = totalQuery.where(listWhere) as typeof totalQuery;
+    }
+    const totalRow = await totalQuery.get();
+
+    let summaryQuery = db.select({
+      totalCount: sql<number>`count(*)`,
+      successCount: sql<number>`coalesce(sum(case when ${schema.proxyLogs.status} = 'success' then 1 else 0 end), 0)`,
+      failedCount: sql<number>`coalesce(sum(case when coalesce(${schema.proxyLogs.status}, '') <> 'success' then 1 else 0 end), 0)`,
+      totalCost: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.estimatedCost}, 0)), 0)`,
+      totalTokensAll: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.totalTokens}, 0)), 0)`,
+    }).from(schema.proxyLogs)
+      .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+      .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id));
+    if (summaryWhere) {
+      summaryQuery = summaryQuery.where(summaryWhere) as typeof summaryQuery;
+    }
+    const summaryRow = await summaryQuery.get();
+
+    return {
+      items: listRows.map((row) => mapProxyLogRow(row)),
+      total: Number(totalRow?.total || 0),
+      page: Math.floor(offset / limit) + 1,
+      pageSize: limit,
+      summary: {
+        totalCount: Number(summaryRow?.totalCount || 0),
+        successCount: Number(summaryRow?.successCount || 0),
+        failedCount: Number(summaryRow?.failedCount || 0),
+        totalCost: toRoundedMicroNumber(summaryRow?.totalCost),
+        totalTokensAll: Number(summaryRow?.totalTokensAll || 0),
+      },
+    };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/stats/proxy-logs/:id', async (request, reply) => {
+    const id = Number.parseInt(request.params.id, 10);
+    if (!Number.isFinite(id) || id <= 0) {
+      return reply.code(400).send({ message: 'proxy log id is invalid' });
+    }
+
+    const row = await withProxyLogSelectFields(({ fields }) => (
       db.select({
         proxy_logs: fields,
         accounts: schema.accounts,
@@ -851,21 +1238,19 @@ export async function statsRoutes(app: FastifyInstance) {
       }).from(schema.proxyLogs)
         .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
         .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-        .orderBy(desc(schema.proxyLogs.createdAt))
-        .limit(limit).offset(offset).all()
-    ), { includeBillingDetails: true }) as Array<{
+        .where(eq(schema.proxyLogs.id, id))
+        .get()
+    ), { includeBillingDetails: true }) as {
       proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
       accounts: { username?: string | null } | null;
-      sites: { name?: string | null; url?: string | null } | null;
-    }>;
+      sites: { id?: number | null; name?: string | null; url?: string | null } | null;
+    } | undefined;
 
-    return rows.map((row) => ({
-      ...row.proxy_logs,
-      billingDetails: parseProxyLogBillingDetails(row.proxy_logs.billingDetails),
-      username: row.accounts?.username || null,
-      siteName: row.sites?.name || null,
-      siteUrl: row.sites?.url || null,
-    }));
+    if (!row) {
+      return reply.code(404).send({ message: 'proxy log not found' });
+    }
+
+    return mapProxyLogRow(row, { includeBillingDetails: true });
   });
 
   app.get<{ Querystring: { limit?: string; offset?: string } }>('/api/stats/proxy-video-tasks', async (request) => {
@@ -1243,6 +1628,8 @@ export async function statsRoutes(app: FastifyInstance) {
       username: schema.accounts.username,
       siteId: schema.sites.id,
       siteName: schema.sites.name,
+      accessToken: schema.accounts.accessToken,
+      extraConfig: schema.accounts.extraConfig,
     })
       .from(schema.modelAvailability)
       .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
@@ -1320,6 +1707,7 @@ export async function statsRoutes(app: FastifyInstance) {
     }
 
     for (const row of availableModelRows) {
+      if (isApiKeyConnection(row)) continue;
       const modelName = (row.modelName || '').trim();
       if (!modelName) continue;
       const coverageKey = `${row.accountId}::${modelName.toLowerCase()}`;
@@ -1334,7 +1722,11 @@ export async function statsRoutes(app: FastifyInstance) {
       });
     }
 
-    const accountIdsForGroupHints = new Set(availableModelRows.map((row) => row.accountId));
+    const accountIdsForGroupHints = new Set(
+      availableModelRows
+        .filter((row) => !isApiKeyConnection(row))
+        .map((row) => row.accountId),
+    );
     const requiredGroupsByAccountModel = new Map<string, Map<string, string>>();
     const hasPotentialGroupHints = hasAnyTokenGroupSignals || unknownGroupCoverageByAccountModel.size > 0;
 
@@ -1394,6 +1786,7 @@ export async function statsRoutes(app: FastifyInstance) {
     }
 
     for (const row of availableModelRows) {
+      if (isApiKeyConnection(row)) continue;
       const modelName = (row.modelName || '').trim();
       if (!modelName) continue;
       const accountModelKey = `${row.accountId}::${modelName.toLowerCase()}`;

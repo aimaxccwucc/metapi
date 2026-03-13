@@ -35,6 +35,7 @@ export type ConversationContentPart =
   | { type: 'image_url'; url: string }
   | { type: 'image_inline'; dataUrl: string; mimeType?: string | null }
   | { type: 'input_audio'; dataUrl: string; mimeType?: string | null }
+  | { type: 'input_file'; fileId?: string | null; filename?: string | null; mimeType?: string | null; data?: string | null }
   | { type: 'output_audio'; dataUrl: string; mimeType?: string | null }
   | { type: 'tool_call'; name?: string; argumentsText?: string }
   | { type: 'tool_result'; name?: string; outputText?: string }
@@ -58,6 +59,7 @@ export type ChatMessage = {
 type ApiChatMessage = {
   role: ChatRole;
   content: string;
+  parts?: ConversationContentPart[] | null;
 };
 
 export type PlaygroundMultipartFile = {
@@ -65,6 +67,12 @@ export type PlaygroundMultipartFile = {
   name: string;
   mimeType: string;
   dataUrl: string;
+};
+
+export type ConversationUploadedFile = {
+  fileId: string;
+  filename?: string | null;
+  mimeType?: string | null;
 };
 
 export type TesterProxyEnvelope = {
@@ -249,21 +257,152 @@ const appendOptionalNumber = (target: Record<string, unknown>, key: string, enab
   }
 };
 
+const parseDataUrl = (dataUrl: string): { mimeType: string; data: string } | null => {
+  const match = /^data:([^;,]+)?;base64,(.+)$/i.exec((dataUrl || '').trim());
+  if (!match) return null;
+  return {
+    mimeType: match[1] || 'application/octet-stream',
+    data: match[2],
+  };
+};
+
+const toOpenAiContentPart = (part: ConversationContentPart): Record<string, unknown> | null => {
+  if (part.type === 'image_url') {
+    return {
+      type: 'image_url',
+      image_url: part.url,
+    };
+  }
+
+  if (part.type === 'image_inline') {
+    return {
+      type: 'image_url',
+      image_url: part.dataUrl,
+    };
+  }
+
+  if (part.type === 'input_audio') {
+    const parsed = parseDataUrl(part.dataUrl);
+    if (!parsed) return null;
+    return {
+      type: 'input_audio',
+      input_audio: {
+        data: parsed.data,
+        format: (part.mimeType || parsed.mimeType || 'audio/wav').split('/').pop() || 'wav',
+      },
+    };
+  }
+
+  if (part.type === 'input_file') {
+    const filePayload: Record<string, unknown> = {};
+    if (typeof part.fileId === 'string' && part.fileId.trim()) filePayload.file_id = part.fileId.trim();
+    if (typeof part.filename === 'string' && part.filename.trim()) filePayload.filename = part.filename.trim();
+    if (typeof part.data === 'string' && part.data.trim()) filePayload.file_data = part.data.trim();
+    if (typeof part.mimeType === 'string' && part.mimeType.trim()) filePayload.mime_type = part.mimeType.trim();
+    if (Object.keys(filePayload).length === 0) return null;
+    return {
+      type: 'file',
+      file: filePayload,
+    };
+  }
+
+  return null;
+};
+
+const toResponsesContentPart = (part: ConversationContentPart): Record<string, unknown> | null => {
+  if (part.type === 'image_url') {
+    return {
+      type: 'input_image',
+      image_url: part.url,
+    };
+  }
+
+  if (part.type === 'image_inline') {
+    return {
+      type: 'input_image',
+      image_url: part.dataUrl,
+    };
+  }
+
+  if (part.type === 'input_audio') {
+    const parsed = parseDataUrl(part.dataUrl);
+    if (!parsed) return null;
+    return {
+      type: 'input_audio',
+      input_audio: {
+        data: parsed.data,
+        format: (part.mimeType || parsed.mimeType || 'audio/wav').split('/').pop() || 'wav',
+      },
+    };
+  }
+
+  if (part.type === 'input_file') {
+    const fileBlock: Record<string, unknown> = {
+      type: 'input_file',
+    };
+    if (typeof part.fileId === 'string' && part.fileId.trim()) fileBlock.file_id = part.fileId.trim();
+    if (typeof part.filename === 'string' && part.filename.trim()) fileBlock.filename = part.filename.trim();
+    if (typeof part.data === 'string' && part.data.trim()) fileBlock.file_data = part.data.trim();
+    if (Object.keys(fileBlock).length === 1) return null;
+    return fileBlock;
+  }
+
+  return null;
+};
+
 const toGeminiContents = (messages: ApiChatMessage[]) =>
   messages.map((message) => ({
     role: message.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: message.content }],
   }));
 
-const toOpenAiMessageContent = (message: ApiChatMessage): unknown => message.content;
+const toOpenAiMessageContent = (message: ApiChatMessage): unknown => {
+  const parts = Array.isArray(message.parts)
+    ? message.parts
+      .map((part) => toOpenAiContentPart(part))
+      .filter((item): item is Record<string, unknown> => !!item)
+    : [];
+
+  if (parts.length <= 0) {
+    return message.content;
+  }
+
+  if (message.content.trim()) {
+    return [
+      { type: 'text', text: message.content },
+      ...parts,
+    ];
+  }
+
+  return parts;
+};
 
 const toResponsesInput = (messages: ApiChatMessage[]) => {
-  if (messages.length === 1 && messages[0].role === 'user') {
+  const hasStructuredParts = messages.some((message) => Array.isArray(message.parts) && message.parts.length > 0);
+  if (!hasStructuredParts && messages.length === 1 && messages[0].role === 'user') {
     return messages[0].content;
   }
+  const toResponsesTextType = (role: ApiChatMessage['role']) =>
+    role === 'assistant' ? 'output_text' : 'input_text';
   return messages.map((message) => ({
     role: message.role === 'assistant' ? 'assistant' : 'user',
-    content: message.content,
+    content: [
+      ...(message.content.trim() ? [{ type: toResponsesTextType(message.role), text: message.content }] : []),
+      ...((Array.isArray(message.parts)
+        ? message.parts
+          .map((part) => toResponsesContentPart(part))
+          .filter((item): item is Record<string, unknown> => !!item)
+        : [])),
+    ].length > 0
+      ? [
+        ...(message.content.trim() ? [{ type: toResponsesTextType(message.role), text: message.content }] : []),
+        ...((Array.isArray(message.parts)
+          ? message.parts
+            .map((part) => toResponsesContentPart(part))
+            .filter((item): item is Record<string, unknown> => !!item)
+          : [])),
+      ]
+      : message.content,
   }));
 };
 
@@ -676,6 +815,27 @@ export const createMessage = (role: ChatRole, content: string, extra: Partial<Ch
   ...extra,
 });
 
+export const createConversationInputFilePart = (
+  file: ConversationUploadedFile,
+): ConversationContentPart => ({
+  type: 'input_file',
+  fileId: file.fileId,
+  filename: file.filename ?? null,
+  mimeType: file.mimeType ?? null,
+});
+
+export const createConversationUserMessage = (
+  content: string,
+  files: ConversationUploadedFile[] = [],
+  extra: Partial<ChatMessage> = {},
+): ChatMessage => {
+  const parts = files.map((file) => createConversationInputFilePart(file));
+  return createMessage('user', content, {
+    ...extra,
+    ...(parts.length > 0 ? { parts } : {}),
+  });
+};
+
 export const createLoadingAssistantMessage = (): ChatMessage =>
   createMessage('assistant', '', {
     status: MESSAGE_STATUS.LOADING,
@@ -812,6 +972,7 @@ export const toApiMessages = (messages: ChatMessage[]): ApiChatMessage[] =>
     .map((message) => ({
       role: message.role,
       content: message.content,
+      parts: message.parts,
     }));
 
 export const buildConversationRequestEnvelope = (
@@ -882,6 +1043,27 @@ export const buildImagesGenerationsRequestEnvelope = (
     model: inputs.model,
     prompt: modeState.imagesPrompt,
   },
+});
+
+export const buildFileUploadRequestEnvelope = (
+  file: Omit<PlaygroundMultipartFile, 'field'> & { field?: string },
+  purpose = 'assistants',
+): TesterProxyEnvelope => ({
+  method: 'POST',
+  path: '/v1/files',
+  requestKind: 'multipart',
+  stream: false,
+  jobMode: false,
+  rawMode: false,
+  multipartFields: {
+    purpose,
+  },
+  multipartFiles: [{
+    field: file.field || 'file',
+    name: file.name,
+    mimeType: file.mimeType,
+    dataUrl: file.dataUrl,
+  }],
 });
 
 export const buildImagesEditRequestEnvelope = (

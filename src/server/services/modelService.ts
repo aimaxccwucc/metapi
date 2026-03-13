@@ -11,6 +11,24 @@ const API_TOKEN_DISCOVERY_TIMEOUT_MS = 8_000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 12_000;
 const MODEL_REFRESH_BATCH_SIZE = 3;
 
+type ModelRefreshErrorCode = 'timeout' | 'unauthorized' | 'empty_models' | 'unknown';
+
+function classifyModelDiscoveryError(message: string): ModelRefreshErrorCode {
+  const lowered = message.toLowerCase();
+  if (lowered.includes('timeout') || lowered.includes('timed out') || lowered.includes('请求超时')) return 'timeout';
+  if (lowered.includes('http 401') || lowered.includes('http 403')
+    || lowered.includes('unauthorized') || lowered.includes('invalid')
+    || lowered.includes('无权') || lowered.includes('未提供令牌')) return 'unauthorized';
+  return 'unknown';
+}
+
+function buildModelFailureMessage(code: ModelRefreshErrorCode, fallback?: string) {
+  if (code === 'timeout') return '模型获取失败（请求超时）';
+  if (code === 'unauthorized') return '模型获取失败，API Key 已无效';
+  if (code === 'empty_models') return '模型获取失败：未获取到可用模型';
+  return fallback || '模型获取失败';
+}
+
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
 }
@@ -53,7 +71,16 @@ export async function refreshModelsForAccount(accountId: number) {
     .get();
 
   if (!row) {
-    return { accountId, refreshed: false, modelCount: 0, reason: 'account_not_found' };
+    return {
+      accountId,
+      refreshed: false,
+      status: 'failed',
+      errorCode: 'account_not_found',
+      errorMessage: '账号不存在',
+      modelCount: 0,
+      modelsPreview: [],
+      reason: 'account_not_found',
+    };
   }
 
   const account = row.accounts;
@@ -76,11 +103,29 @@ export async function refreshModelsForAccount(accountId: number) {
   }
 
   if (isSiteDisabled(site.status)) {
-    return { accountId, refreshed: false, modelCount: 0, reason: 'site_disabled' };
+    return {
+      accountId,
+      refreshed: false,
+      status: 'skipped',
+      errorCode: 'site_disabled',
+      errorMessage: '站点已禁用',
+      modelCount: 0,
+      modelsPreview: [],
+      reason: 'site_disabled',
+    };
   }
 
   if (!adapter || account.status !== 'active') {
-    return { accountId, refreshed: false, modelCount: 0, reason: 'adapter_or_status' };
+    return {
+      accountId,
+      refreshed: false,
+      status: 'skipped',
+      errorCode: 'adapter_or_status',
+      errorMessage: '平台不可用或账号未激活',
+      modelCount: 0,
+      modelsPreview: [],
+      reason: 'adapter_or_status',
+    };
   }
 
   const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
@@ -125,6 +170,11 @@ export async function refreshModelsForAccount(accountId: number) {
   let scannedTokenCount = 0;
   let discoveredByCredential = false;
   const attemptedCredentials = new Set<string>();
+  const failureMessages: string[] = [];
+  const recordFailure = (err: unknown) => {
+    const message = (err as { message?: string })?.message || String(err || '');
+    if (message) failureMessages.push(message);
+  };
 
   const mergeDiscoveredModels = (models: string[], latencyMs: number | null) => {
     for (const modelName of models) {
@@ -155,7 +205,8 @@ export async function refreshModelsForAccount(accountId: number) {
           `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
         ),
       );
-    } catch {
+    } catch (err) {
+      recordFailure(err);
       models = [];
     }
     if (models.length === 0) return;
@@ -181,7 +232,8 @@ export async function refreshModelsForAccount(accountId: number) {
           `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
         ),
       );
-    } catch {
+    } catch (err) {
+      recordFailure(err);
       models = [];
     }
 
@@ -204,32 +256,57 @@ export async function refreshModelsForAccount(accountId: number) {
     mergeDiscoveredModels(models, latencyMs);
   }
 
-  if (accountModels.size > 0) {
-    const checkedAt = new Date().toISOString();
-    await db.insert(schema.modelAvailability).values(
-      Array.from(accountModels).map((modelName) => ({
-        accountId: account.id,
-        modelName,
-        available: true,
-        latencyMs: modelLatency.get(modelName) ?? null,
-        checkedAt,
-      })),
-    ).run();
-
-    if (isApiKeyConnection(account)) {
-      await setAccountRuntimeHealth(account.id, {
-        state: 'healthy',
-        reason: '模型探测成功',
-        source: 'model-discovery',
-        checkedAt,
-      });
-    }
+  if (accountModels.size === 0) {
+    const firstMessage = failureMessages[0] || '';
+    const errorCode = firstMessage ? classifyModelDiscoveryError(firstMessage) : 'empty_models';
+    const errorMessage = buildModelFailureMessage(errorCode, firstMessage);
+    await setAccountRuntimeHealth(account.id, {
+      state: 'unhealthy',
+      reason: errorMessage,
+      source: 'model-discovery',
+      checkedAt: new Date().toISOString(),
+    });
+    return {
+      accountId,
+      refreshed: true,
+      status: 'failed',
+      errorCode,
+      errorMessage,
+      modelCount: 0,
+      modelsPreview: [],
+      tokenScanned: scannedTokenCount,
+      discoveredByCredential,
+      discoveredApiToken: !!discoveredApiToken,
+    };
   }
 
+  const checkedAt = new Date().toISOString();
+  await db.insert(schema.modelAvailability).values(
+    Array.from(accountModels).map((modelName) => ({
+      accountId: account.id,
+      modelName,
+      available: true,
+      latencyMs: modelLatency.get(modelName) ?? null,
+      checkedAt,
+    })),
+  ).run();
+
+  await setAccountRuntimeHealth(account.id, {
+    state: 'healthy',
+    reason: '模型探测成功',
+    source: 'model-discovery',
+    checkedAt,
+  });
+
+  const modelsPreview = Array.from(accountModels).slice(0, 10);
   return {
     accountId,
     refreshed: true,
+    status: 'success',
+    errorCode: null,
+    errorMessage: '',
     modelCount: accountModels.size,
+    modelsPreview,
     tokenScanned: scannedTokenCount,
     discoveredByCredential,
     discoveredApiToken: !!discoveredApiToken,
@@ -265,11 +342,35 @@ export async function rebuildTokenRoutesFromAvailability() {
     )
     .all();
 
-  const modelTokens = new Map<string, Map<number, number>>();
+  const accountRows = await db.select().from(schema.modelAvailability)
+    .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .where(
+      and(
+        eq(schema.modelAvailability.available, true),
+        eq(schema.accounts.status, 'active'),
+        eq(schema.sites.status, 'active'),
+      ),
+    )
+    .all();
+
+  const modelCandidates = new Map<string, Map<string, { accountId: number; tokenId: number | null }>>();
+  const addModelCandidate = (modelNameRaw: string | null | undefined, accountId: number, tokenId: number | null) => {
+    const modelName = (modelNameRaw || '').trim();
+    if (!modelName) return;
+    if (!modelCandidates.has(modelName)) modelCandidates.set(modelName, new Map());
+    const candidateKey = `${accountId}:${tokenId ?? 'account'}`;
+    modelCandidates.get(modelName)!.set(candidateKey, { accountId, tokenId });
+  };
+
   for (const row of tokenRows) {
-    const modelName = row.token_model_availability.modelName;
-    if (!modelTokens.has(modelName)) modelTokens.set(modelName, new Map<number, number>());
-    modelTokens.get(modelName)!.set(row.account_tokens.id, row.accounts.id);
+    addModelCandidate(row.token_model_availability.modelName, row.accounts.id, row.account_tokens.id);
+  }
+
+  for (const row of accountRows) {
+    if (!isApiKeyConnection(row.accounts)) continue;
+    if (!(row.accounts.apiToken || '').trim()) continue;
+    addModelCandidate(row.model_availability.modelName, row.accounts.id, null);
   }
 
   const routes = await db.select().from(schema.tokenRoutes).all();
@@ -280,7 +381,7 @@ export async function rebuildTokenRoutesFromAvailability() {
   let removedChannels = 0;
   let removedRoutes = 0;
 
-  for (const [modelName, tokenAccountMap] of modelTokens.entries()) {
+  for (const [modelName, candidateMap] of modelCandidates.entries()) {
     let route = routes.find((r) => r.modelPattern === modelName);
     if (!route) {
       const inserted = await db.insert(schema.tokenRoutes).values({
@@ -297,16 +398,19 @@ export async function rebuildTokenRoutesFromAvailability() {
     }
 
     const routeChannels = channels.filter((channel) => channel.routeId === route.id);
-    const desiredTokenIds = new Set<number>(Array.from(tokenAccountMap.keys()));
+    const desiredKeys = new Set(Array.from(candidateMap.keys()));
 
-    for (const [tokenId, accountId] of tokenAccountMap.entries()) {
-      const exists = routeChannels.some((channel) => channel.tokenId === tokenId);
+    for (const [candidateKey, candidate] of candidateMap.entries()) {
+      const exists = routeChannels.some((channel) => (
+        channel.accountId === candidate.accountId
+        && (channel.tokenId ?? null) === candidate.tokenId
+      ));
       if (exists) continue;
 
       const inserted = await db.insert(schema.routeChannels).values({
         routeId: route.id,
-        accountId,
-        tokenId,
+        accountId: candidate.accountId,
+        tokenId: candidate.tokenId,
         priority: 0,
         weight: 10,
         enabled: true,
@@ -318,16 +422,18 @@ export async function rebuildTokenRoutesFromAvailability() {
       if (!created) continue;
       channels.push(created);
       createdChannels++;
+      desiredKeys.add(candidateKey);
     }
 
     for (const channel of routeChannels) {
-      if (channel.tokenId && desiredTokenIds.has(channel.tokenId)) {
+      const channelKey = `${channel.accountId}:${channel.tokenId ?? 'account'}`;
+      if (desiredKeys.has(channelKey)) {
         continue;
       }
 
       if (!channel.tokenId) {
         const preferred = await getPreferredAccountToken(channel.accountId);
-        if (preferred && desiredTokenIds.has(preferred.id)) {
+        if (preferred && desiredKeys.has(`${channel.accountId}:${preferred.id}`)) {
           await db.update(schema.routeChannels)
             .set({ tokenId: preferred.id })
             .where(eq(schema.routeChannels.id, channel.id))
@@ -343,7 +449,7 @@ export async function rebuildTokenRoutesFromAvailability() {
     }
   }
 
-  const latestModelNames = new Set<string>(Array.from(modelTokens.keys()));
+  const latestModelNames = new Set<string>(Array.from(modelCandidates.keys()));
   for (const route of routes) {
     const modelPattern = (route.modelPattern || '').trim();
     if (!modelPattern || !isExactModelPattern(modelPattern) || latestModelNames.has(modelPattern)) {
@@ -368,7 +474,7 @@ export async function rebuildTokenRoutesFromAvailability() {
   invalidateTokenRouterCache();
 
   return {
-    models: modelTokens.size,
+    models: modelCandidates.size,
     createdRoutes,
     createdChannels,
     removedChannels,

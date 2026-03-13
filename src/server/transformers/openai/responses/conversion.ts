@@ -2,6 +2,7 @@ import {
   normalizeResponsesInputForCompatibility as normalizeResponsesInputForCompatibilityViaCompatibility,
   normalizeResponsesMessageItem,
 } from './compatibility.js';
+import { normalizeInputFileBlock, toOpenAiChatFileBlock } from '../../shared/inputFile.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -13,6 +14,29 @@ function asTrimmedString(value: unknown): string {
 
 function toFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function toFiniteIntegerLike(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+  }
+  return null;
+}
+
+function toBooleanLike(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim().toLowerCase();
+    if (trimmed === 'true') return true;
+    if (trimmed === 'false') return false;
+  }
+  return undefined;
 }
 
 function safeJsonStringify(value: unknown): string {
@@ -38,6 +62,122 @@ function cloneJsonValue<T>(value: T): T {
     ) as T;
   }
   return value;
+}
+
+function normalizeOptionalTrimmedString(value: unknown): string | undefined {
+  const trimmed = asTrimmedString(value);
+  return trimmed || undefined;
+}
+
+function normalizeIncludeList(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+
+  if (!Array.isArray(value)) return value;
+
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => item.length > 0);
+}
+
+function hasExplicitInclude(body: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(body, 'include');
+}
+
+function applyDefaultResponsesInclude(body: Record<string, unknown>): void {
+  if (hasExplicitInclude(body)) {
+    body.include = normalizeIncludeList(body.include);
+    return;
+  }
+
+  body.include = ['reasoning.encrypted_content'];
+}
+
+function normalizeTextConfig(
+  rawText: unknown,
+  fallbackVerbosity?: unknown,
+): Record<string, unknown> | undefined {
+  const textConfig = cloneRecord(rawText) || {};
+  const verbosity = (
+    normalizeOptionalTrimmedString(textConfig.verbosity)
+    ?? normalizeOptionalTrimmedString(fallbackVerbosity)
+  );
+  if (verbosity) {
+    textConfig.verbosity = verbosity;
+  }
+  return Object.keys(textConfig).length > 0 ? textConfig : undefined;
+}
+
+function normalizeStreamOptions(rawStreamOptions: unknown): unknown {
+  const streamOptions = cloneRecord(rawStreamOptions);
+  if (!streamOptions) return rawStreamOptions;
+
+  const includeObfuscation = toBooleanLike(streamOptions.include_obfuscation);
+  if (includeObfuscation !== undefined) {
+    streamOptions.include_obfuscation = includeObfuscation;
+  }
+
+  return streamOptions;
+}
+
+function normalizeResponsesRequestFieldParity(
+  body: Record<string, unknown>,
+  options?: {
+    verbositySource?: unknown;
+    defaultEncryptedReasoningInclude?: boolean;
+  },
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = { ...body };
+
+  const safetyIdentifier = normalizeOptionalTrimmedString(normalized.safety_identifier);
+  if (safetyIdentifier) normalized.safety_identifier = safetyIdentifier;
+
+  const maxToolCalls = toFiniteIntegerLike(normalized.max_tool_calls);
+  if (maxToolCalls !== null) normalized.max_tool_calls = maxToolCalls;
+
+  const promptCacheKey = normalizeOptionalTrimmedString(normalized.prompt_cache_key);
+  if (promptCacheKey) normalized.prompt_cache_key = promptCacheKey;
+
+  const promptCacheRetention = normalizeOptionalTrimmedString(normalized.prompt_cache_retention);
+  if (promptCacheRetention) normalized.prompt_cache_retention = promptCacheRetention;
+
+  const background = toBooleanLike(normalized.background);
+  if (background !== undefined) normalized.background = background;
+
+  const user = normalizeOptionalTrimmedString(normalized.user);
+  if (user) normalized.user = user;
+
+  const previousResponseId = normalizeOptionalTrimmedString(normalized.previous_response_id);
+  if (previousResponseId) normalized.previous_response_id = previousResponseId;
+
+  const truncation = normalizeOptionalTrimmedString(normalized.truncation);
+  if (truncation) normalized.truncation = truncation;
+
+  const serviceTier = normalizeOptionalTrimmedString(normalized.service_tier);
+  if (serviceTier) normalized.service_tier = serviceTier;
+
+  const topLogprobs = toFiniteIntegerLike(normalized.top_logprobs);
+  if (topLogprobs !== null) normalized.top_logprobs = topLogprobs;
+
+  if (normalized.include !== undefined) {
+    normalized.include = normalizeIncludeList(normalized.include);
+  }
+  if (options?.defaultEncryptedReasoningInclude) {
+    applyDefaultResponsesInclude(normalized);
+  }
+
+  if (normalized.stream_options !== undefined) {
+    normalized.stream_options = normalizeStreamOptions(normalized.stream_options);
+  }
+
+  const textConfig = normalizeTextConfig(normalized.text, options?.verbositySource);
+  if (textConfig) {
+    normalized.text = textConfig;
+  }
+
+  return normalized;
 }
 
 function parseJsonString(raw: string): unknown {
@@ -219,6 +359,7 @@ const ALLOWED_RESPONSES_FIELDS = new Set([
   'include',
   'response_format',
   'service_tier',
+  'top_logprobs',
   'stop',
   'n',
 ]);
@@ -227,6 +368,7 @@ export function sanitizeResponsesBodyForProxy(
   body: Record<string, unknown>,
   modelName: string,
   stream: boolean,
+  options?: { defaultEncryptedReasoningInclude?: boolean },
 ): Record<string, unknown> {
   let normalized = normalizeResponsesBodyForCompatibility({
     ...body,
@@ -249,6 +391,11 @@ export function sanitizeResponsesBodyForProxy(
       }
     }
   }
+
+  normalized = normalizeResponsesRequestFieldParity(normalized, {
+    verbositySource: body.verbosity,
+    defaultEncryptedReasoningInclude: options?.defaultEncryptedReasoningInclude,
+  });
 
   const sanitized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(normalized)) {
@@ -388,23 +535,23 @@ export function convertOpenAiBodyToResponsesBody(
   if (openaiBody.service_tier !== undefined) body.service_tier = openaiBody.service_tier;
   if (openaiBody.top_logprobs !== undefined) body.top_logprobs = openaiBody.top_logprobs;
   if (openaiBody.stream_options !== undefined) body.stream_options = openaiBody.stream_options;
-
-  const textConfig = cloneRecord(openaiBody.text) || {};
-  const verbosity = (
-    asTrimmedString(openaiBody.verbosity)
-    || asTrimmedString(isRecord(openaiBody.text) ? openaiBody.text.verbosity : undefined)
-  );
-  if (verbosity) {
-    textConfig.verbosity = verbosity;
+  if (openaiBody.response_format !== undefined) {
+    const existingTextConfig = cloneRecord(body.text) || {};
+    existingTextConfig.format = cloneJsonValue(openaiBody.response_format);
+    body.text = existingTextConfig;
   }
-  if (Object.keys(textConfig).length > 0) {
+
+  const textConfig = normalizeTextConfig(body.text, openaiBody.verbosity);
+  if (textConfig) {
     body.text = textConfig;
   }
 
   const responsesToolChoice = convertOpenAiToolChoiceToResponses(openaiBody.tool_choice);
   if (responsesToolChoice !== undefined) body.tool_choice = responsesToolChoice;
 
-  return normalizeResponsesBodyForCompatibility(body);
+  return normalizeResponsesBodyForCompatibility(
+    normalizeResponsesRequestFieldParity(body, { verbositySource: openaiBody.verbosity }),
+  );
 }
 
 type OpenAiToolCall = {
@@ -467,6 +614,11 @@ function normalizeOpenAiContentBlock(item: Record<string, unknown>): string | Re
       type: 'input_audio',
       input_audio: item.input_audio,
     };
+  }
+
+  if (type === 'input_file' || type === 'file') {
+    const fileBlock = normalizeInputFileBlock(item);
+    return fileBlock ? toOpenAiChatFileBlock(fileBlock) : null;
   }
 
   if (type === 'reasoning' || type === 'thinking' || type === 'redacted_reasoning') {
@@ -559,9 +711,13 @@ export function convertResponsesBodyToOpenAiBody(
   body: Record<string, unknown>,
   modelName: string,
   stream: boolean,
+  options?: { defaultEncryptedReasoningInclude?: boolean },
 ): Record<string, unknown> {
+  const normalizedBody = normalizeResponsesRequestFieldParity(body, {
+    defaultEncryptedReasoningInclude: options?.defaultEncryptedReasoningInclude,
+  });
   const messages: Array<Record<string, unknown>> = [];
-  const input = body.input;
+  const input = normalizedBody.input;
   let functionCallIndex = 0;
   let pendingToolCalls: OpenAiToolCall[] = [];
 
@@ -612,15 +768,20 @@ export function convertResponsesBodyToOpenAiBody(
     if (itemType === 'reasoning') {
       flushPendingToolCalls();
       const reasoningContent = toOpenAiMessageContent(item.summary ?? item.content ?? item);
+      const reasoningSignature = asTrimmedString(item.encrypted_content);
       const hasReasoningContent = typeof reasoningContent === 'string'
         ? reasoningContent.trim().length > 0
         : Array.isArray(reasoningContent) && reasoningContent.length > 0;
-      if (!hasReasoningContent) return;
+      if (!hasReasoningContent && !reasoningSignature) return;
 
-      messages.push({
+      const message: Record<string, unknown> = {
         role: 'assistant',
         content: reasoningContent,
-      });
+      };
+      if (reasoningSignature) {
+        message.reasoning_signature = reasoningSignature;
+      }
+      messages.push(message);
       return;
     }
 
@@ -655,7 +816,7 @@ export function convertResponsesBodyToOpenAiBody(
   }
   flushPendingToolCalls();
 
-  const instructions = asTrimmedString(body.instructions);
+  const instructions = asTrimmedString(normalizedBody.instructions);
   if (instructions) {
     messages.unshift({ role: 'system', content: instructions });
   }
@@ -666,32 +827,36 @@ export function convertResponsesBodyToOpenAiBody(
     messages,
   };
 
-  if (typeof body.temperature === 'number' && Number.isFinite(body.temperature)) {
-    payload.temperature = body.temperature;
+  if (typeof normalizedBody.temperature === 'number' && Number.isFinite(normalizedBody.temperature)) {
+    payload.temperature = normalizedBody.temperature;
   }
-  if (typeof body.top_p === 'number' && Number.isFinite(body.top_p)) {
-    payload.top_p = body.top_p;
+  if (typeof normalizedBody.top_p === 'number' && Number.isFinite(normalizedBody.top_p)) {
+    payload.top_p = normalizedBody.top_p;
   }
-  if (typeof body.max_output_tokens === 'number' && Number.isFinite(body.max_output_tokens)) {
-    payload.max_tokens = body.max_output_tokens;
+  if (typeof normalizedBody.max_output_tokens === 'number' && Number.isFinite(normalizedBody.max_output_tokens)) {
+    payload.max_tokens = normalizedBody.max_output_tokens;
   }
-  if (body.parallel_tool_calls !== undefined) payload.parallel_tool_calls = body.parallel_tool_calls;
-  if (body.tools !== undefined) payload.tools = convertResponsesToolsToOpenAi(body.tools);
-  if (body.tool_choice !== undefined) payload.tool_choice = convertResponsesToolChoiceToOpenAi(body.tool_choice);
-  if (body.safety_identifier !== undefined) payload.safety_identifier = body.safety_identifier;
-  if (body.max_tool_calls !== undefined) payload.max_tool_calls = body.max_tool_calls;
-  if (body.prompt_cache_key !== undefined) payload.prompt_cache_key = body.prompt_cache_key;
-  if (body.prompt_cache_retention !== undefined) payload.prompt_cache_retention = body.prompt_cache_retention;
-  if (body.background !== undefined) payload.background = body.background;
-  if (body.user !== undefined) payload.user = body.user;
-  if (body.include !== undefined) payload.include = cloneJsonValue(body.include);
-  if (body.previous_response_id !== undefined) payload.previous_response_id = body.previous_response_id;
-  if (body.truncation !== undefined) payload.truncation = body.truncation;
-  if (body.service_tier !== undefined) payload.service_tier = body.service_tier;
-  if (body.top_logprobs !== undefined) payload.top_logprobs = body.top_logprobs;
-  if (body.stream_options !== undefined) payload.stream_options = body.stream_options;
-  if (isRecord(body.text) && asTrimmedString(body.text.verbosity)) {
-    payload.verbosity = asTrimmedString(body.text.verbosity);
+  if (normalizedBody.parallel_tool_calls !== undefined) payload.parallel_tool_calls = normalizedBody.parallel_tool_calls;
+  if (normalizedBody.tools !== undefined) payload.tools = convertResponsesToolsToOpenAi(normalizedBody.tools);
+  if (normalizedBody.tool_choice !== undefined) payload.tool_choice = convertResponsesToolChoiceToOpenAi(normalizedBody.tool_choice);
+  if (normalizedBody.safety_identifier !== undefined) payload.safety_identifier = normalizedBody.safety_identifier;
+  if (normalizedBody.max_tool_calls !== undefined) payload.max_tool_calls = normalizedBody.max_tool_calls;
+  if (normalizedBody.prompt_cache_key !== undefined) payload.prompt_cache_key = normalizedBody.prompt_cache_key;
+  if (normalizedBody.prompt_cache_retention !== undefined) payload.prompt_cache_retention = normalizedBody.prompt_cache_retention;
+  if (normalizedBody.background !== undefined) payload.background = normalizedBody.background;
+  if (normalizedBody.user !== undefined) payload.user = normalizedBody.user;
+  if (normalizedBody.include !== undefined) payload.include = cloneJsonValue(normalizedBody.include);
+  if (normalizedBody.previous_response_id !== undefined) payload.previous_response_id = normalizedBody.previous_response_id;
+  if (normalizedBody.truncation !== undefined) payload.truncation = normalizedBody.truncation;
+  if (normalizedBody.reasoning !== undefined) payload.reasoning = cloneJsonValue(normalizedBody.reasoning);
+  if (normalizedBody.service_tier !== undefined) payload.service_tier = normalizedBody.service_tier;
+  if (normalizedBody.top_logprobs !== undefined) payload.top_logprobs = normalizedBody.top_logprobs;
+  if (normalizedBody.stream_options !== undefined) payload.stream_options = normalizedBody.stream_options;
+  if (isRecord(normalizedBody.text) && normalizedBody.text.format !== undefined) {
+    payload.response_format = cloneJsonValue(normalizedBody.text.format);
+  }
+  if (isRecord(normalizedBody.text) && asTrimmedString(normalizedBody.text.verbosity)) {
+    payload.verbosity = asTrimmedString(normalizedBody.text.verbosity);
   }
 
   return payload;

@@ -55,6 +55,12 @@ type ResponsesUsageSummary = {
 };
 
 type AggregateOutputItem = Record<string, unknown>;
+type AggregateOutputMetaCarrier = AggregateOutputItem & { [key: symbol]: true | undefined };
+
+const outputTextDoneMarker = Symbol('responses.output_text.done');
+const contentPartDoneMarker = Symbol('responses.content_part.done');
+const reasoningSummaryTextDoneMarker = Symbol('responses.reasoning_summary_text.done');
+const reasoningSummaryPartDoneMarker = Symbol('responses.reasoning_summary_part.done');
 
 export type OpenAiResponsesAggregateState = {
   modelName: string;
@@ -88,6 +94,14 @@ export function createOpenAiResponsesAggregateState(modelName: string): OpenAiRe
     completed: false,
     failed: false,
   };
+}
+
+function markTerminalMarker(item: AggregateOutputItem, marker: symbol): void {
+  (item as AggregateOutputMetaCarrier)[marker] = true;
+}
+
+function hasTerminalMarker(item: AggregateOutputItem, marker: symbol): boolean {
+  return (item as AggregateOutputMetaCarrier)[marker] === true;
 }
 
 function mergeUsageExtras(
@@ -218,7 +232,9 @@ function ensureReasoningItem(
   indexHint?: unknown,
 ): { index: number; item: AggregateOutputItem; created: boolean } {
   const itemId = asTrimmedString(itemIdRaw);
-  const existingIndex = itemId ? state.reasoningIndexById[itemId] : undefined;
+  const existingIndex = itemId
+    ? state.reasoningIndexById[itemId]
+    : Object.values(state.reasoningIndexById)[0];
   const index = existingIndex ?? resolveOutputIndex(state, indexHint, itemId);
   const created = !state.outputItems[index];
   const item = ensureOutputItem(state, index, () => ({
@@ -236,7 +252,15 @@ function ensureReasoningSummaryPart(
   itemIdRaw: unknown,
   summaryIndexRaw: unknown,
   indexHint?: unknown,
-): { item: AggregateOutputItem; summary: AggregateOutputItem; index: number; summaryIndex: number; created: boolean } {
+): {
+  item: AggregateOutputItem;
+  summary: AggregateOutputItem;
+  index: number;
+  summaryIndex: number;
+  created: boolean;
+  itemCreated: boolean;
+  partCreated: boolean;
+} {
   const reasoningState = ensureReasoningItem(state, itemIdRaw, indexHint);
   const summaryIndex = typeof summaryIndexRaw === 'number' && Number.isFinite(summaryIndexRaw)
     ? Math.max(0, Math.trunc(summaryIndexRaw))
@@ -244,12 +268,20 @@ function ensureReasoningSummaryPart(
   const summary = Array.isArray(reasoningState.item.summary) ? reasoningState.item.summary as AggregateOutputItem[] : [];
   if (!Array.isArray(reasoningState.item.summary)) reasoningState.item.summary = summary;
   let part = summary[summaryIndex];
-  const created = !isRecord(part);
+  const partCreated = !isRecord(part);
   if (!isRecord(part)) {
     part = { type: 'summary_text', text: '' };
     summary[summaryIndex] = part;
   }
-  return { item: reasoningState.item, summary: part, index: reasoningState.index, summaryIndex, created: reasoningState.created || created };
+  return {
+    item: reasoningState.item,
+    summary: part,
+    index: reasoningState.index,
+    summaryIndex,
+    created: reasoningState.created || partCreated,
+    itemCreated: reasoningState.created,
+    partCreated,
+  };
 }
 
 function ensureFunctionCallItem(
@@ -407,6 +439,26 @@ function serializeOriginalResponsesEvent(eventType: string, payload: Record<stri
   return [serializeSse(eventType, payload)];
 }
 
+function mergeImageGenerationFields(
+  item: AggregateOutputItem,
+  payload: Record<string, unknown>,
+): void {
+  const passthroughKeys = [
+    'background',
+    'output_format',
+    'quality',
+    'size',
+    'revised_prompt',
+    'mime_type',
+  ] as const;
+
+  for (const key of passthroughKeys) {
+    if (payload[key] !== undefined) {
+      item[key] = cloneJson(payload[key]);
+    }
+  }
+}
+
 function computeNovelDelta(existingText: string, incomingDelta: string): string {
   if (!incomingDelta) return '';
   if (!existingText) return incomingDelta;
@@ -438,6 +490,23 @@ function applyOriginalResponsesPayload(
       const outputIndex = resolveOutputIndex(state, payload.output_index, (payload.item as Record<string, unknown> | undefined)?.id);
       const item = cloneRecord(payload.item) || {};
       if (Object.keys(item).length > 0) {
+        const itemType = asTrimmedString(item.type).toLowerCase();
+        if (itemType === 'reasoning') {
+          const reasoningState = ensureReasoningItem(state, item.id, outputIndex);
+          const next = {
+            ...reasoningState.item,
+            ...item,
+          };
+          if ((!Array.isArray(item.summary) || item.summary.length === 0) && Array.isArray(reasoningState.item.summary)) {
+            next.summary = reasoningState.item.summary;
+          }
+          setOutputItem(state, reasoningState.index, next);
+          return serializeOriginalResponsesEvent(eventType, {
+            ...payload,
+            output_index: reasoningState.index,
+            item: state.outputItems[reasoningState.index] ?? payload.item,
+          });
+        }
         const existing = isRecord(state.outputItems[outputIndex]) ? cloneRecord(state.outputItems[outputIndex]) || {} : {};
         const next = {
           ...existing,
@@ -468,8 +537,20 @@ function applyOriginalResponsesPayload(
       const message = ensureMessageItem(state, outputIndex).item;
       const content = Array.isArray(message.content) ? message.content as AggregateOutputItem[] : [];
       if (!Array.isArray(message.content)) message.content = content;
-      const part = cloneRecord(payload.part);
-      if (part) content[contentIndex] = part;
+      const existingPart = isRecord(content[contentIndex]) ? content[contentIndex] as AggregateOutputItem : null;
+      const incomingPart = cloneRecord(payload.part);
+      if (incomingPart) {
+        content[contentIndex] = existingPart
+          ? {
+            ...existingPart,
+            ...incomingPart,
+          }
+          : incomingPart;
+      }
+      const part = isRecord(content[contentIndex]) ? content[contentIndex] as AggregateOutputItem : existingPart;
+      if (eventType === 'response.content_part.done' && part) {
+        markTerminalMarker(part, contentPartDoneMarker);
+      }
       return serializeOriginalResponsesEvent(eventType, payload);
     }
     case 'response.output_text.delta':
@@ -478,6 +559,7 @@ function applyOriginalResponsesPayload(
       const textPart = ensureMessageOutputTextPart(state, outputIndex);
       if (eventType === 'response.output_text.done') {
         textPart.part.text = typeof payload.text === 'string' ? payload.text : String(payload.text ?? '');
+        markTerminalMarker(textPart.part, outputTextDoneMarker);
       } else {
         textPart.part.text = `${typeof textPart.part.text === 'string' ? textPart.part.text : ''}${typeof payload.delta === 'string' ? payload.delta : ''}`;
       }
@@ -525,6 +607,11 @@ function applyOriginalResponsesPayload(
           ...part,
         };
         summaryState.item.summary = summary;
+        if (eventType === 'response.reasoning_summary_part.done') {
+          markTerminalMarker(summary[summaryState.summaryIndex] as AggregateOutputItem, reasoningSummaryPartDoneMarker);
+        }
+      } else if (eventType === 'response.reasoning_summary_part.done') {
+        markTerminalMarker(summaryState.summary, reasoningSummaryPartDoneMarker);
       }
       return serializeOriginalResponsesEvent(eventType, payload);
     }
@@ -533,6 +620,7 @@ function applyOriginalResponsesPayload(
       const summaryState = ensureReasoningSummaryPart(state, payload.item_id, payload.summary_index, payload.output_index);
       if (eventType === 'response.reasoning_summary_text.done') {
         summaryState.summary.text = typeof payload.text === 'string' ? payload.text : String(payload.text ?? '');
+        markTerminalMarker(summaryState.summary, reasoningSummaryTextDoneMarker);
       } else {
         summaryState.summary.text = `${typeof summaryState.summary.text === 'string' ? summaryState.summary.text : ''}${typeof payload.delta === 'string' ? payload.delta : ''}`;
       }
@@ -555,6 +643,7 @@ function applyOriginalResponsesPayload(
         });
         entry.item.partial_images = partialImages;
       }
+      mergeImageGenerationFields(entry.item, payload);
       if (payload.result !== undefined) {
         entry.item.result = payload.result;
       }
@@ -620,19 +709,47 @@ function buildSyntheticMessageEvents(
 
 function buildSyntheticReasoningEvents(
   state: OpenAiResponsesAggregateState,
-  delta: string,
+  delta?: string,
+  reasoningSignature?: string,
 ): string[] {
-  const summaryState = ensureReasoningSummaryPart(state, '', 0, state.outputItems.length);
-  const itemId = asTrimmedString(summaryState.item.id);
   const lines: string[] = [];
+  const signature = asTrimmedString(reasoningSignature);
+  const reasoningState = (signature || delta)
+    ? ensureReasoningItem(state, '', state.outputItems.length)
+    : null;
+
+  if (reasoningState && signature) {
+    reasoningState.item.encrypted_content = signature;
+    if (reasoningState.created) {
+      lines.push(serializeSse('response.output_item.added', {
+        type: 'response.output_item.added',
+        output_index: reasoningState.index,
+        item: reasoningState.item,
+      }));
+    }
+  }
+
+  if (!delta) {
+    return lines;
+  }
+
+  const summaryState = ensureReasoningSummaryPart(
+    state,
+    reasoningState?.item.id ?? '',
+    0,
+    reasoningState?.index ?? state.outputItems.length,
+  );
+  const itemId = asTrimmedString(summaryState.item.id);
   const currentText = typeof summaryState.summary.text === 'string' ? summaryState.summary.text : '';
   const novelDelta = computeNovelDelta(currentText, delta);
-  if (summaryState.created) {
+  if (summaryState.itemCreated && !reasoningState?.created) {
     lines.push(serializeSse('response.output_item.added', {
       type: 'response.output_item.added',
       output_index: summaryState.index,
       item: summaryState.item,
     }));
+  }
+  if (summaryState.partCreated) {
     lines.push(serializeSse('response.reasoning_summary_part.added', {
       type: 'response.reasoning_summary_part.added',
       item_id: itemId,
@@ -684,6 +801,111 @@ function buildSyntheticToolEvents(
   return lines;
 }
 
+function buildSyntheticTerminalItemDoneEvents(
+  state: OpenAiResponsesAggregateState,
+  status: 'completed' | 'failed',
+): string[] {
+  const lines: string[] = [];
+
+  for (let index = 0; index < state.outputItems.length; index += 1) {
+    const item = state.outputItems[index];
+    if (!isRecord(item)) continue;
+
+    const currentStatus = asTrimmedString(item.status).toLowerCase();
+    if (currentStatus === 'completed' || currentStatus === 'failed') continue;
+
+    const itemType = asTrimmedString(item.type).toLowerCase();
+    const itemId = ensureOutputItemId(asTrimmedString(item.id), 'out', index);
+    item.id = itemId;
+
+    if (itemType === 'message') {
+      const content = Array.isArray(item.content) ? item.content as AggregateOutputItem[] : [];
+      const part = content[0];
+      if (isRecord(part)) {
+        const text = typeof part.text === 'string' ? part.text : String(part.text ?? '');
+        if (!hasTerminalMarker(part, outputTextDoneMarker)) {
+          lines.push(serializeSse('response.output_text.done', {
+            type: 'response.output_text.done',
+            output_index: index,
+            item_id: itemId,
+            text,
+          }));
+          markTerminalMarker(part, outputTextDoneMarker);
+        }
+        if (!hasTerminalMarker(part, contentPartDoneMarker)) {
+          lines.push(serializeSse('response.content_part.done', {
+            type: 'response.content_part.done',
+            output_index: index,
+            item_id: itemId,
+            content_index: 0,
+            part: cloneJson(part),
+          }));
+          markTerminalMarker(part, contentPartDoneMarker);
+        }
+      }
+    } else if (itemType === 'reasoning') {
+      const summary = Array.isArray(item.summary) ? item.summary as AggregateOutputItem[] : [];
+      const part = summary[0];
+      if (isRecord(part)) {
+        const text = typeof part.text === 'string' ? part.text : String(part.text ?? '');
+        if (!hasTerminalMarker(part, reasoningSummaryTextDoneMarker)) {
+          lines.push(serializeSse('response.reasoning_summary_text.done', {
+            type: 'response.reasoning_summary_text.done',
+            item_id: itemId,
+            output_index: index,
+            summary_index: 0,
+            text,
+          }));
+          markTerminalMarker(part, reasoningSummaryTextDoneMarker);
+        }
+        if (!hasTerminalMarker(part, reasoningSummaryPartDoneMarker)) {
+          lines.push(serializeSse('response.reasoning_summary_part.done', {
+            type: 'response.reasoning_summary_part.done',
+            item_id: itemId,
+            output_index: index,
+            summary_index: 0,
+            part: cloneJson(part),
+          }));
+          markTerminalMarker(part, reasoningSummaryPartDoneMarker);
+        }
+      }
+    } else if (itemType === 'function_call') {
+      const callId = asTrimmedString(item.call_id) || itemId;
+      const name = asTrimmedString(item.name);
+      const argumentsText = typeof item.arguments === 'string' ? item.arguments : String(item.arguments ?? '');
+      lines.push(serializeSse('response.function_call_arguments.done', {
+        type: 'response.function_call_arguments.done',
+        item_id: itemId,
+        call_id: callId,
+        output_index: index,
+        ...(name ? { name } : {}),
+        arguments: argumentsText,
+      }));
+    } else if (itemType === 'custom_tool_call') {
+      const callId = asTrimmedString(item.call_id) || itemId;
+      const name = asTrimmedString(item.name);
+      const inputText = typeof item.input === 'string' ? item.input : String(item.input ?? '');
+      lines.push(serializeSse('response.custom_tool_call_input.done', {
+        type: 'response.custom_tool_call_input.done',
+        item_id: itemId,
+        call_id: callId,
+        output_index: index,
+        ...(name ? { name } : {}),
+        input: inputText,
+      }));
+    }
+
+    item.status = status;
+    lines.push(serializeSse('response.output_item.done', {
+      type: 'response.output_item.done',
+      output_index: index,
+      item: cloneJson(item),
+    }));
+  }
+
+  return lines;
+}
+
 export function serializeConvertedResponsesEvents(input: {
   state: OpenAiResponsesAggregateState;
   streamContext: StreamTransformContext;
@@ -707,8 +929,8 @@ export function serializeConvertedResponsesEvents(input: {
   if (event.contentDelta) {
     lines.push(...buildSyntheticMessageEvents(state, event.contentDelta));
   }
-  if (event.reasoningDelta) {
-    lines.push(...buildSyntheticReasoningEvents(state, event.reasoningDelta));
+  if (event.reasoningDelta || event.reasoningSignature) {
+    lines.push(...buildSyntheticReasoningEvents(state, event.reasoningDelta, event.reasoningSignature));
   }
   lines.push(...buildSyntheticToolEvents(state, event));
   return lines;
@@ -722,8 +944,10 @@ export function completeResponsesStream(
   if (state.failed || state.completed) {
     return [serializeDone()];
   }
+  const lines = buildSyntheticTerminalItemDoneEvents(state, 'completed');
   state.completed = true;
   return [
+    ...lines,
     serializeSse('response.completed', {
       type: 'response.completed',
       response: materializeResponse(state, streamContext, usage, null, 'completed'),
@@ -741,6 +965,7 @@ export function failResponsesStream(
   if (state.failed) {
     return [serializeDone()];
   }
+  const lines = buildSyntheticTerminalItemDoneEvents(state, 'failed');
   state.failed = true;
   const errorPayload = cloneRecord(payload);
   const message = (
@@ -749,6 +974,7 @@ export function failResponsesStream(
       : (typeof errorPayload?.message === 'string' ? errorPayload.message : 'upstream stream failed')
   );
   return [
+    ...lines,
     serializeSse('response.failed', {
       type: 'response.failed',
       response: materializeResponse(state, streamContext, usage, cloneRecord(errorPayload?.response), 'failed'),

@@ -3,7 +3,19 @@ export type GeminiReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'max';
 type GeminiThinkingConfig = {
   thinkingBudget?: number;
   thinkingLevel?: string;
+  includeThoughts?: boolean;
 };
+
+const GEMINI_3_STANDARD_BUDGETS: ReadonlyMap<number, GeminiReasoningEffort> = new Map([
+  [0, 'none'],
+  [1024, 'low'],
+  [8192, 'medium'],
+  [32768, 'high'],
+]);
+
+function isGemini3Model(model: string): boolean {
+  return /gemini-3(?:[.-]|$)/i.test(model);
+}
 
 function normalizeReasoningEffort(value: unknown): GeminiReasoningEffort {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -43,8 +55,12 @@ function thinkingBudgetToReasoningEffort(budget: number): GeminiReasoningEffort 
 }
 
 function shouldUseThinkingLevel(model: string, effort: GeminiReasoningEffort): boolean {
-  if (!/gemini-3-/i.test(model)) return false;
+  if (!isGemini3Model(model)) return false;
   return effort === 'none' || effort === 'low' || effort === 'medium' || effort === 'high';
+}
+
+function shouldUseThinkingLevelForBudget(model: string, budget: number): boolean {
+  return isGemini3Model(model) && GEMINI_3_STANDARD_BUDGETS.has(budget);
 }
 
 function reasoningEffortToThinkingBudget(effort: GeminiReasoningEffort): number {
@@ -72,6 +88,23 @@ export function reasoningEffortToGeminiThinkingConfig(
     return { thinkingLevel: effort };
   }
   return { thinkingBudget: reasoningEffortToThinkingBudget(effort) };
+}
+
+export function thinkingBudgetToGeminiThinkingConfig(
+  model: string,
+  thinkingBudget: unknown,
+): GeminiThinkingConfig | null {
+  const budget = toFiniteInt(thinkingBudget);
+  if (budget === null) return null;
+  if (shouldUseThinkingLevelForBudget(model, budget)) {
+    const standardEffort = GEMINI_3_STANDARD_BUDGETS.get(budget);
+    return {
+      thinkingLevel: standardEffort ?? thinkingBudgetToReasoningEffort(budget),
+    };
+  }
+  return {
+    thinkingBudget: budget,
+  };
 }
 
 export function geminiThinkingConfigToReasoning(
@@ -108,6 +141,16 @@ function toFiniteInt(value: unknown): number | null {
   return Math.max(0, Math.trunc(numeric));
 }
 
+function withSynthesizedThoughts(
+  thinkingConfig: GeminiThinkingConfig | null,
+): GeminiThinkingConfig | null {
+  if (!thinkingConfig) return null;
+  return {
+    ...thinkingConfig,
+    includeThoughts: true,
+  };
+}
+
 export function resolveGeminiThinkingConfigFromRequest(
   model: string,
   body: Record<string, unknown>,
@@ -124,7 +167,7 @@ export function resolveGeminiThinkingConfigFromRequest(
       return { thinkingLevel: nativeLevel };
     }
     if (nativeBudget !== null) {
-      return { thinkingBudget: nativeBudget };
+      return thinkingBudgetToGeminiThinkingConfig(model, nativeBudget);
     }
   }
 
@@ -142,11 +185,11 @@ export function resolveGeminiThinkingConfigFromRequest(
 
   const parsedBudget = toFiniteInt(reasoningBudget);
   if (parsedBudget !== null) {
-    return reasoningEffortToGeminiThinkingConfig(model, thinkingBudgetToReasoningEffort(parsedBudget));
+    return withSynthesizedThoughts(thinkingBudgetToGeminiThinkingConfig(model, parsedBudget));
   }
 
   if (reasoningEffort !== undefined) {
-    return reasoningEffortToGeminiThinkingConfig(model, reasoningEffort);
+    return withSynthesizedThoughts(reasoningEffortToGeminiThinkingConfig(model, reasoningEffort));
   }
 
   return null;
@@ -161,5 +204,13 @@ export function extractReasoningMetadataFromGeminiRequest(
   const thinkingConfig = isRecord(generationConfig?.thinkingConfig)
     ? generationConfig!.thinkingConfig as Record<string, unknown>
     : null;
-  return geminiThinkingConfigToReasoning(thinkingConfig);
+  if (thinkingConfig) {
+    return geminiThinkingConfigToReasoning(thinkingConfig);
+  }
+
+  const synthesizedThinkingConfig = resolveGeminiThinkingConfigFromRequest(
+    typeof body.model === 'string' ? body.model : '',
+    body,
+  );
+  return geminiThinkingConfigToReasoning(synthesizedThinkingConfig ?? null);
 }

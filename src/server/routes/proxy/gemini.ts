@@ -33,33 +33,11 @@ async function selectNextGeminiProbeChannel(request: FastifyRequest, excludeChan
   return null;
 }
 
-function resolveGeminiApiVersion(request: FastifyRequest): string {
-  const params = request.params as { geminiApiVersion?: string } | undefined;
-  return (params?.geminiApiVersion || 'v1beta').trim() || 'v1beta';
-}
-
-function getRawRequestUrl(request: FastifyRequest): string {
-  return request.raw.url || request.url || '';
-}
-
-function extractGeminiModelActionPath(request: FastifyRequest, apiVersion: string): string {
-  const rawUrl = getRawRequestUrl(request);
-  const withoutQuery = rawUrl.split('?')[0] || rawUrl;
-  const normalizedVersion = apiVersion.replace(/^\/+/, '');
-  const geminiPrefix = `/gemini/${normalizedVersion}/`;
-  const aliasPrefix = `/${normalizedVersion}/`;
-  if (withoutQuery.startsWith(geminiPrefix)) {
-    return withoutQuery.slice(geminiPrefix.length);
-  }
-  if (withoutQuery.startsWith(aliasPrefix)) {
-    return withoutQuery.slice(aliasPrefix.length);
-  }
-  return withoutQuery.replace(/^\/+/, '');
-}
-
 export async function geminiProxyRoute(app: FastifyInstance) {
   const listModels = async (request: FastifyRequest, reply: FastifyReply) => {
-    const apiVersion = resolveGeminiApiVersion(request);
+    const apiVersion = geminiGenerateContentTransformer.resolveProxyApiVersion(
+      request.params as { geminiApiVersion?: string } | undefined,
+    );
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
     let lastStatus = 503;
@@ -117,9 +95,11 @@ export async function geminiProxyRoute(app: FastifyInstance) {
   };
 
   const generateContent = async (request: FastifyRequest, reply: FastifyReply) => {
-    const apiVersion = resolveGeminiApiVersion(request);
-    const modelActionPath = extractGeminiModelActionPath(request, apiVersion);
-    const requestedModel = modelActionPath.replace(/^models\//, '').split(':')[0].trim();
+    const parsedPath = geminiGenerateContentTransformer.parseProxyRequestPath({
+      rawUrl: request.raw.url || request.url || '',
+      params: request.params as { geminiApiVersion?: string } | undefined,
+    });
+    const { apiVersion, modelActionPath, isStreamAction, requestedModel } = parsedPath;
     if (!requestedModel) {
       return reply.code(400).send({
         error: { message: 'Gemini model path is required', type: 'invalid_request_error' },
@@ -206,27 +186,23 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               if (done) break;
               if (!value) continue;
               const chunkText = decoder.decode(value, { stream: true });
-              const parsed = geminiGenerateContentTransformer.stream.parseSsePayloads(rest + chunkText);
-              rest = parsed.rest;
-              for (const event of parsed.events) {
-                geminiGenerateContentTransformer.stream.applyAggregate(aggregateState, event);
-                reply.raw.write(
-                  geminiGenerateContentTransformer.stream.serializeSsePayload(
-                    geminiGenerateContentTransformer.outbound.serializeAggregateResponse(aggregateState),
-                  ),
-                );
+              const consumed = geminiGenerateContentTransformer.stream.consumeUpstreamSseBuffer(
+                aggregateState,
+                rest + chunkText,
+              );
+              rest = consumed.rest;
+              for (const line of consumed.lines) {
+                reply.raw.write(line);
               }
             }
             const tail = decoder.decode();
             if (tail) {
-              const parsed = geminiGenerateContentTransformer.stream.parseSsePayloads(rest + tail);
-              for (const event of parsed.events) {
-                geminiGenerateContentTransformer.stream.applyAggregate(aggregateState, event);
-                reply.raw.write(
-                  geminiGenerateContentTransformer.stream.serializeSsePayload(
-                    geminiGenerateContentTransformer.outbound.serializeAggregateResponse(aggregateState),
-                  ),
-                );
+              const consumed = geminiGenerateContentTransformer.stream.consumeUpstreamSseBuffer(
+                aggregateState,
+                rest + tail,
+              );
+              for (const line of consumed.lines) {
+                reply.raw.write(line);
               }
             }
           } finally {
@@ -239,19 +215,13 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         const text = await upstream.text();
         try {
           const parsed = JSON.parse(text);
-          const aggregateState = geminiGenerateContentTransformer.aggregator.createState();
-          if (Array.isArray(parsed)) {
-            for (const chunk of geminiGenerateContentTransformer.stream.parseJsonArrayPayload(parsed)) {
-              geminiGenerateContentTransformer.aggregator.apply(aggregateState, chunk);
-            }
-            return reply.code(upstream.status).send(
-              geminiGenerateContentTransformer.outbound.serializeAggregateResponse(aggregateState),
-            );
-          }
-
-          geminiGenerateContentTransformer.aggregator.apply(aggregateState, parsed);
+          const aggregateState = geminiGenerateContentTransformer.stream.createAggregateState();
           return reply.code(upstream.status).send(
-            geminiGenerateContentTransformer.outbound.serializeAggregateResponse(aggregateState),
+            geminiGenerateContentTransformer.stream.serializeUpstreamJsonPayload(
+              aggregateState,
+              parsed,
+              isStreamAction,
+            ),
           );
         } catch {
           return reply.code(upstream.status).type(contentType || 'application/json').send(text);

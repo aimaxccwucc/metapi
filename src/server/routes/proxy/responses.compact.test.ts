@@ -29,4 +29,24 @@ describe('responses proxy compact route', () => {
       },
     });
   });
+
+  it('rejects streaming /v1/responses/compact requests because compact is non-streaming', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses/compact',
+      payload: {
+        model: 'gpt-5.2',
+        input: 'hello',
+        stream: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'stream is not supported on /v1/responses/compact',
+        type: 'invalid_request_error',
+      },
+    });
+  });
 });

@@ -5,6 +5,8 @@ import CenteredModal from '../components/CenteredModal.js';
 import { useToast } from '../components/Toast.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import ModernSelect from '../components/ModernSelect.js';
+import { MobileCard, MobileField } from '../components/MobileCard.js';
+import { useIsMobile } from '../components/useIsMobile.js';
 import { clearFocusParams, readFocusTokenId } from './helpers/navigationFocus.js';
 import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { tr } from '../i18n.js';
@@ -105,6 +107,7 @@ function isTruthyFlag(input: string | null): boolean {
 export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: TokensPanelProps) {
   const location = useLocation();
   const navigate = useNavigate();
+  const isMobile = useIsMobile(768);
   const initialCreateForm = {
     accountId: 0,
     name: '',
@@ -726,7 +729,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
         ) : null}
       </CenteredModal>
 
-      {selectedTokenIds.length > 0 && (
+      {!isMobile && selectedTokenIds.length > 0 && (
         <div className="card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <span style={{ fontSize: 13, fontWeight: 600 }}>已选 {selectedTokenIds.length} 项</span>
           <button onClick={() => runBatchTokenAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
@@ -738,6 +741,23 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
           <button data-testid="tokens-batch-delete" onClick={() => runBatchTokenAction('delete')} disabled={batchActionLoading} className="btn btn-link btn-link-danger">
             批量删除
           </button>
+        </div>
+      )}
+
+      {isMobile && selectedTokenIds.length > 0 && (
+        <div className="mobile-actions-bar">
+          <span className="mobile-actions-info">已选 {selectedTokenIds.length} 项</span>
+          <div className="mobile-actions-row">
+            <button onClick={() => runBatchTokenAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+              批量启用
+            </button>
+            <button onClick={() => runBatchTokenAction('disable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+              批量禁用
+            </button>
+            <button data-testid="tokens-batch-delete" onClick={() => runBatchTokenAction('delete')} disabled={batchActionLoading} className="btn btn-link btn-link-danger">
+              批量删除
+            </button>
+          </div>
         </div>
       )}
 
@@ -868,7 +888,117 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
             <div className="skeleton" style={{ width: '100%', height: 34 }} />
           </div>
         ) : tokens.length > 0 ? (
-          <table className="data-table token-table">
+          isMobile ? (
+            <div className="mobile-card-list">
+              {tokens.map((token: any) => {
+                const loadingPrefix = `token-${token.id}`;
+                return (
+                  <MobileCard
+                    key={token.id}
+                    title={token.name || '-'}
+                    actions={(
+                      <input
+                        type="checkbox"
+                        aria-label={`选择令牌 ${token.name || token.id}`}
+                        checked={selectedTokenIds.includes(token.id)}
+                        onChange={(event) => toggleTokenSelection(token.id, event.target.checked)}
+                      />
+                    )}
+                  >
+                    <MobileField
+                      label="令牌值"
+                      value={<span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{token.tokenMasked || '***'}</span>}
+                    />
+                    <MobileField
+                      label="来源站点"
+                      value={token.site?.url ? (
+                        <a
+                          href={token.site.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="badge-link"
+                        >
+                          <span className="badge badge-muted" style={{ fontSize: 11 }}>
+                            {token.site?.name || 'unknown'}
+                          </span>
+                        </a>
+                      ) : (
+                        <span className="badge badge-muted" style={{ fontSize: 11 }}>
+                          {token.site?.name || 'unknown'}
+                        </span>
+                      )}
+                    />
+                    <MobileField label="账号" value={token.account?.username || `account-${token.accountId}`} />
+                    <MobileField
+                      label="状态"
+                      value={(
+                        <span className={`badge ${token.enabled ? 'badge-success' : 'badge-muted'}`} style={{ fontSize: 11 }}>
+                          {token.enabled ? '启用' : '禁用'}
+                        </span>
+                      )}
+                    />
+                    <MobileField
+                      label="默认"
+                      value={token.isDefault ? <span className="badge badge-warning" style={{ fontSize: 11 }}>默认</span> : '-'}
+                    />
+                    <MobileField label="更新时间" value={formatDateTimeLocal(token.updatedAt)} />
+                    <div className="mobile-card-actions">
+                      {!token.isDefault && (
+                        <button
+                          onClick={() => withRowLoading(`${loadingPrefix}-default`, async () => {
+                            await api.setDefaultAccountToken(token.id);
+                            toast.success('默认令牌已更新');
+                            await load();
+                          })}
+                          disabled={!!rowLoading[`${loadingPrefix}-default`]}
+                          className="btn btn-link btn-link-info"
+                        >
+                          {rowLoading[`${loadingPrefix}-default`] ? <span className="spinner spinner-sm" /> : '设默认'}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleCopyToken(token.id, token.name || '')}
+                        disabled={!!rowLoading[`${loadingPrefix}-copy`]}
+                        className="btn btn-link btn-link-primary"
+                        data-testid={`token-copy-${token.id}`}
+                      >
+                        {rowLoading[`${loadingPrefix}-copy`] ? <span className="spinner spinner-sm" /> : '复制'}
+                      </button>
+                      <button
+                        onClick={() => openEditPanel(token)}
+                        className="btn btn-link btn-link-info"
+                      >
+                        编辑
+                      </button>
+                      <button
+                        onClick={() => withRowLoading(`${loadingPrefix}-toggle`, async () => {
+                          await api.updateAccountToken(token.id, { enabled: !token.enabled });
+                          toast.success(token.enabled ? '令牌已禁用' : '令牌已启用');
+                          await load();
+                        })}
+                        disabled={!!rowLoading[`${loadingPrefix}-toggle`]}
+                        className={`btn btn-link ${token.enabled ? 'btn-link-warning' : 'btn-link-primary'}`}
+                      >
+                        {rowLoading[`${loadingPrefix}-toggle`] ? <span className="spinner spinner-sm" /> : (token.enabled ? '禁用' : '启用')}
+                      </button>
+                      <button
+                        onClick={() => withRowLoading(`${loadingPrefix}-delete`, async () => {
+                          await api.deleteAccountToken(token.id);
+                          toast.success('令牌已删除');
+                          await load();
+                        })}
+                        disabled={!!rowLoading[`${loadingPrefix}-delete`]}
+                        className="btn btn-link btn-link-danger"
+                      >
+                        {rowLoading[`${loadingPrefix}-delete`] ? <span className="spinner spinner-sm" /> : '删除'}
+                      </button>
+                    </div>
+                  </MobileCard>
+                );
+              })}
+            </div>
+          ) : (
+            <table className="data-table token-table">
             <thead>
               <tr>
                 <th style={{ width: 44 }}>
@@ -998,6 +1128,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
               })}
             </tbody>
           </table>
+          )
         ) : (
           <div className="empty-state">
             <svg className="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" /></svg>

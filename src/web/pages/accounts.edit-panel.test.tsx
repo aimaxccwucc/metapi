@@ -1,20 +1,33 @@
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, create, type ReactTestInstance } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast.js';
 import Accounts from './Accounts.js';
 
-const { apiMock } = vi.hoisted(() => ({
+const { apiMock, toastMock } = vi.hoisted(() => ({
   apiMock: {
     getAccounts: vi.fn(),
     getSites: vi.fn(),
     updateAccount: vi.fn(),
     refreshAccountHealth: vi.fn(),
+    checkModels: vi.fn(),
+  },
+  toastMock: {
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    toast: vi.fn(),
   },
 }));
 
 vi.mock('../api.js', () => ({
   api: apiMock,
+}));
+
+vi.mock('../components/Toast.js', () => ({
+  ToastProvider: ({ children }: { children: ReactNode }) => children,
+  useToast: () => toastMock,
 }));
 
 function collectText(node: ReactTestInstance): string {
@@ -85,6 +98,49 @@ describe('Accounts edit panel', () => {
         && node.props.placeholder === '账号名称'
       ));
       expect(usernameInput.props.value).toBe('alpha');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('shows model refresh toast on success', async () => {
+    apiMock.checkModels.mockResolvedValue({
+      refresh: {
+        status: 'success',
+        modelCount: 2,
+        modelsPreview: ['gpt-4', 'gpt-3.5'],
+      },
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/accounts']}>
+            <ToastProvider>
+              <Accounts />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const modelButtons = root.root.findAll((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('btn-link-info')
+        && collectText(node).trim() === '模型'
+      ));
+      expect(modelButtons.length).toBeGreaterThan(0);
+
+      await act(async () => {
+        await modelButtons[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(toastMock.success).toHaveBeenCalledWith(expect.stringContaining('已获取到模型'));
+      expect(toastMock.success).toHaveBeenCalledWith(expect.stringContaining('（共 2 个）'));
     } finally {
       root?.unmount();
     }

@@ -9,246 +9,105 @@ import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { resolveProxyUrlForSite, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
-import { type NormalizedStreamEvent } from '../../transformers/shared/normalized.js';
 import { openAiResponsesTransformer } from '../../transformers/openai/responses/index.js';
-import { serializeResponsesFinalPayload } from '../../transformers/openai/responses/outbound.js';
-import { convertResponsesBodyToOpenAiBody } from '../../transformers/openai/responses/conversion.js';
 import {
-  completeResponsesStream,
-  createOpenAiResponsesAggregateState,
-  failResponsesStream,
-  serializeConvertedResponsesEvents,
-} from '../../transformers/openai/responses/aggregator.js';
-import {
-  buildMinimalJsonHeadersForCompatibility,
   buildUpstreamEndpointRequest,
-  isEndpointDowngradeError,
-  isUnsupportedMediaTypeError,
   resolveUpstreamEndpointCandidates,
-  type UpstreamEndpoint,
 } from './upstreamEndpoint.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
 import { composeProxyLogMessage } from './logPathMeta.js';
 import { executeEndpointFlow, withUpstreamPath } from './endpointFlow.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { resolveProxyLogBilling } from './proxyBilling.js';
+import { getProxyResourceOwner } from '../../middleware/auth.js';
+import { detectDownstreamClientContext, isCodexResponsesSurface, type DownstreamClientContext } from './downstreamClientContext.js';
+import { normalizeInputFileBlock } from '../../transformers/shared/inputFile.js';
+import {
+  ProxyInputFileResolutionError,
+  hasNonImageFileInputInOpenAiBody,
+  resolveResponsesBodyInputFiles,
+} from '../../services/proxyInputFileResolver.js';
 
 const MAX_RETRIES = 2;
-
-function shouldDowngradeFromChatToMessagesForResponses(
-  endpointPath: string,
-  status: number,
-  upstreamErrorText: string,
-): boolean {
-  if (!endpointPath.includes('/chat/completions')) return false;
-  if (status < 400 || status >= 500) return false;
-  return /messages\s+is\s+required/i.test(upstreamErrorText);
-}
-
-function parseUpstreamErrorShape(rawText: string): {
-  type: string;
-  code: string;
-  message: string;
-} {
-  try {
-    const parsed = JSON.parse(rawText) as Record<string, unknown>;
-    const error = (parsed.error && typeof parsed.error === 'object')
-      ? parsed.error as Record<string, unknown>
-      : parsed;
-    return {
-      type: typeof error.type === 'string' ? error.type.trim().toLowerCase() : '',
-      code: typeof error.code === 'string' ? error.code.trim().toLowerCase() : '',
-      message: typeof error.message === 'string' ? error.message.trim() : '',
-    };
-  } catch {
-    return { type: '', code: '', message: '' };
-  }
-}
-
-function stripResponsesMetadata(
-  body: Record<string, unknown>,
-): Record<string, unknown> | null {
-  if (!Object.prototype.hasOwnProperty.call(body, 'metadata')) return null;
-  const next = { ...body };
-  delete next.metadata;
-  return next;
-}
-
-function toFiniteNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function buildCoreResponsesBody(
-  body: Record<string, unknown>,
-): Record<string, unknown> | null {
-  const model = typeof body.model === 'string' ? body.model.trim() : '';
-  if (!model) return null;
-  if (body.input === undefined) return null;
-
-  const core: Record<string, unknown> = {
-    model,
-    input: body.input,
-    stream: body.stream === true,
-  };
-
-  const maxOutputTokens = toFiniteNumber(body.max_output_tokens);
-  if (maxOutputTokens !== null && maxOutputTokens > 0) {
-    core.max_output_tokens = Math.trunc(maxOutputTokens);
-  }
-
-  const temperature = toFiniteNumber(body.temperature);
-  if (temperature !== null) core.temperature = temperature;
-
-  const topP = toFiniteNumber(body.top_p);
-  if (topP !== null) core.top_p = topP;
-
-  const instructions = typeof body.instructions === 'string' ? body.instructions.trim() : '';
-  if (instructions) core.instructions = instructions;
-
-  return core;
-}
-
-function buildStrictResponsesBody(
-  body: Record<string, unknown>,
-): Record<string, unknown> | null {
-  const model = typeof body.model === 'string' ? body.model.trim() : '';
-  if (!model) return null;
-  if (body.input === undefined) return null;
-
-  return {
-    model,
-    input: body.input,
-    stream: body.stream === true,
-  };
-}
-
-function buildResponsesCompatibilityBodies(
-  body: Record<string, unknown>,
-): Record<string, unknown>[] {
-  const candidates: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
-  try {
-    const originalKey = JSON.stringify(body);
-    if (originalKey) seen.add(originalKey);
-  } catch {
-    // ignore non-serializable bodies
-  }
-  const push = (next: Record<string, unknown> | null) => {
-    if (!next) return;
-    let key = '';
-    try {
-      key = JSON.stringify(next);
-    } catch {
-      return;
-    }
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    candidates.push(next);
-  };
-
-  push(stripResponsesMetadata(body));
-  push(buildCoreResponsesBody(body));
-  push(buildStrictResponsesBody(body));
-  return candidates;
-}
-
-function buildResponsesCompatibilityHeaderCandidates(
-  headers: Record<string, string>,
-  stream: boolean,
-): Record<string, string>[] {
-  const candidates: Record<string, string>[] = [];
-  const seen = new Set<string>();
-  const push = (next: Record<string, string>) => {
-    const normalizedEntries = Object.entries(next)
-      .filter(([, value]) => typeof value === 'string' && value.trim().length > 0)
-      .map(([key, value]) => [key.toLowerCase(), value] as const)
-      .sort(([a], [b]) => a.localeCompare(b));
-    const key = JSON.stringify(normalizedEntries);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    candidates.push(Object.fromEntries(normalizedEntries));
-  };
-
-  push(headers);
-
-  const minimal: Record<string, string> = {};
-  for (const [rawKey, rawValue] of Object.entries(headers)) {
-    const key = rawKey.toLowerCase();
-    if (
-      key === 'authorization'
-      || key === 'x-api-key'
-      || key === 'content-type'
-      || key === 'accept'
-    ) {
-      minimal[key] = rawValue;
-    }
-  }
-  if (!minimal['content-type']) minimal['content-type'] = 'application/json';
-  if (stream && !minimal.accept) minimal.accept = 'text/event-stream';
-  push(minimal);
-
-  return candidates;
-}
-
-function shouldRetryResponsesCompatibility(input: {
-  endpoint: UpstreamEndpoint;
-  status: number;
-  rawErrText: string;
-}): boolean {
-  if (input.endpoint !== 'responses') return false;
-  if (input.status !== 400) return false;
-  const parsedError = parseUpstreamErrorShape(input.rawErrText);
-  const type = parsedError.type.trim().toLowerCase();
-  const code = parsedError.code.trim().toLowerCase();
-  const message = parsedError.message.trim().toLowerCase();
-  const compact = `${type} ${code} ${message}`.trim();
-  const rawCompact = (input.rawErrText || '').toLowerCase();
-
-  // Authentication/authorization failures should not enter compatibility retries.
-  if (
-    compact.includes('invalid_api_key')
-    || compact.includes('authentication')
-    || compact.includes('unauthorized')
-    || compact.includes('forbidden')
-    || compact.includes('insufficient_quota')
-    || compact.includes('rate_limit')
-  ) {
-    return false;
-  }
-
-  if (type === 'upstream_error' || code === 'upstream_error') return true;
-  if (message === 'upstream_error' || message === 'upstream request failed') return true;
-  if (rawCompact.includes('upstream_error')) return true;
-
-  // Many sub2api-compatible gateways return generic 400 for field incompatibilities.
-  // Retry with progressively stricter payload/header candidates to maximize compatibility.
-  return true;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
 }
 
-function asTrimmedString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
+function normalizeIncludeList(value: unknown): string[] {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => item.length > 0);
 }
 
-function normalizeText(value: unknown): string {
-  if (typeof value === 'string') return value;
+function hasExplicitInclude(body: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(body, 'include');
+}
+
+function hasResponsesReasoningRequest(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const relevantKeys = ['effort', 'budget_tokens', 'budgetTokens', 'max_tokens', 'maxTokens', 'summary'];
+  return relevantKeys.some((key) => {
+    const entry = value[key];
+    if (typeof entry === 'string') return entry.trim().length > 0;
+    return entry !== undefined && entry !== null;
+  });
+}
+
+function carriesResponsesReasoningContinuity(value: unknown): boolean {
   if (Array.isArray(value)) {
-    return value
-      .map((item) => normalizeText(item))
-      .filter((item) => item.length > 0)
-      .join('\n');
+    return value.some((item) => carriesResponsesReasoningContinuity(item));
   }
-  if (isRecord(value)) {
-    if (typeof value.text === 'string') return value.text;
-    if (typeof value.content === 'string') return value.content;
-    if (typeof value.input_text === 'string') return value.input_text;
-    if (typeof value.output_text === 'string') return value.output_text;
-    if (Array.isArray(value.content)) return normalizeText(value.content);
+  if (!isRecord(value)) return false;
+
+  const type = typeof value.type === 'string' ? value.type.trim().toLowerCase() : '';
+  if (type === 'reasoning') {
+    if (typeof value.encrypted_content === 'string' && value.encrypted_content.trim()) {
+      return true;
+    }
+    if (Array.isArray(value.summary) && value.summary.length > 0) {
+      return true;
+    }
   }
-  return '';
+
+  if (typeof value.reasoning_signature === 'string' && value.reasoning_signature.trim()) {
+    return true;
+  }
+
+  return carriesResponsesReasoningContinuity(value.input)
+    || carriesResponsesReasoningContinuity(value.content);
+}
+
+function wantsNativeResponsesReasoning(body: unknown): boolean {
+  if (!isRecord(body)) return false;
+  const include = normalizeIncludeList(body.include);
+  if (include.some((item) => item.toLowerCase() === 'reasoning.encrypted_content')) {
+    return true;
+  }
+  if (carriesResponsesReasoningContinuity(body.input)) {
+    return true;
+  }
+  if (hasExplicitInclude(body)) {
+    return false;
+  }
+  return hasResponsesReasoningRequest(body.reasoning);
+}
+
+function carriesResponsesFileUrlInput(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => carriesResponsesFileUrlInput(item));
+  }
+  if (!isRecord(value)) return false;
+
+  const normalizedFile = normalizeInputFileBlock(value);
+  if (normalizedFile?.fileUrl) return true;
+
+  return Object.values(value).some((entry) => carriesResponsesFileUrlInput(entry));
 }
 
 type UsageSummary = ReturnType<typeof parseProxyUsage>;
@@ -259,16 +118,35 @@ export async function responsesProxyRoute(app: FastifyInstance) {
     reply: FastifyReply,
     downstreamPath: string,
   ) => {
-    const body = request.body as any;
-    const requestedModel = typeof body?.model === 'string' ? body.model.trim() : '';
-    if (!requestedModel) {
-      return reply.code(400).send({ error: { message: 'model is required', type: 'invalid_request_error' } });
+    const body = request.body as Record<string, unknown>;
+    const clientContext = detectDownstreamClientContext({
+      downstreamPath,
+      headers: request.headers as Record<string, unknown>,
+      body,
+    });
+    const defaultEncryptedReasoningInclude = isCodexResponsesSurface(
+      request.headers as Record<string, unknown>,
+    );
+    const parsedRequestEnvelope = openAiResponsesTransformer.transformRequest(body, {
+      defaultEncryptedReasoningInclude,
+    });
+    if (parsedRequestEnvelope.error) {
+      return reply.code(parsedRequestEnvelope.error.statusCode).send(parsedRequestEnvelope.error.payload);
+    }
+    const requestEnvelope = parsedRequestEnvelope.value!;
+    const requestedModel = requestEnvelope.model;
+    const isStream = requestEnvelope.stream;
+    const isCompactRequest = downstreamPath === '/v1/responses/compact';
+    if (isCompactRequest && isStream) {
+      return reply.code(400).send({
+        error: {
+          message: 'stream is not supported on /v1/responses/compact',
+          type: 'invalid_request_error',
+        },
+      });
     }
     if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
     const downstreamPolicy = getDownstreamRoutingPolicy(request);
-    const isCompactRequest = downstreamPath === '/v1/responses/compact';
-
-    const isStream = body.stream === true;
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
 
@@ -295,7 +173,39 @@ export async function responsesProxyRoute(app: FastifyInstance) {
       excludeChannelIds.push(selected.channel.id);
 
       const modelName = selected.actualModel || requestedModel;
-      const openAiBody = convertResponsesBodyToOpenAiBody(body, modelName, isStream);
+      const owner = getProxyResourceOwner(request);
+      let normalizedResponsesBody: Record<string, unknown> = {
+        ...requestEnvelope.parsed.normalizedBody,
+        model: modelName,
+        stream: isStream,
+      };
+      if (owner) {
+        try {
+          normalizedResponsesBody = await resolveResponsesBodyInputFiles(normalizedResponsesBody, owner);
+        } catch (error) {
+          if (error instanceof ProxyInputFileResolutionError) {
+            return reply.code(error.statusCode).send(error.payload);
+          }
+          throw error;
+        }
+      }
+      const openAiBody = openAiResponsesTransformer.inbound.toOpenAiBody(
+        normalizedResponsesBody,
+        modelName,
+        isStream,
+        { defaultEncryptedReasoningInclude },
+      );
+      const hasNonImageFileInput = hasNonImageFileInputInOpenAiBody(openAiBody);
+      const prefersNativeResponsesReasoning = wantsNativeResponsesReasoning(normalizedResponsesBody);
+      const requiresNativeResponsesFileUrl = carriesResponsesFileUrlInput(normalizedResponsesBody.input);
+      if (requiresNativeResponsesFileUrl && String(selected.site.platform || '').trim().toLowerCase() === 'claude') {
+        return reply.code(400).send({
+          error: {
+            message: 'Responses input_file.file_url requires an upstream /v1/responses endpoint; current site only supports /v1/messages.',
+            type: 'invalid_request_error',
+          },
+        });
+      }
       const endpointCandidates = await resolveUpstreamEndpointCandidates(
         {
           site: selected.site,
@@ -304,10 +214,54 @@ export async function responsesProxyRoute(app: FastifyInstance) {
         modelName,
         'responses',
         requestedModel,
+        {
+          hasNonImageFileInput,
+          wantsNativeResponsesReasoning: prefersNativeResponsesReasoning,
+        },
       );
+      if (requiresNativeResponsesFileUrl) {
+        endpointCandidates.splice(0, endpointCandidates.length, 'responses');
+      }
       if (endpointCandidates.length === 0) {
         endpointCandidates.push('responses', 'chat', 'messages');
       }
+      const buildEndpointRequest = (endpoint: 'chat' | 'messages' | 'responses') => {
+        const endpointRequest = buildUpstreamEndpointRequest({
+          endpoint,
+          modelName,
+          stream: isStream,
+          tokenValue: selected.tokenValue,
+          sitePlatform: selected.site.platform,
+          siteUrl: selected.site.url,
+          openaiBody: openAiBody,
+          downstreamFormat: 'responses',
+          responsesOriginalBody: normalizedResponsesBody,
+          downstreamHeaders: request.headers as Record<string, unknown>,
+        });
+        const upstreamPath = (
+          isCompactRequest && endpoint === 'responses'
+            ? `${endpointRequest.path}/compact`
+            : endpointRequest.path
+        );
+        return {
+          endpoint,
+          path: upstreamPath,
+          headers: endpointRequest.headers,
+          body: endpointRequest.body as Record<string, unknown>,
+        };
+      };
+      const endpointStrategy = openAiResponsesTransformer.compatibility.createEndpointStrategy({
+        isStream,
+        requiresNativeResponsesFileUrl,
+        dispatchRequest: (compatibilityRequest, targetUrl) => fetch(
+          targetUrl ?? `${selected.site.url}${compatibilityRequest.path}`,
+          withSiteRecordProxyRequestInit(selected.site, {
+            method: 'POST',
+            headers: compatibilityRequest.headers,
+            body: JSON.stringify(compatibilityRequest.body),
+          }),
+        ),
+      });
 
       const startTime = Date.now();
 
@@ -316,112 +270,9 @@ export async function responsesProxyRoute(app: FastifyInstance) {
           siteUrl: selected.site.url,
           proxyUrl: resolveProxyUrlForSite(selected.site),
           endpointCandidates,
-          buildRequest: (endpoint) => {
-            const endpointRequest = buildUpstreamEndpointRequest({
-              endpoint,
-              modelName,
-              stream: isStream,
-              tokenValue: selected.tokenValue,
-              sitePlatform: selected.site.platform,
-              siteUrl: selected.site.url,
-              openaiBody: openAiBody,
-              downstreamFormat: 'responses',
-              responsesOriginalBody: body,
-              downstreamHeaders: request.headers as Record<string, unknown>,
-            });
-            const upstreamPath = (
-              isCompactRequest && endpoint === 'responses'
-                ? `${endpointRequest.path}/compact`
-                : endpointRequest.path
-            );
-            return {
-              endpoint,
-              path: upstreamPath,
-              headers: endpointRequest.headers,
-              body: endpointRequest.body as Record<string, unknown>,
-            };
-          },
-          tryRecover: async (ctx) => {
-            if (shouldRetryResponsesCompatibility({
-              endpoint: ctx.request.endpoint,
-              status: ctx.response.status,
-              rawErrText: ctx.rawErrText,
-            })) {
-              const compatibilityBodies = buildResponsesCompatibilityBodies(ctx.request.body);
-              const compatibilityHeaders = buildResponsesCompatibilityHeaderCandidates(
-                ctx.request.headers,
-                isStream,
-              );
-
-              for (const compatibilityHeadersCandidate of compatibilityHeaders) {
-                for (const compatibilityBody of compatibilityBodies) {
-                  const compatibilityResponse = await fetch(
-                    ctx.targetUrl,
-                    withSiteRecordProxyRequestInit(selected.site, {
-                      method: 'POST',
-                      headers: compatibilityHeadersCandidate,
-                      body: JSON.stringify(compatibilityBody),
-                    }),
-                  );
-                  if (compatibilityResponse.ok) {
-                    return {
-                      upstream: compatibilityResponse,
-                      upstreamPath: ctx.request.path,
-                    };
-                  }
-
-                  ctx.request = {
-                    ...ctx.request,
-                    headers: compatibilityHeadersCandidate,
-                    body: compatibilityBody,
-                  };
-                  ctx.response = compatibilityResponse;
-                  ctx.rawErrText = await compatibilityResponse.text().catch(() => 'unknown error');
-                }
-              }
-            }
-
-            if (!isUnsupportedMediaTypeError(ctx.response.status, ctx.rawErrText)) {
-              return null;
-            }
-
-            const minimalHeaders = buildMinimalJsonHeadersForCompatibility({
-              headers: ctx.request.headers,
-              endpoint: ctx.request.endpoint,
-              stream: isStream,
-            });
-            const minimalResponse = await fetch(
-              ctx.targetUrl,
-              withSiteRecordProxyRequestInit(selected.site, {
-                method: 'POST',
-                headers: minimalHeaders,
-                body: JSON.stringify(ctx.request.body),
-              }),
-            );
-            if (minimalResponse.ok) {
-              return {
-                upstream: minimalResponse,
-                upstreamPath: ctx.request.path,
-              };
-            }
-
-            ctx.request = {
-              ...ctx.request,
-              headers: minimalHeaders,
-            };
-            ctx.response = minimalResponse;
-            ctx.rawErrText = await minimalResponse.text().catch(() => 'unknown error');
-            return null;
-          },
-          shouldDowngrade: (ctx) => (
-            ctx.response.status >= 500
-            || isEndpointDowngradeError(ctx.response.status, ctx.rawErrText)
-            || shouldDowngradeFromChatToMessagesForResponses(
-              ctx.request.path,
-              ctx.response.status,
-              ctx.rawErrText,
-            )
-          ),
+          buildRequest: (endpoint) => buildEndpointRequest(endpoint),
+          tryRecover: endpointStrategy.tryRecover,
+          shouldDowngrade: endpointStrategy.shouldDowngrade,
           onDowngrade: (ctx) => {
             logProxy(
               selected,
@@ -432,6 +283,13 @@ export async function responsesProxyRoute(app: FastifyInstance) {
               ctx.errText,
               retryCount,
               downstreamPath,
+              0,
+              0,
+              0,
+              0,
+              null,
+              null,
+              clientContext,
             );
           },
         });
@@ -440,7 +298,23 @@ export async function responsesProxyRoute(app: FastifyInstance) {
           const status = endpointResult.status || 502;
           const errText = endpointResult.errText || 'unknown error';
           tokenRouter.recordFailure(selected.channel.id);
-          logProxy(selected, requestedModel, 'failed', status, Date.now() - startTime, errText, retryCount, downstreamPath);
+          logProxy(
+            selected,
+            requestedModel,
+            'failed',
+            status,
+            Date.now() - startTime,
+            errText,
+            retryCount,
+            downstreamPath,
+            0,
+            0,
+            0,
+            0,
+            null,
+            null,
+            clientContext,
+          );
 
           if (isTokenExpiredError({ status, message: errText })) {
             await reportTokenExpired({
@@ -467,6 +341,7 @@ export async function responsesProxyRoute(app: FastifyInstance) {
         const successfulUpstreamPath = endpointResult.upstreamPath;
 
         if (isStream) {
+          reply.hijack();
           reply.raw.statusCode = 200;
           reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
           reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -474,12 +349,6 @@ export async function responsesProxyRoute(app: FastifyInstance) {
           reply.raw.setHeader('X-Accel-Buffering', 'no');
 
           const reader = upstream.body?.getReader();
-          if (!reader) {
-            reply.raw.end();
-            return;
-          }
-
-          const decoder = new TextDecoder();
           let parsedUsage: UsageSummary = {
             promptTokens: 0,
             completionTokens: 0,
@@ -488,102 +357,24 @@ export async function responsesProxyRoute(app: FastifyInstance) {
             cacheCreationTokens: 0,
             promptTokensIncludeCache: null,
           };
-          let sseBuffer = '';
-
-          const passthroughResponsesStream = successfulUpstreamPath === '/v1/responses';
-          const streamContext = openAiResponsesTransformer.createStreamContext(modelName);
-          const responsesState = createOpenAiResponsesAggregateState(modelName);
-
           const writeLines = (lines: string[]) => {
             for (const line of lines) reply.raw.write(line);
           };
-
-          const consumeSseBuffer = (incoming: string): string => {
-             const pulled = openAiResponsesTransformer.pullSseEvents(incoming);
-            for (const eventBlock of pulled.events) {
-              if (eventBlock.data === '[DONE]') {
-                if (passthroughResponsesStream) {
-                  reply.raw.write('data: [DONE]\n\n');
-                } else if (!responsesState.completed) {
-                  writeLines(completeResponsesStream(responsesState, streamContext, parsedUsage));
-                }
-                continue;
+          const streamSession = openAiResponsesTransformer.proxyStream.createSession({
+            modelName,
+            successfulUpstreamPath,
+            getUsage: () => parsedUsage,
+            onParsedPayload: (payload) => {
+              if (payload && typeof payload === 'object') {
+                parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(payload));
               }
-
-              let parsedPayload: unknown = null;
-              try {
-                parsedPayload = JSON.parse(eventBlock.data);
-              } catch {
-                parsedPayload = null;
-              }
-
-              if (parsedPayload && typeof parsedPayload === 'object') {
-                parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(parsedPayload));
-              }
-
-              if (passthroughResponsesStream) {
-                const eventName = eventBlock.event ? `event: ${eventBlock.event}\n` : '';
-                reply.raw.write(`${eventName}data: ${eventBlock.data}\n\n`);
-                continue;
-              }
-
-              const payloadType = (isRecord(parsedPayload) && typeof parsedPayload.type === 'string')
-                ? parsedPayload.type
-                : '';
-              const isFailureEvent = (
-                eventBlock.event === 'error'
-                || eventBlock.event === 'response.failed'
-                || payloadType === 'error'
-                || payloadType === 'response.failed'
-              );
-              if (isFailureEvent) {
-                writeLines(failResponsesStream(responsesState, streamContext, parsedUsage, parsedPayload));
-                continue;
-              }
-
-              if (parsedPayload && typeof parsedPayload === 'object') {
-                const normalizedEvent = openAiResponsesTransformer.transformStreamEvent(parsedPayload, streamContext, modelName);
-                writeLines(serializeConvertedResponsesEvents({
-                  state: responsesState,
-                  streamContext,
-                  event: normalizedEvent,
-                  usage: parsedUsage,
-                }));
-                continue;
-              }
-
-              writeLines(serializeConvertedResponsesEvents({
-                state: responsesState,
-                streamContext,
-                event: { contentDelta: eventBlock.data },
-                usage: parsedUsage,
-              }));
-            }
-
-            return pulled.rest;
-          };
-
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (!value) continue;
-
-              sseBuffer += decoder.decode(value, { stream: true });
-              sseBuffer = consumeSseBuffer(sseBuffer);
-            }
-
-            sseBuffer += decoder.decode();
-            if (sseBuffer.trim().length > 0) {
-              sseBuffer = consumeSseBuffer(`${sseBuffer}\n\n`);
-            }
-          } finally {
-            reader.releaseLock();
-            if (!passthroughResponsesStream && !responsesState.completed) {
-              writeLines(completeResponsesStream(responsesState, streamContext, parsedUsage));
-            }
-            reply.raw.end();
-          }
+            },
+            writeLines,
+            writeRaw: (chunk) => {
+              reply.raw.write(chunk);
+            },
+          });
+          await streamSession.run(reader, reply.raw);
 
           const latency = Date.now() - startTime;
           const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
@@ -632,10 +423,11 @@ export async function responsesProxyRoute(app: FastifyInstance) {
           modelName,
           rawText,
         );
-        const downstreamData = serializeResponsesFinalPayload({
+        const downstreamData = openAiResponsesTransformer.outbound.serializeFinal({
           upstreamPayload: upstreamData,
           normalized,
           usage: parsedUsage,
+          serializationMode: isCompactRequest ? 'compact' : 'response',
         });
         const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
           site: selected.site,
@@ -670,7 +462,23 @@ export async function responsesProxyRoute(app: FastifyInstance) {
         return reply.send(downstreamData);
       } catch (err: any) {
         tokenRouter.recordFailure(selected.channel.id);
-        logProxy(selected, requestedModel, 'failed', 0, Date.now() - startTime, err.message, retryCount, downstreamPath);
+        logProxy(
+          selected,
+          requestedModel,
+          'failed',
+          0,
+          Date.now() - startTime,
+          err.message,
+          retryCount,
+          downstreamPath,
+          0,
+          0,
+          0,
+          0,
+          null,
+          null,
+          clientContext,
+        );
         if (retryCount < MAX_RETRIES) {
           retryCount += 1;
           continue;
@@ -707,10 +515,16 @@ async function logProxy(
   estimatedCost = 0,
   billingDetails: unknown = null,
   upstreamPath: string | null = null,
+  clientContext: DownstreamClientContext | null = null,
 ) {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
     const normalizedErrorMessage = composeProxyLogMessage({
+      clientKind: clientContext?.clientKind && clientContext.clientKind !== 'generic'
+        ? clientContext.clientKind
+        : null,
+      sessionId: clientContext?.sessionId || null,
+      traceHint: clientContext?.traceHint || null,
       downstreamPath,
       upstreamPath,
       errorMessage,

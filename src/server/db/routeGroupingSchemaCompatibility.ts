@@ -51,12 +51,48 @@ const ROUTE_GROUPING_COLUMN_COMPATIBILITY_SPECS: RouteGroupingColumnCompatibilit
     },
   },
   {
+    table: 'token_routes',
+    column: 'routing_strategy',
+    addSql: {
+      sqlite: 'ALTER TABLE token_routes ADD COLUMN routing_strategy text DEFAULT \'weighted\';',
+      mysql: 'ALTER TABLE `token_routes` ADD COLUMN `routing_strategy` VARCHAR(32) NULL DEFAULT \'weighted\'',
+      postgres: 'ALTER TABLE "token_routes" ADD COLUMN "routing_strategy" TEXT DEFAULT \'weighted\'',
+    },
+  },
+  {
     table: 'route_channels',
     column: 'source_model',
     addSql: {
       sqlite: 'ALTER TABLE route_channels ADD COLUMN source_model text;',
       mysql: 'ALTER TABLE `route_channels` ADD COLUMN `source_model` TEXT NULL',
       postgres: 'ALTER TABLE "route_channels" ADD COLUMN "source_model" TEXT',
+    },
+  },
+  {
+    table: 'route_channels',
+    column: 'last_selected_at',
+    addSql: {
+      sqlite: 'ALTER TABLE route_channels ADD COLUMN last_selected_at text;',
+      mysql: 'ALTER TABLE `route_channels` ADD COLUMN `last_selected_at` TEXT NULL',
+      postgres: 'ALTER TABLE "route_channels" ADD COLUMN "last_selected_at" TEXT',
+    },
+  },
+  {
+    table: 'route_channels',
+    column: 'consecutive_fail_count',
+    addSql: {
+      sqlite: 'ALTER TABLE route_channels ADD COLUMN consecutive_fail_count integer NOT NULL DEFAULT 0;',
+      mysql: 'ALTER TABLE `route_channels` ADD COLUMN `consecutive_fail_count` INT NOT NULL DEFAULT 0',
+      postgres: 'ALTER TABLE "route_channels" ADD COLUMN "consecutive_fail_count" INTEGER NOT NULL DEFAULT 0',
+    },
+  },
+  {
+    table: 'route_channels',
+    column: 'cooldown_level',
+    addSql: {
+      sqlite: 'ALTER TABLE route_channels ADD COLUMN cooldown_level integer NOT NULL DEFAULT 0;',
+      mysql: 'ALTER TABLE `route_channels` ADD COLUMN `cooldown_level` INT NOT NULL DEFAULT 0',
+      postgres: 'ALTER TABLE "route_channels" ADD COLUMN "cooldown_level" INTEGER NOT NULL DEFAULT 0',
     },
   },
 ];

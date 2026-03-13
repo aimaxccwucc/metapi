@@ -16,11 +16,76 @@ function cloneJsonValue<T>(value: T): T {
   return value;
 }
 
+function stableSerialize(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function mergeJsonArrays(existing: unknown[], incoming: unknown[]): unknown[] {
+  const merged = existing.map((item) => cloneJsonValue(item));
+  const seen = new Set(merged.map((item) => stableSerialize(item)));
+  for (const item of incoming) {
+    const cloned = cloneJsonValue(item);
+    const serialized = stableSerialize(cloned);
+    if (seen.has(serialized)) continue;
+    seen.add(serialized);
+    merged.push(cloned);
+  }
+  return merged;
+}
+
+function mergeJsonValues(existing: unknown, incoming: unknown): unknown {
+  if (incoming === undefined) return cloneJsonValue(existing);
+  if (existing === undefined) return cloneJsonValue(incoming);
+  if (Array.isArray(existing) && Array.isArray(incoming)) {
+    return mergeJsonArrays(existing, incoming);
+  }
+  if (isRecord(existing) && isRecord(incoming)) {
+    return mergeJsonRecords(existing, incoming);
+  }
+  return cloneJsonValue(incoming);
+}
+
+function mergeJsonRecords(existing: GeminiRecord, incoming: GeminiRecord): GeminiRecord {
+  const merged: GeminiRecord = Object.fromEntries(
+    Object.entries(existing).map(([key, value]) => [key, cloneJsonValue(value)]),
+  );
+
+  for (const [key, value] of Object.entries(incoming)) {
+    merged[key] = mergeJsonValues(merged[key], value);
+  }
+
+  return merged;
+}
+
 function pushUniqueJson(target: GeminiRecord[], incoming: unknown): void {
   if (!isRecord(incoming)) return;
-  const serialized = JSON.stringify(incoming);
-  if (target.some((item) => JSON.stringify(item) === serialized)) return;
+  const serialized = stableSerialize(incoming);
+  if (target.some((item) => stableSerialize(item) === serialized)) return;
   target.push(cloneJsonValue(incoming));
+}
+
+function isTextPart(value: unknown): value is GeminiRecord & { text: string } {
+  return isRecord(value) && typeof value.text === 'string';
+}
+
+function partComparableShape(value: GeminiRecord & { text: string }): string {
+  const { text: _text, ...rest } = value;
+  return stableSerialize(rest);
+}
+
+function appendPart(target: GeminiRecord[], incoming: unknown): void {
+  if (!isRecord(incoming)) return;
+  const next = cloneJsonValue(incoming);
+  if (isTextPart(next)) {
+    for (let index = target.length - 1; index >= 0; index -= 1) {
+      const existing = target[index];
+      if (!isTextPart(existing)) continue;
+      if (partComparableShape(existing) !== partComparableShape(next)) continue;
+      existing.text = `${existing.text}${next.text}`;
+      return;
+    }
+  }
+  target.push(next);
 }
 
 function collectPartsFromPayload(payload: unknown): GeminiRecord[] {
@@ -119,7 +184,7 @@ export function applyGeminiGenerateContentAggregate(
   payload: unknown,
 ): GeminiGenerateContentAggregateState {
   for (const part of collectPartsFromPayload(payload)) {
-    state.parts.push(part);
+    appendPart(state.parts, part);
     if (typeof part.thoughtSignature === 'string' && part.thoughtSignature.trim()) {
       if (!state.thoughtSignatures.includes(part.thoughtSignature)) {
         state.thoughtSignatures.push(part.thoughtSignature);
@@ -145,13 +210,17 @@ export function applyGeminiGenerateContentAggregate(
       if (candidate.groundingMetadata !== undefined) {
         pushUniqueJson(state.groundingMetadata, candidate.groundingMetadata);
         if (isRecord(candidate.groundingMetadata)) {
-          candidateAggregate.groundingMetadata = cloneJsonValue(candidate.groundingMetadata);
+          candidateAggregate.groundingMetadata = candidateAggregate.groundingMetadata
+            ? mergeJsonRecords(candidateAggregate.groundingMetadata, candidate.groundingMetadata)
+            : cloneJsonValue(candidate.groundingMetadata);
         }
       }
       if (candidate.citationMetadata !== undefined) {
         pushUniqueJson(state.citations, candidate.citationMetadata);
         if (isRecord(candidate.citationMetadata)) {
-          candidateAggregate.citationMetadata = cloneJsonValue(candidate.citationMetadata);
+          candidateAggregate.citationMetadata = candidateAggregate.citationMetadata
+            ? mergeJsonRecords(candidateAggregate.citationMetadata, candidate.citationMetadata)
+            : cloneJsonValue(candidate.citationMetadata);
         }
       }
       if (typeof candidate.finishReason === 'string' && candidate.finishReason.trim()) {
@@ -163,7 +232,7 @@ export function applyGeminiGenerateContentAggregate(
       if (content && Array.isArray(content.parts)) {
         for (const part of content.parts) {
           if (!isRecord(part)) continue;
-          candidateAggregate.parts.push(cloneJsonValue(part));
+          appendPart(candidateAggregate.parts, part);
         }
       }
     }

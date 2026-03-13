@@ -1,4 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fetchMock = vi.fn();
@@ -27,6 +29,45 @@ vi.mock('../../services/downstreamApiKeyService.js', () => ({
   authorizeDownstreamToken: (...args: unknown[]) => authorizeDownstreamTokenMock(...args),
   consumeManagedKeyRequest: (...args: unknown[]) => consumeManagedKeyRequestMock(...args),
 }));
+
+function parseSsePayloads(body: string): Array<Record<string, unknown>> {
+  return body
+    .split('\n\n')
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .map((block) => block
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n'),
+    )
+    .filter((data) => data && data !== '[DONE]')
+    .map((data) => JSON.parse(data) as Record<string, unknown>);
+}
+
+function readWorkspaceFile(relativePath: string): string {
+  return readFileSync(path.resolve(process.cwd(), relativePath), 'utf8');
+}
+
+describe('gemini transformer-owned path parsing', () => {
+  it('keeps apiVersion and modelActionPath parsing in transformer helpers', async () => {
+    const geminiRoute = readWorkspaceFile('src/server/routes/proxy/gemini.ts');
+
+    expect(geminiRoute).not.toContain('function resolveGeminiApiVersion(');
+    expect(geminiRoute).not.toContain('function extractGeminiModelActionPath(');
+
+    const { geminiGenerateContentTransformer } = await import('../../transformers/gemini/generate-content/index.js');
+    expect(geminiGenerateContentTransformer.parseProxyRequestPath({
+      rawUrl: '/gemini/v1/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
+      params: { geminiApiVersion: 'v1' },
+    })).toEqual({
+      apiVersion: 'v1',
+      modelActionPath: 'models/gemini-2.5-flash:streamGenerateContent',
+      requestedModel: 'gemini-2.5-flash',
+      isStreamAction: true,
+    });
+  });
+});
 
 describe('gemini native proxy routes', () => {
   let app: FastifyInstance;
@@ -200,6 +241,54 @@ describe('gemini native proxy routes', () => {
     });
   });
 
+  it('forwards explicit gemini version paths through transformer-owned parsing helpers', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: 'hello from v1 gemini' }],
+            role: 'model',
+          },
+          finishReason: 'STOP',
+        },
+      ],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/gemini/v1/models/gemini-2.5-flash:generateContent?alt=json',
+      headers: {
+        'x-goog-api-key': 'sk-managed-gemini',
+      },
+      payload: {
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: 'hello' }],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [targetUrl, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(targetUrl).toContain('/v1/models/gemini-2.5-flash:generateContent');
+    expect(targetUrl).toContain('alt=json');
+    expect(targetUrl).toContain('key=gemini-key');
+    expect(JSON.parse(String(requestInit.body))).toEqual({
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: 'hello' }],
+        },
+      ],
+    });
+    expect(response.json().candidates?.[0]?.content?.parts?.[0]?.text).toBe('hello from v1 gemini');
+  });
+
   it('preserves structured Gemini-native fields instead of narrowing them to a bare passthrough shell', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       candidates: [
@@ -301,7 +390,7 @@ describe('gemini native proxy routes', () => {
     });
   });
 
-  it('aggregates non-sse json-array streaming payloads into a final Gemini response', async () => {
+  it('keeps non-sse json-array streaming payloads on the wire as chunk responses', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify([
       {
         candidates: [
@@ -348,32 +437,45 @@ describe('gemini native proxy routes', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({
-      responseId: '',
-      modelVersion: '',
-      candidates: [
-        {
-          index: 0,
-          finishReason: 'STOP',
-          content: {
-            role: 'model',
-            parts: [
-              { text: 'first' },
-              { text: 'second', thoughtSignature: 'sig-1' },
-            ],
+    expect(response.json()).toEqual([
+      {
+        responseId: '',
+        modelVersion: '',
+        candidates: [
+          {
+            index: 0,
+            finishReason: 'STOP',
+            content: {
+              role: 'model',
+              parts: [{ text: 'first' }],
+            },
+            groundingMetadata: { source: 'web' },
           },
-          groundingMetadata: { source: 'web' },
-          citationMetadata: { citations: [{ startIndex: 0, endIndex: 5 }] },
-        },
-      ],
-      usageMetadata: {
-        promptTokenCount: 11,
-        candidatesTokenCount: 6,
-        totalTokenCount: 17,
-        cachedContentTokenCount: 2,
-        thoughtsTokenCount: 3,
+        ],
       },
-    });
+      {
+        responseId: '',
+        modelVersion: '',
+        candidates: [
+          {
+            index: 0,
+            finishReason: 'STOP',
+            content: {
+              role: 'model',
+              parts: [{ text: 'second', thoughtSignature: 'sig-1' }],
+            },
+            citationMetadata: { citations: [{ startIndex: 0, endIndex: 5 }] },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 11,
+          candidatesTokenCount: 6,
+          totalTokenCount: 17,
+          cachedContentTokenCount: 2,
+          thoughtsTokenCount: 3,
+        },
+      },
+    ]);
   });
 
   it('derives gemini-3 thinkingLevel from OpenAI-style reasoning inputs in the runtime request path', async () => {
@@ -428,12 +530,12 @@ describe('gemini native proxy routes', () => {
         },
       ],
       generationConfig: {
-        thinkingConfig: { thinkingLevel: 'high' },
+        thinkingConfig: { thinkingLevel: 'high', includeThoughts: true },
       },
     });
   });
 
-  it('aggregates SSE payloads through the transformer instead of raw passthrough', async () => {
+  it('streams SSE payloads as normalized chunk events instead of cumulative aggregate snapshots', async () => {
     const encoder = new TextEncoder();
     const upstreamBody = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -466,12 +568,53 @@ describe('gemini native proxy routes', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.headers['content-type']).toContain('text/event-stream');
-    expect(response.body).toContain('data: {"responseId":"resp-sse"');
-    expect(response.body).toContain('"groundingMetadata":{"source":"web"}');
-    expect(response.body).toContain('"citationMetadata":{"citations":[{"startIndex":0,"endIndex":5}]}');
-    expect(response.body).toContain('"cachedContentTokenCount":2');
-    expect(response.body).toContain('"thoughtsTokenCount":3');
-    expect(response.body).toContain('"parts":[{"text":"first"},{"text":"second","thoughtSignature":"sig-1"}]');
+    const events = parseSsePayloads(response.body);
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      responseId: 'resp-sse',
+      modelVersion: 'gemini-2.5-flash',
+      candidates: [
+        {
+          content: {
+            parts: [{ text: 'first' }],
+          },
+          groundingMetadata: { source: 'web' },
+        },
+      ],
+    });
+    expect(events[0]).not.toMatchObject({
+      candidates: [
+        {
+          citationMetadata: expect.anything(),
+        },
+      ],
+    });
+    expect(events[1]).toMatchObject({
+      usageMetadata: {
+        promptTokenCount: 11,
+        candidatesTokenCount: 6,
+        totalTokenCount: 17,
+        cachedContentTokenCount: 2,
+        thoughtsTokenCount: 3,
+      },
+      candidates: [
+        {
+          finishReason: 'STOP',
+          content: {
+            parts: [{ text: 'second', thoughtSignature: 'sig-1' }],
+          },
+          citationMetadata: { citations: [{ startIndex: 0, endIndex: 5 }] },
+        },
+      ],
+    });
+    expect(events[1]).not.toMatchObject({
+      candidates: [
+        {
+          groundingMetadata: expect.anything(),
+        },
+      ],
+    });
     expect(response.body).not.toContain('\r\n\r\n');
   });
 

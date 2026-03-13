@@ -30,23 +30,11 @@ async function request(url: string, options: RequestOptions = {}) {
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${token}`,
   };
-  const method = String(fetchOptions.method || 'GET').toUpperCase();
-  const isMutatingJsonMethod = method === 'POST' || method === 'PUT' || method === 'PATCH';
-  const rawBody = fetchOptions.body;
-  const isFormDataBody = typeof FormData !== 'undefined' && rawBody instanceof FormData;
-  const hasBody = rawBody !== undefined && rawBody !== null;
-  const normalizedBody = (!isFormDataBody && isMutatingJsonMethod && !hasBody)
-    ? '{}'
-    : rawBody;
-
-  if (!isFormDataBody && (hasBody || isMutatingJsonMethod)) {
-    headers['Content-Type'] = 'application/json';
-  }
+  if (fetchOptions.body) headers['Content-Type'] = 'application/json';
 
   try {
     const res = await fetch(url, {
       ...fetchOptions,
-      body: normalizedBody,
       signal: controller.signal,
       headers: {
         ...headers,
@@ -96,6 +84,17 @@ async function request(url: string, options: RequestOptions = {}) {
   }
 }
 
+function buildQueryString(params?: Record<string, string | number | boolean | null | undefined>) {
+  if (!params) return '';
+  const searchParams = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue;
+    searchParams.set(key, String(value));
+  }
+  const serialized = searchParams.toString();
+  return serialized ? `?${serialized}` : '';
+}
+
 type TestChatRequestPayload = {
   model: string;
   messages: Array<{ role: string; content: string }>;
@@ -142,6 +141,92 @@ export type ProxyTestJobResponse = {
   expiresAt?: string;
 };
 
+export type ProxyLogStatusFilter = 'all' | 'success' | 'failed';
+
+export type ProxyLogBillingDetails = {
+  quotaType: number;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    billablePromptTokens: number;
+    promptTokensIncludeCache: boolean | null;
+  };
+  pricing: {
+    modelRatio: number;
+    completionRatio: number;
+    cacheRatio: number;
+    cacheCreationRatio: number;
+    groupRatio: number;
+  };
+  breakdown: {
+    inputPerMillion: number;
+    outputPerMillion: number;
+    cacheReadPerMillion: number;
+    cacheCreationPerMillion: number;
+    inputCost: number;
+    outputCost: number;
+    cacheReadCost: number;
+    cacheCreationCost: number;
+    totalCost: number;
+  };
+} | null;
+
+export type ProxyLogListItem = {
+  id: number;
+  createdAt: string;
+  modelRequested: string;
+  modelActual: string;
+  status: string;
+  latencyMs: number;
+  totalTokens: number | null;
+  retryCount: number;
+  accountId?: number | null;
+  siteId?: number | null;
+  username?: string | null;
+  siteName?: string | null;
+  siteUrl?: string | null;
+  errorMessage?: string | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  estimatedCost?: number | null;
+};
+
+export type ProxyLogDetail = ProxyLogListItem & {
+  routeId?: number | null;
+  channelId?: number | null;
+  httpStatus?: number | null;
+  billingDetails?: ProxyLogBillingDetails;
+};
+
+export type ProxyLogsSummary = {
+  totalCount: number;
+  successCount: number;
+  failedCount: number;
+  totalCost: number;
+  totalTokensAll: number;
+};
+
+export type ProxyLogsQuery = {
+  limit?: number;
+  offset?: number;
+  status?: ProxyLogStatusFilter;
+  search?: string;
+  siteId?: number;
+  from?: string;
+  to?: string;
+};
+
+export type ProxyLogsResponse = {
+  items: ProxyLogListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  summary: ProxyLogsSummary;
+};
+
 export const api = {
   // Sites
   getSites: () => request('/api/sites'),
@@ -150,30 +235,12 @@ export const api = {
   deleteSite: (id: number) => request(`/api/sites/${id}`, { method: 'DELETE' }),
   batchUpdateSites: (data: any) => request('/api/sites/batch', { method: 'POST', body: JSON.stringify(data) }),
   detectSite: (url: string) => request('/api/sites/detect', { method: 'POST', body: JSON.stringify({ url }) }),
-  refreshSiteHealth: (data?: { wait?: boolean }) => request('/api/sites/health/refresh', {
-    method: 'POST',
-    body: JSON.stringify(data || {}),
-    timeoutMs: data?.wait ? 150_000 : 30_000,
-  }),
-  cleanupUnreachableSites: (data?: { wait?: boolean; dryRun?: boolean }) => request('/api/sites/cleanup-unreachable', {
-    method: 'POST',
-    body: JSON.stringify(data || {}),
-    timeoutMs: data?.wait ? 150_000 : 30_000,
-  }),
 
   // Accounts
   getAccounts: () => request('/api/accounts'),
-  addAccount: (data: any) => request('/api/accounts', {
-    method: 'POST',
-    body: JSON.stringify(data),
-    timeoutMs: 120_000,
-  }),
+  addAccount: (data: any) => request('/api/accounts', { method: 'POST', body: JSON.stringify(data) }),
   loginAccount: (data: { siteId: number; username: string; password: string }) => request('/api/accounts/login', { method: 'POST', body: JSON.stringify(data) }),
-  verifyToken: (data: { siteId: number; accessToken: string; platformUserId?: number; credentialMode?: 'auto' | 'session' | 'apikey' }) => request('/api/accounts/verify-token', {
-    method: 'POST',
-    body: JSON.stringify(data),
-    timeoutMs: 90_000,
-  }),
+  verifyToken: (data: { siteId: number; accessToken: string; platformUserId?: number; credentialMode?: 'auto' | 'session' | 'apikey' }) => request('/api/accounts/verify-token', { method: 'POST', body: JSON.stringify(data) }),
   rebindAccountSession: (id: number, data: { accessToken: string; platformUserId?: number; refreshToken?: string; tokenExpiresAt?: number }) =>
     request(`/api/accounts/${id}/rebind-session`, { method: 'POST', body: JSON.stringify(data) }),
   updateAccount: (id: number, data: any) => request(`/api/accounts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
@@ -184,11 +251,6 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(data || {}),
     timeoutMs: data?.wait ? 150_000 : 30_000,
-  }),
-  repairAccountKeys: (data?: { wait?: boolean }) => request('/api/accounts/keys/repair', {
-    method: 'POST',
-    body: JSON.stringify(data || {}),
-    timeoutMs: data?.wait ? 180_000 : 30_000,
   }),
 
   // Account tokens
@@ -215,6 +277,11 @@ export const api = {
 
   // Routes
   getRoutes: () => request('/api/routes'),
+  getRoutesLite: () => request('/api/routes/lite'),
+  getRoutesSummary: () => request('/api/routes/summary'),
+  getRouteChannels: (routeId: number) => request(`/api/routes/${routeId}/channels`),
+  batchAddChannels: (routeId: number, channels: Array<{ accountId: number; tokenId?: number; sourceModel?: string }>) =>
+    request(`/api/routes/${routeId}/channels/batch`, { method: 'POST', body: JSON.stringify({ channels }) }),
   addRoute: (data: any) => request('/api/routes', { method: 'POST', body: JSON.stringify(data) }),
   updateRoute: (id: number, data: any) => request(`/api/routes/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteRoute: (id: number) => request(`/api/routes/${id}`, { method: 'DELETE' }),
@@ -256,8 +323,8 @@ export const api = {
 
   // Stats
   getDashboard: () => request('/api/stats/dashboard'),
-  getProxyLogs: (params?: string) => request(`/api/stats/proxy-logs${params ? '?' + params : ''}`),
-  getProxyVideoTasks: (params?: string) => request(`/api/stats/proxy-video-tasks${params ? '?' + params : ''}`),
+  getProxyLogs: (params?: ProxyLogsQuery) => request(`/api/stats/proxy-logs${buildQueryString(params)}`) as Promise<ProxyLogsResponse>,
+  getProxyLogDetail: (id: number) => request(`/api/stats/proxy-logs/${id}`) as Promise<ProxyLogDetail>,
   checkModels: (accountId: number) => request(`/api/models/check/${accountId}`, { method: 'POST' }),
   getSiteDistribution: () => request('/api/stats/site-distribution'),
   getSiteTrend: (days = 7) => request(`/api/stats/site-trend?days=${days}`),
@@ -325,11 +392,6 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ data }),
     }),
-  importAllApiHubMerge: (data: any) =>
-    request('/api/settings/backup/import-all-api-hub-merge', {
-      method: 'POST',
-      body: JSON.stringify({ data }),
-    }),
   clearRuntimeCache: () => request('/api/settings/maintenance/clear-cache', { method: 'POST' }),
   clearUsageData: () => request('/api/settings/maintenance/clear-usage', { method: 'POST' }),
   factoryReset: () => request('/api/settings/maintenance/factory-reset', { method: 'POST' }),
@@ -351,11 +413,6 @@ export const api = {
     const query = params.toString();
     return request(`/api/models/marketplace${query ? `?${query}` : ''}`, { timeoutMs: options?.refresh ? 45_000 : 15_000 });
   },
-  testMarketplaceModelAvailability: (data: { modelName: string; accountId?: number; siteName?: string }) => request('/api/models/marketplace/test', {
-    method: 'POST',
-    body: JSON.stringify(data),
-    timeoutMs: 45_000,
-  }),
   getModelTokenCandidates: () => request('/api/models/token-candidates'),
 
   // Simple chat test from admin panel

@@ -1,16 +1,12 @@
-import { lt } from 'drizzle-orm';
 import { config } from '../config.js';
-import { db, schema } from '../db/index.js';
-import { formatUtcSqlDateTime } from './localTimeService.js';
-
-const DAY_MS = 24 * 60 * 60 * 1000;
+import { cleanupUsageLogs, getLogCleanupCutoffUtc } from './logCleanupService.js';
 
 let retentionTimer: ReturnType<typeof setInterval> | null = null;
 
 export function getProxyLogRetentionCutoffUtc(nowMs = Date.now()): string | null {
   const days = Math.max(0, Math.trunc(config.proxyLogRetentionDays));
   if (days <= 0) return null;
-  return formatUtcSqlDateTime(new Date(nowMs - days * DAY_MS));
+  return getLogCleanupCutoffUtc(days, nowMs);
 }
 
 export async function cleanupExpiredProxyLogs(nowMs = Date.now()): Promise<{
@@ -30,10 +26,7 @@ export async function cleanupExpiredProxyLogs(nowMs = Date.now()): Promise<{
     };
   }
 
-  const deleted = (await db.delete(schema.proxyLogs)
-    .where(lt(schema.proxyLogs.createdAt, cutoffUtc))
-    .run())
-    .changes;
+  const { deleted } = await cleanupUsageLogs(retentionDays, nowMs);
 
   return {
     enabled: true,
@@ -67,4 +60,12 @@ export function stopProxyLogRetentionService(): void {
   if (!retentionTimer) return;
   clearInterval(retentionTimer);
   retentionTimer = null;
+}
+
+export function setLegacyProxyLogRetentionFallbackEnabled(enabled: boolean): void {
+  if (enabled) {
+    startProxyLogRetentionService();
+    return;
+  }
+  stopProxyLogRetentionService();
 }

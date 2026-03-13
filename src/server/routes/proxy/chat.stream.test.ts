@@ -201,6 +201,117 @@ describe('chat proxy stream behavior', () => {
     expect(response.body).toContain('data: [DONE]');
   });
 
+  it('normalizes inline think tags into reasoning_content for /v1/chat/completions streams', async () => {
+    const encoder = new TextEncoder();
+    const upstreamBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think","model":"upstream-gpt","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think","model":"upstream-gpt","choices":[{"delta":{"content":"<think>plan quietly</think>"},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think","model":"upstream-gpt","choices":[{"delta":{"content":"visible answer"},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think","model":"upstream-gpt","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    fetchMock.mockResolvedValue(new Response(upstreamBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-4o-mini',
+        stream: true,
+        messages: [{ role: 'user', content: 'show your work and answer' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('"reasoning_content":"plan quietly"');
+    expect(response.body).toContain('"content":"visible answer"');
+    expect(response.body).not.toContain('<think>');
+    expect(response.body).not.toContain('</think>');
+    expect(response.body).toContain('data: [DONE]');
+  });
+
+  it('tracks split inline think tags across SSE chunks for /v1/chat/completions streams', async () => {
+    const encoder = new TextEncoder();
+    const upstreamBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think-split","model":"upstream-gpt","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think-split","model":"upstream-gpt","choices":[{"delta":{"content":"<thin"},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think-split","model":"upstream-gpt","choices":[{"delta":{"content":"k>plan "},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think-split","model":"upstream-gpt","choices":[{"delta":{"content":"quietly</th"},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think-split","model":"upstream-gpt","choices":[{"delta":{"content":"ink>visible "},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think-split","model":"upstream-gpt","choices":[{"delta":{"content":"answer"},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-think-split","model":"upstream-gpt","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    fetchMock.mockResolvedValue(new Response(upstreamBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-4o-mini',
+        stream: true,
+        messages: [{ role: 'user', content: 'show your work and answer' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('"reasoning_content":"plan "');
+    expect(response.body).toContain('"reasoning_content":"quietly"');
+    expect(response.body).toContain('"content":"visible "');
+    expect(response.body).toContain('"content":"answer"');
+    expect(response.body).not.toContain('<think>');
+    expect(response.body).not.toContain('</think>');
+    expect(response.body).not.toContain('<thin');
+    expect(response.body).not.toContain('quietly</th');
+    expect(response.body).not.toContain('ink>visible');
+    expect(response.body).toContain('data: [DONE]');
+  });
+
+  it('synthesizes a terminal finish chunk when /v1/chat/completions upstream EOFs after visible content', async () => {
+    const encoder = new TextEncoder();
+    const upstreamBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-eof","model":"upstream-gpt","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"id":"chatcmpl-eof","model":"upstream-gpt","choices":[{"delta":{"content":"tail before eof"},"finish_reason":null}]}\n\n'));
+        controller.close();
+      },
+    });
+
+    fetchMock.mockResolvedValue(new Response(upstreamBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-4o-mini',
+        stream: true,
+        messages: [{ role: 'user', content: 'finish cleanly' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('tail before eof');
+    expect(response.body).toContain('"finish_reason":"stop"');
+    expect(response.body).toContain('data: [DONE]');
+  });
+
   it('normalizes anthropic-style SSE events into OpenAI chunks for clients like OpenWebUI', async () => {
     const encoder = new TextEncoder();
     const upstreamBody = new ReadableStream<Uint8Array>({
@@ -486,6 +597,40 @@ describe('chat proxy stream behavior', () => {
     expect(response.body).not.toContain('event: ping');
   });
 
+  it('does not synthesize message_stop when anthropic upstream EOFs before terminal event on /v1/messages', async () => {
+    const encoder = new TextEncoder();
+    const upstreamBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_eof_early","model":"claude-opus-4-6"}}\n\n'));
+        controller.enqueue(encoder.encode('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'));
+        controller.enqueue(encoder.encode('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n'));
+        controller.close();
+      },
+    });
+
+    fetchMock.mockResolvedValue(new Response(upstreamBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/messages',
+      payload: {
+        model: 'claude-opus-4-6',
+        stream: true,
+        max_tokens: 256,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('event: message_start');
+    expect(response.body).toContain('event: content_block_delta');
+    expect(response.body).not.toContain('event: message_stop');
+    expect(response.body).not.toContain('"stop_reason":"end_turn"');
+  });
+
   it('normalizes Claude thinking adaptive type for legacy upstreams on /v1/messages', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       id: 'msg_headers_adaptive',
@@ -565,8 +710,87 @@ describe('chat proxy stream behavior', () => {
 
     expect(Array.isArray(firstBody.messages)).toBe(true);
     expect(Array.isArray(secondBody.messages)).toBe(true);
-    expect(typeof secondBody.messages[0]?.content).toBe('string');
-    expect(secondBody.messages[0]?.content).toContain('hello');
+    expect(Array.isArray(secondBody.messages[0]?.content)).toBe(true);
+    expect(secondBody.messages[0]?.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'text',
+          text: expect.stringContaining('hello'),
+        }),
+      ]),
+    );
+  });
+
+  it('keeps native Claude file blocks when retrying /v1/messages with normalized body', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          type: '<nil>',
+          message: 'messages is required',
+        },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'msg_retry_file_ok',
+        type: 'message',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'ok after normalized fallback' }],
+        stop_reason: 'end_turn',
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/messages',
+      payload: {
+        model: 'claude-opus-4-6',
+        max_tokens: 256,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'summarize this file' },
+              {
+                type: 'file',
+                file: {
+                  filename: 'brief.pdf',
+                  file_data: 'JVBERi0xLjc=',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock.mock.calls.length).toBe(2);
+
+    const [_firstUrl, firstOptions] = fetchMock.mock.calls[0] as [string, any];
+    const [_secondUrl, secondOptions] = fetchMock.mock.calls[1] as [string, any];
+    const firstBody = JSON.parse(firstOptions.body);
+    const secondBody = JSON.parse(secondOptions.body);
+
+    expect(firstBody.messages[0]?.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'document',
+          title: 'brief.pdf',
+        }),
+      ]),
+    );
+    expect(secondBody.messages[0]?.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'document',
+          title: 'brief.pdf',
+        }),
+      ]),
+    );
   });
 
   it('downgrades to next endpoint when normalized Claude fallback still returns messages is required', async () => {
@@ -760,7 +984,7 @@ describe('chat proxy stream behavior', () => {
     expect(body.output_text).toContain('ok from messages fallback');
   });
 
-  it('passes through /v1/responses SSE payloads', async () => {
+  it('canonicalizes native /v1/responses SSE payloads instead of passing them through raw', async () => {
     const encoder = new TextEncoder();
     const upstreamBody = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -788,6 +1012,9 @@ describe('chat proxy stream behavior', () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers['content-type']).toContain('text/event-stream');
     expect(response.body).toContain('response.output_text.delta');
+    expect(response.body).toContain('response.output_text.done');
+    expect(response.body).toContain('response.output_item.done');
+    expect(response.body).toContain('response.completed');
     expect(response.body).toContain('[DONE]');
   });
 
@@ -963,6 +1190,7 @@ describe('chat proxy stream behavior', () => {
     const forwardedBody = JSON.parse(options.body);
     expect(forwardedBody.metadata).toEqual({ session_id: 'abc123' });
     expect(forwardedBody.reasoning).toEqual({ effort: 'high' });
+    expect(forwardedBody.include).toEqual(['reasoning.encrypted_content']);
   });
 
   it('retries /v1/responses without metadata when upstream returns empty upstream_error', async () => {
@@ -1444,7 +1672,7 @@ describe('chat proxy stream behavior', () => {
     expect(deltaMatches.length).toBe(1);
     const textMatches = response.body.match(/I'm Claude, an AI assistant made by Anthropic\./g) || [];
     expect(textMatches.length).toBeGreaterThan(0);
-    expect(textMatches.length).toBeLessThanOrEqual(4);
+    expect(textMatches.length).toBeLessThanOrEqual(6);
   });
 
   it('deduplicates overlapping text windows when /v1/responses is converted from /v1/messages stream', async () => {
@@ -1694,6 +1922,394 @@ describe('chat proxy stream behavior', () => {
     expect(body.object).toBe('response');
     expect(body.output_text).toContain('hello from anthropic messages upstream');
 
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [targetUrl] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/messages');
+  });
+
+  it('prefers native /v1/responses for claude-family /v1/responses requests that explicitly ask for encrypted reasoning', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_reasoning_1',
+      object: 'response',
+      model: 'upstream-gpt',
+      output_text: 'hello from responses upstream',
+      output: [
+        {
+          id: 'msg_reasoning_1',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'hello from responses upstream' }],
+        },
+      ],
+      status: 'completed',
+      usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'claude-haiku-4-5-20251001',
+        input: 'hello',
+        include: ['reasoning.encrypted_content'],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [targetUrl] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/responses');
+  });
+
+  it('prefers native /v1/responses for claude-family /v1/responses requests that include input_file file_url', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_file_url_1',
+      object: 'response',
+      model: 'upstream-gpt',
+      output_text: 'hello from responses upstream',
+      output: [
+        {
+          id: 'msg_file_url_1',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'hello from responses upstream' }],
+        },
+      ],
+      status: 'completed',
+      usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'claude-haiku-4-5-20251001',
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [
+              { type: 'input_text', text: 'read this remote file' },
+              {
+                type: 'input_file',
+                filename: 'remote.pdf',
+                file_url: 'https://example.com/remote.pdf',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/responses');
+    const forwardedBody = JSON.parse(options.body);
+    expect(forwardedBody.input[0].content[1]).toEqual({
+      type: 'input_file',
+      filename: 'remote.pdf',
+      file_url: 'https://example.com/remote.pdf',
+    });
+  });
+
+  it('returns clear 400 when input_file file_url is sent to a claude-only upstream without native responses support', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'claude-site', url: 'https://upstream.example.com', platform: 'claude' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-claude',
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'claude-haiku-4-5-20251001',
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [
+              { type: 'input_text', text: 'read this remote file' },
+              {
+                type: 'input_file',
+                filename: 'remote.pdf',
+                file_url: 'https://example.com/remote.pdf',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json();
+    expect(body?.error?.type).toBe('invalid_request_error');
+    expect(body?.error?.message).toContain('input_file.file_url');
+    expect(body?.error?.message).toContain('/v1/responses');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('prefers native /v1/responses for claude-family /v1/responses requests that opt into reasoning without injecting a generic default include', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_reasoning_2',
+      object: 'response',
+      model: 'upstream-gpt',
+      output_text: 'hello from responses upstream',
+      output: [
+        {
+          id: 'msg_reasoning_2',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'hello from responses upstream' }],
+        },
+      ],
+      status: 'completed',
+      usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'claude-haiku-4-5-20251001',
+        input: 'hello',
+        reasoning: {
+          effort: 'high',
+          summary: 'auto',
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/responses');
+    const forwardedBody = JSON.parse(options.body);
+    expect(forwardedBody.include).toBeUndefined();
+  });
+
+  it('keeps generic claude-family /v1/responses requests on the default messages-first order when codex headers are absent', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'msg_default_messages_first',
+      type: 'message',
+      model: 'upstream-gpt',
+      content: [{ type: 'text', text: 'messages endpoint selected by default' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'claude-haiku-4-5-20251001',
+        input: 'hello',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [targetUrl] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/messages');
+  });
+
+  it('defaults encrypted reasoning include and prefers native /v1/responses for claude-family codex-surface requests even without reasoning config', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_reasoning_default',
+      object: 'response',
+      model: 'upstream-gpt',
+      output_text: 'hello from responses upstream',
+      output: [
+        {
+          id: 'msg_reasoning_default',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'hello from responses upstream' }],
+        },
+      ],
+      status: 'completed',
+      usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: {
+        'openai-beta': 'responses-2025-03-11',
+        'x-stainless-lang': 'typescript',
+        originator: 'codex_cli_rs',
+      },
+      payload: {
+        model: 'claude-haiku-4-5-20251001',
+        input: 'hello',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/responses');
+    const forwardedBody = JSON.parse(options.body);
+    expect(forwardedBody.include).toEqual(['reasoning.encrypted_content']);
+  });
+
+  it('keeps explicit empty include on claude-family codex-surface responses requests and stays on the default messages-first order', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'msg_explicit_empty_include',
+      type: 'message',
+      model: 'upstream-gpt',
+      content: [{ type: 'text', text: 'messages endpoint selected because include stayed empty' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: {
+        'openai-beta': 'responses-2025-03-11',
+        'x-stainless-lang': 'typescript',
+        originator: 'codex_cli_rs',
+      },
+      payload: {
+        model: 'claude-haiku-4-5-20251001',
+        input: 'hello',
+        reasoning: {
+          effort: 'high',
+          summary: 'auto',
+        },
+        include: [],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [targetUrl] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/messages');
+  });
+
+  it('keeps explicit custom include on claude-family codex-surface responses requests and stays on the default messages-first order', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'msg_explicit_custom_include',
+      type: 'message',
+      model: 'upstream-gpt',
+      content: [{ type: 'text', text: 'messages endpoint selected because custom include stayed explicit' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: {
+        'openai-beta': 'responses-2025-03-11',
+        'x-stainless-lang': 'typescript',
+        originator: 'codex_cli_rs',
+      },
+      payload: {
+        model: 'claude-haiku-4-5-20251001',
+        input: 'hello',
+        reasoning: {
+          effort: 'high',
+          summary: 'auto',
+        },
+        include: ['message.input_image.image_url'],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [targetUrl] = fetchMock.mock.calls[0] as [string, any];
     expect(targetUrl).toContain('/v1/messages');
