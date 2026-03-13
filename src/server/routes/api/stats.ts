@@ -985,8 +985,8 @@ export async function statsRoutes(app: FastifyInstance) {
       .innerJoin(schema.accounts, eq(schema.checkinLogs.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(and(
-        gte(sql`datetime(${schema.checkinLogs.createdAt})`, todayStartUtc),
-        lt(sql`datetime(${schema.checkinLogs.createdAt})`, todayEndUtc),
+        gte(schema.checkinLogs.createdAt, todayStartUtc),
+        lt(schema.checkinLogs.createdAt, todayEndUtc),
         eq(schema.sites.status, 'active'),
       ))
       .all();
@@ -1056,8 +1056,8 @@ export async function statsRoutes(app: FastifyInstance) {
       .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
       .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .where(and(
-        gte(sql`datetime(${schema.proxyLogs.createdAt})`, todayStartUtc),
-        lt(sql`datetime(${schema.proxyLogs.createdAt})`, todayEndUtc),
+        gte(schema.proxyLogs.createdAt, todayStartUtc),
+        lt(schema.proxyLogs.createdAt, todayEndUtc),
         eq(schema.sites.status, 'active'),
       ))
       .get();
