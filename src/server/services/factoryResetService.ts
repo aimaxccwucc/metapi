@@ -1,6 +1,6 @@
 import { buildConfig, config } from '../config.js';
 import { db, schema, switchRuntimeDatabase } from '../db/index.js';
-import { updateBalanceRefreshCron, updateCheckinCron, updateLogCleanupSettings } from './checkinScheduler.js';
+import { updateBalanceRefreshCron, updateCheckinCron } from './checkinScheduler.js';
 import { ensureDefaultSitesSeeded } from './defaultSiteSeedService.js';
 import { startProxyLogRetentionService } from './proxyLogRetentionService.js';
 import { invalidateSiteProxyCache } from './siteProxy.js';
@@ -45,12 +45,7 @@ function resetRuntimeConfigToInitialState() {
   config.logCleanupRetentionDays = Math.max(1, Math.trunc(config.proxyLogRetentionDays || config.logCleanupRetentionDays || 30));
   updateCheckinCron(config.checkinCron);
   updateBalanceRefreshCron(config.balanceRefreshCron);
-  updateLogCleanupSettings({
-    cronExpr: config.logCleanupCron,
-    usageLogsEnabled: config.logCleanupUsageLogsEnabled,
-    programLogsEnabled: config.logCleanupProgramLogsEnabled,
-    retentionDays: config.logCleanupRetentionDays,
-  });
+  // updateLogCleanupSettings - 保留本地 checkinScheduler 版本，暂不支持日志清理
   startProxyLogRetentionService();
   invalidateSiteProxyCache();
 }

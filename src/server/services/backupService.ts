@@ -392,6 +392,7 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         platform,
         proxyUrl: null,
         useSystemProxy: false,
+        customHeaders: null,
         status: 'active',
         healthStatus: 'unknown',
         healthReason: null,
