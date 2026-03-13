@@ -8,7 +8,7 @@ import {
   type ClaudeDownstreamContext,
   type StreamTransformContext,
 } from '../../shared/normalized.js';
-import { extractChatResponseExtras } from './helpers.js';
+import { extractChatChoiceEvents, extractChatResponseExtras } from './helpers.js';
 import type { OpenAiChatNormalizedStreamEvent } from './model.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -36,8 +36,35 @@ export const openAiChatStream = {
     return createStreamTransformContext(modelName);
   },
   normalizeEvent(payload: unknown, context: StreamTransformContext, modelName: string): OpenAiChatNormalizedStreamEvent {
+    const normalized = normalizeUpstreamStreamEvent(payload, context, modelName);
+    const choiceEvents = extractChatChoiceEvents(payload);
+    const primaryChoice = choiceEvents[0];
+    const normalizedChoiceEvents = choiceEvents.map((choiceEvent, index) => (
+      index === 0
+        ? {
+          ...choiceEvent,
+          role: normalized.role !== undefined ? normalized.role : choiceEvent.role,
+          contentDelta: normalized.contentDelta,
+          reasoningDelta: normalized.reasoningDelta,
+          toolCallDeltas: normalized.toolCallDeltas !== undefined
+            ? normalized.toolCallDeltas
+            : choiceEvent.toolCallDeltas,
+          finishReason: normalized.finishReason !== undefined
+            ? normalized.finishReason
+            : choiceEvent.finishReason,
+        }
+        : choiceEvent
+    ));
     return {
-      ...normalizeUpstreamStreamEvent(payload, context, modelName),
+      ...normalized,
+      ...(primaryChoice
+        ? {
+          choiceIndex: primaryChoice.index,
+          annotations: primaryChoice.annotations,
+          citations: primaryChoice.citations,
+        }
+        : {}),
+      ...(normalizedChoiceEvents.length > 0 ? { choiceEvents: normalizedChoiceEvents } : {}),
       ...extractChatResponseExtras(payload),
     };
   },
@@ -46,6 +73,60 @@ export const openAiChatStream = {
     context: StreamTransformContext,
     downstreamContext?: ClaudeDownstreamContext,
   ): string[] {
+    if (
+      Array.isArray(event.choiceEvents)
+      && event.choiceEvents.length > 0
+      && (event.choiceEvents.length > 1 || event.choiceEvents[0]?.index !== 0)
+    ) {
+      const usagePayload = event.usagePayload
+        ? {
+          ...(isRecord(event.usagePayload) ? event.usagePayload : {}),
+          ...(event.usageDetails?.prompt_tokens_details
+            ? { prompt_tokens_details: event.usageDetails.prompt_tokens_details }
+            : {}),
+          ...(event.usageDetails?.completion_tokens_details
+            ? { completion_tokens_details: event.usageDetails.completion_tokens_details }
+            : {}),
+        }
+        : undefined;
+      return [`data: ${JSON.stringify({
+        id: context.id || `chatcmpl-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: context.created,
+        model: context.model,
+        choices: event.choiceEvents
+          .map((choiceEvent) => {
+            const delta: Record<string, unknown> = {};
+            if (choiceEvent.role) delta.role = choiceEvent.role;
+            if (choiceEvent.contentDelta !== undefined) delta.content = choiceEvent.contentDelta;
+            if (choiceEvent.reasoningDelta) delta.reasoning_content = choiceEvent.reasoningDelta;
+            if (Array.isArray(choiceEvent.toolCallDeltas) && choiceEvent.toolCallDeltas.length > 0) {
+              delta.tool_calls = choiceEvent.toolCallDeltas.map((toolCall) => ({
+                index: toolCall.index,
+                ...(toolCall.id ? { id: toolCall.id } : {}),
+                type: 'function',
+                function: {
+                  ...(toolCall.name ? { name: toolCall.name } : {}),
+                  ...(toolCall.argumentsDelta !== undefined ? { arguments: toolCall.argumentsDelta } : {}),
+                },
+              }));
+            }
+            if (Array.isArray(choiceEvent.annotations) && choiceEvent.annotations.length > 0) {
+              delta.annotations = choiceEvent.annotations;
+            }
+
+            return {
+              index: choiceEvent.index,
+              delta,
+              finish_reason: choiceEvent.finishReason ?? null,
+            };
+          })
+          .sort((left, right) => left.index - right.index),
+        ...(Array.isArray(event.citations) && event.citations.length > 0 ? { citations: event.citations } : {}),
+        ...(usagePayload && Object.keys(usagePayload).length > 0 ? { usage: usagePayload } : {}),
+      })}\n\n`];
+    }
+
     const lines = serializeNormalizedStreamEvent(
       'openai',
       event,

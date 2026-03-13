@@ -300,6 +300,19 @@ export class NewApiAdapter extends BasePlatformAdapter {
     return [];
   }
 
+  private isTokenListResponse(payload: any): boolean {
+    if (!payload || typeof payload !== 'object') return false;
+    if (payload?.success === true) return true;
+    return (
+      Array.isArray(payload?.data)
+      || Array.isArray(payload?.data?.items)
+      || Array.isArray(payload?.data?.data)
+      || Array.isArray(payload?.items)
+      || Array.isArray(payload?.list)
+      || Array.isArray(payload?.data?.list)
+    );
+  }
+
   private normalizeTokenKeyForCompare(value?: string | null): string {
     const trimmed = (value || '').trim();
     return trimmed.startsWith('Bearer ') ? trimmed.slice(7).trim() : trimmed;
@@ -1336,6 +1349,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
       });
       const normalized = this.normalizeTokenItems(this.parseTokenItems(res));
       if (normalized.length > 0) return normalized;
+      if (this.isTokenListResponse(res)) return [];
     } catch {}
 
     const cookieTokens = await this.getApiTokensByCookie(baseUrl, accessToken, userId);

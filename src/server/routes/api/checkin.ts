@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
+import { upsertSetting } from '../../db/upsertSetting.js';
 import { eq, desc } from 'drizzle-orm';
 import { checkinAccount, checkinAll } from '../../services/checkinService.js';
 import { updateCheckinCron } from '../../services/checkinScheduler.js';
@@ -144,8 +145,7 @@ export async function checkinRoutes(app: FastifyInstance) {
   app.put<{ Body: { cron: string } }>('/api/checkin/schedule', async (request) => {
     try {
       updateCheckinCron(request.body.cron);
-      await db.insert(schema.settings).values({ key: 'checkin_cron', value: JSON.stringify(request.body.cron) })
-        .onConflictDoUpdate({ target: schema.settings.key, set: { value: JSON.stringify(request.body.cron) } }).run();
+      await upsertSetting('checkin_cron', request.body.cron);
       return { success: true, cron: request.body.cron };
     } catch (err: any) {
       return { error: err.message };

@@ -7,7 +7,7 @@ import { isTokenExpiredError } from '../../services/alertRules.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
-import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import { withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { cloneFormDataWithOverrides, ensureMultipartBufferParser, parseMultipartFormData } from './multipart.js';
 import {
   deleteProxyVideoTaskByPublicId,
@@ -199,12 +199,13 @@ export async function videosProxyRoute(app: FastifyInstance) {
       });
     }
 
-    const upstream = await fetch(`${mapping.siteUrl}/v1/videos/${encodeURIComponent(mapping.upstreamVideoId)}`, {
+    const targetUrl = `${mapping.siteUrl}/v1/videos/${encodeURIComponent(mapping.upstreamVideoId)}`;
+    const upstream = await fetch(targetUrl, await withSiteProxyRequestInit(targetUrl, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${mapping.tokenValue}`,
       },
-    });
+    }));
     const text = await upstream.text();
     try {
       const data = JSON.parse(text);
@@ -229,12 +230,13 @@ export async function videosProxyRoute(app: FastifyInstance) {
       });
     }
 
-    const upstream = await fetch(`${mapping.siteUrl}/v1/videos/${encodeURIComponent(mapping.upstreamVideoId)}`, {
+    const targetUrl = `${mapping.siteUrl}/v1/videos/${encodeURIComponent(mapping.upstreamVideoId)}`;
+    const upstream = await fetch(targetUrl, await withSiteProxyRequestInit(targetUrl, {
       method: 'DELETE',
       headers: {
         Authorization: `Bearer ${mapping.tokenValue}`,
       },
-    });
+    }));
     if (upstream.ok) {
       await deleteProxyVideoTaskByPublicId(mapping.publicId);
       return reply.code(upstream.status).send();

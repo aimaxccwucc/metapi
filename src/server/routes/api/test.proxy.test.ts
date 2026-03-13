@@ -149,4 +149,46 @@ describe('testRoutes proxy tester transport', () => {
       status: 'pending',
     });
   });
+
+  it('allows multipart proxy uploads to /v1/files', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'file_123',
+      object: 'file',
+      bytes: 8,
+      filename: 'notes.md',
+      purpose: 'assistants',
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/test/proxy',
+      payload: {
+        method: 'POST',
+        path: '/v1/files',
+        requestKind: 'multipart',
+        stream: false,
+        jobMode: false,
+        rawMode: false,
+        multipartFields: {
+          purpose: 'assistants',
+        },
+        multipartFiles: [
+          {
+            field: 'file',
+            name: 'notes.md',
+            mimeType: 'text/markdown',
+            dataUrl: 'data:text/markdown;base64,IyBoZWxsbw==',
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [url, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit & { body?: { constructor?: { name?: string } } }];
+    expect(url).toMatch(/\/v1\/files$/);
+    expect(requestInit.body?.constructor?.name).toBe('FormData');
+  });
 });

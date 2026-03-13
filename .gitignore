@@ -9,11 +9,13 @@ data/*
 logs/
 tmp/*
 !tmp/.gitkeep
+.worktrees/
 
 # Local desktop/debug artifacts
 /.tmp-*
 /main.js
 /NUL
+/.playwright-cli/
 
 .DS_Store
 Thumbs.db

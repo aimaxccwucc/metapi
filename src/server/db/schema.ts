@@ -9,6 +9,7 @@ export const sites = sqliteTable('sites', {
   platform: text('platform').notNull(), // 'new-api' | 'one-api' | 'veloera' | 'one-hub' | 'done-hub' | 'sub2api' | 'openai' | 'claude' | 'gemini'
   proxyUrl: text('proxy_url'),
   useSystemProxy: integer('use_system_proxy', { mode: 'boolean' }).default(false),
+  customHeaders: text('custom_headers'),
   status: text('status').notNull().default('active'), // 'active' | 'disabled'
   healthStatus: text('health_status').notNull().default('unknown'), // 'alive' | 'unreachable' | 'unknown'
   healthReason: text('health_reason'),
@@ -114,6 +115,7 @@ export const tokenRoutes = sqliteTable('token_routes', {
   modelMapping: text('model_mapping'), // JSON
   decisionSnapshot: text('decision_snapshot'), // JSON
   decisionRefreshedAt: text('decision_refreshed_at'),
+  routingStrategy: text('routing_strategy').default('weighted'),
   enabled: integer('enabled', { mode: 'boolean' }).default(true),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),
@@ -137,7 +139,10 @@ export const routeChannels = sqliteTable('route_channels', {
   totalLatencyMs: integer('total_latency_ms').default(0),
   totalCost: real('total_cost').default(0),
   lastUsedAt: text('last_used_at'),
+  lastSelectedAt: text('last_selected_at'),
   lastFailAt: text('last_fail_at'),
+  consecutiveFailCount: integer('consecutive_fail_count').notNull().default(0),
+  cooldownLevel: integer('cooldown_level').notNull().default(0),
   cooldownUntil: text('cooldown_until'),
 }, (table) => ({
   routeIdIdx: index('route_channels_route_id_idx').on(table.routeId),
@@ -192,6 +197,25 @@ export const proxyVideoTasks = sqliteTable('proxy_video_tasks', {
   publicIdUnique: uniqueIndex('proxy_video_tasks_public_id_unique').on(table.publicId),
   upstreamVideoIdIdx: index('proxy_video_tasks_upstream_video_id_idx').on(table.upstreamVideoId),
   createdAtIdx: index('proxy_video_tasks_created_at_idx').on(table.createdAt),
+}));
+
+export const proxyFiles = sqliteTable('proxy_files', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  publicId: text('public_id').notNull(),
+  ownerType: text('owner_type').notNull(),
+  ownerId: text('owner_id').notNull(),
+  filename: text('filename').notNull(),
+  mimeType: text('mime_type').notNull(),
+  purpose: text('purpose'),
+  byteSize: integer('byte_size').notNull(),
+  sha256: text('sha256').notNull(),
+  contentBase64: text('content_base64').notNull(),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+  deletedAt: text('deleted_at'),
+}, (table) => ({
+  publicIdUnique: uniqueIndex('proxy_files_public_id_unique').on(table.publicId),
+  ownerLookupIdx: index('proxy_files_owner_lookup_idx').on(table.ownerType, table.ownerId, table.deletedAt),
 }));
 
 export const settings = sqliteTable('settings', {

@@ -36,6 +36,14 @@ const SITE_COLUMN_COMPATIBILITY_SPECS: SiteColumnCompatibilitySpec[] = [
     },
   },
   {
+    column: 'custom_headers',
+    addSql: {
+      sqlite: 'ALTER TABLE sites ADD COLUMN custom_headers text;',
+      mysql: 'ALTER TABLE `sites` ADD COLUMN `custom_headers` TEXT NULL',
+      postgres: 'ALTER TABLE "sites" ADD COLUMN "custom_headers" TEXT',
+    },
+  },
+  {
     column: 'external_checkin_url',
     addSql: {
       sqlite: 'ALTER TABLE sites ADD COLUMN external_checkin_url text;',

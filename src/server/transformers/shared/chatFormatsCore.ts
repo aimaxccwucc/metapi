@@ -1,3 +1,13 @@
+import {
+  decodeAnthropicReasoningSignature,
+} from './reasoningTransport.js';
+import {
+  consumeThinkTaggedText,
+  createThinkTagParserState,
+  extractInlineThinkTags,
+  type ThinkTagParserState,
+} from './thinkTagParser.js';
+
 export type DownstreamFormat = 'openai' | 'claude';
 
 export type ParsedSseEvent = {
@@ -12,6 +22,7 @@ export type StreamTransformContext = {
   roleSent: boolean;
   doneSent: boolean;
   toolCalls: Record<number, { id?: string; name?: string; arguments?: string }>;
+  thinkTagParser: ThinkTagParserState;
 };
 
 export type ClaudeDownstreamContext = {
@@ -32,6 +43,8 @@ export type NormalizedStreamEvent = {
   role?: 'assistant';
   contentDelta?: string;
   reasoningDelta?: string;
+  reasoningSignature?: string;
+  redactedReasoningContent?: string;
   toolCallDeltas?: Array<{
     index: number;
     id?: string;
@@ -48,6 +61,8 @@ export type NormalizedFinalResponse = {
   created: number;
   content: string;
   reasoningContent: string;
+  reasoningSignature?: string;
+  redactedReasoningContent?: string;
   finishReason: string;
   toolCalls: Array<{
     id: string;
@@ -94,8 +109,6 @@ function textFromPart(part: unknown): string {
   if (typeof part.output_text === 'string') return part.output_text;
   if (typeof part.completion === 'string') return part.completion;
   if (typeof part.partial_json === 'string') return part.partial_json;
-  if (typeof part.reasoning_content === 'string') return part.reasoning_content;
-  if (typeof part.reasoning === 'string') return part.reasoning;
 
   if (Array.isArray(part.content)) {
     return part.content.map((item) => textFromPart(item)).join('');
@@ -110,13 +123,15 @@ function textFromPart(part: unknown): string {
 }
 
 function extractTextAndReasoning(value: unknown): { content: string; reasoning: string } {
-  if (typeof value === 'string') return { content: value, reasoning: '' };
+  if (typeof value === 'string') return extractInlineThinkTags(value);
   if (Array.isArray(value)) {
     const contentParts: string[] = [];
     const reasoningParts: string[] = [];
     for (const item of value) {
       if (typeof item === 'string') {
-        contentParts.push(item);
+        const parsedString = extractInlineThinkTags(item);
+        if (parsedString.content) contentParts.push(parsedString.content);
+        if (parsedString.reasoning) reasoningParts.push(parsedString.reasoning);
         continue;
       }
       if (!isRecord(item)) continue;
@@ -135,8 +150,9 @@ function extractTextAndReasoning(value: unknown): { content: string; reasoning: 
         continue;
       }
 
-      const text = textFromPart(item);
-      if (text) contentParts.push(text);
+      const parsedText = extractInlineThinkTags(textFromPart(item));
+      if (parsedText.content) contentParts.push(parsedText.content);
+      if (parsedText.reasoning) reasoningParts.push(parsedText.reasoning);
     }
 
     return {
@@ -151,9 +167,34 @@ function extractTextAndReasoning(value: unknown): { content: string; reasoning: 
     return extractTextAndReasoning(value.parts);
   }
 
+  const directReasoning = joinNonEmpty([
+    typeof value.reasoning_content === 'string' ? value.reasoning_content : '',
+    typeof value.reasoning === 'string' ? value.reasoning : '',
+    typeof value.thinking === 'string' ? value.thinking : '',
+  ]);
+  const parsedText = extractInlineThinkTags(textFromPart(value));
+
   return {
-    content: textFromPart(value),
-    reasoning: '',
+    content: parsedText.content,
+    reasoning: joinNonEmpty([directReasoning, parsedText.reasoning]),
+  };
+}
+
+function extractStreamingTextAndReasoning(
+  value: unknown,
+  thinkTagParser: ThinkTagParserState,
+): { content: string; reasoning: string } {
+  const parsed = extractTextAndReasoning(value);
+  if (!parsed.content) {
+    return parsed;
+  }
+
+  const streamed = consumeThinkTaggedText(thinkTagParser, parsed.content);
+  return {
+    content: streamed.content,
+    reasoning: [parsed.reasoning, streamed.reasoning]
+      .filter((part) => part.length > 0)
+      .join(''),
   };
 }
 
@@ -210,6 +251,7 @@ export function createStreamTransformContext(modelName: string): StreamTransform
     roleSent: false,
     doneSent: false,
     toolCalls: {},
+    thinkTagParser: createThinkTagParserState(),
   };
 }
 
@@ -246,10 +288,18 @@ function extractAssistantContent(choice: any): string {
   const content = extractTextAndReasoning(choice?.content).content;
   if (content) return content;
 
-  if (typeof choice?.text === 'string' && choice.text.length > 0) return choice.text;
-  if (typeof choice?.completion === 'string' && choice.completion.length > 0) return choice.completion;
-  if (typeof choice?.output_text === 'string' && choice.output_text.length > 0) return choice.output_text;
-  if (typeof choice?.delta?.content === 'string' && choice.delta.content.length > 0) return choice.delta.content;
+  if (typeof choice?.text === 'string' && choice.text.length > 0) {
+    return extractInlineThinkTags(choice.text).content;
+  }
+  if (typeof choice?.completion === 'string' && choice.completion.length > 0) {
+    return extractInlineThinkTags(choice.completion).content;
+  }
+  if (typeof choice?.output_text === 'string' && choice.output_text.length > 0) {
+    return extractInlineThinkTags(choice.output_text).content;
+  }
+  if (typeof choice?.delta?.content === 'string' && choice.delta.content.length > 0) {
+    return extractInlineThinkTags(choice.delta.content).content;
+  }
 
   return '';
 }
@@ -270,6 +320,11 @@ function extractAssistantReasoning(choice: any): string {
 
   const nested = extractTextAndReasoning(choice?.content).reasoning;
   if (nested) return nested;
+
+  if (typeof choice?.delta?.content === 'string' && choice.delta.content.length > 0) {
+    const parsedDelta = extractInlineThinkTags(choice.delta.content);
+    if (parsedDelta.reasoning) return parsedDelta.reasoning;
+  }
 
   return '';
 }
@@ -734,18 +789,23 @@ export function normalizeUpstreamStreamEvent(
 
     const choice = payload.choices[0] ?? {};
     const delta = isRecord(choice?.delta) ? choice.delta : {};
-    const deltaParsed = extractTextAndReasoning(delta.content ?? delta);
+    const deltaParsed = extractStreamingTextAndReasoning(delta.content ?? delta, context.thinkTagParser);
+    const messageParsed = extractStreamingTextAndReasoning(choice?.message?.content ?? '', context.thinkTagParser);
 
     const rawContentDelta =
       deltaParsed.content
-      || (typeof choice?.message?.content === 'string' ? choice.message.content : '')
+      || messageParsed.content
       || '';
 
     const reasoningDelta =
       (typeof (delta as any).reasoning_content === 'string' ? (delta as any).reasoning_content : '')
       || (typeof (delta as any).reasoning === 'string' ? (delta as any).reasoning : '')
       || deltaParsed.reasoning
+      || messageParsed.reasoning
       || '';
+    const reasoningSignature = isNonEmptyString((delta as any).reasoning_signature)
+      ? (delta as any).reasoning_signature
+      : undefined;
 
     // Some upstream providers (e.g. certain OpenAI-compatible aggregators) emit thinking
     // tokens with the same text duplicated in both delta.content and delta.reasoning_content.
@@ -791,6 +851,7 @@ export function normalizeUpstreamStreamEvent(
       role: (delta as any).role === 'assistant' ? 'assistant' : undefined,
       contentDelta: contentDelta || undefined,
       reasoningDelta: reasoningDelta || undefined,
+      reasoningSignature,
       toolCallDeltas: toolCallDeltas.length > 0 ? toolCallDeltas : undefined,
       finishReason: normalizeStopReason(choice?.finish_reason),
     };
@@ -798,11 +859,10 @@ export function normalizeUpstreamStreamEvent(
 
   const type = typeof payload.type === 'string' ? payload.type : '';
   if (type.startsWith('response.output_text')) {
-    const deltaText = typeof payload.delta === 'string'
-      ? payload.delta
-      : extractTextAndReasoning(payload.delta).content;
+    const parsed = extractStreamingTextAndReasoning(payload.delta, context.thinkTagParser);
     return {
-      contentDelta: deltaText || undefined,
+      contentDelta: parsed.content || undefined,
+      reasoningDelta: parsed.reasoning || undefined,
     };
   }
 
@@ -830,6 +890,11 @@ export function normalizeUpstreamStreamEvent(
 
   if (type === 'response.output_item.added' && isRecord((payload as any).item)) {
     const item = (payload as any).item as Record<string, unknown>;
+    if (item.type === 'reasoning' && isNonEmptyString(item.encrypted_content)) {
+      return {
+        reasoningSignature: item.encrypted_content,
+      };
+    }
     if (item.type === 'function_call') {
       const outputIndex = (
         typeof (payload as any).output_index === 'number' && Number.isFinite((payload as any).output_index)
@@ -958,7 +1023,7 @@ export function normalizeUpstreamStreamEvent(
       };
     }
 
-    const parsed = extractTextAndReasoning(payload.content_block);
+    const parsed = extractStreamingTextAndReasoning(payload.content_block, context.thinkTagParser);
     return {
       contentDelta: parsed.content || undefined,
       reasoningDelta: parsed.reasoning || undefined,
@@ -968,7 +1033,7 @@ export function normalizeUpstreamStreamEvent(
   if (type === 'content_block_delta') {
     const delta = isRecord(payload.delta) ? payload.delta : {};
     const deltaType = typeof delta.type === 'string' ? delta.type : '';
-    const parsed = extractTextAndReasoning(delta);
+    const parsed = extractStreamingTextAndReasoning(delta, context.thinkTagParser);
 
     if (deltaType === 'input_json_delta') {
       const index = (
@@ -1012,7 +1077,10 @@ export function normalizeUpstreamStreamEvent(
 
   if (Array.isArray(payload.candidates)) {
     const candidate = payload.candidates[0] || {};
-    const parsed = extractTextAndReasoning((candidate as any).content?.parts || (candidate as any).content);
+    const parsed = extractStreamingTextAndReasoning(
+      (candidate as any).content?.parts || (candidate as any).content,
+      context.thinkTagParser,
+    );
 
     if (isNonEmptyString((payload as any).modelVersion)) {
       context.model = (payload as any).modelVersion;
@@ -1027,7 +1095,7 @@ export function normalizeUpstreamStreamEvent(
     };
   }
 
-  const fallback = extractTextAndReasoning(payload);
+  const fallback = extractStreamingTextAndReasoning(payload, context.thinkTagParser);
   return {
     contentDelta: fallback.content || undefined,
     reasoningDelta: fallback.reasoning || undefined,
@@ -1038,15 +1106,17 @@ function buildOpenAiStreamChunk(
   context: StreamTransformContext,
   event: NormalizedStreamEvent,
 ): Record<string, unknown> | null {
+  const normalizedContentDelta = event.contentDelta || '';
+  const normalizedReasoningDelta = event.reasoningDelta || '';
   const delta: Record<string, unknown> = {};
   const isInitialAssistantRoleOnlyEvent = (
     !context.roleSent
     && event.role === 'assistant'
-    && !event.contentDelta
-    && !event.reasoningDelta
+    && !normalizedContentDelta
+    && !normalizedReasoningDelta
   );
 
-  if (!context.roleSent && (event.role === 'assistant' || event.contentDelta || event.reasoningDelta)) {
+  if (!context.roleSent && (event.role === 'assistant' || normalizedContentDelta || normalizedReasoningDelta)) {
     delta.role = 'assistant';
     context.roleSent = true;
   } else if (event.role === 'assistant') {
@@ -1054,12 +1124,12 @@ function buildOpenAiStreamChunk(
     context.roleSent = true;
   }
 
-  if (event.contentDelta) {
-    delta.content = event.contentDelta;
+  if (normalizedContentDelta) {
+    delta.content = normalizedContentDelta;
   }
 
-  if (event.reasoningDelta) {
-    delta.reasoning_content = event.reasoningDelta;
+  if (normalizedReasoningDelta) {
+    delta.reasoning_content = normalizedReasoningDelta;
   }
 
   if (Array.isArray(event.toolCallDeltas) && event.toolCallDeltas.length > 0) {
@@ -1371,13 +1441,29 @@ export function serializeFinalResponse(
   usage: { promptTokens: number; completionTokens: number; totalTokens: number },
 ): Record<string, unknown> {
   const toolCalls = Array.isArray(normalized.toolCalls) ? normalized.toolCalls : [];
+  const rawReasoningSignature = typeof normalized.reasoningSignature === 'string'
+    ? normalized.reasoningSignature.trim()
+    : '';
+  const taggedReasoningSignature = rawReasoningSignature.startsWith('metapi:');
+  const claudeReasoningSignature = decodeAnthropicReasoningSignature(rawReasoningSignature)
+    ?? (rawReasoningSignature && !taggedReasoningSignature ? rawReasoningSignature : null);
 
   if (downstreamFormat === 'claude') {
     const contentBlocks: Array<Record<string, unknown>> = [];
     if (normalized.reasoningContent) {
-      contentBlocks.push({
+      const thinkingBlock: Record<string, unknown> = {
         type: 'thinking',
         thinking: normalized.reasoningContent,
+      };
+      if (claudeReasoningSignature) {
+        thinkingBlock.signature = claudeReasoningSignature;
+      }
+      contentBlocks.push(thinkingBlock);
+    }
+    if (normalized.redactedReasoningContent) {
+      contentBlocks.push({
+        type: 'redacted_thinking',
+        data: normalized.redactedReasoningContent,
       });
     }
     if (normalized.content) {
@@ -1421,6 +1507,9 @@ export function serializeFinalResponse(
   };
   if (normalized.reasoningContent) {
     message.reasoning_content = normalized.reasoningContent;
+  }
+  if (rawReasoningSignature) {
+    message.reasoning_signature = rawReasoningSignature;
   }
   if (toolCalls.length > 0) {
     message.tool_calls = toOpenAiToolCalls(toolCalls);
@@ -1469,6 +1558,9 @@ export function buildSyntheticOpenAiChunks(normalized: NormalizedFinalResponse):
   }
   if (normalized.reasoningContent) {
     startDelta.reasoning_content = normalized.reasoningContent;
+  }
+  if (typeof normalized.reasoningSignature === 'string' && normalized.reasoningSignature.trim()) {
+    startDelta.reasoning_signature = normalized.reasoningSignature.trim();
   }
   if (toolCalls.length > 0) {
     startDelta.tool_calls = toOpenAiToolCalls(toolCalls);

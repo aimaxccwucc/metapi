@@ -153,6 +153,23 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(claudeOrder).toEqual(['messages']);
   });
 
+  it('prefers document-capable endpoints when downstream content contains non-image files', async () => {
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'openai',
+      undefined,
+      {
+        hasNonImageFileInput: true,
+      },
+    );
+
+    expect(order).toEqual(['responses', 'messages', 'chat']);
+  });
+
   it('keeps claude models messages-first even when openai platform catalog prefers chat', async () => {
     fetchModelPricingCatalogMock.mockResolvedValue({
       models: [
@@ -206,6 +223,23 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'responses',
     );
     expect(responsesOrder).toEqual(['responses', 'messages', 'chat']);
+  });
+
+  it('prefers native responses endpoints for claude-family models when encrypted reasoning is explicitly requested', async () => {
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'claude-opus-4-6',
+      'responses',
+      undefined,
+      {
+        wantsNativeResponsesReasoning: true,
+      } as any,
+    );
+
+    expect(order).toEqual(['responses', 'messages', 'chat']);
   });
 
   it('treats endpoint-not-found responses as downgrade candidates', () => {
@@ -391,6 +425,88 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
+  it('preserves input_file blocks when converting chat to responses', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-4.1',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'summarize this file' },
+              { type: 'input_file', filename: 'brief.pdf', file_data: 'JVBERi0xLjc=' },
+            ],
+          },
+        ],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'summarize this file' },
+          { type: 'input_file', filename: 'brief.pdf', file_data: 'data:application/pdf;base64,JVBERi0xLjc=' },
+        ],
+      },
+    ]);
+  });
+
+  it('serializes file uploads into Responses input_file blocks without conflicting file ids', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-5.2',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'gpt-5.2',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'read this' },
+              {
+                type: 'file',
+                file_id: 'file_local_123',
+                filename: 'paper.pdf',
+                mime_type: 'application/pdf',
+                file_data: 'JVBERi0xLjQK',
+              },
+            ],
+          },
+        ],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'read this' },
+          {
+            type: 'input_file',
+            filename: 'paper.pdf',
+            file_data: 'data:application/pdf;base64,JVBERi0xLjQK',
+          },
+        ],
+      },
+    ]);
+  });
+
   it('applies global responses standardization and drops non-standard fields', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'responses',
@@ -550,6 +666,144 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
+  it('preserves structured input_file blocks on downstream responses bodies', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {},
+      downstreamFormat: 'responses',
+      responsesOriginalBody: {
+        model: 'gpt-5.2',
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [
+              { type: 'input_text', text: 'summarize this file' },
+              {
+                type: 'input_file',
+                filename: 'notes.txt',
+                file_data: 'data:text/plain;base64,aGVsbG8=',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'summarize this file' },
+          {
+            type: 'input_file',
+            filename: 'notes.txt',
+            file_data: 'data:text/plain;base64,aGVsbG8=',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('preserves structured input_file file_url blocks on downstream responses bodies', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      openaiBody: {},
+      downstreamFormat: 'responses',
+      responsesOriginalBody: {
+        model: 'gpt-5.2',
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [
+              { type: 'input_text', text: 'read this remote file' },
+              {
+                type: 'input_file',
+                filename: 'remote.pdf',
+                file_url: 'https://example.com/remote.pdf',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'read this remote file' },
+          {
+            type: 'input_file',
+            filename: 'remote.pdf',
+            file_url: 'https://example.com/remote.pdf',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('maps OpenAI file blocks to Anthropic document blocks', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-sonnet-4-5',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'claude',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.2',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'summarize this pdf' },
+              {
+                type: 'input_file',
+                filename: 'brief.pdf',
+                file_data: 'data:application/pdf;base64,JVBERi0xLjQK',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.body.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'summarize this pdf' },
+          {
+            type: 'document',
+            cache_control: { type: 'ephemeral' },
+            source: {
+              type: 'base64',
+              media_type: 'application/pdf',
+              data: 'JVBERi0xLjQK',
+            },
+            title: 'brief.pdf',
+          },
+        ],
+      },
+    ]);
+  });
+
   it('preserves multimodal OpenAI user content when converting to Anthropic messages', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'messages',
@@ -578,7 +832,13 @@ describe('buildUpstreamEndpointRequest', () => {
     });
 
     expect(request.path).toBe('/v1/messages');
-    expect(request.body.system).toBe('be careful');
+    expect(request.body.system).toEqual([
+      {
+        type: 'text',
+        text: 'be careful',
+        cache_control: { type: 'ephemeral' },
+      },
+    ]);
     expect(request.body.messages).toEqual([
       {
         role: 'user',
@@ -591,6 +851,100 @@ describe('buildUpstreamEndpointRequest', () => {
               type: 'url',
               url: 'https://example.com/cat.png',
             },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('maps input_file blocks to anthropic document content', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-sonnet-4-5',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'claude',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'claude-sonnet-4-5',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'read this document' },
+              { type: 'input_file', filename: 'brief.pdf', mime_type: 'application/pdf', file_data: 'JVBERi0xLjc=' },
+            ],
+          },
+        ],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.body.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'read this document' },
+          {
+            type: 'document',
+            cache_control: { type: 'ephemeral' },
+            title: 'brief.pdf',
+            source: {
+              type: 'base64',
+              media_type: 'application/pdf',
+              data: 'JVBERi0xLjc=',
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('maps file uploads into Anthropic document blocks for messages endpoints', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-opus-4-6',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'claude',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'claude-opus-4-6',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'summarize the PDF' },
+              {
+                type: 'file',
+                file_id: 'file_local_789',
+                filename: 'report.pdf',
+                mime_type: 'application/pdf',
+                file_data: 'JVBERi0xLjQK',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.body.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'summarize the PDF' },
+          {
+            type: 'document',
+            cache_control: { type: 'ephemeral' },
+            source: {
+              type: 'base64',
+              media_type: 'application/pdf',
+              data: 'JVBERi0xLjQK',
+            },
+            title: 'report.pdf',
           },
         ],
       },
@@ -645,6 +999,61 @@ describe('buildUpstreamEndpointRequest', () => {
         ],
       },
     ]);
+  });
+
+  it('preserves native Claude request bodies instead of re-optimizing cache anchors', () => {
+    const claudeOriginalBody = {
+      model: 'claude-opus-4-6',
+      max_tokens: 512,
+      tools: [
+        {
+          name: 'lookup',
+          input_schema: { type: 'object' },
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'tool_1',
+              name: 'lookup',
+              input: { city: 'paris' },
+              cache_control: { type: 'ephemeral' },
+            },
+            {
+              type: 'text',
+              text: 'done',
+            },
+          ],
+        },
+      ],
+      tool_choice: { type: 'tool', name: 'lookup' },
+    };
+
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-opus-4-6',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'claude',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'claude',
+      openaiBody: {
+        model: 'ignored',
+        messages: [{ role: 'user', content: 'ignored' }],
+      },
+      claudeOriginalBody,
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.body).toEqual({
+      ...claudeOriginalBody,
+      model: 'claude-opus-4-6',
+      stream: false,
+    });
   });
 
   it('preserves multimodal OpenAI user content when converting to Responses input', () => {
@@ -733,7 +1142,13 @@ describe('buildUpstreamEndpointRequest', () => {
     });
 
     expect(request.path).toBe('/v1/messages');
-    expect(request.body.system).toBe('system prompt');
+    expect(request.body.system).toEqual([
+      {
+        type: 'text',
+        text: 'system prompt',
+        cache_control: { type: 'ephemeral' },
+      },
+    ]);
     expect(request.body.messages).toEqual([
       {
         role: 'user',

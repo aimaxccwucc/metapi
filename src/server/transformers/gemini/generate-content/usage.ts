@@ -11,6 +11,10 @@ function isAggregateState(value: unknown): value is GeminiGenerateContentAggrega
   return isRecord(value) && Array.isArray(value.parts) && isRecord(value.usage);
 }
 
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
 export function extractGeminiUsage(payload: unknown): NormalizedUsage {
   const usageMetadata = isAggregateState(payload)
     ? payload.usage
@@ -20,22 +24,12 @@ export function extractGeminiUsage(payload: unknown): NormalizedUsage {
     return createEmptyNormalizedUsage();
   }
 
-  const promptTokens = typeof usageMetadata.promptTokenCount === 'number'
-    ? usageMetadata.promptTokenCount
-    : 0;
-  const candidatesTokenCount = typeof usageMetadata.candidatesTokenCount === 'number'
-    ? usageMetadata.candidatesTokenCount
-    : 0;
-  const thoughtsTokenCount = typeof usageMetadata.thoughtsTokenCount === 'number'
-    ? usageMetadata.thoughtsTokenCount
-    : 0;
+  const promptTokens = finiteNumber(usageMetadata.promptTokenCount) ?? 0;
+  const candidatesTokenCount = finiteNumber(usageMetadata.candidatesTokenCount) ?? 0;
+  const thoughtsTokenCount = finiteNumber(usageMetadata.thoughtsTokenCount) ?? 0;
   const completionTokens = candidatesTokenCount + thoughtsTokenCount;
-  const totalTokens = typeof usageMetadata.totalTokenCount === 'number'
-    ? usageMetadata.totalTokenCount
-    : promptTokens + completionTokens;
-  const cachedTokens = typeof usageMetadata.cachedContentTokenCount === 'number'
-    ? usageMetadata.cachedContentTokenCount
-    : 0;
+  const totalTokens = finiteNumber(usageMetadata.totalTokenCount) ?? (promptTokens + completionTokens);
+  const cachedTokens = finiteNumber(usageMetadata.cachedContentTokenCount) ?? 0;
   const reasoningTokens = thoughtsTokenCount;
 
   return {
@@ -43,6 +37,8 @@ export function extractGeminiUsage(payload: unknown): NormalizedUsage {
     completionTokens,
     totalTokens,
     cachedTokens,
+    cacheReadTokens: cachedTokens,
+    cacheCreationTokens: 0,
     reasoningTokens,
   };
 }

@@ -1,175 +1,104 @@
-# Metapi 项目目录规范
+# Metapi 项目结构
 
-本文档说明 Metapi 的目录组织方式，目标是让新功能落位更稳定、查找更直接、临时文件不污染根目录。
+本文档只说明当前仓库里长期维护的主目录，帮助贡献者快速判断代码、脚本和文档应当放在哪里。
 
 ## 顶层目录
 
 ```text
 metapi/
-├── data/                  # 运行时数据（SQLite 数据库）
-├── dist/                  # 构建产物（前后端）
-├── docker/                # 容器相关文件
-│   ├── Dockerfile         # 多阶段构建（Alpine）
-│   ├── docker-compose.yml # Docker Compose 编排
-│   └── docker-compose.override.yml # 开发覆盖配置
-├── docs/                  # 文档与资源
-│   ├── .vitepress/        # VitePress 文档站配置
-│   ├── community/         # 社区贡献规范
-│   ├── logos/             # Logo 素材
-│   │   └── drafts/        # Logo 草稿
-│   ├── screenshots/       # 界面截图
-│   └── *.md               # 各文档页面
-├── drizzle/               # Drizzle ORM 迁移 SQL 与元数据
-├── scripts/               # 项目脚本（按场景分组）
-│   ├── dev/
-│   │   └── restart.bat    # Windows 开发环境快捷重启
-│   └── desktop/
-│       └── afterSign.mjs  # Electron macOS 签名后处理 / 可选公证
+├── build/                # 打包静态资源（如 Electron 图标）
+├── data/                 # 默认运行时数据目录（SQLite、日志、导出文件）
+├── dist/                 # 构建产物（web / server / desktop）
+├── docker/               # Dockerfile、Compose 与部署模板
+├── docs/                 # VitePress 文档、截图、Logo 与社区规范
+├── drizzle/              # Drizzle SQL 迁移与 meta 快照
+├── scripts/              # 开发脚本、桌面打包钩子、一次性 codemod
 ├── src/
-│   ├── desktop/           # Electron 主进程与桌面运行时
-│   ├── server/            # Fastify 后端服务
-│   └── web/               # React 前端应用
-├── .github/workflows/     # CI/CD 工作流
-│   ├── ci.yml             # 测试与构建检查
-│   ├── release.yml        # 多平台 Release 包发布
-│   └── docs-pages.yml     # 文档站 GitHub Pages 部署
-├── tmp/                   # 临时调试文件（已 gitignore）
-├── package.json
-├── tsconfig.json
-├── tsconfig.server.json
-├── vite.config.ts
-├── drizzle.config.ts
-└── README.md
+│   ├── desktop/          # Electron 主进程与桌面运行时
+│   ├── server/           # Fastify 服务、数据库、代理路由与业务服务
+│   └── web/              # React 管理后台
+├── tmp/                  # 临时调试文件（已 gitignore）
+├── restart.bat           # Windows 快捷重启入口，转发到 scripts/dev/restart.bat
+├── package.json          # 脚本入口与依赖清单
+├── electron-builder.yml  # 桌面打包配置
+├── drizzle.config.ts     # Drizzle 配置
+├── vite.config.ts        # Web 构建配置
+└── tsconfig*.json        # TypeScript 配置
 ```
 
-## 后端目录约定（`src/server`）
+## 源码目录
+
+### `src/server`
 
 ```text
 src/server/
-├── index.ts               # 服务启动入口
-├── config.ts              # 环境变量与配置加载
-├── middleware/
-│   └── auth.ts            # 认证中间件
-├── db/
-│   ├── index.ts           # 数据库连接
-│   ├── schema.ts          # Drizzle 表定义（全部 Schema）
-│   └── migrate.ts         # 迁移执行器
+├── index.ts              # Fastify 启动、运行时初始化、启动摘要输出
+├── config.ts             # 环境变量解析与 Fastify 配置
+├── desktop.ts            # 桌面模式下的静态资源与公开路由适配
+├── nativeModuleGuard.ts  # better-sqlite3 ABI 兼容检查
+├── db/                   # schema、连接、迁移、兼容列修复
+├── middleware/           # 认证等通用中间件
 ├── routes/
-│   ├── api/               # 管理 API 路由
-│   │   ├── auth.ts        # 登录 / 登出
-│   │   ├── sites.ts       # 站点 CRUD
-│   │   ├── accounts.ts    # 账号管理
-│   │   ├── accountTokens.ts # Token 同步与管理
-│   │   ├── tokens.ts      # Token 批量操作与路由规则管理
-│   │   ├── downstreamApiKeys.ts # 下游 API Key 管理
-│   │   ├── checkin.ts     # 签到触发与日志
-│   │   ├── stats.ts       # 仪表盘统计
-│   │   ├── search.ts      # 全局搜索
-│   │   ├── events.ts      # 事件日志
-│   │   ├── tasks.ts       # 后台任务状态
-│   │   ├── settings.ts    # 运行时配置
-│   │   ├── monitor.ts     # 外部监控集成
-│   │   └── test.ts        # 测试 / 验证端点
-│   └── proxy/             # 代理路由
-│       ├── router.ts      # 代理路由注册
-│       ├── chat.ts        # Chat Completions & Claude Messages
-│       ├── responses.ts   # OpenAI Responses 端点
-│       ├── completions.ts # Legacy Completions
-│       ├── embeddings.ts  # 向量嵌入
-│       ├── images.ts      # 图像生成
-│       ├── models.ts      # 模型列表
-│       ├── chatFormats.ts # OpenAI <-> Claude 格式转换
-│       ├── upstreamEndpoint.ts  # 上游端点处理与透传
-│       └── downstreamPolicy.ts  # 下游 API Key 策略校验
-└── services/
-    ├── platforms/          # 平台适配器
-    │   ├── base.ts         # 适配器接口定义
-    │   ├── index.ts        # 适配器注册表
-    │   ├── newApi.ts       # New API 适配器
-    │   ├── oneApi.ts       # One API 适配器
-    │   ├── oneHub.ts       # OneHub 适配器
-    │   ├── doneHub.ts      # DoneHub 适配器
-    │   ├── veloera.ts      # Veloera 适配器
-    │   ├── anyrouter.ts    # AnyRouter 适配器
-    │   └── sub2api.ts      # Sub2API 适配器
-    ├── tokenRouter.ts              # 智能路由引擎
-    ├── checkinService.ts           # 签到执行
-    ├── checkinScheduler.ts         # 签到调度
-    ├── checkinRewardParser.ts      # 奖励金额解析
-    ├── balanceService.ts           # 余额刷新
-    ├── modelService.ts             # 模型发现与管理
-    ├── modelPricingService.ts      # 模型定价
-    ├── modelAnalysisService.ts     # 使用分析
-    ├── notifyService.ts            # 多渠道通知
-    ├── notificationThrottle.ts     # 通知节流
-    ├── alertService.ts             # 告警事件
-    ├── alertRules.ts               # 告警规则
-    ├── backupService.ts            # 数据导入导出
-    ├── backgroundTaskService.ts    # 后台任务管理
-    ├── accountCredentialService.ts # 凭证加密
-    ├── accountHealthService.ts     # 健康状态管理
-    ├── accountExtraConfig.ts       # 平台专属配置
-    ├── accountTokenService.ts      # Token 管理服务
-    ├── downstreamApiKeyService.ts  # 下游 API Key 服务
-    ├── downstreamPolicyTypes.ts    # 下游策略类型定义
-    ├── proxyRetryPolicy.ts         # 重试策略
-    ├── proxyUsageParser.ts         # Token 用量解析
-    ├── proxyUsageFallbackService.ts # 余额兜底估算
-    ├── failureReasonService.ts     # 错误分类
-    ├── siteDetector.ts             # 平台自动检测
-    ├── dailySummaryService.ts      # 每日摘要
-    ├── todayIncomeRewardService.ts # 今日收入快照
-    ├── localTimeService.ts         # 时区处理
-    ├── upstreamModelDescriptionService.ts # 上游模型描述缓存
-    ├── startupInfo.ts              # 启动信息
-    └── settings.ts                 # 运行时配置管理
+│   ├── api/              # 管理端 API（sites / accounts / tokens / settings ...）
+│   └── proxy/            # OpenAI / Claude / Gemini 兼容代理入口
+├── services/             # 业务服务、平台适配器、日志 / 文件 / 路由 / 迁移能力
+└── transformers/         # 协议转换与共享归一化层
 ```
 
-## 前端目录约定（`src/web`）
+- 新的管理接口优先放在 `routes/api/`。
+- 新的 `/v1/*`、多模态、文件、视频等兼容代理逻辑放在 `routes/proxy/`。
+- 协议格式转换或跨协议共享归一化，优先落在 `transformers/` 而不是路由文件里。
+
+### `src/web`
 
 ```text
 src/web/
-├── App.tsx                # 应用入口与路由配置
-├── main.tsx               # Vite 入口
-├── api.ts                 # 统一 API 请求客户端
-├── authSession.ts         # 认证会话管理
-├── i18n.tsx               # 国际化
-├── i18n.supplement.ts     # 国际化补充翻译
-├── components/            # 通用 UI 组件
-│   ├── BrandIcon.tsx      # 模型品牌图标
-│   ├── ChangeKeyModal.tsx # 修改管理令牌弹窗
-│   ├── ModelAnalysisPanel.tsx # 消费分析图表
-│   ├── ModernSelect.tsx   # 自定义下拉选择组件
-│   ├── SearchModal.tsx    # 全局搜索弹窗
-│   ├── NotificationPanel.tsx # 实时事件面板
-│   ├── Toast.tsx          # 通知提示
-│   └── charts/            # 图表组件
-│       ├── SiteDistributionChart.tsx # 余额分布饼图
-│       └── SiteTrendChart.tsx       # 消费趋势图
-├── pages/                 # 页面组件（路由页）
-│   ├── Dashboard.tsx      # 仪表盘
-│   ├── Sites.tsx          # 站点管理
-│   ├── Accounts.tsx       # 账号管理
-│   ├── Tokens.tsx         # Token 管理
-│   ├── TokenRoutes.tsx    # 路由规则
-│   ├── Models.tsx         # 模型广场
-│   ├── ModelTester.tsx    # 模型操练场
-│   ├── Monitors.tsx       # 可用性监控
-│   ├── CheckinLog.tsx     # 签到日志
-│   ├── ProxyLogs.tsx      # 代理日志
-│   ├── ProgramLogs.tsx    # 系统事件日志
-│   ├── ImportExport.tsx   # 数据导入导出
-│   ├── Settings.tsx       # 系统设置
-│   ├── NotificationSettings.tsx # 通知设置
-│   ├── About.tsx          # 关于页面
-│   └── helpers/           # 页面级纯逻辑 / 工具函数（含测试）
-└── public/                # 静态资源
+├── main.tsx              # Vite 入口
+├── App.tsx               # 路由与页面装配
+├── api.ts                # 管理端 API 客户端
+├── authSession.ts        # 登录态管理
+├── appLocalState.ts      # 本地安装 / UI 状态
+├── docsLink.ts           # 文档链接映射
+├── i18n*.ts*             # 国际化
+├── components/           # 通用组件与图表组件
+├── pages/                # 路由页与页面级 helpers
+└── public/               # Web 静态资源
 ```
 
-## 目录卫生规则
+- 页面级测试和 helper 与页面代码同目录维护。
+- 通用展示组件放 `components/`；只被单页消费的纯逻辑优先放 `pages/helpers/`。
 
-- 所有调试临时文件放入 `tmp/`，不要散落在项目根目录。
-- 开发脚本统一放入 `scripts/<scene>/`，根目录仅保留必要入口文件。
-- 素材草稿统一归档到 `docs/logos/drafts/`，避免根目录堆积二进制文件。
-- 测试文件与被测文件同目录（`*.test.ts`），方便就近维护。
-- 平台适配器新增时，在 `services/platforms/` 中创建独立文件并注册到 `index.ts`。
+### `src/desktop`
+
+```text
+src/desktop/
+├── main.ts               # Electron 主进程入口
+├── runtime.ts            # 桌面运行时端口 / 路径解析
+└── runtime.test.ts       # 桌面运行时测试
+```
+
+## 脚本与文档目录
+
+```text
+scripts/
+├── dev/                  # 本地开发脚本（run-server.ts / restart.bat / db-smoke.ts）
+├── desktop/              # Electron 打包钩子（afterPack / afterSign）
+└── codemods/             # 一次性仓库级重构脚本
+```
+
+```text
+docs/
+├── .vitepress/           # 文档站导航与主题配置
+├── community/            # 社区贡献规范
+├── public/               # 文档站公开静态资源
+├── logos/                # 可编辑 Logo 源文件与草稿
+├── screenshots/          # 文档截图
+└── *.md                  # 面向用户和维护者的文档页面
+```
+
+## 放置规则
+
+- 测试文件尽量与被测源码同目录，命名使用 `*.test.ts` 或 `*.test.tsx`。
+- 运行时数据放 `data/`，临时排障文件放 `tmp/`，不要散落在仓库根目录。
+- 桌面打包脚本统一放 `scripts/desktop/`，不要把一次性签名或打包命令写进根目录批处理。
+- 文档站真正对外可访问的静态资源放 `docs/public/`；仍需继续编辑的素材保留在 `docs/logos/` 或 `docs/screenshots/`。

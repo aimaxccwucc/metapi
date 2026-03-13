@@ -8,10 +8,12 @@ import {
   MESSAGE_STATUS,
   buildApiPayload,
   buildEmbeddingsRequestEnvelope,
+  buildFileUploadRequestEnvelope,
   buildRawProxyRequestEnvelope,
   buildSearchRequestEnvelope,
   collectModelTesterModelNames,
   countConversationTurns,
+  createConversationUserMessage,
   filterModelTesterModelNames,
   getPreferredModelTesterModel,
   parseCustomRequestBody,
@@ -19,6 +21,7 @@ import {
   serializeModelTesterSession,
   syncMessagesToCustomRequestBody,
   toApiMessages,
+  type ChatMessage,
   type ModelTesterSessionState,
 } from './modelTesterSession.js';
 
@@ -172,6 +175,128 @@ describe('modelTesterSession', () => {
     });
   });
 
+  it('builds multipart upload envelopes for /v1/files', () => {
+    expect(buildFileUploadRequestEnvelope({
+      name: 'paper.pdf',
+      mimeType: 'application/pdf',
+      dataUrl: 'data:application/pdf;base64,JVBERi0xLjc=',
+    })).toEqual({
+      method: 'POST',
+      path: '/v1/files',
+      requestKind: 'multipart',
+      stream: false,
+      jobMode: false,
+      rawMode: false,
+      multipartFields: {
+        purpose: 'assistants',
+      },
+      multipartFiles: [
+        {
+          field: 'file',
+          name: 'paper.pdf',
+          mimeType: 'application/pdf',
+          dataUrl: 'data:application/pdf;base64,JVBERi0xLjc=',
+        },
+      ],
+    });
+  });
+
+  it('creates user conversation messages that preserve uploaded file references', () => {
+    const message = createConversationUserMessage('请总结附件', [
+      {
+        fileId: 'file-metapi-123',
+        filename: 'paper.pdf',
+        mimeType: 'application/pdf',
+      },
+    ]);
+
+    expect(message.role).toBe('user');
+    expect(message.content).toBe('请总结附件');
+    expect(message.parts).toEqual([
+      {
+        type: 'input_file',
+        fileId: 'file-metapi-123',
+        filename: 'paper.pdf',
+        mimeType: 'application/pdf',
+      },
+    ]);
+  });
+
+  it('preserves file reference parts when building responses conversation payloads', () => {
+    const payload = buildApiPayload(
+      [{
+        id: 'u1',
+        role: 'user',
+        content: '请总结上传文件',
+        createAt: 1,
+        parts: [
+          {
+            type: 'input_file',
+            fileId: 'file_123',
+            filename: 'notes.txt',
+            mimeType: 'text/plain',
+          },
+        ],
+      } as ChatMessage],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'gpt-5',
+        protocol: 'responses',
+      },
+      DEFAULT_PARAMETER_ENABLED,
+    );
+
+    expect(payload.jsonBody).toEqual({
+      model: 'gpt-5',
+      input: [
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: '请总结上传文件' },
+            { type: 'input_file', file_id: 'file_123', filename: 'notes.txt' },
+          ],
+        },
+      ],
+      stream: false,
+      temperature: 0.7,
+    });
+  });
+
+  it('serializes assistant history as output_text for responses payloads', () => {
+    const payload = buildApiPayload(
+      [
+        { id: 'u1', role: 'user', content: '先看附件', createAt: 1 },
+        { id: 'a1', role: 'assistant', content: '我已经看过摘要', createAt: 2 },
+      ],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'gpt-5.2',
+        protocol: 'responses',
+      },
+      DEFAULT_PARAMETER_ENABLED,
+    );
+
+    expect(payload.jsonBody).toEqual({
+      model: 'gpt-5.2',
+      input: [
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: '先看附件' },
+          ],
+        },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'output_text', text: '我已经看过摘要' },
+          ],
+        },
+      ],
+      stream: false,
+      temperature: 0.7,
+    });
+  });
+
   it('builds gemini conversation envelope with generationConfig', () => {
     const payload = buildApiPayload(
       [{ id: 'u1', role: 'user', content: 'hello', createAt: 1 }],
@@ -194,6 +319,86 @@ describe('modelTesterSession', () => {
       systemInstruction: { parts: [{ text: 'system text' }] },
       contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
       generationConfig: { temperature: 0.2, maxOutputTokens: 300 },
+    });
+  });
+
+  it('serializes conversation file parts into openai and responses payloads', () => {
+    const message = {
+      id: 'u1',
+      role: 'user' as const,
+      content: 'summarize this',
+      createAt: 1,
+      parts: [
+        {
+          type: 'input_file' as const,
+          fileId: 'file_metapi_123',
+          filename: 'paper.pdf',
+          mimeType: 'application/pdf',
+        },
+      ],
+    };
+
+    const openaiPayload = buildApiPayload(
+      [message],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'gpt-4.1',
+        protocol: 'openai',
+      },
+      DEFAULT_PARAMETER_ENABLED,
+    );
+
+    expect(openaiPayload.jsonBody).toEqual({
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'summarize this' },
+          {
+            type: 'file',
+            file: {
+              file_id: 'file_metapi_123',
+              filename: 'paper.pdf',
+              mime_type: 'application/pdf',
+            },
+          },
+        ],
+      },
+      ],
+      stream: false,
+      temperature: 0.7,
+      frequency_penalty: 0,
+      presence_penalty: 0,
+    });
+
+    const responsesPayload = buildApiPayload(
+      [message],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'gpt-4.1',
+        protocol: 'responses',
+      },
+      DEFAULT_PARAMETER_ENABLED,
+    );
+
+    expect(responsesPayload.jsonBody).toEqual({
+      model: 'gpt-4.1',
+      input: [
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'summarize this' },
+            {
+              type: 'input_file',
+              file_id: 'file_metapi_123',
+              filename: 'paper.pdf',
+            },
+          ],
+        },
+      ],
+      stream: false,
+      temperature: 0.7,
     });
   });
 

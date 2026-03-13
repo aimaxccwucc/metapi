@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
+import CenteredModal from '../components/CenteredModal.js';
 import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
-import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
+import { MobileCard, MobileField } from '../components/MobileCard.js';
+import { useIsMobile } from '../components/useIsMobile.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import { clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
 import { tr } from '../i18n.js';
@@ -12,7 +14,9 @@ import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { resolveInitialConnectionSegment } from './helpers/defaultConnectionSegment.js';
 import {
   buildSiteSaveAction,
+  emptySiteCustomHeader,
   emptySiteForm,
+  serializeSiteCustomHeaders,
   siteFormFromSite,
   type SiteEditorState,
   type SiteForm,
@@ -25,18 +29,18 @@ type SiteRow = {
   externalCheckinUrl?: string | null;
   platform?: string;
   status?: string;
-  healthStatus?: 'alive' | 'unreachable' | 'unknown' | string;
-  healthReason?: string | null;
-  healthCheckedAt?: string | null;
-  apiKey?: string;
-  proxyUrl?: string | null;
   useSystemProxy?: boolean;
+  customHeaders?: string | null;
   globalWeight?: number;
   isPinned?: boolean;
   sortOrder?: number;
   totalBalance?: number;
   createdAt?: string;
 };
+
+function hasConfiguredCustomHeaders(customHeaders?: string | null): boolean {
+  return typeof customHeaders === 'string' && customHeaders.trim().length > 0;
+}
 
 const platformColors: Record<string, string> = {
   'new-api': 'badge-info',
@@ -50,17 +54,6 @@ const platformColors: Record<string, string> = {
   claude: 'badge-warning',
   gemini: 'badge-info',
   cliproxyapi: 'badge-info',
-};
-
-const siteReachabilityMap: Record<string, {
-  label: string;
-  cls: string;
-  dotClass: string;
-  pulse?: boolean;
-}> = {
-  alive: { label: '可达', cls: 'badge-success', dotClass: 'status-dot-success', pulse: true },
-  unreachable: { label: '不可达', cls: 'badge-error', dotClass: 'status-dot-error', pulse: true },
-  unknown: { label: '未知', cls: 'badge-muted', dotClass: 'status-dot-muted' },
 };
 
 const SITE_PLATFORM_OPTIONS = [
@@ -94,9 +87,9 @@ export default function Sites() {
   const [orderingSiteId, setOrderingSiteId] = useState<number | null>(null);
   const [pinningSiteId, setPinningSiteId] = useState<number | null>(null);
   const [selectedSiteIds, setSelectedSiteIds] = useState<number[]>([]);
+  const [expandedSiteIds, setExpandedSiteIds] = useState<number[]>([]);
+  const isMobile = useIsMobile(768);
   const [batchActionLoading, setBatchActionLoading] = useState(false);
-  const [siteOpsLoading, setSiteOpsLoading] = useState<Record<string, boolean>>({});
-  const editorPresence = useAnimatedVisibility(Boolean(editor), 220);
   const lastEditorRef = useRef<SiteEditorState | null>(null);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
   const highlightTimerRef = useRef<number | null>(null);
@@ -106,6 +99,16 @@ export default function Sites() {
   const activeEditor = editor || lastEditorRef.current;
   const isEditing = activeEditor?.mode === 'edit';
   const isAdding = activeEditor?.mode === 'add';
+  const formInputStyle = {
+    width: '100%',
+    padding: '10px 14px',
+    border: '1px solid var(--color-border)',
+    borderRadius: 'var(--radius-sm)',
+    fontSize: 13,
+    outline: 'none',
+    background: 'var(--color-bg)',
+    color: 'var(--color-text-primary)',
+  } as const;
 
   const load = async () => {
     try {
@@ -203,6 +206,11 @@ export default function Sites() {
       toast.error('全局权重必须是大于 0 的数字');
       return;
     }
+    const serializedCustomHeaders = serializeSiteCustomHeaders(form.customHeaders);
+    if (!serializedCustomHeaders.valid) {
+      toast.error(serializedCustomHeaders.error || '自定义请求头格式不正确');
+      return;
+    }
 
     const payload = {
       name: form.name.trim(),
@@ -210,6 +218,7 @@ export default function Sites() {
       externalCheckinUrl: form.externalCheckinUrl.trim(),
       platform: form.platform.trim(),
       useSystemProxy: !!form.useSystemProxy,
+      customHeaders: serializedCustomHeaders.customHeaders,
       globalWeight: Number(parsedGlobalWeight.toFixed(3)),
     };
     if (!payload.name || !payload.url) {
@@ -249,6 +258,34 @@ export default function Sites() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const updateCustomHeaderRow = (index: number, field: 'key' | 'value', value: string) => {
+    setForm((prev) => ({
+      ...prev,
+      customHeaders: prev.customHeaders.map((item, itemIndex) => (
+        itemIndex === index
+          ? { ...item, [field]: value }
+          : item
+      )),
+    }));
+  };
+
+  const addCustomHeaderRow = () => {
+    setForm((prev) => ({
+      ...prev,
+      customHeaders: [...prev.customHeaders, emptySiteCustomHeader()],
+    }));
+  };
+
+  const removeCustomHeaderRow = (index: number) => {
+    setForm((prev) => {
+      const nextHeaders = prev.customHeaders.filter((_, itemIndex) => itemIndex !== index);
+      return {
+        ...prev,
+        customHeaders: nextHeaders.length > 0 ? nextHeaders : [emptySiteCustomHeader()],
+      };
+    });
   };
 
   const handleDetect = async () => {
@@ -344,6 +381,14 @@ export default function Sites() {
     setSelectedSiteIds(sortedSites.map((site) => site.id));
   };
 
+  const toggleSiteDetails = (siteId: number) => {
+    setExpandedSiteIds((current) => (
+      current.includes(siteId)
+        ? current.filter((id) => id !== siteId)
+        : [...current, siteId]
+    ));
+  };
+
   const runBatchAction = async (action: 'enable' | 'disable' | 'delete' | 'enableSystemProxy' | 'disableSystemProxy') => {
     if (selectedSiteIds.length === 0) return;
     if (action === 'delete' && typeof globalThis.confirm === 'function' && !globalThis.confirm(`确认删除选中的 ${selectedSiteIds.length} 个站点？`)) return;
@@ -370,74 +415,10 @@ export default function Sites() {
     }
   };
 
-  const handleSiteRowClick = (siteId: number, event: MouseEvent<HTMLTableRowElement>) => {
+  const handleSiteRowClick = (siteId: number, event: React.MouseEvent<HTMLTableRowElement>) => {
     if (shouldIgnoreRowSelectionClick(event.target)) return;
     const isSelected = selectedSiteIds.includes(siteId);
     toggleSiteSelection(siteId, !isSelected);
-  };
-
-  const withSiteOpLoading = async (key: string, fn: () => Promise<void>) => {
-    setSiteOpsLoading((prev) => ({ ...prev, [key]: true }));
-    try {
-      await fn();
-    } finally {
-      setSiteOpsLoading((prev) => ({ ...prev, [key]: false }));
-    }
-  };
-
-  const handleRefreshSiteHealth = async () => {
-    await withSiteOpLoading('refresh-site-health', async () => {
-      const result = await api.refreshSiteHealth();
-      toast.success(result?.message || '已开始检测站点存活状态，请到任务中心查看结果');
-    });
-  };
-
-  const handleDryRunCleanup = async () => {
-    await withSiteOpLoading('dryrun-cleanup', async () => {
-      const result = await api.cleanupUnreachableSites({ dryRun: true });
-      toast.success(result?.message || '已开始预检失活站点，请到任务中心查看结果');
-    });
-  };
-
-  const handleCleanupUnreachable = async () => {
-    if (!window.confirm('将移除不可达站点，并级联删除其账号/Key/签到日志。确认继续？')) return;
-    await withSiteOpLoading('cleanup-unreachable', async () => {
-      const result = await api.cleanupUnreachableSites();
-      toast.success(result?.message || '已开始移除失活站点，请到任务中心查看结果');
-      await load();
-    });
-  };
-
-  const renderSiteReachability = (site: SiteRow) => {
-    const healthKey = site.healthStatus || 'unknown';
-    const health = siteReachabilityMap[healthKey] || siteReachabilityMap.unknown;
-    const reason = (site.healthReason || '').trim();
-    const checkedAt = site.healthCheckedAt ? formatDateTimeLocal(site.healthCheckedAt) : '';
-    const detail = reason || (checkedAt ? `最后检测: ${checkedAt}` : '尚未检测');
-
-    return (
-      <div>
-        <span className={`badge ${health.cls}`} style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 4, width: 'fit-content' }}>
-          <span className={`status-dot ${health.dotClass} ${health.pulse ? 'animate-pulse-dot' : ''}`} style={{ marginRight: 0 }} />
-          {health.label}
-        </span>
-        <div
-          style={{
-            marginTop: 4,
-            maxWidth: 220,
-            fontSize: 11,
-            lineHeight: 1.35,
-            color: 'var(--color-text-muted)',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}
-          title={detail}
-        >
-          {detail}
-        </div>
-      </div>
-    );
   };
 
   return (
@@ -464,7 +445,7 @@ export default function Sites() {
         </div>
       </div>
 
-      {selectedSiteIds.length > 0 && (
+      {!isMobile && selectedSiteIds.length > 0 && (
         <div className="card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <span style={{ fontSize: 13, fontWeight: 600 }}>已选 {selectedSiteIds.length} 项</span>
           <button
@@ -496,175 +477,352 @@ export default function Sites() {
         </div>
       )}
 
-      <div className="info-tip" style={{ marginBottom: 12 }}>
-        站点权重说明：最终站点倍率 = 站点全局权重 × 设置页中下游 API Key 的站点倍率。它会与路由策略因子（基础权重、价值分、成本、余额、使用频次）共同作用。数值越大，该站点在同优先级下越容易被选中。建议范围 0.5-3，默认 1；长期不建议超过 5。
-      </div>
-
-      <div className="card" style={{ marginBottom: 12, padding: 12 }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-          <button
-            onClick={handleRefreshSiteHealth}
-            disabled={!!siteOpsLoading['refresh-site-health']}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)' }}
-          >
-            {siteOpsLoading['refresh-site-health'] ? <><span className="spinner spinner-sm" /> 检测中...</> : '一键检测站点存活'}
-          </button>
-          <button
-            onClick={handleDryRunCleanup}
-            disabled={!!siteOpsLoading['dryrun-cleanup']}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)' }}
-          >
-            {siteOpsLoading['dryrun-cleanup'] ? <><span className="spinner spinner-sm" /> 预检中...</> : '预检可移除站点'}
-          </button>
-          <button
-            onClick={handleCleanupUnreachable}
-            disabled={!!siteOpsLoading['cleanup-unreachable']}
-            className="btn btn-link btn-link-danger"
-          >
-            {siteOpsLoading['cleanup-unreachable'] ? <><span className="spinner spinner-sm" /> 移除中...</> : '一键移除失活站点+账号'}
-          </button>
-        </div>
-      </div>
-
-      {editorPresence.shouldRender && activeEditor && (
-        <div className={`card panel-presence ${editorPresence.isVisible ? '' : 'is-closing'}`.trim()} style={{ padding: 20, marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>
-              {isEditing ? '编辑站点' : '添加站点'}
-            </div>
-            <button onClick={closeEditor} className="btn btn-ghost" style={{ fontSize: 12, padding: '4px 10px' }}>
-              取消
-            </button>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <input
-              placeholder="站点名称"
-              value={form.name}
-              onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
-              style={{
-                width: '100%',
-                padding: '10px 14px',
-                border: '1px solid var(--color-border)',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: 13,
-                outline: 'none',
-                background: 'var(--color-bg)',
-                color: 'var(--color-text-primary)',
-              }}
-            />
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                placeholder="站点 URL (例如 https://api.example.com)"
-                value={form.url}
-                onChange={(e) => setForm((prev) => ({ ...prev, url: e.target.value }))}
-                onBlur={() => {
-                  if (form.url.trim() && !form.platform.trim()) {
-                    handleDetect();
-                  }
-                }}
-                style={{
-                  flex: 1,
-                  padding: '10px 14px',
-                  border: '1px solid var(--color-border)',
-                  borderRadius: 'var(--radius-sm)',
-                  fontSize: 13,
-                  outline: 'none',
-                  background: 'var(--color-bg)',
-                  color: 'var(--color-text-primary)',
-                }}
-              />
-              <button
-                onClick={handleDetect}
-                disabled={detecting || !form.url.trim()}
-                className="btn btn-ghost"
-                style={{ padding: '10px 14px', minWidth: 96, border: '1px solid var(--color-border)' }}
-              >
-                {detecting ? <><span className="spinner spinner-sm" /> 检测中</> : '自动检测'}
-              </button>
-            </div>
-            <div
-              style={{
-                border: `1px solid ${form.platform.trim() ? 'color-mix(in srgb, var(--color-success) 48%, transparent)' : 'var(--color-border)'}`,
-                borderRadius: 'var(--radius-sm)',
-                background: form.platform.trim() ? 'color-mix(in srgb, var(--color-success) 10%, var(--color-bg))' : 'var(--color-bg)',
-                transition: 'all 0.2s',
-              }}
-            >
-              <ModernSelect
-                value={form.platform}
-                onChange={(value) => setForm((prev) => ({ ...prev, platform: value }))}
-                options={platformOptions}
-                placeholder="平台类型（可自动检测）"
-              />
-            </div>
-            <input
-              placeholder="外部签到/福利站点 URL（可选）"
-              value={form.externalCheckinUrl}
-              onChange={(e) => setForm((prev) => ({ ...prev, externalCheckinUrl: e.target.value }))}
-              style={{
-                width: '100%',
-                padding: '10px 14px',
-                border: '1px solid var(--color-border)',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: 13,
-                outline: 'none',
-                background: 'var(--color-bg)',
-                color: 'var(--color-text-primary)',
-              }}
-            />
-            <label style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '10px 14px',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: 13,
-              background: 'var(--color-bg)',
-              color: 'var(--color-text-primary)',
-            }}>
-              <input
-                type="checkbox"
-                checked={form.useSystemProxy}
-                onChange={(e) => setForm((prev) => ({ ...prev, useSystemProxy: e.target.checked }))}
-              />
-              使用系统代理
-            </label>
-            <input
-              placeholder="站点全局权重（默认 1）"
-              value={form.globalWeight}
-              onChange={(e) => setForm((prev) => ({ ...prev, globalWeight: e.target.value }))}
-              style={{
-                width: '100%',
-                padding: '10px 14px',
-                border: '1px solid var(--color-border)',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: 13,
-                outline: 'none',
-                background: 'var(--color-bg)',
-                color: 'var(--color-text-primary)',
-              }}
-            />
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-              越大越容易被路由选中。建议 0.5-3，默认 1。
-            </div>
+      {isMobile && selectedSiteIds.length > 0 && (
+        <div className="mobile-actions-bar">
+          <span className="mobile-actions-info">已选 {selectedSiteIds.length} 项</span>
+          <div className="mobile-actions-row">
             <button
-              onClick={handleSave}
-              disabled={saving || !form.name.trim() || !form.url.trim()}
-              className="btn btn-primary"
-              style={{ alignSelf: 'flex-start' }}
+              data-testid="sites-batch-enable-system-proxy"
+              onClick={() => runBatchAction('enableSystemProxy')}
+              disabled={batchActionLoading}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
             >
-              {saving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : (isEditing ? '保存修改' : '保存站点')}
+              批量开启系统代理
+            </button>
+            <button
+              onClick={() => runBatchAction('disableSystemProxy')}
+              disabled={batchActionLoading}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+            >
+              批量关闭系统代理
+            </button>
+            <button onClick={() => runBatchAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+              批量启用
+            </button>
+            <button onClick={() => runBatchAction('disable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+              批量禁用
+            </button>
+            <button onClick={() => runBatchAction('delete')} disabled={batchActionLoading} className="btn btn-link btn-link-danger">
+              批量删除
             </button>
           </div>
         </div>
       )}
 
+      <div className="info-tip" style={{ marginBottom: 12 }}>
+        站点权重说明：最终站点倍率 = 站点全局权重 × 设置页中下游 API Key 的站点倍率。它会与路由策略因子（基础权重、价值分、成本、余额、使用频次）共同作用。数值越大，该站点在同优先级下越容易被选中。建议范围 0.5-3，默认 1；长期不建议超过 5。
+      </div>
+
+      {activeEditor && (
+        <CenteredModal
+          open={Boolean(editor)}
+          onClose={closeEditor}
+          title={(
+            <div style={{ fontSize: 14, fontWeight: 600 }}>
+              {isEditing ? '编辑站点' : '添加站点'}
+            </div>
+          )}
+          maxWidth={920}
+          bodyStyle={{
+            maxHeight: isMobile ? '78vh' : '72vh',
+            overflowY: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+          }}
+          footer={(
+            <>
+              <button onClick={closeEditor} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+                取消
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving || !form.name.trim() || !form.url.trim()}
+                className="btn btn-primary"
+              >
+                {saving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : (isEditing ? '保存修改' : '保存站点')}
+              </button>
+            </>
+          )}
+        >
+          <input
+            placeholder="站点名称"
+            value={form.name}
+            onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+            style={formInputStyle}
+          />
+          <div style={{ display: 'flex', gap: 8, flexDirection: isMobile ? 'column' : 'row' }}>
+            <input
+              placeholder="站点 URL (例如 https://api.example.com)"
+              value={form.url}
+              onChange={(e) => setForm((prev) => ({ ...prev, url: e.target.value }))}
+              onBlur={() => {
+                if (form.url.trim() && !form.platform.trim()) {
+                  handleDetect();
+                }
+              }}
+              style={{ ...formInputStyle, flex: 1 }}
+            />
+            <button
+              onClick={handleDetect}
+              disabled={detecting || !form.url.trim()}
+              className="btn btn-ghost"
+              style={{ padding: '10px 14px', minWidth: 96, border: '1px solid var(--color-border)' }}
+            >
+              {detecting ? <><span className="spinner spinner-sm" /> 检测中</> : '自动检测'}
+            </button>
+          </div>
+          <div
+            style={{
+              border: `1px solid ${form.platform.trim() ? 'color-mix(in srgb, var(--color-success) 48%, transparent)' : 'var(--color-border)'}`,
+              borderRadius: 'var(--radius-sm)',
+              background: form.platform.trim() ? 'color-mix(in srgb, var(--color-success) 10%, var(--color-bg))' : 'var(--color-bg)',
+              transition: 'all 0.2s',
+            }}
+          >
+            <ModernSelect
+              value={form.platform}
+              onChange={(value) => setForm((prev) => ({ ...prev, platform: value }))}
+              options={platformOptions}
+              placeholder="平台类型（可自动检测）"
+            />
+          </div>
+          <input
+            placeholder="外部签到/福利站点 URL（可选）"
+            value={form.externalCheckinUrl}
+            onChange={(e) => setForm((prev) => ({ ...prev, externalCheckinUrl: e.target.value }))}
+            style={formInputStyle}
+          />
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+              padding: 12,
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'color-mix(in srgb, var(--color-surface) 82%, transparent)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>
+                站点自定义请求头
+              </div>
+              <button
+                type="button"
+                onClick={addCustomHeaderRow}
+                className="btn btn-ghost"
+                style={{ border: '1px solid var(--color-border)' }}
+              >
+                + 添加请求头
+              </button>
+            </div>
+            {form.customHeaders.map((header, index) => (
+              <div
+                key={`custom-header-${index}`}
+                style={{
+                  display: 'flex',
+                  gap: 8,
+                  flexDirection: isMobile ? 'column' : 'row',
+                  alignItems: isMobile ? 'stretch' : 'center',
+                }}
+              >
+                <input
+                  placeholder="Header 名称"
+                  value={header.key}
+                  onChange={(e) => updateCustomHeaderRow(index, 'key', e.target.value)}
+                  style={{ ...formInputStyle, flex: 1, fontFamily: 'var(--font-mono)' }}
+                />
+                <input
+                  placeholder="Header 值"
+                  value={header.value}
+                  onChange={(e) => updateCustomHeaderRow(index, 'value', e.target.value)}
+                  style={{ ...formInputStyle, flex: 1, fontFamily: 'var(--font-mono)' }}
+                />
+                <button
+                  type="button"
+                  onClick={() => removeCustomHeaderRow(index)}
+                  className="btn btn-link btn-link-danger"
+                  style={isMobile ? { alignSelf: 'flex-end' } : undefined}
+                >
+                  删除
+                </button>
+              </div>
+            ))}
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
+              按 key/value 逐条填写。整行留空会自动忽略；同名请求头不允许重复；请求本身显式传入的请求头优先级更高。
+            </div>
+          </div>
+          <label style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 14px',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-sm)',
+            fontSize: 13,
+            background: 'var(--color-bg)',
+            color: 'var(--color-text-primary)',
+          }}>
+            <input
+              type="checkbox"
+              checked={form.useSystemProxy}
+              onChange={(e) => setForm((prev) => ({ ...prev, useSystemProxy: e.target.checked }))}
+            />
+            使用系统代理
+          </label>
+          <input
+            placeholder="站点全局权重（默认 1）"
+            value={form.globalWeight}
+            onChange={(e) => setForm((prev) => ({ ...prev, globalWeight: e.target.value }))}
+            style={formInputStyle}
+          />
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+            越大越容易被路由选中。建议 0.5-3，默认 1。
+          </div>
+        </CenteredModal>
+      )}
+
       <div className="card" style={{ overflowX: 'auto' }}>
         {sites.length > 0 ? (
-          <table className="data-table sites-table">
+          isMobile ? (
+            <div className="mobile-card-list">
+              {sortedSites.map((site) => {
+                const isExpanded = expandedSiteIds.includes(site.id);
+                return (
+                  <MobileCard
+                    key={site.id}
+                    title={site.name || '-'}
+                    actions={(
+                      <input
+                        type="checkbox"
+                        aria-label={`选择站点 ${site.name || site.id}`}
+                        checked={selectedSiteIds.includes(site.id)}
+                        onChange={(event) => toggleSiteSelection(site.id, event.target.checked)}
+                      />
+                    )}
+                  >
+                    <MobileField
+                      label="状态"
+                      value={(
+                        <span className={`badge ${site.status === 'disabled' ? 'badge-muted' : 'badge-success'}`} style={{ fontSize: 11 }}>
+                          {site.status === 'disabled' ? '禁用' : '启用'}
+                        </span>
+                      )}
+                    />
+                    <MobileField
+                      label="平台"
+                      value={(
+                        <span className={`badge ${platformColors[site.platform || ''] || 'badge-muted'}`} style={{ fontSize: 11 }}>
+                          {site.platform || '-'}
+                        </span>
+                      )}
+                    />
+                    <MobileField label="余额" value={`$${(site.totalBalance || 0).toFixed(2)}`} />
+                    <MobileField label="权重" value={(site.globalWeight || 1).toFixed(2)} />
+                    {isExpanded ? (
+                      <div className="mobile-card-extra">
+                        <MobileField
+                          label="系统代理"
+                          value={(
+                            <span className={`badge ${site.useSystemProxy ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>
+                              {site.useSystemProxy ? '已开启' : '未开启'}
+                            </span>
+                          )}
+                        />
+                        <MobileField
+                          label="外部签到站URL"
+                          value={site.externalCheckinUrl ? (
+                            <a
+                              href={site.externalCheckinUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="sites-url-link"
+                              style={{
+                                fontSize: 12,
+                                fontFamily: 'var(--font-mono)',
+                                color: 'var(--color-primary)',
+                                textDecoration: 'underline',
+                                wordBreak: 'break-all',
+                              }}
+                            >
+                              {site.externalCheckinUrl}
+                            </a>
+                          ) : '-'}
+                        />
+                        <MobileField
+                          label="自定义头"
+                          value={hasConfiguredCustomHeaders(site.customHeaders) ? '已配置' : '-'}
+                        />
+                        <MobileField
+                          label="创建时间"
+                          value={formatDateTimeLocal(site.createdAt)}
+                        />
+                      </div>
+                    ) : null}
+                    <div className="mobile-card-actions">
+                      <button
+                        type="button"
+                        onClick={() => toggleSiteDetails(site.id)}
+                        className="btn btn-link"
+                      >
+                        {isExpanded ? '收起' : '详情'}
+                      </button>
+                      <button
+                        onClick={() => handleTogglePin(site)}
+                        disabled={pinningSiteId === site.id}
+                        className={`btn btn-link ${site.isPinned ? 'btn-link-warning' : 'btn-link-primary'}`}
+                      >
+                        {pinningSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.isPinned ? '取消置顶' : '置顶')}
+                      </button>
+                      {sortMode === 'custom' && (
+                        <>
+                          <button
+                            onClick={() => handleMoveCustomOrder(site, 'up')}
+                            disabled={orderingSiteId === site.id}
+                            className="btn btn-link btn-link-muted"
+                          >
+                            ↑
+                          </button>
+                          <button
+                            onClick={() => handleMoveCustomOrder(site, 'down')}
+                            disabled={orderingSiteId === site.id}
+                            className="btn btn-link btn-link-muted"
+                          >
+                            ↓
+                          </button>
+                        </>
+                      )}
+                      <button
+                        onClick={() => openEdit(site)}
+                        className="btn btn-link btn-link-primary"
+                      >
+                        编辑
+                      </button>
+                      <button
+                        onClick={() => handleToggleStatus(site)}
+                        disabled={togglingSiteId === site.id}
+                        className={`btn btn-link ${site.status === 'disabled' ? 'btn-link-primary' : 'btn-link-warning'}`}
+                      >
+                        {togglingSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.status === 'disabled' ? '启用' : '禁用')}
+                      </button>
+                      <button
+                        onClick={() => handleDelete(site)}
+                        disabled={deleting === site.id}
+                        className="btn btn-link btn-link-danger"
+                      >
+                        {deleting === site.id ? <span className="spinner spinner-sm" /> : null}
+                        删除
+                      </button>
+                    </div>
+                  </MobileCard>
+                );
+              })}
+            </div>
+          ) : (
+            <table className="data-table sites-table">
             <thead>
               <tr>
                 <th style={{ width: 44 }}>
@@ -678,7 +836,7 @@ export default function Sites() {
                 <th>外部签到站URL</th>
                 <th>总余额</th>
                 <th>状态</th>
-                <th>可达状态</th>
+                <th>系统代理</th>
                 <th>权重</th>
                 <th>平台</th>
                 <th>创建时间</th>
@@ -706,17 +864,24 @@ export default function Sites() {
                     />
                   </td>
                   <td style={{ fontWeight: 600 }}>
-                    <a
-                      href={site.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        color: 'var(--color-text-primary)',
-                        textDecoration: 'underline',
-                      }}
-                    >
-                      {site.name}
-                    </a>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+                      <a
+                        href={site.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          color: 'var(--color-text-primary)',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        {site.name}
+                      </a>
+                      {hasConfiguredCustomHeaders(site.customHeaders) ? (
+                        <span className="badge badge-info" style={{ fontSize: 11 }}>
+                          自定义头
+                        </span>
+                      ) : null}
+                    </div>
                   </td>
                   <td className="sites-url-cell" style={{ maxWidth: 300 }}>
                     {site.externalCheckinUrl ? (
@@ -746,7 +911,9 @@ export default function Sites() {
                     </span>
                   </td>
                   <td>
-                    {renderSiteReachability(site)}
+                    <span className={`badge ${site.useSystemProxy ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>
+                      {site.useSystemProxy ? '已开启' : '未开启'}
+                    </span>
                   </td>
                   <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
                     {(site.globalWeight || 1).toFixed(2)}
@@ -827,6 +994,7 @@ export default function Sites() {
               ))}
             </tbody>
           </table>
+          )
         ) : (
           <div className="empty-state">
             <svg className="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">

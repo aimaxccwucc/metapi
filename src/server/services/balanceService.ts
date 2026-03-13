@@ -14,7 +14,7 @@ import { decryptAccountPassword } from './accountCredentialService.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
-import { resolveProxyUrlForSite, withExplicitProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
@@ -43,15 +43,7 @@ function shouldAttemptAutoRelogin(message?: string | null): boolean {
 
 function shouldReportExpired(message?: string | null): boolean {
   if (!message) return false;
-  if (isTokenExpiredError({ message })) return true;
-
-  const text = message.toLowerCase();
-  return (
-    text.includes('access token') ||
-    text.includes('new-api-user') ||
-    text.includes('unauthorized') ||
-    text.includes('forbidden')
-  );
+  return isTokenExpiredError({ message });
 }
 
 function isUnsupportedCheckinRuntimeHealth(health: ReturnType<typeof extractRuntimeHealth>): boolean {
@@ -257,7 +249,6 @@ async function fetchTodayIncomeFromLogs(params: {
   accessToken: string;
   platform?: string | null;
   platformUserId?: number;
-  proxyUrl?: string | null;
 }): Promise<number | null> {
   const baseUrl = params.baseUrl.trim();
   const accessToken = params.accessToken.trim();
@@ -292,7 +283,8 @@ async function fetchTodayIncomeFromLogs(params: {
       });
 
       try {
-        const response = await fetch(`${baseUrl}/api/log/self?${query.toString()}`, withExplicitProxyRequestInit(params.proxyUrl, {
+        const requestUrl = `${baseUrl}/api/log/self?${query.toString()}`;
+        const response = await fetch(requestUrl, await withSiteProxyRequestInit(requestUrl, {
           method: 'GET',
           headers,
         }));
@@ -573,7 +565,6 @@ export async function refreshBalance(accountId: number) {
         accessToken: activeAccessToken,
         platform: site.platform,
         platformUserId,
-        proxyUrl: resolveProxyUrlForSite(site),
       });
       if (typeof fallbackIncome === 'number' && Number.isFinite(fallbackIncome)) {
         balanceInfo.todayIncome = fallbackIncome;

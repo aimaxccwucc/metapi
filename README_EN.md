@@ -27,7 +27,13 @@ into <strong>one API Key, one endpoint</strong>, with automatic model discovery,
   <img alt="License" src="https://img.shields.io/badge/license-MIT-brightgreen?style=flat">
 </a><!--
 --><img alt="Node.js" src="https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&style=flat"><!--
---><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&style=flat">
+--><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&style=flat"><!--
+--><a href="https://zeabur.com/templates/DOX5PR">
+  <img alt="Deploy on Zeabur" src="https://zeabur.com/button.svg" height="28">
+</a><!--
+--><a href="https://render.com/deploy?repo=https://github.com/cita-777/metapi">
+  <img alt="Deploy to Render" src="https://render.com/images/deploy-to-render-button.svg" height="28">
+</a>
 </p>
 
 <p align="center">
@@ -36,15 +42,31 @@ into <strong>one API Key, one endpoint</strong>, with automatic model discovery,
 </p>
 
 <p align="center">
-  <a href="docs/index.md"><strong>Docs</strong></a> ·
-  <a href="docs/getting-started.md">Quick Start</a> ·
-  <a href="docs/deployment.md">Deployment</a> ·
-  <a href="docs/configuration.md">Configuration</a> ·
-  <a href="docs/faq.md">FAQ</a> ·
+  <a href="https://metapi.cita777.me"><strong>Docs</strong></a> ·
+  <a href="https://metapi.cita777.me/getting-started">Quick Start</a> ·
+  <a href="https://metapi.cita777.me/deployment">Deployment</a> ·
+  <a href="https://metapi.cita777.me/configuration">Configuration</a> ·
+  <a href="https://metapi.cita777.me/client-integration">Client Integration</a> ·
+  <a href="https://metapi.cita777.me/faq">FAQ</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 </div>
+
+---
+
+## 🌐 Live Demo
+
+> Try Metapi without deploying — full-featured demo instance:
+
+| | |
+|---|---|
+| 🔗 **Demo URL** | [metapi-t9od.onrender.com](https://metapi-t9od.onrender.com/) |
+| 🔑 **Admin Token** | `123456` |
+
+> **⚠️ Security Notice**: This is a public demo. **Do NOT enter any real API keys, credentials, or site information.** Data may be reset at any time.
+
+> **ℹ️ Note**: Demo runs on Render free tier + OpenRouter free models (only `:free` suffixed models available). First visit may take 30-60s to wake up.
 
 ---
 
@@ -160,7 +182,7 @@ The AI ecosystem is seeing a growing number of aggregation relay stations based 
 ### Unified Proxy Gateway
 
 - Compatible with **OpenAI** and **Claude** downstream formats, works with all mainstream clients
-- Supports Responses / Chat Completions / Messages / Completions (Legacy) / Embeddings / Images / Models (current core coverage)
+- Supports Responses / Chat Completions / Messages / Completions (Legacy) / Embeddings / Images / Models, plus standard `/v1/files`
 - Full SSE streaming support with automatic format conversion (OpenAI <-> Claude)
 
 ### Smart Routing Engine
@@ -184,12 +206,12 @@ The AI ecosystem is seeing a growing number of aggregation relay stations based 
 | **New API** | `new-api` | Next-gen LLM gateway |
 | **One API** | `one-api` | Classic OpenAI API aggregation |
 | **OneHub** | `onehub` | Enhanced One API fork |
-| **DoneHub** | `donehub` | Enhanced OneHub fork |
+| **DoneHub** | `done-hub` | Enhanced OneHub fork |
 | **Veloera** | `veloera` | API gateway platform |
 | **AnyRouter** | `anyrouter` | Universal routing platform |
 | **Sub2API** | `sub2api` | Subscription-based relay |
 
-Each adapter supports: account login, balance queries, model enumeration, token sync, daily check-in, user info retrieval, and full lifecycle management.
+Adapters cover shared capabilities such as model discovery, balance access, token management, and proxy integration; login, check-in, and user-info flows vary by platform.
 
 ### Account & Token Management
 
@@ -264,7 +286,7 @@ Alert scenarios: low balance warning, site/account anomalies, check-in failures,
 
 ### Lightweight Deployment
 
-- **Single Docker container** with built-in SQLite — no external dependencies
+- **Single Docker container** with a default local data directory, plus optional external MySQL / PostgreSQL runtime DB
 - Alpine base image, minimal footprint
 - Full data import/export for worry-free migration
 
@@ -330,31 +352,7 @@ After starting, visit `http://localhost:4000` and log in with your `AUTH_TOKEN`!
 > If running outside Compose without explicitly setting `AUTH_TOKEN`, the default is `change-me-admin-token` (for local debugging only).
 > If you change the admin token in the Settings panel, use the new token for subsequent logins.
 
-### Desktop App (Windows / macOS / Linux)
-
-For personal-computer deployments, download the desktop installer from [Releases](https://github.com/cita-777/metapi/releases):
-
-1. Download the installer for your platform
-2. Install and launch Metapi Desktop
-3. The desktop shell starts the local service automatically and stores data under the app data directory
-
-Desktop builds include:
-
-- Embedded local Metapi service, started automatically by Electron
-- Tray menu for reopen / restart backend / launch at login
-- In-app update checks backed by GitHub Releases
-
-> [!NOTE]
-> Server deployments are now Docker-first.  
-> GitHub Release assets are intended for the desktop app rather than raw Node.js server archives.
-
-### Upgrade
-
-```bash
-docker compose pull && docker compose up -d && docker image prune -f
-```
-
-For more deployment options, see [Deployment Guide](docs/deployment.md).
+For Docker Compose, desktop installers, reverse proxy, upgrades, and database options, see [Deployment Guide](docs/deployment.md).
 
 ---
 
@@ -379,7 +377,7 @@ For more deployment options, see [Deployment Guide](docs/deployment.md).
 | Category | Link | Description |
 | --- | --- | --- |
 | Docs Home | [docs/index.md](docs/index.md) | Publishable docs portal with nav/sidebar/search |
-| Overview | [docs/README.md](docs/README.md) | Documentation index |
+| Docs Maintenance | [docs/README.md](docs/README.md) | Maintenance and contributor-oriented docs entry |
 | Quick Start | [docs/getting-started.md](docs/getting-started.md) | Get running in 10 minutes |
 | Deployment | [docs/deployment.md](docs/deployment.md) | Docker Compose, reverse proxy, upgrades |
 | Configuration | [docs/configuration.md](docs/configuration.md) | All environment variables and routing params |
@@ -399,7 +397,7 @@ For more deployment options, see [Deployment Guide](docs/deployment.md).
 | `AUTH_TOKEN` | Admin panel login token (**must change**) | `change-me-admin-token` |
 | `PROXY_TOKEN` | Proxy API Bearer Token (**must change**) | `change-me-proxy-sk-token` |
 | `PORT` | Service listening port | `4000` |
-| `DATA_DIR` | Data directory (SQLite database) | `./data` |
+| `DATA_DIR` | Data directory for local runtime data | `./data` |
 | `TZ` | Timezone | `Asia/Shanghai` |
 | `ACCOUNT_CREDENTIAL_SECRET` | Account credential encryption key | Defaults to `AUTH_TOKEN` |
 
@@ -411,46 +409,9 @@ For more deployment options, see [Deployment Guide](docs/deployment.md).
 | `BALANCE_REFRESH_CRON` | Balance refresh cron expression | `0 * * * *` |
 
 <details>
-<summary><strong>Smart Routing Parameters</strong></summary>
+<summary><strong>Smart Routing, Notification & Security Configuration</strong></summary>
 
-| Variable | Description | Default |
-| --- | --- | --- |
-| `ROUTING_FALLBACK_UNIT_COST` | Default unit price when no cost signal | `1` |
-| `BASE_WEIGHT_FACTOR` | Base weight factor | `0.5` |
-| `VALUE_SCORE_FACTOR` | Value score factor | `0.5` |
-| `COST_WEIGHT` | Cost weight in routing selection | `0.4` |
-| `BALANCE_WEIGHT` | Balance weight in routing selection | `0.3` |
-| `USAGE_WEIGHT` | Usage weight in routing selection | `0.3` |
-
-</details>
-
-<details>
-<summary><strong>Notification Channel Configuration</strong></summary>
-
-| Variable | Description | Default |
-| --- | --- | --- |
-| `WEBHOOK_ENABLED` | Enable Webhook notifications | `true` |
-| `WEBHOOK_URL` | Webhook push URL | empty |
-| `BARK_ENABLED` | Enable Bark push | `true` |
-| `BARK_URL` | Bark push URL | empty |
-| `SERVERCHAN_ENABLED` | Enable ServerChan notifications | `true` |
-| `SERVERCHAN_KEY` | ServerChan SendKey | empty |
-| `SMTP_ENABLED` | Enable email notifications | `false` |
-| `SMTP_HOST` | SMTP server address | empty |
-| `SMTP_PORT` | SMTP port | `587` |
-| `SMTP_SECURE` | Use SSL/TLS | `false` |
-| `SMTP_USER` / `SMTP_PASS` | SMTP authentication | empty |
-| `SMTP_FROM` / `SMTP_TO` | Sender / recipient | empty |
-| `NOTIFY_COOLDOWN_SEC` | Same-alert cooldown (seconds) | `300` |
-
-</details>
-
-<details>
-<summary><strong>Security Configuration</strong></summary>
-
-| Variable | Description | Default |
-| --- | --- | --- |
-| `ADMIN_IP_ALLOWLIST` | Admin API IP allowlist (comma-separated) | empty (no restriction) |
+See [docs/configuration.md](docs/configuration.md) for full details on smart routing parameters, notification channels (Webhook / Bark / ServerChan / Telegram / SMTP), and security settings (IP allowlist).
 
 </details>
 
@@ -470,6 +431,9 @@ Metapi exposes standard OpenAI / Claude compatible endpoints:
 | `/v1/completions` | POST | OpenAI Completions (Legacy) |
 | `/v1/embeddings` | POST | Embeddings |
 | `/v1/images/generations` | POST | Image Generation |
+| `/v1/files` | POST / GET | OpenAI Files upload and list |
+| `/v1/files/:fileId` | GET / DELETE | OpenAI Files retrieve metadata and delete |
+| `/v1/files/:fileId/content` | GET | OpenAI Files raw content |
 | `/v1/models` | GET | List all available models |
 
 Include `Authorization: Bearer <PROXY_TOKEN>` in request headers.
@@ -477,7 +441,7 @@ Include `Authorization: Bearer <PROXY_TOKEN>` in request headers.
 The global `PROXY_TOKEN` works by default.
 From `System Settings -> Downstream API Key Strategy` you can create multiple project-level downstream keys with individual configuration:
 
-- Expiration time (ExpireAt)
+- Expiration time (expiresAt)
 - Cost and request limits (MaxCost / MaxRequests)
 - Model allowlist (SupportedModels, supports exact/glob/re:regex)
 - Route allowlist (AllowedRouteIds)
@@ -495,84 +459,9 @@ Compatible with all OpenAI API-compatible clients:
 | **API Key** | Your configured `PROXY_TOKEN` |
 | **Model List** | Auto-fetched from `GET /v1/models` |
 
-### CLI Quick Setup (Claude Code / Codex)
+Standard OpenAI `/v1/files` workflows are also supported for clients that use the official file API.
 
-#### Claude Code (`~/.claude/settings.json`)
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://your-domain.com",
-    "ANTHROPIC_API_KEY": "your-proxy-sk-token",
-    "ANTHROPIC_AUTH_TOKEN": "your-proxy-sk-token",
-    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
-  }
-}
-```
-
-> Note: Different client versions may read `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`; setting both is recommended.
-
-#### Codex (`~/.codex/config.toml` + `~/.codex/auth.json`)
-
-`~/.codex/config.toml`
-
-```toml
-model = "gpt-5"
-model_provider = "metapi"
-
-[model_providers.metapi]
-name = "metapi"
-base_url = "https://your-domain.com/v1"
-```
-
-`~/.codex/auth.json`
-
-```json
-{
-  "OPENAI_API_KEY": "your-proxy-sk-token"
-}
-```
-
-> Tip: `model` must exist in Metapi `GET /v1/models`.
-
-### Verified Compatible Clients
-
-- [ChatGPT-Next-Web](https://github.com/ChatGPTNextWeb/ChatGPT-Next-Web)
-- [Open WebUI](https://github.com/open-webui/open-webui)
-- [Cherry Studio](https://github.com/kangfenmao/cherry-studio)
-- [Cursor](https://cursor.sh)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- Codex CLI
-- [Roo Code](https://github.com/RooVetGit/Roo-Code)
-- [Kilo Code](https://github.com/kilocode/kilocode)
-- And any client that supports the OpenAI API format
-
-<details>
-<summary><strong>Troubleshooting: Streaming Response Issues</strong></summary>
-
-If non-streaming works but streaming fails, check:
-
-1. Whether the reverse proxy has SSE buffering disabled (Nginx: `proxy_buffering off`)
-2. Whether a middleware layer is rewriting the `text/event-stream` Content-Type
-3. Whether the client requires a specific streaming format
-
-**Nginx reference configuration:**
-
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:4000;
-    proxy_buffering off;
-    proxy_cache off;
-    proxy_set_header Connection '';
-    proxy_http_version 1.1;
-    chunked_transfer_encoding off;
-}
-```
-
-</details>
-
-For detailed integration instructions: [docs/client-integration.md](docs/client-integration.md)
+For detailed per-client setup, examples, and troubleshooting, see [docs/client-integration.md](docs/client-integration.md).
 
 ---
 
@@ -584,7 +473,7 @@ For detailed integration instructions: [docs/client-integration.md](docs/client-
 | **Frontend** | [React 18](https://react.dev) + [Vite](https://vitejs.dev) |
 | **Language** | [TypeScript](https://www.typescriptlang.org) — End-to-end type safety |
 | **Styling** | [Tailwind CSS v4](https://tailwindcss.com) — Utility-first CSS framework |
-| **Database** | SQLite ([better-sqlite3](https://github.com/WiseLibs/better-sqlite3)) + [Drizzle ORM](https://orm.drizzle.team) |
+| **Database** | SQLite / MySQL / PostgreSQL + [Drizzle ORM](https://orm.drizzle.team) |
 | **Charts** | [VChart](https://visactor.io/vchart) (@visactor/react-vchart) |
 | **Scheduling** | [node-cron](https://github.com/node-cron/node-cron) |
 | **Containerization** | Docker (Alpine) + Docker Compose |
@@ -640,7 +529,7 @@ npm run db:generate    # Generate Drizzle migration files
 
 ## Data & Privacy
 
-Metapi is fully self-hosted. All data (accounts, tokens, routes, logs) is stored in the local SQLite database. No data is sent to any third party. Proxy requests are transmitted directly between your server and upstream sites only.
+Metapi is fully self-hosted. All data (accounts, tokens, routes, logs) stays in your own deployment environment. No data is sent to any third party. Proxy requests are transmitted directly between your server and upstream sites only.
 
 ---
 
@@ -671,6 +560,7 @@ If you discover a security issue, please refer to [SECURITY.md](SECURITY.md) and
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=cita-777/metapi&type=date&legend=top-left&v=2)](https://www.star-history.com/#cita-777/metapi&type=date&legend=top-left)
+
 ---
 
 <div align="center">

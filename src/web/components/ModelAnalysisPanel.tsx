@@ -205,9 +205,31 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
             <tbody>
               {callRanking.map((item, index) => {
                 const latMs = item.avgLatencyMs;
-                const latColor = latMs > 10000 ? '#ef4444' : latMs > 3000 ? '#f59e0b' : '#22c55e';
-                const latBg = latMs > 10000 ? 'rgba(239,68,68,0.08)' : latMs > 3000 ? 'rgba(245,158,11,0.08)' : 'rgba(34,197,94,0.08)';
-                const latText = latMs >= 1000 ? `${(latMs / 1000).toFixed(latMs >= 10000 ? 0 : 1)}s` : `${latMs}ms`;
+                const latSec = latMs / 1000;
+                // ≤15s green, 15-60s gradient green→yellow→red, >60s or failed → red
+                let latColor: string;
+                let latBg: string;
+                if (latSec <= 15) {
+                  // green gradient: 0s=#22c55e → 15s=blend towards yellow
+                  const t = Math.min(latSec / 15, 1);
+                  const r = Math.round(34 + t * (245 - 34));
+                  const g = Math.round(197 + t * (158 - 197));
+                  const b = Math.round(94 + t * (11 - 94));
+                  latColor = `rgb(${r},${g},${b})`;
+                  latBg = `rgba(${r},${g},${b},0.08)`;
+                } else if (latSec <= 60) {
+                  // yellow→red gradient: 15s=#f59e0b → 60s=#ef4444
+                  const t = Math.min((latSec - 15) / 45, 1);
+                  const r = Math.round(245 + t * (239 - 245));
+                  const g = Math.round(158 + t * (68 - 158));
+                  const b = Math.round(11 + t * (68 - 11));
+                  latColor = `rgb(${r},${g},${b})`;
+                  latBg = `rgba(${r},${g},${b},0.08)`;
+                } else {
+                  latColor = '#ef4444';
+                  latBg = 'rgba(239,68,68,0.08)';
+                }
+                const latText = latMs >= 1000 ? `${(latMs / 1000).toFixed(latSec >= 60 ? 0 : 1)}s` : `${latMs}ms`;
                 const rateColor = item.successRate >= 90 ? '#16a34a' : item.successRate >= 60 ? '#d97706' : '#dc2626';
                 const rateBg = item.successRate >= 90 ? 'rgba(34,197,94,0.1)' : item.successRate >= 60 ? 'rgba(245,158,11,0.1)' : 'rgba(239,68,68,0.1)';
 

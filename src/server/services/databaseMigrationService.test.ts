@@ -101,7 +101,7 @@ describe('databaseMigrationService', () => {
     expect(normalized.ssl).toBe(false);
   });
 
-  it.each(['postgres', 'mysql', 'sqlite'] as const)('creates or patches sites schema with use_system_proxy for %s', async (dialect) => {
+  it.each(['postgres', 'mysql', 'sqlite'] as const)('creates or patches sites schema with use_system_proxy and custom_headers for %s', async (dialect) => {
     const executedSql: string[] = [];
     await __databaseMigrationServiceTestUtils.ensureSchema({
       dialect,
@@ -118,7 +118,7 @@ describe('databaseMigrationService', () => {
         }
         if (sqlText.includes('pragma_table_info') || sqlText.includes('information_schema.columns')) {
           const columnName = String(params[1] ?? sqlText.match(/name = '([^']+)'/)?.[1] ?? '');
-          return columnName === 'use_system_proxy' ? 0 : 1;
+          return columnName === 'use_system_proxy' || columnName === 'custom_headers' ? 0 : 1;
         }
         return 0;
       },
@@ -126,8 +126,10 @@ describe('databaseMigrationService', () => {
     });
 
     const useSystemProxySql = executedSql.find((sqlText) => sqlText.includes('use_system_proxy'));
+    const customHeadersSql = executedSql.find((sqlText) => sqlText.includes('custom_headers'));
 
     expect(useSystemProxySql).toContain('use_system_proxy');
+    expect(customHeadersSql).toContain('custom_headers');
   });
 
   it.each(['postgres', 'mysql'] as const)('patches token_routes decision snapshot columns for %s', async (dialect) => {
@@ -159,7 +161,7 @@ describe('databaseMigrationService', () => {
     ).toBe(true);
   });
 
-  it('includes useSystemProxy when building site migration statements', () => {
+  it('includes useSystemProxy and customHeaders when building site migration statements', () => {
     const statements = __databaseMigrationServiceTestUtils.buildStatements({
       version: 'test',
       timestamp: Date.now(),
@@ -170,6 +172,7 @@ describe('databaseMigrationService', () => {
           url: 'https://example.com',
           platform: 'openai',
           useSystemProxy: true,
+          customHeaders: '{"x-site-scope":"internal"}',
           status: 'active',
         }],
         accounts: [],
@@ -190,8 +193,11 @@ describe('databaseMigrationService', () => {
 
     const siteStatement = statements.find((statement) => statement.table === 'sites');
     const useSystemProxyIndex = siteStatement?.columns.indexOf('use_system_proxy') ?? -1;
+    const customHeadersIndex = siteStatement?.columns.indexOf('custom_headers') ?? -1;
 
     expect(useSystemProxyIndex).toBeGreaterThanOrEqual(0);
     expect(siteStatement?.values[useSystemProxyIndex]).toBe(true);
+    expect(customHeadersIndex).toBeGreaterThanOrEqual(0);
+    expect(siteStatement?.values[customHeadersIndex]).toBe('{"x-site-scope":"internal"}');
   });
 });

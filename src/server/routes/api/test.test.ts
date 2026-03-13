@@ -109,6 +109,46 @@ describe('/api/test proxy tester routes', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('allows multipart /v1/files uploads through the proxy tester', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'file_demo_123',
+      object: 'file',
+      filename: 'notes.txt',
+      bytes: 11,
+      purpose: 'user_data',
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/test/proxy',
+      payload: {
+        method: 'POST',
+        path: '/v1/files',
+        requestKind: 'multipart',
+        multipartFields: {
+          purpose: 'user_data',
+        },
+        multipartFiles: [
+          {
+            field: 'file',
+            name: 'notes.txt',
+            mimeType: 'text/plain',
+            dataUrl: 'data:text/plain;base64,aGVsbG8gZmlsZXM=',
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [targetUrl, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit & { body?: { constructor?: { name?: string } } }];
+    expect(targetUrl).toBe(`http://127.0.0.1:${config.port}/v1/files`);
+    expect(requestInit.method).toBe('POST');
+    expect(requestInit.body?.constructor?.name).toBe('FormData');
+  });
+
   it('keeps legacy /api/test/chat wrapper working for responses payloads', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       object: 'response',

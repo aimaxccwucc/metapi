@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { db, schema } from '../../db/index.js';
+import { upsertSetting } from '../../db/upsertSetting.js';
 import { config } from '../../config.js';
 import { eq } from 'drizzle-orm';
 
@@ -7,15 +8,7 @@ const MONITOR_AUTH_COOKIE = 'meta_monitor_auth';
 const LDOH_BASE_URL = 'https://ldoh.105117.xyz';
 const LDOH_COOKIE_SETTING_KEY = 'monitor_ldoh_cookie';
 
-async function upsertSetting(key: string, value: unknown) {
-  await db.insert(schema.settings)
-    .values({ key, value: JSON.stringify(value) })
-    .onConflictDoUpdate({
-      target: schema.settings.key,
-      set: { value: JSON.stringify(value) },
-    })
-    .run();
-}
+
 
 async function getSettingString(key: string): Promise<string> {
   const row = await db.select().from(schema.settings).where(eq(schema.settings.key, key)).get();

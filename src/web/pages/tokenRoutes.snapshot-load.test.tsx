@@ -6,7 +6,8 @@ import TokenRoutes from './TokenRoutes.js';
 
 const { apiMock, getBrandMock } = vi.hoisted(() => ({
   apiMock: {
-    getRoutes: vi.fn(),
+    getRoutesSummary: vi.fn(),
+    getRouteChannels: vi.fn(),
     getModelTokenCandidates: vi.fn(),
     getRouteDecisionsBatch: vi.fn(),
     getRouteWideDecisionsBatch: vi.fn(),
@@ -50,12 +51,17 @@ describe('TokenRoutes cached snapshot load', () => {
     apiMock.getModelTokenCandidates.mockResolvedValue({ models: {} });
     apiMock.getRouteDecisionsBatch.mockResolvedValue({ decisions: {} });
     apiMock.getRouteWideDecisionsBatch.mockResolvedValue({ decisions: {} });
-    apiMock.getRoutes.mockResolvedValue([
+    apiMock.getRoutesSummary.mockResolvedValue([
       {
         id: 1,
         modelPattern: 'gpt-4o-mini',
         displayName: 'gpt-4o-mini',
+        displayIcon: null,
+        modelMapping: null,
         enabled: true,
+        channelCount: 1,
+        enabledChannelCount: 1,
+        siteNames: ['cached-site'],
         decisionSnapshot: {
           requestedModel: 'gpt-4o-mini',
           actualModel: 'gpt-4o-mini',
@@ -81,23 +87,23 @@ describe('TokenRoutes cached snapshot load', () => {
           ],
         },
         decisionRefreshedAt: '2026-03-08T01:23:45.000Z',
-        channels: [
-          {
-            id: 11,
-            accountId: 101,
-            tokenId: 1001,
-            sourceModel: 'gpt-4o-mini',
-            priority: 0,
-            weight: 10,
-            enabled: true,
-            manualOverride: false,
-            successCount: 0,
-            failCount: 0,
-            account: { username: 'cached-user' },
-            site: { name: 'cached-site' },
-            token: { id: 1001, name: 'cached-token', accountId: 101, enabled: true, isDefault: true },
-          },
-        ],
+      },
+    ]);
+    apiMock.getRouteChannels.mockResolvedValue([
+      {
+        id: 11,
+        accountId: 101,
+        tokenId: 1001,
+        sourceModel: 'gpt-4o-mini',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+        manualOverride: false,
+        successCount: 0,
+        failCount: 0,
+        account: { username: 'cached-user' },
+        site: { name: 'cached-site' },
+        token: { id: 1001, name: 'cached-token', accountId: 101, enabled: true, isDefault: true },
       },
     ]);
   });
@@ -117,6 +123,15 @@ describe('TokenRoutes cached snapshot load', () => {
             </ToastProvider>
           </MemoryRouter>,
         );
+      });
+      await flushMicrotasks();
+
+      // Expand the route card to see channel details with probability
+      const expandBtn = root.root.find((node) =>
+        node.type === 'div' && String(node.props.className || '').includes('route-card-collapsed'),
+      );
+      await act(async () => {
+        expandBtn.props.onClick();
       });
       await flushMicrotasks();
 

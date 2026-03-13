@@ -11,6 +11,11 @@ export interface ProxyAuthContext {
   policy: DownstreamRoutingPolicy;
 }
 
+export interface ProxyResourceOwner {
+  ownerType: 'managed_key' | 'global_proxy_token';
+  ownerId: string;
+}
+
 const proxyAuthContextByRequest = new WeakMap<FastifyRequest, ProxyAuthContext>();
 
 function normalizeIp(rawIp: string | null | undefined): string {
@@ -106,4 +111,21 @@ export async function proxyAuthMiddleware(request: FastifyRequest, reply: Fastif
 
 export function getProxyAuthContext(request: FastifyRequest): ProxyAuthContext | null {
   return proxyAuthContextByRequest.get(request) || null;
+}
+
+export function getProxyResourceOwner(request: FastifyRequest): ProxyResourceOwner | null {
+  const auth = getProxyAuthContext(request);
+  if (!auth) return null;
+
+  if (auth.source === 'managed') {
+    return {
+      ownerType: 'managed_key',
+      ownerId: auth.keyId === null ? auth.token : String(auth.keyId),
+    };
+  }
+
+  return {
+    ownerType: 'global_proxy_token',
+    ownerId: 'global',
+  };
 }

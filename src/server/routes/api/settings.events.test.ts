@@ -43,6 +43,11 @@ describe('settings and auth events', () => {
     config.systemProxyUrl = '';
     config.checkinCron = '0 8 * * *';
     config.balanceRefreshCron = '0 * * * *';
+    config.logCleanupConfigured = false;
+    config.logCleanupCron = '0 6 * * *';
+    config.logCleanupUsageLogsEnabled = false;
+    config.logCleanupProgramLogsEnabled = false;
+    config.logCleanupRetentionDays = 30;
     config.routingFallbackUnitCost = 1;
   });
 
@@ -217,6 +222,80 @@ describe('settings and auth events', () => {
     expect(getResponse.statusCode).toBe(200);
     const runtime = getResponse.json() as { systemProxyUrl?: string };
     expect(runtime.systemProxyUrl).toBe('http://127.0.0.1:7890');
+  });
+
+  it('persists and returns log cleanup settings from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        logCleanupCron: '15 4 * * *',
+        logCleanupUsageLogsEnabled: true,
+        logCleanupProgramLogsEnabled: true,
+        logCleanupRetentionDays: 14,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as {
+      logCleanupCron?: string;
+      logCleanupUsageLogsEnabled?: boolean;
+      logCleanupProgramLogsEnabled?: boolean;
+      logCleanupRetentionDays?: number;
+    };
+    expect(updated.logCleanupCron).toBe('15 4 * * *');
+    expect(updated.logCleanupUsageLogsEnabled).toBe(true);
+    expect(updated.logCleanupProgramLogsEnabled).toBe(true);
+    expect(updated.logCleanupRetentionDays).toBe(14);
+    expect(config.logCleanupCron).toBe('15 4 * * *');
+    expect(config.logCleanupUsageLogsEnabled).toBe(true);
+    expect(config.logCleanupProgramLogsEnabled).toBe(true);
+    expect(config.logCleanupRetentionDays).toBe(14);
+
+    const rows = await db.select().from(schema.settings).all();
+    const settingsMap = new Map(rows.map((row) => [row.key, row.value]));
+    expect(settingsMap.get('log_cleanup_cron')).toBe(JSON.stringify('15 4 * * *'));
+    expect(settingsMap.get('log_cleanup_usage_logs_enabled')).toBe(JSON.stringify(true));
+    expect(settingsMap.get('log_cleanup_program_logs_enabled')).toBe(JSON.stringify(true));
+    expect(settingsMap.get('log_cleanup_retention_days')).toBe(JSON.stringify(14));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as {
+      logCleanupCron?: string;
+      logCleanupUsageLogsEnabled?: boolean;
+      logCleanupProgramLogsEnabled?: boolean;
+      logCleanupRetentionDays?: number;
+    };
+    expect(runtime.logCleanupCron).toBe('15 4 * * *');
+    expect(runtime.logCleanupUsageLogsEnabled).toBe(true);
+    expect(runtime.logCleanupProgramLogsEnabled).toBe(true);
+    expect(runtime.logCleanupRetentionDays).toBe(14);
+  });
+
+  it('rejects invalid log cleanup cron and retention days', async () => {
+    const invalidCronResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        logCleanupCron: 'invalid cron',
+      },
+    });
+    expect(invalidCronResponse.statusCode).toBe(400);
+    expect((invalidCronResponse.json() as { message?: string }).message).toContain('日志清理 Cron');
+
+    const invalidRetentionResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        logCleanupRetentionDays: 0,
+      },
+    });
+    expect(invalidRetentionResponse.statusCode).toBe(400);
+    expect((invalidRetentionResponse.json() as { message?: string }).message).toContain('保留天数');
   });
 
   it('invalidates cached site proxy resolution when system proxy url changes', async () => {

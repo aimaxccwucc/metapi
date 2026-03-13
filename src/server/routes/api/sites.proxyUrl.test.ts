@@ -36,7 +36,7 @@ describe('sites system proxy settings', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('stores useSystemProxy and external checkin url when creating a site', async () => {
+  it('stores useSystemProxy, external checkin url, and custom headers when creating a site', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/sites',
@@ -45,6 +45,10 @@ describe('sites system proxy settings', () => {
         url: 'https://proxy-site.example.com',
         platform: 'new-api',
         useSystemProxy: true,
+        customHeaders: JSON.stringify({
+          'cf-access-client-id': 'site-client-id',
+          'x-site-scope': 'internal',
+        }),
         externalCheckinUrl: 'https://checkin.example.com/welfare',
         globalWeight: 1.5,
       },
@@ -53,10 +57,12 @@ describe('sites system proxy settings', () => {
     expect(response.statusCode).toBe(200);
     const payload = response.json() as {
       useSystemProxy?: boolean;
+      customHeaders?: string | null;
       externalCheckinUrl?: string | null;
       globalWeight?: number;
     };
     expect(payload.useSystemProxy).toBe(true);
+    expect(payload.customHeaders).toBe('{"cf-access-client-id":"site-client-id","x-site-scope":"internal"}');
     expect(payload.externalCheckinUrl).toBe('https://checkin.example.com/welfare');
     expect(payload.globalWeight).toBe(1.5);
   });
@@ -175,5 +181,39 @@ describe('sites system proxy settings', () => {
 
     expect(response.statusCode).toBe(200);
     expect((response.json() as { useSystemProxy?: boolean }).useSystemProxy).toBe(true);
+  });
+
+  it('rejects invalid custom headers json', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'headers-site',
+        url: 'https://headers-site.example.com',
+        platform: 'new-api',
+        customHeaders: '{invalid-json}',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((response.json() as { error?: string }).error).toContain('Invalid customHeaders');
+  });
+
+  it('rejects custom headers with non-string values', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'headers-site',
+        url: 'https://headers-site.example.com',
+        platform: 'new-api',
+        customHeaders: JSON.stringify({
+          'x-site-scope': true,
+        }),
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((response.json() as { error?: string }).error).toContain('must use a string value');
   });
 });

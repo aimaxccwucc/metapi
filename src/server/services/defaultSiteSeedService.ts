@@ -1,5 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
+import { upsertSetting } from '../db/upsertSetting.js';
 
 export const DEFAULT_SITE_SEED_SETTING_KEY = 'default_site_seed_v1';
 
@@ -53,16 +54,7 @@ type SeedSummary = {
 };
 
 async function writeSeedMarker(tx: typeof db) {
-  await tx.insert(schema.settings)
-    .values({
-      key: DEFAULT_SITE_SEED_SETTING_KEY,
-      value: JSON.stringify(true),
-    })
-    .onConflictDoUpdate({
-      target: schema.settings.key,
-      set: { value: JSON.stringify(true) },
-    })
-    .run();
+  await upsertSetting(DEFAULT_SITE_SEED_SETTING_KEY, true, tx);
 }
 
 export async function ensureDefaultSitesSeeded(): Promise<SeedSummary> {

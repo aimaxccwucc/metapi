@@ -40,6 +40,51 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     delete process.env.DATA_DIR;
   });
 
+  it('creates an exact route with an account-direct channel for apikey model availability', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'apikey-site',
+      url: 'https://apikey-site.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'apikey-user',
+      accessToken: '',
+      apiToken: 'sk-apikey-route',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-5.2-codex',
+      available: true,
+      latencyMs: 1200,
+      checkedAt: '2026-03-08T08:00:00.000Z',
+    }).run();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.models).toBe(1);
+
+    const route = await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.modelPattern, 'gpt-5.2-codex'))
+      .get();
+    expect(route).toBeDefined();
+
+    const channels = await db.select().from(schema.routeChannels)
+      .where(and(
+        eq(schema.routeChannels.routeId, route!.id),
+        eq(schema.routeChannels.accountId, account.id),
+      ))
+      .all();
+
+    expect(channels).toHaveLength(1);
+    expect(channels[0]?.tokenId ?? null).toBeNull();
+    expect(channels[0]?.manualOverride).toBe(false);
+  });
+
   it('removes stale exact routes and keeps wildcard routes on rebuild', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-1',

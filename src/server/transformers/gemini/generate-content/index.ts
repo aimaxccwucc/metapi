@@ -6,6 +6,10 @@ function baseIncludesVersion(baseUrl: string): boolean {
   return /\/v\d+(?:beta)?(?:\/|$)/i.test(baseUrl);
 }
 
+function asTrimmedString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 export function resolveGeminiNativeBaseUrl(baseUrl: string, apiVersion: string): string {
   const normalized = normalizeBaseUrl(baseUrl);
   if (baseIncludesVersion(normalized)) return normalized;
@@ -37,6 +41,42 @@ export function resolveGeminiGenerateContentUrl(
   return `${base}/${normalizedAction}${query ? `?${query}` : ''}`;
 }
 
+export function resolveGeminiProxyApiVersion(params: { geminiApiVersion?: unknown } | null | undefined): string {
+  return asTrimmedString(params?.geminiApiVersion) || 'v1beta';
+}
+
+export function parseGeminiProxyRequestPath(input: {
+  rawUrl?: string | null;
+  params?: { geminiApiVersion?: unknown } | null;
+}): {
+  apiVersion: string;
+  modelActionPath: string;
+  requestedModel: string;
+  isStreamAction: boolean;
+} {
+  const apiVersion = resolveGeminiProxyApiVersion(input.params);
+  const rawUrl = asTrimmedString(input.rawUrl);
+  const withoutQuery = rawUrl.split('?')[0] || rawUrl;
+  const normalizedVersion = apiVersion.replace(/^\/+/, '');
+  const geminiPrefix = `/gemini/${normalizedVersion}/`;
+  const aliasPrefix = `/${normalizedVersion}/`;
+
+  let modelActionPath = withoutQuery.replace(/^\/+/, '');
+  if (withoutQuery.startsWith(geminiPrefix)) {
+    modelActionPath = withoutQuery.slice(geminiPrefix.length);
+  } else if (withoutQuery.startsWith(aliasPrefix)) {
+    modelActionPath = withoutQuery.slice(aliasPrefix.length);
+  }
+
+  const requestedModel = modelActionPath.replace(/^models\//, '').split(':')[0].trim();
+  return {
+    apiVersion,
+    modelActionPath,
+    requestedModel,
+    isStreamAction: modelActionPath.endsWith(':streamGenerateContent'),
+  };
+}
+
 import { geminiGenerateContentInbound } from './inbound.js';
 import { geminiGenerateContentOutbound } from './outbound.js';
 import { geminiGenerateContentStream } from './stream.js';
@@ -58,6 +98,8 @@ export const geminiGenerateContentTransformer = {
     reasoningEffortToGeminiThinkingConfig,
     geminiThinkingConfigToReasoning,
   },
+  parseProxyRequestPath: parseGeminiProxyRequestPath,
+  resolveProxyApiVersion: resolveGeminiProxyApiVersion,
   resolveBaseUrl: resolveGeminiNativeBaseUrl,
   resolveModelsUrl: resolveGeminiModelsUrl,
   resolveActionUrl: resolveGeminiGenerateContentUrl,
