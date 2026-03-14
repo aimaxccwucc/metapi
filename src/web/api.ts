@@ -413,6 +413,11 @@ export const api = {
     const query = params.toString();
     return request(`/api/models/marketplace${query ? `?${query}` : ''}`, { timeoutMs: options?.refresh ? 45_000 : 15_000 });
   },
+  testMarketplaceModelAvailability: (data: { modelName: string; accountId?: number; siteName?: string }) => request('/api/models/marketplace/test', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    timeoutMs: 45_000,
+  }),
   getModelTokenCandidates: () => request('/api/models/token-candidates'),
 
   // Simple chat test from admin panel
