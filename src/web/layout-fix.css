@@ -5,53 +5,9 @@ body {
 }
 
 @media (max-width: 900px) {
-  .app-layout {
-    display: block;
-    min-height: auto;
-  }
-
+  /* 移动端使用 MobileDrawer，侧边栏直接隐藏 */
   .sidebar,
   .sidebar.collapsed {
-    position: static;
-    top: auto;
-    width: 100%;
-    height: auto;
-    border-right: none;
-    border-bottom: 1px solid var(--color-border);
-    padding: 8px;
-    overflow: visible;
-  }
-
-  .sidebar-group {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 6px;
-  }
-
-  .sidebar-group-label {
-    width: 100%;
-    margin: 0;
-    padding: 4px 6px;
-  }
-
-  .sidebar-item {
-    gap: 6px;
-    padding: 6px 10px;
-    font-size: 12px;
-  }
-
-  .sidebar-item-icon {
-    width: 16px;
-    height: 16px;
-  }
-
-  .sidebar-item.active::before {
-    display: none;
-  }
-
-  .sidebar-collapse-btn {
     display: none;
   }
 
