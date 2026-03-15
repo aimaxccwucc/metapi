@@ -387,20 +387,20 @@ function createMysqlSchemaInspector(): RuntimeSchemaInspector | null {
     },
     getColumnType: async (table, column) => {
       const [rows] = await mysqlPool!.query(
-        'SELECT column_type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1',
+        'SELECT column_type AS columnType FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1',
         [table, column],
-      ) as [Array<{ column_type?: string }> | unknown, unknown];
+      ) as [Array<{ columnType?: string }> | unknown, unknown];
       if (!Array.isArray(rows) || rows.length === 0) return null;
-      return typeof rows[0]?.column_type === 'string' ? rows[0].column_type : null;
+      return typeof rows[0]?.columnType === 'string' ? rows[0].columnType : null;
     },
     getIndexColumns: async (table, indexName) => {
       const [rows] = await mysqlPool!.query(
-        'SELECT column_name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? ORDER BY seq_in_index ASC',
+        'SELECT column_name AS columnName FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? ORDER BY seq_in_index ASC',
         [table, indexName],
-      ) as [Array<{ column_name?: string }> | unknown, unknown];
+      ) as [Array<{ columnName?: string }> | unknown, unknown];
       if (!Array.isArray(rows) || rows.length === 0) return null;
       return rows
-        .map((row) => (typeof row.column_name === 'string' ? row.column_name : ''))
+        .map((row) => (typeof row.columnName === 'string' ? row.columnName : ''))
         .filter((columnName) => columnName.length > 0);
     },
     execute: async (sqlText) => {
