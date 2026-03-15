@@ -580,47 +580,40 @@ export class TokenRouter {
 
     if (available.length === 0) return null;
 
-    const layers = new Map<number, typeof available>();
-    for (const c of available) {
-      const p = c.channel.priority ?? 0;
-      if (!layers.has(p)) layers.set(p, []);
-      layers.get(p)!.push(c);
+    const selected = this.selectCandidateFromAvailable(
+      match.route,
+      available,
+      requestedByDisplayName
+        ? (candidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel
+        : mappedModel,
+      downstreamPolicy,
+      nowMs,
+    );
+    if (!selected) return null;
+
+    const tokenValue = this.resolveChannelTokenValue(selected);
+    if (!tokenValue) return null;
+    const actualModel = resolveActualModelForSelectedChannel(
+      requestedModel,
+      match.route,
+      mappedModel,
+      selected.channel.sourceModel,
+    );
+
+    if (isRoundRobinRouteRoutingStrategy(match.route.routingStrategy)) {
+      const nextSelectedAt = new Date().toISOString();
+      await db.update(schema.routeChannels).set({ lastSelectedAt: nextSelectedAt }).where(eq(schema.routeChannels.id, selected.channel.id)).run();
+      patchCachedChannel(selected.channel.id, (channel) => {
+        channel.lastSelectedAt = nextSelectedAt;
+      });
     }
 
-    const sortedPriorities = Array.from(layers.keys()).sort((a, b) => a - b);
-    for (const priority of sortedPriorities) {
-      const candidates = filterRecentlyFailedCandidates(
-        layers.get(priority)!,
-        nowMs,
-        RECENT_FAILURE_AVOID_SEC,
-      );
-      const selected = this.weightedRandomSelect(
-        candidates,
-        requestedByDisplayName
-          ? (candidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel
-          : mappedModel,
-        downstreamPolicy,
-      );
-      if (!selected) continue;
-
-      const tokenValue = this.resolveChannelTokenValue(selected);
-      if (!tokenValue) continue;
-      const actualModel = resolveActualModelForSelectedChannel(
-        requestedModel,
-        match.route,
-        mappedModel,
-        selected.channel.sourceModel,
-      );
-
-      return {
-        ...selected,
-        tokenValue,
-        tokenName: selected.token?.name || 'default',
-        actualModel,
-      };
-    }
-
-    return null;
+    return {
+      ...selected,
+      tokenValue,
+      tokenName: selected.token?.name || 'default',
+      actualModel,
+    };
   }
 
   async explainSelection(

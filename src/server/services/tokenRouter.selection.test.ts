@@ -398,4 +398,34 @@ describe('TokenRouter selection scoring', () => {
     expect(catalogCandidate?.reason || '').toContain('成本=目录:0.200000');
     expect(fallbackCandidate?.reason || '').toContain('成本=默认:100.000000');
   });
+
+  it('uses the same adaptive filtering rules for failover selection', async () => {
+    const site = await createSite('next-channel-site');
+    const account = await createAccount(site.id, 'next-channel-user');
+    const route = await createRoute('gpt-4.1-mini');
+
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const channelB = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channelB.id, { status: 401, upstreamErrorText: 'unauthorized', modelName: 'gpt-4.1-mini' });
+
+    const next = await router.selectNextChannel('gpt-4.1-mini', [channelA.id]);
+    expect(next).toBeNull();
+  });
 });
