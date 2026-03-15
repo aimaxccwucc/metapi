@@ -297,7 +297,7 @@ export async function responsesProxyRoute(app: FastifyInstance) {
         if (!endpointResult.ok) {
           const status = endpointResult.status || 502;
           const errText = endpointResult.errText || 'unknown error';
-          tokenRouter.recordFailure(selected.channel.id);
+          tokenRouter.recordFailure(selected.channel.id, { status, upstreamErrorText: errText });
           logProxy(
             selected,
             requestedModel,
@@ -461,7 +461,7 @@ export async function responsesProxyRoute(app: FastifyInstance) {
         );
         return reply.send(downstreamData);
       } catch (err: any) {
-        tokenRouter.recordFailure(selected.channel.id);
+        tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: err?.message || 'network failure' });
         logProxy(
           selected,
           requestedModel,

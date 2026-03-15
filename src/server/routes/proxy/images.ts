@@ -80,7 +80,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
 
         const text = await upstream.text();
         if (!upstream.ok) {
-          tokenRouter.recordFailure(selected.channel.id);
+          tokenRouter.recordFailure(selected.channel.id, { status: upstream.status, upstreamErrorText: text });
           if ((text || '').match(/unsupported\s+model|only\s+imagen\s+models\s+are\s+supported|not\s+supported\s+model\s+for\s+image\s+generation/i)) {
             await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
           }
@@ -121,7 +121,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
         logProxy(selected, requestedModel, 'success', upstream.status, latency, null, retryCount, estimatedCost);
         return reply.code(upstream.status).send(data);
       } catch (err: any) {
-        tokenRouter.recordFailure(selected.channel.id);
+        tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: err?.message || 'network failure' });
         logProxy(selected, requestedModel, 'failed', 0, Date.now() - startTime, err.message, retryCount);
         if (retryCount < MAX_RETRIES) {
           retryCount++;
@@ -202,7 +202,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
         const upstream = await fetch(targetUrl, requestInit);
         const text = await upstream.text();
         if (!upstream.ok) {
-          tokenRouter.recordFailure(selected.channel.id);
+          tokenRouter.recordFailure(selected.channel.id, { status: upstream.status, upstreamErrorText: text });
           if ((text || '').match(/unsupported\s+model|only\s+imagen\s+models\s+are\s+supported|not\s+supported\s+model\s+for\s+image\s+generation/i)) {
             await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
           }
@@ -243,7 +243,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
         logProxy(selected, requestedModel, 'success', upstream.status, latency, null, retryCount, estimatedCost, '/v1/images/edits');
         return reply.code(upstream.status).send(data);
       } catch (err: any) {
-        tokenRouter.recordFailure(selected.channel.id);
+        tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: err?.message || 'network failure' });
         logProxy(selected, requestedModel, 'failed', 0, Date.now() - startTime, err.message, retryCount, 0, '/v1/images/edits');
         if (retryCount < MAX_RETRIES) {
           retryCount++;

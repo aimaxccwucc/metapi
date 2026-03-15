@@ -77,6 +77,8 @@ export type RouteDecisionCandidate = {
   tokenName: string;
   priority: number;
   weight: number;
+  effectiveWeight: number;
+  healthScore: number;
   eligible: boolean;
   recentlyFailed: boolean;
   avoidedByRecentFailure: boolean;

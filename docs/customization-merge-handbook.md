@@ -80,6 +80,61 @@
 
 如果测试需要注册定制路由，统一通过 `registerCustomRoutes` 接入，避免测试把自定义逻辑重新散落到多个入口。
 
+## 代理与路由定制补充规范
+
+### 1. 不要直接修改人工配置的权重语义
+
+路由的人工配置字段，例如：
+
+- `route_channels.weight`
+- `route_channels.priority`
+
+应继续只表达人工意图，不要把“运行时健康惩罚”直接回写覆盖到这些字段。
+
+推荐方式：
+
+- 保留人工 `weight` 作为基础权重。
+- 运行时健康逻辑单独计算 `health score` 或 `effective weight`。
+- 仅把运行时结果用于选路与展示，不篡改用户配置。
+
+这样做的好处是：
+
+- 排障时能区分“你配的权重”与“系统临时降权”。
+- 与上游合并时，不会把数据库字段语义改乱。
+- 后续如果要禁用动态惩罚，也不需要回滚用户配置数据。
+
+### 2. 代理失败分类必须收口到独立 helper
+
+像下面这类逻辑，不要散写在每个代理入口文件里：
+
+- 什么错误应该重试
+- 什么错误应该强惩罚
+- 什么错误应该视为账号失效
+- 什么错误只应该做模型级或请求类型级惩罚
+
+推荐方式：
+
+- 在 `src/server/services/proxyRetryPolicy.ts` 统一维护失败分类与重试规则。
+- 在 `src/server/services/channelRoutingHealth.ts` 统一维护健康分、降权与冷却策略。
+- 各代理入口只负责把 `status` 和错误文本传给 service，不内联重复规则。
+
+这样后续上游如果改代理入口，只要接缝还在，就不需要逐个手工重新合并错误策略。
+
+### 3. 路由核心文件只保留调度接缝
+
+`src/server/services/tokenRouter.ts` 仍然是高冲突文件，后续改造要继续遵守：
+
+- 选路流程可以在这里编排。
+- 失败分类、健康评分、冷却时长计算，优先放到独立 helper。
+- `tokenRouter.ts` 里避免继续塞入大量错误分类细则或硬编码惩罚表。
+
+本次改造涉及的建议独立能力文件：
+
+- `src/server/services/channelRoutingHealth.ts`
+- `src/server/services/proxyRetryPolicy.ts`
+
+后续继续扩展时，也优先在这类独立文件追加，而不是继续膨胀 `tokenRouter.ts`。
+
 ## 已落地的低侵入模式
 
 目前以下自定义接口已经从上游核心路由文件中抽离到 `src/server/custom/routes`：

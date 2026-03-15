@@ -205,7 +205,7 @@ async function handleChatProxyRequest(
       if (!endpointResult.ok) {
         const status = endpointResult.status || 502;
         const errText = endpointResult.errText || 'unknown error';
-        tokenRouter.recordFailure(selected.channel.id);
+        tokenRouter.recordFailure(selected.channel.id, { status, upstreamErrorText: errText });
         logProxy(
           selected,
           requestedModel,
@@ -451,7 +451,7 @@ async function handleChatProxyRequest(
 
       return reply.send(downstreamResponse);
     } catch (err: any) {
-      tokenRouter.recordFailure(selected.channel.id);
+      tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: err?.message || 'network failure' });
       logProxy(
         selected,
         requestedModel,

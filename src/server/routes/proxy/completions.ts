@@ -68,7 +68,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
 
         if (!upstream.ok) {
           const errText = await upstream.text().catch(() => 'unknown error');
-          tokenRouter.recordFailure(selected.channel.id);
+          tokenRouter.recordFailure(selected.channel.id, { status: upstream.status, upstreamErrorText: errText });
           logProxy(selected, requestedModel, 'failed', upstream.status, Date.now() - startTime, errText, retryCount);
 
           if (isTokenExpiredError({ status: upstream.status, message: errText })) {
@@ -210,7 +210,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         );
         return reply.send(data);
       } catch (err: any) {
-        tokenRouter.recordFailure(selected.channel.id);
+        tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: err?.message || 'network failure' });
         logProxy(selected, requestedModel, 'failed', 0, Date.now() - startTime, err.message, retryCount);
         if (retryCount < MAX_RETRIES) {
           retryCount++;

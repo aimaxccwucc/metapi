@@ -152,7 +152,7 @@ export function SortableChannelRow({
           </span>
         ) : null}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', marginTop: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', marginTop: 4, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 11, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>选中概率</span>
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 120 }}>
             <div
@@ -187,6 +187,19 @@ export function SortableChannelRow({
               {decisionState.probability.toFixed(1)}%
             </span>
           </div>
+
+          {decisionCandidate ? (
+            <>
+              <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>健康</span>
+              <span style={{ fontSize: 11, color: 'var(--color-info)', fontWeight: 600 }}>
+                {Number(decisionCandidate.healthScore || 0).toFixed(1)}%
+              </span>
+              <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>有效权重</span>
+              <span style={{ fontSize: 11, color: 'var(--color-primary)', fontWeight: 600 }}>
+                {Number(decisionCandidate.effectiveWeight || 0).toFixed(2)}
+              </span>
+            </>
+          ) : null}
 
           <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>成功/失败</span>
           <span style={{ fontSize: 11 }}>

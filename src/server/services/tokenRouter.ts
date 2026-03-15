@@ -1,9 +1,17 @@
-﻿import { eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { minimatch } from 'minimatch';
 import { db, schema } from '../db/index.js';
 import { config } from '../config.js';
 import { getCachedModelRoutingReferenceCost, refreshModelPricingCatalog } from './modelPricingService.js';
 import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
+import { isRoundRobinRouteRoutingStrategy } from './routeRoutingStrategy.js';
+import {
+  calculateChannelHealthScore,
+  resolveRoundRobinCooldownMs,
+  resolveWeightedFailureCooldownLevel,
+  resolveWeightedFailureCooldownMs,
+} from './channelRoutingHealth.js';
+import { type ProxyFailureContext, type RetryFailureCategory, classifyProxyFailure } from './proxyRetryPolicy.js';
 
 interface RouteMatch {
   route: typeof schema.tokenRoutes.$inferSelect;
@@ -35,6 +43,24 @@ interface SelectedChannel {
 type FailureAwareChannel = {
   failCount?: number | null;
   lastFailAt?: string | null;
+  consecutiveFailCount?: number | null;
+  cooldownLevel?: number | null;
+  totalLatencyMs?: number | null;
+  successCount?: number | null;
+};
+
+export type RecordFailureOptions = ProxyFailureContext & {
+  routingStrategy?: string | null;
+};
+
+type SelectionDetail = {
+  candidate: RouteChannelCandidate;
+  probability: number;
+  reason: string;
+  effectiveWeight: number;
+  baseWeight: number;
+  healthMultiplier: number;
+  healthSummary: string;
 };
 
 const RECENT_FAILURE_AVOID_SEC = 10 * 60;
@@ -171,6 +197,8 @@ export interface RouteDecisionCandidate {
   tokenName: string;
   priority: number;
   weight: number;
+  effectiveWeight: number;
+  healthScore: number;
   eligible: boolean;
   recentlyFailed: boolean;
   avoidedByRecentFailure: boolean;
@@ -456,51 +484,40 @@ export class TokenRouter {
 
     if (available.length === 0) return null;
 
-    // Group by priority
-    const layers = new Map<number, typeof available>();
-    for (const c of available) {
-      const p = c.channel.priority ?? 0;
-      if (!layers.has(p)) layers.set(p, []);
-      layers.get(p)!.push(c);
+    const selected = this.selectCandidateFromAvailable(
+      match.route,
+      available,
+      requestedByDisplayName
+        ? (candidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel
+        : mappedModel,
+      downstreamPolicy,
+      nowMs,
+    );
+    if (!selected) return null;
+
+    const tokenValue = this.resolveChannelTokenValue(selected);
+    if (!tokenValue) return null;
+    const actualModel = resolveActualModelForSelectedChannel(
+      requestedModel,
+      match.route,
+      mappedModel,
+      selected.channel.sourceModel,
+    );
+
+    if (isRoundRobinRouteRoutingStrategy(match.route.routingStrategy)) {
+      const nowIso = new Date().toISOString();
+      await db.update(schema.routeChannels).set({ lastSelectedAt: nowIso }).where(eq(schema.routeChannels.id, selected.channel.id)).run();
+      patchCachedChannel(selected.channel.id, (channel) => {
+        channel.lastSelectedAt = nowIso;
+      });
     }
 
-    // Sort layers by priority (ascending = higher priority first)
-    const sortedPriorities = Array.from(layers.keys()).sort((a, b) => a - b);
-
-    // Try each priority layer
-    for (const priority of sortedPriorities) {
-      const candidates = filterRecentlyFailedCandidates(
-        layers.get(priority)!,
-        nowMs,
-        RECENT_FAILURE_AVOID_SEC,
-      );
-      const selected = this.weightedRandomSelect(
-        candidates,
-        requestedByDisplayName
-          ? (candidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel
-          : mappedModel,
-        downstreamPolicy,
-      );
-      if (selected) {
-        const tokenValue = this.resolveChannelTokenValue(selected);
-        if (!tokenValue) continue;
-        const actualModel = resolveActualModelForSelectedChannel(
-          requestedModel,
-          match.route,
-          mappedModel,
-          selected.channel.sourceModel,
-        );
-
-        return {
-          ...selected,
-          tokenValue,
-          tokenName: selected.token?.name || 'default',
-          actualModel,
-        };
-      }
-    }
-
-    return null;
+    return {
+      ...selected,
+      tokenValue,
+      tokenName: selected.token?.name || 'default',
+      actualModel,
+    };
   }
 
   /**
@@ -730,6 +747,8 @@ export class TokenRouter {
         tokenName: row.token?.name || 'default',
         priority: row.channel.priority ?? 0,
         weight: row.channel.weight ?? 10,
+        effectiveWeight: row.channel.weight ?? 10,
+        healthScore: 100,
         eligible,
         recentlyFailed,
         avoidedByRecentFailure: false,
@@ -759,50 +778,38 @@ export class TokenRouter {
       };
     }
 
-    const sortedPriorities = Array.from(availableByPriority.keys()).sort((a, b) => a - b);
-    let selected: RouteChannelCandidate | null = null;
-    let selectedPriority = 0;
+    const selection = this.explainCandidateSelection(
+      match.route,
+      availableByPriority,
+      useChannelSourceModelForCost
+        ? (candidate) => (normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
+        : mappedModel,
+      downstreamPolicy,
+      nowMs,
+    );
 
-    for (const priority of sortedPriorities) {
-      const rawLayer = availableByPriority.get(priority) ?? [];
-      if (rawLayer.length === 0) continue;
-
-      const filteredLayer = filterRecentlyFailedCandidates(rawLayer, nowMs, RECENT_FAILURE_AVOID_SEC);
-      const avoided = rawLayer.filter((row) => !filteredLayer.some((item) => item.channel.id === row.channel.id));
-      if (avoided.length > 0) {
-        for (const row of avoided) {
-          const target = candidateMap.get(row.channel.id);
-          if (!target) continue;
-          target.avoidedByRecentFailure = true;
-          target.reason = `最近失败，优先避让（${RECENT_FAILURE_AVOID_SEC / 60} 分钟窗口）`;
-        }
+    for (const detail of selection.details) {
+      const target = candidateMap.get(detail.candidate.channel.id);
+      if (!target) continue;
+      target.probability = Number((detail.probability * 100).toFixed(2));
+      target.effectiveWeight = Number(detail.effectiveWeight.toFixed(2));
+      target.healthScore = Number((detail.healthMultiplier * 100).toFixed(1));
+      if (target.eligible) {
+        target.reason = detail.reason;
       }
+    }
 
-      const weighted = this.calculateWeightedSelection(
-        filteredLayer,
-        useChannelSourceModelForCost
-          ? (candidate) => (normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
-          : mappedModel,
-        downstreamPolicy,
-      );
-      for (const detail of weighted.details) {
-        const target = candidateMap.get(detail.candidate.channel.id);
-        if (!target) continue;
-        target.probability = Number((detail.probability * 100).toFixed(2));
-        if (target.eligible && !target.avoidedByRecentFailure) {
-          target.reason = detail.reason;
-        }
-      }
+    for (const channelId of selection.avoidedChannelIds) {
+      const target = candidateMap.get(channelId);
+      if (!target) continue;
+      target.avoidedByRecentFailure = true;
+      target.reason = `最近失败，优先避让（${RECENT_FAILURE_AVOID_SEC / 60} 分钟窗口）`;
+    }
 
-      if (!weighted.selected) continue;
-      selected = weighted.selected;
-      selectedPriority = priority;
-      summary.push(
-        avoided.length > 0
-          ? `优先级 P${priority}：可用 ${rawLayer.length}，因最近失败避让 ${avoided.length}`
-          : `优先级 P${priority}：可用 ${rawLayer.length}`,
-      );
-      break;
+    const selected = selection.selected;
+    const selectedPriority = selection.selectedPriority;
+    for (const layerSummary of selection.layerSummaries) {
+      summary.push(layerSummary);
     }
 
     if (!selected) {
@@ -892,17 +899,22 @@ export class TokenRouter {
   async recordSuccess(channelId: number, latencyMs: number, cost: number) {
     const ch = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
     if (!ch) return;
+    const route = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, ch.routeId)).get();
     const nowIso = new Date().toISOString();
     const nextSuccessCount = (ch.successCount ?? 0) + 1;
     const nextTotalLatencyMs = (ch.totalLatencyMs ?? 0) + latencyMs;
     const nextTotalCost = (ch.totalCost ?? 0) + cost;
+    const nextLastSelectedAt = isRoundRobinRouteRoutingStrategy(route?.routingStrategy) ? nowIso : ch.lastSelectedAt;
     await db.update(schema.routeChannels).set({
       successCount: nextSuccessCount,
       totalLatencyMs: nextTotalLatencyMs,
       totalCost: nextTotalCost,
       lastUsedAt: nowIso,
+      lastSelectedAt: nextLastSelectedAt,
       cooldownUntil: null,
       lastFailAt: null,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
     }).where(eq(schema.routeChannels.id, channelId)).run();
 
     patchCachedChannel(channelId, (channel) => {
@@ -910,32 +922,75 @@ export class TokenRouter {
       channel.totalLatencyMs = nextTotalLatencyMs;
       channel.totalCost = nextTotalCost;
       channel.lastUsedAt = nowIso;
+      channel.lastSelectedAt = nextLastSelectedAt;
       channel.cooldownUntil = null;
       channel.lastFailAt = null;
+      channel.consecutiveFailCount = 0;
+      channel.cooldownLevel = 0;
     });
   }
 
   /**
    * Record failure and set cooldown.
    */
-  async recordFailure(channelId: number) {
+  async recordFailure(channelId: number, options: RecordFailureOptions = {}) {
     const ch = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
     if (!ch) return;
+    const route = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, ch.routeId)).get();
+    const routingStrategy = options.routingStrategy ?? route?.routingStrategy ?? 'weighted';
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
     const failCount = (ch.failCount ?? 0) + 1;
-    // Exponential backoff cooldown: 30s, 60s, 120s, 240s, max 5min
-    const cooldownSec = Math.min(30 * Math.pow(2, failCount - 1), 300);
-    const cooldownUntil = new Date(Date.now() + cooldownSec * 1000).toISOString();
-    const nowIso = new Date().toISOString();
+
+    if (isRoundRobinRouteRoutingStrategy(routingStrategy)) {
+      const nextConsecutiveFailCount = (ch.consecutiveFailCount ?? 0) + 1;
+      const shouldEnterCooldown = nextConsecutiveFailCount >= 3;
+      const nextCooldownLevel = shouldEnterCooldown
+        ? Math.min((ch.cooldownLevel ?? 0) + 1, 3)
+        : (ch.cooldownLevel ?? 0);
+      const cooldownUntil = shouldEnterCooldown
+        ? new Date(nowMs + resolveRoundRobinCooldownMs(nextCooldownLevel)).toISOString()
+        : null;
+      const persistedConsecutiveFailCount = shouldEnterCooldown ? 0 : nextConsecutiveFailCount;
+
+      await db.update(schema.routeChannels).set({
+        failCount,
+        lastFailAt: nowIso,
+        cooldownUntil,
+        consecutiveFailCount: persistedConsecutiveFailCount,
+        cooldownLevel: nextCooldownLevel,
+      }).where(eq(schema.routeChannels.id, channelId)).run();
+
+      patchCachedChannel(channelId, (channel) => {
+        channel.failCount = failCount;
+        channel.lastFailAt = nowIso;
+        channel.cooldownUntil = cooldownUntil;
+        channel.consecutiveFailCount = persistedConsecutiveFailCount;
+        channel.cooldownLevel = nextCooldownLevel;
+      });
+      return;
+    }
+
+    const category = classifyProxyFailure(options);
+    const nextConsecutiveFailCount = (ch.consecutiveFailCount ?? 0) + 1;
+    const cooldownLevel = resolveWeightedFailureCooldownLevel(nextConsecutiveFailCount, category);
+    const cooldownMs = resolveWeightedFailureCooldownMs(nextConsecutiveFailCount, category);
+    const cooldownUntil = new Date(nowMs + cooldownMs).toISOString();
+
     await db.update(schema.routeChannels).set({
       failCount,
       lastFailAt: nowIso,
       cooldownUntil,
+      consecutiveFailCount: nextConsecutiveFailCount,
+      cooldownLevel,
     }).where(eq(schema.routeChannels.id, channelId)).run();
 
     patchCachedChannel(channelId, (channel) => {
       channel.failCount = failCount;
       channel.lastFailAt = nowIso;
       channel.cooldownUntil = cooldownUntil;
+      channel.consecutiveFailCount = nextConsecutiveFailCount;
+      channel.cooldownLevel = cooldownLevel;
     });
   }
 
@@ -1048,6 +1103,129 @@ export class TokenRouter {
     return reasonParts;
   }
 
+  private selectCandidateFromAvailable(
+    route: typeof schema.tokenRoutes.$inferSelect,
+    candidates: RouteChannelCandidate[],
+    modelName: string | ((candidate: RouteChannelCandidate) => string),
+    downstreamPolicy: DownstreamRoutingPolicy,
+    nowMs: number,
+  ): RouteChannelCandidate | null {
+    if (candidates.length === 0) return null;
+
+    if (isRoundRobinRouteRoutingStrategy(route.routingStrategy)) {
+      return this.selectRoundRobinCandidate(candidates);
+    }
+
+    const layers = new Map<number, RouteChannelCandidate[]>();
+    for (const candidate of candidates) {
+      const priority = candidate.channel.priority ?? 0;
+      if (!layers.has(priority)) layers.set(priority, []);
+      layers.get(priority)!.push(candidate);
+    }
+
+    const sortedPriorities = Array.from(layers.keys()).sort((a, b) => a - b);
+    for (const priority of sortedPriorities) {
+      const rawLayer = layers.get(priority) ?? [];
+      const filteredLayer = filterRecentlyFailedCandidates(rawLayer, nowMs, RECENT_FAILURE_AVOID_SEC);
+      const weighted = this.calculateWeightedSelection(filteredLayer, modelName, downstreamPolicy, nowMs);
+      if (weighted.selected) return weighted.selected;
+    }
+
+    return null;
+  }
+
+  private explainCandidateSelection(
+    route: typeof schema.tokenRoutes.$inferSelect,
+    availableByPriority: Map<number, RouteChannelCandidate[]>,
+    modelName: string | ((candidate: RouteChannelCandidate) => string),
+    downstreamPolicy: DownstreamRoutingPolicy,
+    nowMs: number,
+  ) {
+    const details: SelectionDetail[] = [];
+    const avoidedChannelIds: number[] = [];
+    const layerSummaries: string[] = [];
+
+    if (availableByPriority.size === 0) {
+      return {
+        selected: null as RouteChannelCandidate | null,
+        selectedPriority: 0,
+        details,
+        avoidedChannelIds,
+        layerSummaries,
+      };
+    }
+
+    if (isRoundRobinRouteRoutingStrategy(route.routingStrategy)) {
+      const allCandidates = Array.from(availableByPriority.values()).flat();
+      const selected = this.selectRoundRobinCandidate(allCandidates);
+      const selectedId = selected?.channel.id ?? 0;
+      for (const candidate of allCandidates) {
+        const health = calculateChannelHealthScore(candidate.channel, nowMs);
+        details.push({
+          candidate,
+          probability: candidate.channel.id === selectedId ? 1 : 0,
+          reason: `轮询策略（上次选择=${candidate.channel.lastSelectedAt || '从未'}，${health.summary}）`,
+          effectiveWeight: candidate.channel.id === selectedId ? 1 : 0,
+          baseWeight: candidate.channel.weight ?? 10,
+          healthMultiplier: health.multiplier,
+          healthSummary: health.summary,
+        });
+      }
+      layerSummaries.push(`轮询策略：可用 ${allCandidates.length}`);
+      return {
+        selected,
+        selectedPriority: selected?.channel.priority ?? 0,
+        details,
+        avoidedChannelIds,
+        layerSummaries,
+      };
+    }
+
+    const sortedPriorities = Array.from(availableByPriority.keys()).sort((a, b) => a - b);
+    let selected: RouteChannelCandidate | null = null;
+    let selectedPriority = 0;
+
+    for (const priority of sortedPriorities) {
+      const rawLayer = availableByPriority.get(priority) ?? [];
+      if (rawLayer.length === 0) continue;
+      const filteredLayer = filterRecentlyFailedCandidates(rawLayer, nowMs, RECENT_FAILURE_AVOID_SEC);
+      for (const candidate of rawLayer) {
+        if (!filteredLayer.some((item) => item.channel.id === candidate.channel.id)) {
+          avoidedChannelIds.push(candidate.channel.id);
+        }
+      }
+      const weighted = this.calculateWeightedSelection(filteredLayer, modelName, downstreamPolicy, nowMs);
+      details.push(...weighted.details);
+      if (!weighted.selected) continue;
+      selected = weighted.selected;
+      selectedPriority = priority;
+      layerSummaries.push(
+        rawLayer.length !== filteredLayer.length
+          ? `优先级 P${priority}：可用 ${rawLayer.length}，因最近失败避让 ${rawLayer.length - filteredLayer.length}`
+          : `优先级 P${priority}：可用 ${rawLayer.length}`,
+      );
+      break;
+    }
+
+    return { selected, selectedPriority, details, avoidedChannelIds, layerSummaries };
+  }
+
+  private selectRoundRobinCandidate(candidates: RouteChannelCandidate[]): RouteChannelCandidate | null {
+    if (candidates.length === 0) return null;
+    const ordered = [...candidates].sort((left, right) => {
+      const leftSelectedAt = Date.parse(left.channel.lastSelectedAt || '');
+      const rightSelectedAt = Date.parse(right.channel.lastSelectedAt || '');
+      const leftValue = Number.isNaN(leftSelectedAt) ? -1 : leftSelectedAt;
+      const rightValue = Number.isNaN(rightSelectedAt) ? -1 : rightSelectedAt;
+      if (leftValue !== rightValue) return leftValue - rightValue;
+      const leftPriority = left.channel.priority ?? 0;
+      const rightPriority = right.channel.priority ?? 0;
+      if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+      return left.channel.id - right.channel.id;
+    });
+    return ordered[0] ?? null;
+  }
+
   private weightedRandomSelect(
     candidates: RouteChannelCandidate[],
     modelName: string | ((candidate: RouteChannelCandidate) => string),
@@ -1060,35 +1238,45 @@ export class TokenRouter {
     candidates: RouteChannelCandidate[],
     modelName: string | ((candidate: RouteChannelCandidate) => string),
     downstreamPolicy: DownstreamRoutingPolicy,
+    nowMs = Date.now(),
   ) {
     if (candidates.length === 0) {
       return {
         selected: null as RouteChannelCandidate | null,
-        details: [] as Array<{ candidate: RouteChannelCandidate; probability: number; reason: string }>,
+        details: [] as SelectionDetail[],
       };
     }
 
+    const resolveModelName = typeof modelName === 'function'
+      ? modelName
+      : (() => modelName);
+
     if (candidates.length === 1) {
+      const only = candidates[0];
+      const health = calculateChannelHealthScore(only.channel, nowMs);
+      const baseWeight = only.channel.weight ?? 10;
       return {
-        selected: candidates[0],
+        selected: only,
         details: [{
-          candidate: candidates[0],
+          candidate: only,
           probability: 1,
-          reason: '唯一可用候选',
+          reason: `唯一可用候选（基础权重=${baseWeight}，有效权重=${(baseWeight * health.multiplier).toFixed(2)}，${health.summary}）`,
+          effectiveWeight: baseWeight * health.multiplier,
+          baseWeight,
+          healthMultiplier: health.multiplier,
+          healthSummary: health.summary,
         }],
       };
     }
 
     const { baseWeightFactor, valueScoreFactor, costWeight, balanceWeight, usageWeight } = config.routingWeights;
-    const resolveModelName = typeof modelName === 'function'
-      ? modelName
-      : (() => modelName);
     const effectiveCosts = candidates.map((candidate) => resolveEffectiveUnitCost(candidate, resolveModelName(candidate)));
+    const healthScores = candidates.map((candidate) => calculateChannelHealthScore(candidate.channel, nowMs));
 
-    const valueScores = candidates.map((c, i) => {
-      const unitCost = effectiveCosts[i]?.unitCost || 1;
-      const balance = c.account.balance || 0;
-      const totalUsed = (c.channel.successCount ?? 0) + (c.channel.failCount ?? 0);
+    const valueScores = candidates.map((candidate, index) => {
+      const unitCost = effectiveCosts[index]?.unitCost || 1;
+      const balance = candidate.account.balance || 0;
+      const totalUsed = (candidate.channel.successCount ?? 0) + (candidate.channel.failCount ?? 0);
       const recentUsage = Math.max(totalUsed, 1);
       return costWeight * (1 / unitCost) + balanceWeight * balance + usageWeight * (1 / recentUsage);
     });
@@ -1096,23 +1284,21 @@ export class TokenRouter {
     const maxVS = Math.max(...valueScores, 0.001);
     const minVS = Math.min(...valueScores, 0);
     const range = maxVS - minVS || 1;
-    const normalizedVS = valueScores.map((v) => (v - minVS) / range);
+    const normalizedVS = valueScores.map((value) => (value - minVS) / range);
 
-    const baseContributions = candidates.map((c, i) => {
-      const weight = c.channel.weight ?? 10;
-      return (weight + 10) * (baseWeightFactor + normalizedVS[i] * valueScoreFactor);
-    });
-
-    // Avoid over-favoring a site that has many tokens/channels for the same route.
-    // Site-level total contribution remains comparable, then split across its channels.
     const siteChannelCounts = new Map<number, number>();
     for (const candidate of candidates) {
       siteChannelCounts.set(candidate.site.id, (siteChannelCounts.get(candidate.site.id) || 0) + 1);
     }
 
-    const contributions = candidates.map((candidate, i) => {
+    const baseContributions = candidates.map((candidate, index) => {
+      const weight = candidate.channel.weight ?? 10;
+      return (weight + 10) * (baseWeightFactor + normalizedVS[index] * valueScoreFactor);
+    });
+
+    const contributions = candidates.map((candidate, index) => {
       const siteChannels = Math.max(1, siteChannelCounts.get(candidate.site.id) || 1);
-      let contribution = baseContributions[i] / siteChannels;
+      let contribution = baseContributions[index] / siteChannels;
       const downstreamSiteMultiplier = downstreamPolicy.siteWeightMultipliers[candidate.site.id] ?? 1;
       const normalizedDownstreamSiteMultiplier =
         (Number.isFinite(downstreamSiteMultiplier) && downstreamSiteMultiplier > 0)
@@ -1126,21 +1312,19 @@ export class TokenRouter {
       if (combinedSiteWeight > 0 && Number.isFinite(combinedSiteWeight)) {
         contribution *= combinedSiteWeight;
       }
-
-      // If upstream price is unknown and we are using fallback unit cost,
-      // apply an explicit penalty so raising fallback cost meaningfully lowers probability.
-      if (effectiveCosts[i]?.source === 'fallback') {
-        contribution *= 1 / Math.max(1, effectiveCosts[i]?.unitCost || 1);
+      if (effectiveCosts[index]?.source === 'fallback') {
+        contribution *= 1 / Math.max(1, effectiveCosts[index]?.unitCost || 1);
       }
-
+      contribution *= healthScores[index].multiplier;
       return contribution;
     });
 
-    const totalContribution = contributions.reduce((a, b) => a + b, 0);
-    const details = candidates.map((candidate, i) => {
-      const probability = totalContribution > 0 ? contributions[i] / totalContribution : 0;
+    const totalContribution = contributions.reduce((sum, value) => sum + value, 0);
+    const details: SelectionDetail[] = candidates.map((candidate, index) => {
+      const probability = totalContribution > 0 ? contributions[index] / totalContribution : 0;
       const weight = candidate.channel.weight ?? 10;
-      const cost = effectiveCosts[i];
+      const cost = effectiveCosts[index];
+      const health = healthScores[index];
       const costSourceText = cost?.source === 'observed'
         ? '实测'
         : (cost?.source === 'configured' ? '配置' : (cost?.source === 'catalog' ? '目录' : '默认'));
@@ -1158,16 +1342,20 @@ export class TokenRouter {
       return {
         candidate,
         probability,
-        reason: `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`,
+        effectiveWeight: contributions[index],
+        baseWeight: weight,
+        healthMultiplier: health.multiplier,
+        healthSummary: health.summary,
+        reason: `按权重随机（基础权重=${weight}，健康分=${(health.multiplier * 100).toFixed(0)}%，有效权重=${contributions[index].toFixed(2)}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%，${health.summary}）`,
       };
     });
 
     let rand = Math.random() * totalContribution;
     let selected = candidates[candidates.length - 1];
-    for (let i = 0; i < candidates.length; i++) {
-      rand -= contributions[i];
+    for (let index = 0; index < candidates.length; index += 1) {
+      rand -= contributions[index];
       if (rand <= 0) {
-        selected = candidates[i];
+        selected = candidates[index];
         break;
       }
     }
