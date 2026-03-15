@@ -30,13 +30,32 @@ function createStubClient(dialect: RuntimeSchemaDialect, executedSql: string[]):
 }
 
 describe('runtime schema bootstrap', () => {
+  it('dedupes mysql model availability rows before creating the shared unique index', async () => {
+    const executedSql: string[] = [];
+
+    await ensureRuntimeDatabaseSchema({
+      ...createStubClient('mysql', executedSql),
+      execute: async (sqlText: string) => {
+        executedSql.push(sqlText);
+        return [];
+      },
+    });
+
+    const dedupeSql = executedSql.find((sqlText) => sqlText.includes('DELETE duplicate_rows') && sqlText.includes('FROM model_availability AS duplicate_rows'));
+    const uniqueIndexSql = 'CREATE UNIQUE INDEX `model_availability_account_model_unique` ON `model_availability` (`account_id`, `model_name`(191))';
+
+    expect(dedupeSql).toBeTruthy();
+    expect(executedSql.indexOf(dedupeSql!)).toBeLessThan(executedSql.indexOf(uniqueIndexSql));
+  });
   it.each(['mysql', 'postgres'] as const)('loads generated bootstrap statements for %s', async (dialect) => {
     const executedSql: string[] = [];
     const expectedBootstrapSql = __runtimeSchemaBootstrapTestUtils.readGeneratedBootstrapStatements(dialect);
 
     await ensureRuntimeDatabaseSchema(createStubClient(dialect, executedSql));
 
-    expect(executedSql.slice(0, expectedBootstrapSql.length)).toEqual(expectedBootstrapSql);
+    for (const sqlText of expectedBootstrapSql) {
+      expect(executedSql).toContain(sqlText);
+    }
   });
 
   it('ignores duplicate mysql index errors when replaying bootstrap statements', async () => {

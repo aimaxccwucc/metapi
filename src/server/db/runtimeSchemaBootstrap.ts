@@ -7,6 +7,10 @@ import {
   ensureLegacySchemaCompatibility,
   type LegacySchemaCompatInspector,
 } from './legacySchemaCompat.js';
+import {
+  ensureSharedIndexSchemaCompatibility,
+  type SharedIndexSchemaInspector,
+} from './sharedIndexSchemaCompatibility.js';
 import { generateBootstrapSql, resolveGeneratedArtifactPath } from './schemaArtifactGenerator.js';
 import type { SchemaContract } from './schemaContract.js';
 
@@ -131,6 +135,56 @@ function createLegacySchemaInspector(client: RuntimeSchemaClient): LegacySchemaC
   };
 }
 
+function createSharedIndexSchemaInspector(client: RuntimeSchemaClient): SharedIndexSchemaInspector {
+  if (client.dialect === 'sqlite') {
+    return {
+      dialect: 'sqlite',
+      tableExists: async (table) => {
+        const normalizedTable = validateIdentifier(table);
+        return (await client.queryScalar(
+          `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '${normalizedTable}'`,
+        )) > 0;
+      },
+      execute: async (sqlText) => {
+        await client.execute(sqlText);
+      },
+    };
+  }
+
+  if (client.dialect === 'mysql') {
+    return {
+      dialect: 'mysql',
+      tableExists: async (table) => {
+        return (await client.queryScalar(
+          'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?',
+          [table],
+        )) > 0;
+      },
+      execute: async (sqlText) => {
+        await client.execute(sqlText);
+      },
+      dedupeForUniqueIndex: async (table, indexName) => {
+        if (table === 'model_availability' && indexName === 'model_availability_account_model_unique') {
+          await dedupeMySqlModelAvailabilityForUniqueIndex(client);
+        }
+      },
+    };
+  }
+
+  return {
+    dialect: 'postgres',
+    tableExists: async (table) => {
+      return (await client.queryScalar(
+        'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1',
+        [table],
+      )) > 0;
+    },
+    execute: async (sqlText) => {
+      await client.execute(sqlText);
+    },
+  };
+}
+
 function splitSqlStatements(sqlText: string): string[] {
   const withoutCommentLines = sqlText
     .split(/\r?\n/g)
@@ -141,6 +195,17 @@ function splitSqlStatements(sqlText: string): string[] {
     .split(/;\s*(?:\r?\n|$)/g)
     .map((statement) => statement.trim())
     .filter((statement) => statement.length > 0);
+}
+
+async function dedupeMySqlModelAvailabilityForUniqueIndex(client: RuntimeSchemaClient): Promise<void> {
+  await client.execute(`
+    DELETE duplicate_rows
+    FROM model_availability AS duplicate_rows
+    INNER JOIN model_availability AS kept_rows
+      ON duplicate_rows.account_id = kept_rows.account_id
+      AND COALESCE(duplicate_rows.model_name, '') = COALESCE(kept_rows.model_name, '')
+      AND duplicate_rows.id < kept_rows.id
+  `);
 }
 
 function readSchemaContract(): SchemaContract {
@@ -243,11 +308,16 @@ export async function ensureRuntimeDatabaseSchema(client: RuntimeSchemaClient): 
     ? splitSqlStatements(generateBootstrapSql('sqlite', readSchemaContract()))
     : readGeneratedBootstrapStatements(client.dialect);
 
+  if (client.dialect === 'mysql') {
+    await dedupeMySqlModelAvailabilityForUniqueIndex(client);
+  }
+
   for (const sqlText of statements) {
     await executeBootstrapStatement(client, sqlText);
   }
 
   await ensureLegacySchemaCompatibility(createLegacySchemaInspector(client));
+  await ensureSharedIndexSchemaCompatibility(createSharedIndexSchemaInspector(client));
 }
 
 export async function bootstrapRuntimeDatabaseSchema(input: RuntimeSchemaConnectionInput): Promise<void> {

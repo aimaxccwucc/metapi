@@ -4,6 +4,7 @@ export interface SharedIndexSchemaInspector {
   dialect: SharedIndexSchemaDialect;
   tableExists(table: string): Promise<boolean>;
   execute(sqlText: string): Promise<void>;
+  dedupeForUniqueIndex?(table: string, indexName: string): Promise<void>;
 }
 
 type SharedIndexCompatibilitySpec = {
@@ -363,6 +364,11 @@ async function executeIgnoreDuplicate(inspector: SharedIndexSchemaInspector, sql
   }
 }
 
+async function prepareIndexCompatibility(inspector: SharedIndexSchemaInspector, spec: SharedIndexCompatibilitySpec): Promise<void> {
+  if (!inspector.dedupeForUniqueIndex) return;
+  await inspector.dedupeForUniqueIndex(spec.table, spec.indexName);
+}
+
 export async function ensureSharedIndexSchemaCompatibility(inspector: SharedIndexSchemaInspector): Promise<void> {
   const tableExistsCache = new Map<string, boolean>();
 
@@ -376,6 +382,7 @@ export async function ensureSharedIndexSchemaCompatibility(inspector: SharedInde
       continue;
     }
 
+    await prepareIndexCompatibility(inspector, spec);
     await executeIgnoreDuplicate(inspector, spec.createSql[inspector.dialect]);
   }
 }
