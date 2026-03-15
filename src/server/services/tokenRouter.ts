@@ -70,6 +70,15 @@ type SelectionDetail = {
   healthSummary: string;
 };
 
+export interface RouteDecisionCircuitStatus {
+  state: 'closed' | 'open' | 'half_open';
+  isOpen: boolean;
+  isHalfOpen: boolean;
+  openUntil: number | null;
+  reason: string;
+  effectiveMultiplier: number;
+}
+
 const RECENT_FAILURE_AVOID_SEC = 10 * 60;
 const MIN_EFFECTIVE_UNIT_COST = 1e-6;
 
@@ -211,6 +220,7 @@ export interface RouteDecisionCandidate {
   avoidedByRecentFailure: boolean;
   probability: number;
   reason: string;
+  circuitStatus?: RouteDecisionCircuitStatus;
 }
 
 export interface RouteDecisionExplanation {
@@ -244,6 +254,7 @@ type PricingReferenceRefreshOptions = {
 
 type CandidateEligibilityOptions = {
   requestedModel: string;
+  circuitModelName?: string;
   bypassSourceModelCheck?: boolean;
   excludeChannelIds?: number[];
   nowIso?: string;
@@ -711,6 +722,9 @@ export class TokenRouter {
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
+    const resolveDecisionCircuitModelName = useChannelSourceModelForCost
+      ? (candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel
+      : () => mappedModel;
     const summary: string[] = [`命中路由：${match.route.modelPattern}`];
     if (requestedByDisplayName) {
       summary.push(`按显示名命中：${normalizeRouteDisplayName(match.route.displayName)}`);
@@ -719,6 +733,7 @@ export class TokenRouter {
     let eligibleCandidates = match.channels.filter((row) => {
       const reasonParts = this.getCandidateEligibilityReasons(row, {
         requestedModel,
+        circuitModelName: resolveDecisionCircuitModelName(row),
         bypassSourceModelCheck,
         excludeChannelIds,
         nowIso,
@@ -738,12 +753,18 @@ export class TokenRouter {
     for (const row of match.channels) {
       const reasonParts = this.getCandidateEligibilityReasons(row, {
         requestedModel,
+        circuitModelName: resolveDecisionCircuitModelName(row),
         bypassSourceModelCheck,
         excludeChannelIds,
         nowIso,
       });
 
       const recentlyFailed = isChannelRecentlyFailed(row.channel, nowMs, RECENT_FAILURE_AVOID_SEC);
+      const circuitStatus = getModelCircuitStatus(
+        row.channel.id,
+        resolveModelNameForCircuit(resolveDecisionCircuitModelName, row),
+        nowMs,
+      );
       const baseEligible = reasonParts.length === 0;
       const eligible = baseEligible && eligibleChannelIds.has(row.channel.id);
       const candidate: RouteDecisionCandidate = {
@@ -761,6 +782,7 @@ export class TokenRouter {
         avoidedByRecentFailure: false,
         probability: 0,
         reason: eligible ? '可用' : (reasonParts.join('、') || '当前场景不兼容'),
+        circuitStatus,
       };
       candidates.push(candidate);
       candidateMap.set(candidate.channelId, candidate);
@@ -1118,7 +1140,8 @@ export class TokenRouter {
       reasonParts.push('冷却中');
     }
 
-    const circuitStatus = getModelCircuitStatus(candidate.channel.id, options.requestedModel);
+    const circuitModelName = options.circuitModelName || options.requestedModel;
+    const circuitStatus = getModelCircuitStatus(candidate.channel.id, circuitModelName);
     if (circuitStatus.isOpen) {
       reasonParts.push(circuitStatus.reason);
     }

@@ -117,7 +117,11 @@ describe('TokenRouter model circuit breaker', () => {
 
     expect(channelACandidate?.eligible).toBe(false);
     expect(channelACandidate?.reason || '').toContain('模型熔断');
+    expect(channelACandidate?.circuitStatus?.state).toBe('open');
+    expect(channelACandidate?.circuitStatus?.isOpen).toBe(true);
+    expect(channelACandidate?.circuitStatus?.reason || '').toContain('模型熔断');
     expect(channelBCandidate?.eligible).toBe(true);
+    expect(channelBCandidate?.circuitStatus?.state).toBe('closed');
 
     const otherModelSelection = await router.selectChannel('gpt-4o-mini');
     expect(otherModelSelection?.account.id).toBe(accountA.id);

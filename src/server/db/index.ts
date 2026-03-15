@@ -352,6 +352,8 @@ type RuntimeSchemaInspector = {
   tableExists(table: string): Promise<boolean>;
   columnExists(table: string, column: string): Promise<boolean>;
   execute(sqlText: string): Promise<void>;
+  getColumnType?(table: string, column: string): Promise<string | null>;
+  getIndexColumns?(table: string, indexName: string): Promise<string[] | null>;
 };
 
 function createSqliteSchemaInspector(): RuntimeSchemaInspector {
@@ -368,25 +370,43 @@ function createSqliteSchemaInspector(): RuntimeSchemaInspector {
 function createMysqlSchemaInspector(): RuntimeSchemaInspector | null {
   if (!mysqlPool) return null;
   return {
-      dialect: 'mysql',
-      tableExists: async (table) => {
-        const [rows] = await mysqlPool!.query(
-          'SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1',
-          [table],
-        );
-        return Array.isArray(rows) && rows.length > 0;
-      },
-      columnExists: async (table, column) => {
-        const [rows] = await mysqlPool!.query(
-          'SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1',
-          [table, column],
-        );
-        return Array.isArray(rows) && rows.length > 0;
-      },
-      execute: async (sqlText) => {
-        await executeLegacyCompat((statement) => mysqlPool!.query(statement).then(() => undefined), sqlText);
-      },
-    };
+    dialect: 'mysql',
+    tableExists: async (table) => {
+      const [rows] = await mysqlPool!.query(
+        'SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1',
+        [table],
+      );
+      return Array.isArray(rows) && rows.length > 0;
+    },
+    columnExists: async (table, column) => {
+      const [rows] = await mysqlPool!.query(
+        'SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1',
+        [table, column],
+      );
+      return Array.isArray(rows) && rows.length > 0;
+    },
+    getColumnType: async (table, column) => {
+      const [rows] = await mysqlPool!.query(
+        'SELECT column_type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1',
+        [table, column],
+      ) as [Array<{ column_type?: string }> | unknown, unknown];
+      if (!Array.isArray(rows) || rows.length === 0) return null;
+      return typeof rows[0]?.column_type === 'string' ? rows[0].column_type : null;
+    },
+    getIndexColumns: async (table, indexName) => {
+      const [rows] = await mysqlPool!.query(
+        'SELECT column_name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? ORDER BY seq_in_index ASC',
+        [table, indexName],
+      ) as [Array<{ column_name?: string }> | unknown, unknown];
+      if (!Array.isArray(rows) || rows.length === 0) return null;
+      return rows
+        .map((row) => (typeof row.column_name === 'string' ? row.column_name : ''))
+        .filter((columnName) => columnName.length > 0);
+    },
+    execute: async (sqlText) => {
+      await executeLegacyCompat((statement) => mysqlPool!.query(statement).then(() => undefined), sqlText);
+    },
+  };
 }
 
 function createPostgresSchemaInspector(): RuntimeSchemaInspector | null {

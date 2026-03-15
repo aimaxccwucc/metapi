@@ -5,6 +5,8 @@ export interface ProxyFileSchemaInspector {
   tableExists(table: string): Promise<boolean>;
   columnExists(table: string, column: string): Promise<boolean>;
   execute(sqlText: string): Promise<void>;
+  getColumnType?(table: string, column: string): Promise<string | null>;
+  getIndexColumns?(table: string, indexName: string): Promise<string[] | null>;
 }
 
 type ProxyFileColumnCompatibilitySpec = {
@@ -128,9 +130,54 @@ const CREATE_INDEX_SQL: Record<ProxyFileSchemaDialect, string[]> = {
   ],
   mysql: [
     'CREATE UNIQUE INDEX `proxy_files_public_id_unique` ON `proxy_files` (`public_id`)',
-    'CREATE INDEX `proxy_files_owner_lookup_idx` ON `proxy_files` (`owner_type`, `owner_id`)',
+    'CREATE INDEX `proxy_files_owner_lookup_idx` ON `proxy_files` (`owner_type`(191), `owner_id`(191), `deleted_at`)',
   ],
 };
+
+function normalizeSqlType(type: string | null | undefined): string {
+  return String(type || '').trim().toLowerCase();
+}
+
+function requiresMysqlIndexPrefix(columnType: string | null | undefined): boolean {
+  const normalized = normalizeSqlType(columnType);
+  return normalized.includes('text') || normalized.includes('blob') || normalized.includes('json');
+}
+
+function buildMysqlProxyFileOwnerLookupIndexSql(columnTypes: {
+  ownerType: string | null;
+  ownerId: string | null;
+  deletedAt: string | null;
+}): string {
+  const ownerTypeExpr = requiresMysqlIndexPrefix(columnTypes.ownerType) ? '`owner_type`(191)' : '`owner_type`';
+  const ownerIdExpr = requiresMysqlIndexPrefix(columnTypes.ownerId) ? '`owner_id`(191)' : '`owner_id`';
+  const deletedAtExpr = requiresMysqlIndexPrefix(columnTypes.deletedAt) ? '`deleted_at`(191)' : '`deleted_at`';
+  return `CREATE INDEX \`proxy_files_owner_lookup_idx\` ON \`proxy_files\` (${ownerTypeExpr}, ${ownerIdExpr}, ${deletedAtExpr})`;
+}
+
+async function ensureMysqlProxyFilesOwnerLookupIndexCompatibility(
+  inspector: ProxyFileSchemaInspector,
+): Promise<void> {
+  if (inspector.dialect !== 'mysql') return;
+  if (!inspector.getColumnType || !inspector.getIndexColumns) return;
+
+  const [ownerType, ownerId, deletedAt] = await Promise.all([
+    inspector.getColumnType('proxy_files', 'owner_type'),
+    inspector.getColumnType('proxy_files', 'owner_id'),
+    inspector.getColumnType('proxy_files', 'deleted_at'),
+  ]);
+
+  const desiredSql = buildMysqlProxyFileOwnerLookupIndexSql({ ownerType, ownerId, deletedAt });
+  const existingColumns = await inspector.getIndexColumns('proxy_files', 'proxy_files_owner_lookup_idx');
+  if (existingColumns && existingColumns.join(',') === 'owner_type,owner_id,deleted_at') {
+    return;
+  }
+
+  if (existingColumns && existingColumns.length > 0) {
+    await inspector.execute('DROP INDEX `proxy_files_owner_lookup_idx` ON `proxy_files`');
+  }
+
+  await executeIgnoreDuplicate(inspector, desiredSql);
+}
 
 function normalizeSchemaErrorMessage(error: unknown): string {
   if (typeof error === 'object' && error && 'message' in error) {
@@ -163,6 +210,8 @@ export async function ensureProxyFileSchemaCompatibility(inspector: ProxyFileSch
       await executeIgnoreDuplicate(inspector, spec.addSql[inspector.dialect]);
     }
   }
+
+  await ensureMysqlProxyFilesOwnerLookupIndexCompatibility(inspector);
 
   for (const sqlText of CREATE_INDEX_SQL[inspector.dialect]) {
     await executeIgnoreDuplicate(inspector, sqlText);

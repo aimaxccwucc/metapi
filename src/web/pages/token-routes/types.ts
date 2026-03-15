@@ -69,6 +69,15 @@ export type RouteSummaryRow = {
   decisionRefreshedAt: string | null;
 };
 
+export type RouteDecisionCircuitStatus = {
+  state: 'closed' | 'open' | 'half_open';
+  isOpen: boolean;
+  isHalfOpen: boolean;
+  openUntil: number | null;
+  reason: string;
+  effectiveMultiplier: number;
+};
+
 export type RouteDecisionCandidate = {
   channelId: number;
   accountId: number;
@@ -84,6 +93,7 @@ export type RouteDecisionCandidate = {
   avoidedByRecentFailure: boolean;
   probability: number;
   reason: string;
+  circuitStatus?: RouteDecisionCircuitStatus;
 };
 
 export type RouteDecision = {

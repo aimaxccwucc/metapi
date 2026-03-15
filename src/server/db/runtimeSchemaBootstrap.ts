@@ -109,6 +109,34 @@ function createLegacySchemaInspector(client: RuntimeSchemaClient): LegacySchemaC
           [table, column],
         )) > 0;
       },
+      getColumnType: async (table, column) => {
+        const result = await client.execute(
+          'SELECT column_type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1',
+          [table, column],
+        );
+        const rows = Array.isArray(result)
+          ? (Array.isArray(result[0]) ? result[0] : result)
+          : (result && typeof result === 'object' && 'rows' in result && Array.isArray((result as { rows?: unknown[] }).rows)
+            ? (result as { rows: Array<Record<string, unknown>> }).rows
+            : []);
+        const first = rows[0] as Record<string, unknown> | undefined;
+        return typeof first?.column_type === 'string' ? first.column_type : null;
+      },
+      getIndexColumns: async (table, indexName) => {
+        const result = await client.execute(
+          'SELECT column_name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? ORDER BY seq_in_index ASC',
+          [table, indexName],
+        );
+        const rows = Array.isArray(result)
+          ? (Array.isArray(result[0]) ? result[0] : result)
+          : (result && typeof result === 'object' && 'rows' in result && Array.isArray((result as { rows?: unknown[] }).rows)
+            ? (result as { rows: Array<Record<string, unknown>> }).rows
+            : []);
+        if (rows.length === 0) return null;
+        return (rows as Array<Record<string, unknown>>)
+          .map((row) => (typeof row.column_name === 'string' ? row.column_name : ''))
+          .filter((columnName) => columnName.length > 0);
+      },
       execute: async (sqlText) => {
         await client.execute(sqlText);
       },

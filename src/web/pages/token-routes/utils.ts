@@ -332,6 +332,24 @@ export function getChannelDecisionState(
       };
     }
 
+    if (candidate.circuitStatus?.isOpen) {
+      return {
+        probability: 0,
+        showBar: true,
+        reasonText: candidate.circuitStatus.reason,
+        reasonColor: 'var(--color-warning)',
+      };
+    }
+
+    if (candidate.circuitStatus?.isHalfOpen) {
+      return {
+        probability: 0,
+        showBar: true,
+        reasonText: candidate.circuitStatus.reason,
+        reasonColor: 'var(--color-info)',
+      };
+    }
+
     return {
       probability: 0,
       showBar: true,

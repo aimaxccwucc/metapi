@@ -84,6 +84,10 @@ const LEGACY_COMPAT_INDEXES = new Set([
   ...SHARED_INDEX_COMPATIBILITY_SPECS.map((spec) => spec.indexName),
 ]);
 
+const LEGACY_COMPAT_DROP_INDEXES = new Set([
+  'proxy_files_owner_lookup_idx',
+]);
+
 function normalizeSqlText(sqlText: string): string {
   return sqlText.trim().replace(/\s+/g, ' ').toLowerCase();
 }
@@ -125,6 +129,13 @@ export function classifyLegacyCompatMutation(sqlText: string): LegacySchemaCompa
   );
   if (createIndexMatch) {
     return LEGACY_COMPAT_INDEXES.has(createIndexMatch[1]) ? 'legacy' : 'forbidden';
+  }
+
+  const dropIndexMatch = normalized.match(
+    /^drop index [`"]?([a-z0-9_]+)[`"]? on [`"]?([a-z0-9_]+)[`"]?/i,
+  );
+  if (dropIndexMatch) {
+    return LEGACY_COMPAT_DROP_INDEXES.has(dropIndexMatch[1]) ? 'legacy' : 'forbidden';
   }
 
   return 'forbidden';

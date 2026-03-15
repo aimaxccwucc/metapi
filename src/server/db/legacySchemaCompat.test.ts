@@ -7,6 +7,7 @@ describe('legacy schema compat boundary', () => {
     expect(classifyLegacyCompatMutation('UPDATE "sites" SET "use_system_proxy" = FALSE WHERE "use_system_proxy" IS NULL')).toBe('legacy');
     expect(classifyLegacyCompatMutation('ALTER TABLE "model_availability" ADD COLUMN "is_manual" BOOLEAN DEFAULT FALSE')).toBe('legacy');
     expect(classifyLegacyCompatMutation('UPDATE "model_availability" SET "is_manual" = FALSE WHERE "is_manual" IS NULL')).toBe('legacy');
+    expect(classifyLegacyCompatMutation('DROP INDEX `proxy_files_owner_lookup_idx` ON `proxy_files`')).toBe('legacy');
     expect(classifyLegacyCompatMutation('ALTER TABLE sites ADD COLUMN brand_new_column text;')).toBe('forbidden');
     expect(classifyLegacyCompatMutation('UPDATE "sites" SET "brand_new_column" = 1')).toBe('forbidden');
   });
