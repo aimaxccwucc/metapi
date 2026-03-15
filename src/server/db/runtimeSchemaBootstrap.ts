@@ -166,6 +166,10 @@ function createSharedIndexSchemaInspector(client: RuntimeSchemaClient): SharedIn
       dedupeForUniqueIndex: async (table, indexName) => {
         if (table === 'model_availability' && indexName === 'model_availability_account_model_unique') {
           await dedupeMySqlModelAvailabilityForUniqueIndex(client);
+          return;
+        }
+        if (table === 'token_model_availability' && indexName === 'token_model_availability_token_model_unique') {
+          await dedupeMySqlTokenModelAvailabilityForUniqueIndex(client);
         }
       },
     };
@@ -197,15 +201,27 @@ function splitSqlStatements(sqlText: string): string[] {
     .filter((statement) => statement.length > 0);
 }
 
-async function dedupeMySqlModelAvailabilityForUniqueIndex(client: RuntimeSchemaClient): Promise<void> {
+async function dedupeMySqlDuplicateAvailabilityRows(
+  client: RuntimeSchemaClient,
+  tableName: 'model_availability' | 'token_model_availability',
+  ownerColumn: 'account_id' | 'token_id',
+): Promise<void> {
   await client.execute(`
     DELETE duplicate_rows
-    FROM model_availability AS duplicate_rows
-    INNER JOIN model_availability AS kept_rows
-      ON duplicate_rows.account_id = kept_rows.account_id
+    FROM ${tableName} AS duplicate_rows
+    INNER JOIN ${tableName} AS kept_rows
+      ON duplicate_rows.${ownerColumn} = kept_rows.${ownerColumn}
       AND COALESCE(duplicate_rows.model_name, '') = COALESCE(kept_rows.model_name, '')
       AND duplicate_rows.id < kept_rows.id
   `);
+}
+
+async function dedupeMySqlModelAvailabilityForUniqueIndex(client: RuntimeSchemaClient): Promise<void> {
+  await dedupeMySqlDuplicateAvailabilityRows(client, 'model_availability', 'account_id');
+}
+
+async function dedupeMySqlTokenModelAvailabilityForUniqueIndex(client: RuntimeSchemaClient): Promise<void> {
+  await dedupeMySqlDuplicateAvailabilityRows(client, 'token_model_availability', 'token_id');
 }
 
 function readSchemaContract(): SchemaContract {
@@ -310,6 +326,7 @@ export async function ensureRuntimeDatabaseSchema(client: RuntimeSchemaClient): 
 
   if (client.dialect === 'mysql') {
     await dedupeMySqlModelAvailabilityForUniqueIndex(client);
+    await dedupeMySqlTokenModelAvailabilityForUniqueIndex(client);
   }
 
   for (const sqlText of statements) {

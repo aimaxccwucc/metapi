@@ -47,6 +47,24 @@ describe('runtime schema bootstrap', () => {
     expect(dedupeSql).toBeTruthy();
     expect(executedSql.indexOf(dedupeSql!)).toBeLessThan(executedSql.indexOf(uniqueIndexSql));
   });
+
+  it('dedupes mysql token model availability rows before creating the shared unique index', async () => {
+    const executedSql: string[] = [];
+
+    await ensureRuntimeDatabaseSchema({
+      ...createStubClient('mysql', executedSql),
+      execute: async (sqlText: string) => {
+        executedSql.push(sqlText);
+        return [];
+      },
+    });
+
+    const dedupeSql = executedSql.find((sqlText) => sqlText.includes('DELETE duplicate_rows') && sqlText.includes('FROM token_model_availability AS duplicate_rows'));
+    const uniqueIndexSql = 'CREATE UNIQUE INDEX `token_model_availability_token_model_unique` ON `token_model_availability` (`token_id`, `model_name`(191))';
+
+    expect(dedupeSql).toBeTruthy();
+    expect(executedSql.indexOf(dedupeSql!)).toBeLessThan(executedSql.indexOf(uniqueIndexSql));
+  });
   it.each(['mysql', 'postgres'] as const)('loads generated bootstrap statements for %s', async (dialect) => {
     const executedSql: string[] = [];
     const expectedBootstrapSql = __runtimeSchemaBootstrapTestUtils.readGeneratedBootstrapStatements(dialect);
