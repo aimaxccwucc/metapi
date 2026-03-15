@@ -115,7 +115,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
         const upstream = await fetch(targetUrl, requestInit);
         const text = await upstream.text();
         if (!upstream.ok) {
-          tokenRouter.recordFailure(selected.channel.id, { status: upstream.status, upstreamErrorText: text });
+          tokenRouter.recordFailure(selected.channel.id, { status: upstream.status, upstreamErrorText: text, modelName: selected.actualModel || requestedModel });
           if ((text || '').match(/unsupported\s+model|model\s+not\s+supported|does\s+not\s+support(?:\s+the)?\s+model/i)) {
             await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
           }
@@ -171,11 +171,11 @@ export async function videosProxyRoute(app: FastifyInstance) {
           completionTokens: 0,
           totalTokens: 0,
         });
-        tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+        tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel || requestedModel);
         recordDownstreamCostUsage(request, estimatedCost);
         return reply.code(upstream.status).send(rewriteVideoResponsePublicId(data, mapping.publicId));
       } catch (error: any) {
-        tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: error?.message || 'network failure' });
+        tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: error?.message || 'network failure', modelName: selected.actualModel || requestedModel });
         if (retryCount < MAX_RETRIES) {
           retryCount += 1;
           continue;

@@ -12,6 +12,12 @@ import {
   resolveWeightedFailureCooldownMs,
 } from './channelRoutingHealth.js';
 import { type ProxyFailureContext, type RetryFailureCategory, classifyProxyFailure } from './proxyRetryPolicy.js';
+import {
+  canUseModelCircuit,
+  getModelCircuitStatus,
+  recordModelCircuitFailure,
+  recordModelCircuitSuccess,
+} from './modelCircuitBreaker.js';
 
 interface RouteMatch {
   route: typeof schema.tokenRoutes.$inferSelect;
@@ -51,6 +57,7 @@ type FailureAwareChannel = {
 
 export type RecordFailureOptions = ProxyFailureContext & {
   routingStrategy?: string | null;
+  modelName?: string | null;
 };
 
 type SelectionDetail = {
@@ -440,6 +447,13 @@ function resolveEffectiveUnitCost(candidate: RouteChannelCandidate, modelName: s
 
 function isExplicitTokenChannel(candidate: RouteChannelCandidate): boolean {
   return typeof candidate.channel.tokenId === 'number' && candidate.channel.tokenId > 0;
+}
+
+function resolveModelNameForCircuit(
+  modelName: string | ((candidate: RouteChannelCandidate) => string),
+  candidate: RouteChannelCandidate,
+): string {
+  return typeof modelName === 'function' ? modelName(candidate) : modelName;
 }
 
 export class TokenRouter {
@@ -896,7 +910,7 @@ export class TokenRouter {
   /**
    * Record success for a channel.
    */
-  async recordSuccess(channelId: number, latencyMs: number, cost: number) {
+  async recordSuccess(channelId: number, latencyMs: number, cost: number, modelName?: string | null) {
     const ch = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelId)).get();
     if (!ch) return;
     const route = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, ch.routeId)).get();
@@ -928,6 +942,10 @@ export class TokenRouter {
       channel.consecutiveFailCount = 0;
       channel.cooldownLevel = 0;
     });
+
+    if (typeof modelName === 'string' && modelName.trim()) {
+      recordModelCircuitSuccess(channelId, modelName, Date.now());
+    }
   }
 
   /**
@@ -968,6 +986,9 @@ export class TokenRouter {
         channel.consecutiveFailCount = persistedConsecutiveFailCount;
         channel.cooldownLevel = nextCooldownLevel;
       });
+      if (typeof options.modelName === 'string' && options.modelName.trim()) {
+        recordModelCircuitFailure(channelId, options.modelName, classifyProxyFailure(options), nowMs);
+      }
       return;
     }
 
@@ -992,6 +1013,10 @@ export class TokenRouter {
       channel.consecutiveFailCount = nextConsecutiveFailCount;
       channel.cooldownLevel = cooldownLevel;
     });
+
+    if (typeof options.modelName === 'string' && options.modelName.trim()) {
+      recordModelCircuitFailure(channelId, options.modelName, category, nowMs);
+    }
   }
 
   /**
@@ -1100,6 +1125,11 @@ export class TokenRouter {
       reasonParts.push('冷却中');
     }
 
+    const circuitStatus = getModelCircuitStatus(candidate.channel.id, options.requestedModel);
+    if (circuitStatus.isOpen) {
+      reasonParts.push(circuitStatus.reason);
+    }
+
     return reasonParts;
   }
 
@@ -1126,7 +1156,8 @@ export class TokenRouter {
     const sortedPriorities = Array.from(layers.keys()).sort((a, b) => a - b);
     for (const priority of sortedPriorities) {
       const rawLayer = layers.get(priority) ?? [];
-      const filteredLayer = filterRecentlyFailedCandidates(rawLayer, nowMs, RECENT_FAILURE_AVOID_SEC);
+      const filteredLayer = filterRecentlyFailedCandidates(rawLayer, nowMs, RECENT_FAILURE_AVOID_SEC)
+        .filter((candidate) => canUseModelCircuit(candidate.channel.id, resolveModelNameForCircuit(modelName, candidate), nowMs));
       const weighted = this.calculateWeightedSelection(filteredLayer, modelName, downstreamPolicy, nowMs);
       if (weighted.selected) return weighted.selected;
     }
@@ -1188,9 +1219,14 @@ export class TokenRouter {
     for (const priority of sortedPriorities) {
       const rawLayer = availableByPriority.get(priority) ?? [];
       if (rawLayer.length === 0) continue;
-      const filteredLayer = filterRecentlyFailedCandidates(rawLayer, nowMs, RECENT_FAILURE_AVOID_SEC);
+      const recentFilteredLayer = filterRecentlyFailedCandidates(rawLayer, nowMs, RECENT_FAILURE_AVOID_SEC);
+      const filteredLayer = recentFilteredLayer.filter((candidate) => canUseModelCircuit(
+        candidate.channel.id,
+        resolveModelNameForCircuit(modelName, candidate),
+        nowMs,
+      ));
       for (const candidate of rawLayer) {
-        if (!filteredLayer.some((item) => item.channel.id === candidate.channel.id)) {
+        if (!recentFilteredLayer.some((item) => item.channel.id === candidate.channel.id)) {
           avoidedChannelIds.push(candidate.channel.id);
         }
       }
@@ -1199,9 +1235,11 @@ export class TokenRouter {
       if (!weighted.selected) continue;
       selected = weighted.selected;
       selectedPriority = priority;
+      const avoidedByRecentFailure = rawLayer.length - recentFilteredLayer.length;
+      const avoidedByModelCircuit = recentFilteredLayer.length - filteredLayer.length;
       layerSummaries.push(
-        rawLayer.length !== filteredLayer.length
-          ? `优先级 P${priority}：可用 ${rawLayer.length}，因最近失败避让 ${rawLayer.length - filteredLayer.length}`
+        avoidedByRecentFailure > 0 || avoidedByModelCircuit > 0
+          ? `优先级 P${priority}：可用 ${rawLayer.length}，最近失败避让 ${avoidedByRecentFailure}，模型熔断避让 ${avoidedByModelCircuit}`
           : `优先级 P${priority}：可用 ${rawLayer.length}`,
       );
       break;
@@ -1325,6 +1363,7 @@ export class TokenRouter {
       const weight = candidate.channel.weight ?? 10;
       const cost = effectiveCosts[index];
       const health = healthScores[index];
+      const circuitStatus = getModelCircuitStatus(candidate.channel.id, resolveModelName(candidate), nowMs);
       const costSourceText = cost?.source === 'observed'
         ? '实测'
         : (cost?.source === 'configured' ? '配置' : (cost?.source === 'catalog' ? '目录' : '默认'));
@@ -1346,7 +1385,7 @@ export class TokenRouter {
         baseWeight: weight,
         healthMultiplier: health.multiplier,
         healthSummary: health.summary,
-        reason: `按权重随机（基础权重=${weight}，健康分=${(health.multiplier * 100).toFixed(0)}%，有效权重=${contributions[index].toFixed(2)}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%，${health.summary}）`,
+        reason: `按权重随机（基础权重=${weight}，健康分=${(health.multiplier * 100).toFixed(0)}%，有效权重=${contributions[index].toFixed(2)}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%，${health.summary}，模型熔断=${circuitStatus.state}）`,
       };
     });
 

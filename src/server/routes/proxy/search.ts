@@ -95,7 +95,7 @@ export async function searchProxyRoute(app: FastifyInstance) {
 
         const text = await upstream.text();
         if (!upstream.ok) {
-          tokenRouter.recordFailure(selected.channel.id, { status: upstream.status, upstreamErrorText: text });
+          tokenRouter.recordFailure(selected.channel.id, { status: upstream.status, upstreamErrorText: text, modelName: selected.actualModel || requestedModel });
           logProxy(selected, requestedModel, 'failed', upstream.status, Date.now() - startTime, text, retryCount);
           if (isTokenExpiredError({ status: upstream.status, message: text })) {
             await reportTokenExpired({
@@ -120,12 +120,12 @@ export async function searchProxyRoute(app: FastifyInstance) {
         try { data = JSON.parse(text); } catch { data = { data: [] }; }
 
         const latency = Date.now() - startTime;
-        tokenRouter.recordSuccess(selected.channel.id, latency, 0);
+        tokenRouter.recordSuccess(selected.channel.id, latency, 0, selected.actualModel || requestedModel);
         recordDownstreamCostUsage(request, 0);
         logProxy(selected, requestedModel, 'success', upstream.status, latency, null, retryCount);
         return reply.code(upstream.status).send(data);
       } catch (error: any) {
-        tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: error?.message || 'network failure' });
+        tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: error?.message || 'network failure', modelName: selected.actualModel || requestedModel });
         logProxy(selected, requestedModel, 'failed', 0, Date.now() - startTime, error?.message || 'network error', retryCount);
         if (retryCount < MAX_RETRIES) {
           retryCount += 1;

@@ -323,7 +323,7 @@ async function handleChatProxyRequest(
             resolvedUsage,
           });
 
-          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel || requestedModel);
           recordDownstreamCostUsage(request, estimatedCost);
           logProxy(
             selected,
@@ -372,7 +372,7 @@ async function handleChatProxyRequest(
           resolvedUsage,
         });
 
-        tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+        tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel || requestedModel);
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected,
@@ -430,7 +430,7 @@ async function handleChatProxyRequest(
         resolvedUsage,
       });
 
-      tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost);
+      tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel || requestedModel);
       recordDownstreamCostUsage(request, estimatedCost);
       logProxy(
         selected,
@@ -451,7 +451,7 @@ async function handleChatProxyRequest(
 
       return reply.send(downstreamResponse);
     } catch (err: any) {
-      tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: err?.message || 'network failure' });
+      tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: err?.message || 'network failure', modelName: selected.actualModel || requestedModel });
       logProxy(
         selected,
         requestedModel,

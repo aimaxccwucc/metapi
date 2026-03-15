@@ -132,6 +132,7 @@
 
 - `src/server/services/channelRoutingHealth.ts`
 - `src/server/services/proxyRetryPolicy.ts`
+- `src/server/services/modelCircuitBreaker.ts`
 
 后续继续扩展时，也优先在这类独立文件追加，而不是继续膨胀 `tokenRouter.ts`。
 
