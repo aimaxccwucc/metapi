@@ -1,1 +1,4 @@
-ALTER TABLE "model_availability" ADD COLUMN "is_manual" BOOLEAN DEFAULT false;
+ALTER TABLE "sites" ADD COLUMN "health_status" TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE "sites" ADD COLUMN "health_reason" TEXT;
+ALTER TABLE "sites" ADD COLUMN "health_checked_at" TIMESTAMP;
+CREATE INDEX "sites_health_status_idx" ON "sites" ("health_status");

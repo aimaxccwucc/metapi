@@ -961,6 +961,24 @@
           "notNull": false,
           "defaultValue": "1",
           "primaryKey": false
+        },
+        "health_status": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'unknown'",
+          "primaryKey": false
+        },
+        "health_reason": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "health_checked_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },
@@ -1370,6 +1388,14 @@
         "model_name"
       ],
       "unique": true
+    },
+    {
+      "name": "sites_health_status_idx",
+      "table": "sites",
+      "columns": [
+        "health_status"
+      ],
+      "unique": false
     },
     {
       "name": "sites_status_idx",

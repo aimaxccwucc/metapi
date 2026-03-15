@@ -32,8 +32,10 @@ function quoteIdentifier(dialect: SqlDialect, identifier: string): string {
   return dialect === 'mysql' ? `\`${identifier}\`` : `"${identifier}"`;
 }
 
-function escapeMysqlTextPrefix(columnType: LogicalColumnType): string {
-  return columnType === 'text' || columnType === 'datetime' || columnType === 'json' ? '(191)' : '';
+function escapeMysqlIndexPrefix(columnType: LogicalColumnType, sqlType: string): string {
+  if (columnType === 'json') return '(191)';
+  if (columnType === 'text' && !/^varchar\(/i.test(sqlType)) return '(191)';
+  return '';
 }
 
 function mapColumnType(dialect: SqlDialect, columnName: string, column: SchemaContractColumn): string {
@@ -181,7 +183,8 @@ function buildUniqueIndexStatement(dialect: SqlDialect, uniqueIndex: SchemaContr
   const columns = uniqueIndex.columns
     .map((columnName) => {
       const column = contract.tables[uniqueIndex.table]?.columns[columnName];
-      const suffix = dialect === 'mysql' && column ? escapeMysqlTextPrefix(column.logicalType) : '';
+      const sqlType = dialect === 'mysql' && column ? mapColumnType(dialect, columnName, column) : '';
+      const suffix = dialect === 'mysql' && column ? escapeMysqlIndexPrefix(column.logicalType, sqlType) : '';
       return `${quoteIdentifier(dialect, columnName)}${suffix}`;
     })
     .join(', ');
@@ -192,7 +195,8 @@ function buildIndexStatement(dialect: SqlDialect, index: SchemaContractIndex, co
   const columns = index.columns
     .map((columnName) => {
       const column = contract.tables[index.table]?.columns[columnName];
-      const suffix = dialect === 'mysql' && column ? escapeMysqlTextPrefix(column.logicalType) : '';
+      const sqlType = dialect === 'mysql' && column ? mapColumnType(dialect, columnName, column) : '';
+      const suffix = dialect === 'mysql' && column ? escapeMysqlIndexPrefix(column.logicalType, sqlType) : '';
       return `${quoteIdentifier(dialect, columnName)}${suffix}`;
     })
     .join(', ');

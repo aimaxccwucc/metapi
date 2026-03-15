@@ -114,6 +114,13 @@ describe('schema artifact generator', () => {
     expect(artifacts.mysqlBootstrap).not.toContain('CREATE TABLE IF NOT EXISTS `settings` (`key` TEXT NOT NULL PRIMARY KEY, `value` TEXT)');
   });
 
+  it('does not add mysql text prefixes to varchar-backed indexes', () => {
+    const artifacts = generateDialectArtifacts(readSchemaContract());
+
+    expect(artifacts.mysqlBootstrap).toContain('CREATE INDEX `accounts_site_status_idx` ON `accounts` (`site_id`, `status`)');
+    expect(artifacts.mysqlBootstrap).not.toContain('CREATE INDEX `accounts_site_status_idx` ON `accounts` (`site_id`, `status`(191))');
+  });
+
   it('rejects destructive diffs when generating additive upgrades', () => {
     const current = readSchemaContract();
     const previous = structuredClone(current);
