@@ -3,6 +3,10 @@ import {
   type AccountTokenSchemaInspector,
 } from './accountTokenSchemaCompatibility.js';
 import {
+  ensureModelAvailabilitySchemaCompatibility,
+  type ModelAvailabilitySchemaInspector,
+} from './modelAvailabilitySchemaCompatibility.js';
+import {
   ensureProxyFileSchemaCompatibility,
   type ProxyFileSchemaInspector,
 } from './proxyFileSchemaCompatibility.js';
@@ -27,6 +31,7 @@ export interface LegacySchemaCompatInspector extends
   RouteGroupingSchemaInspector,
   ProxyFileSchemaInspector,
   AccountTokenSchemaInspector,
+  ModelAvailabilitySchemaInspector,
   SharedIndexSchemaInspector {}
 
 const LEGACY_COMPAT_TABLES = new Set([
@@ -46,6 +51,7 @@ const LEGACY_COMPAT_COLUMNS = new Set([
   'sites.external_checkin_url',
   'sites.global_weight',
   'account_tokens.token_group',
+  'model_availability.is_manual',
   'token_routes.display_name',
   'token_routes.display_icon',
   'token_routes.decision_snapshot',
@@ -89,6 +95,9 @@ const LEGACY_COMPAT_UPDATES = new Set([
   'UPDATE sites SET global_weight = 1 WHERE global_weight IS NULL OR global_weight <= 0;',
   'UPDATE `sites` SET `global_weight` = 1 WHERE `global_weight` IS NULL OR `global_weight` <= 0',
   'UPDATE "sites" SET "global_weight" = 1 WHERE "global_weight" IS NULL OR "global_weight" <= 0',
+  'UPDATE model_availability SET is_manual = 0 WHERE is_manual IS NULL;',
+  'UPDATE `model_availability` SET `is_manual` = FALSE WHERE `is_manual` IS NULL',
+  'UPDATE "model_availability" SET "is_manual" = FALSE WHERE "is_manual" IS NULL',
 ].map((sqlText) => normalizeSqlText(sqlText)));
 
 export function classifyLegacyCompatMutation(sqlText: string): LegacySchemaCompatClassification {
@@ -158,5 +167,6 @@ export async function ensureLegacySchemaCompatibility(inspector: LegacySchemaCom
   await ensureRouteGroupingSchemaCompatibility(wrappedInspector);
   await ensureProxyFileSchemaCompatibility(wrappedInspector);
   await ensureAccountTokenSchemaCompatibility(wrappedInspector);
+  await ensureModelAvailabilitySchemaCompatibility(wrappedInspector);
   await ensureSharedIndexSchemaCompatibility(wrappedInspector);
 }

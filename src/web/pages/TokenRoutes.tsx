@@ -585,8 +585,19 @@ export default function TokenRoutes() {
     }
 
     if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      list = list.filter((route) => route.modelPattern.toLowerCase().includes(q));
+      const terms = search
+        .trim()
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(Boolean);
+      list = list.filter((route) => {
+        const haystacks = [
+          route.modelPattern,
+          route.displayName || '',
+          ...(route.siteNames || []),
+        ].map((value) => String(value || '').toLowerCase());
+        return terms.every((term) => haystacks.some((value) => value.includes(term)));
+      });
     }
 
     return list;

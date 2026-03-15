@@ -7,6 +7,7 @@ import { drizzle as drizzlePgProxy } from 'drizzle-orm/pg-proxy';
 import * as schema from './schema.js';
 import { ensureSiteSchemaCompatibility, type SiteSchemaInspector } from './siteSchemaCompatibility.js';
 import { ensureRouteGroupingSchemaCompatibility } from './routeGroupingSchemaCompatibility.js';
+import { ensureModelAvailabilitySchemaCompatibility } from './modelAvailabilitySchemaCompatibility.js';
 import { ensureProxyFileSchemaCompatibility } from './proxyFileSchemaCompatibility.js';
 import { ensureSharedIndexSchemaCompatibility } from './sharedIndexSchemaCompatibility.js';
 import { executeLegacyCompat, executeLegacyCompatSync } from './legacySchemaCompat.js';
@@ -432,6 +433,12 @@ export async function ensureRouteGroupingCompatibilityColumns(): Promise<void> {
   const inspector = createRuntimeSchemaInspector();
   if (!inspector) return;
   await ensureRouteGroupingSchemaCompatibility(inspector);
+}
+
+export async function ensureModelAvailabilityCompatibilityColumns(): Promise<void> {
+  const inspector = createRuntimeSchemaInspector();
+  if (!inspector) return;
+  await ensureModelAvailabilitySchemaCompatibility(inspector);
 }
 
 export async function ensureProxyFileCompatibilityColumns(): Promise<void> {

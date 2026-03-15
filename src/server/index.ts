@@ -33,6 +33,7 @@ import { dirname, normalize, resolve, sep } from 'path';
 import { normalizeLogCleanupRetentionDays } from './services/logCleanupService.js';
 import {
   db,
+  ensureModelAvailabilityCompatibilityColumns,
   ensureProxyFileCompatibilityColumns,
   ensureProxyLogBillingDetailsColumn,
   ensureRouteGroupingCompatibilityColumns,
@@ -265,6 +266,7 @@ try {
 
   await ensureSiteCompatibilityColumns();
   await ensureRouteGroupingCompatibilityColumns();
+  await ensureModelAvailabilityCompatibilityColumns();
   await ensureProxyFileCompatibilityColumns();
   await ensureSharedIndexCompatibility();
   const finalRows = await db.select().from(schema.settings).all();

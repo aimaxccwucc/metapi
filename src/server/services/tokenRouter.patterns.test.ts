@@ -105,6 +105,22 @@ describe('TokenRouter patterns and model mapping', () => {
     expect(unmatched).toBeNull();
   });
 
+  it('matches routes with slash-style and bare regex patterns', async () => {
+    await createRouteWithSingleChannel('/^kimi-(2|1\.5)-5/i', undefined, { sourceModel: 'kimi-2-5' });
+    await createRouteWithSingleChannel('^moonshot-v1-(8k|32k)$', undefined, { sourceModel: 'moonshot-v1-32k' });
+    const router = new TokenRouter();
+
+    const slashMatched = await router.selectChannel('KIMI-2-5');
+    const bareMatched = await router.selectChannel('moonshot-v1-32k');
+    const unmatched = await router.selectChannel('kimi-k2');
+
+    expect(slashMatched).toBeTruthy();
+    expect(slashMatched?.actualModel?.toLowerCase()).toBe('kimi-2-5');
+    expect(bareMatched).toBeTruthy();
+    expect(bareMatched?.actualModel).toBe('moonshot-v1-32k');
+    expect(unmatched).toBeNull();
+  });
+
   it('ignores invalid re: patterns and falls back to next matched route', async () => {
     const invalid = await createRouteWithSingleChannel('re:([a-z');
     const glob = await createRouteWithSingleChannel('claude-*');

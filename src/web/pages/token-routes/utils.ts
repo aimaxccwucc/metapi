@@ -38,22 +38,49 @@ export const PLATFORM_ALIASES: Record<string, string> = {
 };
 
 export function isRegexModelPattern(modelPattern: string): boolean {
-  return modelPattern.trim().toLowerCase().startsWith('re:');
+  const normalized = modelPattern.trim();
+  if (!normalized) return false;
+  if (normalized.toLowerCase().startsWith('re:')) return true;
+  return /^\/(?:[^\\/]|\\.)+\/[a-z]*$/i.test(normalized);
+}
+
+function looksLikeRegexBody(modelPattern: string): boolean {
+  if (!modelPattern) return false;
+  if (/[\*\?\[]/.test(modelPattern)) return false;
+  return modelPattern.startsWith('^')
+    || modelPattern.endsWith('$')
+    || /[()|+\\]/.test(modelPattern);
 }
 
 export function isExactModelPattern(modelPattern: string): boolean {
   const normalized = modelPattern.trim();
   if (!normalized) return false;
-  if (isRegexModelPattern(normalized)) return false;
+  if (parseRegexModelPattern(normalized).regex) return false;
   return !/[\*\?\[]/.test(normalized);
 }
 
 export function parseRegexModelPattern(modelPattern: string): { regex: RegExp | null; error: string | null } {
-  if (!isRegexModelPattern(modelPattern)) return { regex: null, error: null };
-  const body = modelPattern.trim().slice(3).trim();
-  if (!body) return { regex: null, error: 're: 后缺少正则表达式' };
+  const normalized = modelPattern.trim();
+  if (!normalized) return { regex: null, error: null };
+
+  let body = normalized;
+  let flags = '';
+
+  if (normalized.toLowerCase().startsWith('re:')) {
+    body = normalized.slice(3).trim();
+    if (!body) return { regex: null, error: 're: 后缺少正则表达式' };
+  } else {
+    const slashMatch = normalized.match(/^\/((?:[^\\/]|\\.)+)\/([a-z]*)$/i);
+    if (slashMatch) {
+      body = slashMatch[1];
+      flags = slashMatch[2] || '';
+    } else if (!looksLikeRegexBody(normalized)) {
+      return { regex: null, error: null };
+    }
+  }
+
   try {
-    return { regex: new RegExp(body), error: null };
+    return { regex: new RegExp(body, flags), error: null };
   } catch (error) {
     return { regex: null, error: (error as Error)?.message || '无效正则' };
   }
@@ -113,10 +140,11 @@ export function matchesModelPattern(model: string, pattern: string): boolean {
   const cached = matchCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
+  const parsed = parseRegexModelPattern(normalized);
+
   let result: boolean;
-  if (isRegexModelPattern(normalized)) {
-    const parsed = parseRegexModelPattern(normalized);
-    result = !!parsed.regex && parsed.regex.test(model);
+  if (parsed.regex) {
+    result = parsed.regex.test(model);
   } else {
     result = matchesGlobPattern(model, normalized);
   }

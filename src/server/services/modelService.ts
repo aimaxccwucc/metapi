@@ -46,7 +46,9 @@ function normalizeModels(models: string[]): string[] {
 function isExactModelPattern(modelPattern: string): boolean {
   const normalized = modelPattern.trim();
   if (!normalized) return false;
+  if (/^\/(?:[^\\/]|\\.)+\/[a-z]*$/i.test(normalized)) return false;
   if (normalized.toLowerCase().startsWith('re:')) return false;
+  if (!/[\*\?\[]/.test(normalized) && /[()|+^$\\]/.test(normalized)) return false;
   return !/[\*\?\[]/.test(normalized);
 }
 

@@ -220,15 +220,42 @@ type CostSignal = {
 };
 
 export function isRegexModelPattern(pattern: string): boolean {
-  return pattern.trim().toLowerCase().startsWith('re:');
+  const normalized = pattern.trim();
+  if (!normalized) return false;
+  if (normalized.toLowerCase().startsWith('re:')) return true;
+  return /^\/(?:[^\\/]|\\.)+\/[a-z]*$/i.test(normalized);
+}
+
+function looksLikeRegexBody(pattern: string): boolean {
+  if (!pattern) return false;
+  if (/[\*\?\[]/.test(pattern)) return false;
+  return pattern.startsWith('^')
+    || pattern.endsWith('$')
+    || /[()|+\\]/.test(pattern);
 }
 
 export function parseRegexModelPattern(pattern: string): RegExp | null {
-  if (!isRegexModelPattern(pattern)) return null;
-  const body = pattern.trim().slice(3).trim();
+  const normalized = pattern.trim();
+  if (!normalized) return null;
+
+  let body = normalized;
+  let flags = '';
+
+  if (normalized.toLowerCase().startsWith('re:')) {
+    body = normalized.slice(3).trim();
+  } else {
+    const slashMatch = normalized.match(/^\/((?:[^\\/]|\\.)+)\/([a-z]*)$/i);
+    if (slashMatch) {
+      body = slashMatch[1];
+      flags = slashMatch[2] || '';
+    } else if (!looksLikeRegexBody(normalized)) {
+      return null;
+    }
+  }
+
   if (!body) return null;
   try {
-    return new RegExp(body);
+    return new RegExp(body, flags);
   } catch {
     return null;
   }
@@ -240,9 +267,9 @@ export function matchesModelPattern(model: string, pattern: string): boolean {
 
   if (normalizedPattern === model) return true;
 
-  if (isRegexModelPattern(normalizedPattern)) {
-    const re = parseRegexModelPattern(normalizedPattern);
-    return !!re && re.test(model);
+  const re = parseRegexModelPattern(normalizedPattern);
+  if (re) {
+    return re.test(model);
   }
 
   return minimatch(model, normalizedPattern);

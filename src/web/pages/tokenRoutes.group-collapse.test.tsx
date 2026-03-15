@@ -695,4 +695,56 @@ describe('TokenRoutes grouped source models', () => {
       root?.unmount();
     }
   });
+
+  it('matches route search with whitespace-separated AND terms', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        id: 61, modelPattern: 'kimi-2-5', displayName: 'Kimi 2.5',
+        displayIcon: null, modelMapping: null, enabled: true,
+        channelCount: 1, enabledChannelCount: 1, siteNames: ['Moonshot'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+      {
+        id: 62, modelPattern: 'kimi-k2', displayName: 'Kimi K2',
+        displayIcon: null, modelMapping: null, enabled: true,
+        channelCount: 1, enabledChannelCount: 1, siteNames: ['Moonshot'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+      {
+        id: 63, modelPattern: 'deepseek-v3', displayName: 'DeepSeek V3',
+        displayIcon: null, modelMapping: null, enabled: true,
+        channelCount: 1, enabledChannelCount: 1, siteNames: ['Other'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+    ]);
+    apiMock.getRouteChannels.mockResolvedValue([]);
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const searchInput = findInputByPlaceholder(root.root, '搜索模型路由');
+      await act(async () => {
+        searchInput.props.onChange({ target: { value: 'kimi 2 5' } });
+      });
+      await flushMicrotasks();
+
+      const normalizedText = collectText(root.root).replace(/\s+/g, '');
+      expect(normalizedText).toContain('共1条路由');
+      expect(normalizedText).toContain('kimi-2-5');
+      expect(normalizedText).not.toContain('kimi-k2');
+      expect(normalizedText).not.toContain('deepseek-v3');
+    } finally {
+      root?.unmount();
+    }
+  });
 });
