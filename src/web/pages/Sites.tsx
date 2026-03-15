@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { MobileCard, MobileField } from '../components/MobileCard.js';
 import { useIsMobile } from '../components/useIsMobile.js';
+import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import { clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
 import { tr } from '../i18n.js';
@@ -90,15 +91,25 @@ export default function Sites() {
   const [expandedSiteIds, setExpandedSiteIds] = useState<number[]>([]);
   const isMobile = useIsMobile(768);
   const [batchActionLoading, setBatchActionLoading] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState<null | {
+    mode: 'single' | 'batch';
+    siteId?: number;
+    siteName?: string;
+    count?: number;
+  }>(null);
   const lastEditorRef = useRef<SiteEditorState | null>(null);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
   const highlightTimerRef = useRef<number | null>(null);
   const toast = useToast();
+  const [disabledModels, setDisabledModels] = useState<string[]>([]);
+  const [disabledModelInput, setDisabledModelInput] = useState('');
+  const [disabledModelsLoading, setDisabledModelsLoading] = useState(false);
+  const [disabledModelsSaving, setDisabledModelsSaving] = useState(false);
 
   if (editor) lastEditorRef.current = editor;
   const activeEditor = editor || lastEditorRef.current;
   const isEditing = activeEditor?.mode === 'edit';
-  const isAdding = activeEditor?.mode === 'add';
+  const isAdding = editor?.mode === 'add';
   const formInputStyle = {
     width: '100%',
     padding: '10px 14px',
@@ -197,6 +208,48 @@ export default function Sites() {
     setEditor({ mode: 'edit', editingSiteId: site.id });
     setForm(siteFormFromSite(site));
     scrollToEditorTop();
+    // Load disabled models for this site
+    setDisabledModelsLoading(true);
+    setDisabledModels([]);
+    setDisabledModelInput('');
+    api.getSiteDisabledModels(site.id)
+      .then((res: any) => setDisabledModels(Array.isArray(res?.models) ? res.models : []))
+      .catch(() => { })
+      .finally(() => setDisabledModelsLoading(false));
+  };
+
+  const handleAddDisabledModel = () => {
+    const model = disabledModelInput.trim();
+    if (!model) return;
+    if (disabledModels.includes(model)) {
+      toast.info(`模型 "${model}" 已在禁用列表中`);
+      setDisabledModelInput('');
+      return;
+    }
+    setDisabledModels((prev) => [...prev, model]);
+    setDisabledModelInput('');
+  };
+
+  const handleRemoveDisabledModel = (model: string) => {
+    setDisabledModels((prev) => prev.filter((m) => m !== model));
+  };
+
+  const handleSaveDisabledModels = async () => {
+    if (!editor || editor.mode !== 'edit') return;
+    setDisabledModelsSaving(true);
+    try {
+      await api.updateSiteDisabledModels(editor.editingSiteId, disabledModels);
+      try {
+        await api.rebuildRoutes(false, false);
+        toast.success('禁用模型列表已保存，路由已重建');
+      } catch {
+        toast.error('禁用模型列表已保存，但路由重建失败，请手动刷新路由');
+      }
+    } catch (e: any) {
+      toast.error(e.message || '保存禁用模型失败');
+    } finally {
+      setDisabledModelsSaving(false);
+    }
   };
 
   const handleSave = async () => {
@@ -310,16 +363,7 @@ export default function Sites() {
   };
 
   const handleDelete = async (site: SiteRow) => {
-    setDeleting(site.id);
-    try {
-      await api.deleteSite(site.id);
-      toast.success(`站点 "${site.name}" 已删除`);
-      await load();
-    } catch (e: any) {
-      toast.error(e.message || '删除失败');
-    } finally {
-      setDeleting(null);
-    }
+    setDeleteConfirm({ mode: 'single', siteId: site.id, siteName: site.name });
   };
 
   const handleToggleStatus = async (site: SiteRow) => {
@@ -389,9 +433,12 @@ export default function Sites() {
     ));
   };
 
-  const runBatchAction = async (action: 'enable' | 'disable' | 'delete' | 'enableSystemProxy' | 'disableSystemProxy') => {
+  const runBatchAction = async (action: 'enable' | 'disable' | 'delete' | 'enableSystemProxy' | 'disableSystemProxy', skipDeleteConfirm = false) => {
     if (selectedSiteIds.length === 0) return;
-    if (action === 'delete' && typeof globalThis.confirm === 'function' && !globalThis.confirm(`确认删除选中的 ${selectedSiteIds.length} 个站点？`)) return;
+    if (action === 'delete' && !skipDeleteConfirm) {
+      setDeleteConfirm({ mode: 'batch', count: selectedSiteIds.length });
+      return;
+    }
 
     setBatchActionLoading(true);
     try {
@@ -413,6 +460,28 @@ export default function Sites() {
     } finally {
       setBatchActionLoading(false);
     }
+  };
+
+  const confirmDelete = async () => {
+    const target = deleteConfirm;
+    if (!target) return;
+
+    setDeleteConfirm(null);
+    if (target.mode === 'single' && target.siteId) {
+      setDeleting(target.siteId);
+      try {
+        await api.deleteSite(target.siteId);
+        toast.success(`站点 "${target.siteName || target.siteId}" 已删除`);
+        await load();
+      } catch (e: any) {
+        toast.error(e.message || '删除失败');
+      } finally {
+        setDeleting(null);
+      }
+      return;
+    }
+
+    await runBatchAction('delete', true);
   };
 
   const handleSiteRowClick = (siteId: number, event: React.MouseEvent<HTMLTableRowElement>) => {
@@ -514,6 +583,18 @@ export default function Sites() {
       <div className="info-tip" style={{ marginBottom: 12 }}>
         站点权重说明：最终站点倍率 = 站点全局权重 × 设置页中下游 API Key 的站点倍率。它会与路由策略因子（基础权重、价值分、成本、余额、使用频次）共同作用。数值越大，该站点在同优先级下越容易被选中。建议范围 0.5-3，默认 1；长期不建议超过 5。
       </div>
+
+      <DeleteConfirmModal
+        open={Boolean(deleteConfirm)}
+        onClose={() => setDeleteConfirm(null)}
+        onConfirm={confirmDelete}
+        title="确认删除站点"
+        confirmText="确认删除"
+        loading={batchActionLoading || (deleteConfirm?.mode === 'single' && deleting === deleteConfirm?.siteId)}
+        description={deleteConfirm?.mode === 'single'
+          ? <>确定要删除站点 <strong>{deleteConfirm.siteName || `#${deleteConfirm.siteId}`}</strong> 吗？</>
+          : <>确定要删除选中的 <strong>{deleteConfirm?.count || 0}</strong> 个站点吗？</>}
+      />
 
       {activeEditor && (
         <CenteredModal
@@ -654,6 +735,71 @@ export default function Sites() {
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
               按 key/value 逐条填写。整行留空会自动忽略；同名请求头不允许重复；请求本身显式传入的请求头优先级更高。
             </div>
+            {isEditing && (
+              <div style={{ marginTop: 16, padding: '14px', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg)' }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>禁用模型管理</div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
+                  在此站点禁用指定模型后，路由重建时将不为该站点的这些模型创建通道。
+                </div>
+                {disabledModelsLoading ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                    <span className="spinner spinner-sm" /> 加载中...
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10, minHeight: 24 }}>
+                      {disabledModels.length === 0 && (
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无禁用模型</span>
+                      )}
+                      {disabledModels.map((model) => (
+                        <span
+                          key={model}
+                          className="badge badge-muted"
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, padding: '3px 8px' }}
+                        >
+                          {model}
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveDisabledModel(model)}
+                            style={{
+                              background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                              fontSize: 13, lineHeight: 1, color: 'var(--color-text-muted)',
+                            }}
+                            title={`移除 ${model}`}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input
+                        placeholder="输入模型名称，如 gpt-4o"
+                        value={disabledModelInput}
+                        onChange={(e) => setDisabledModelInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddDisabledModel(); } }}
+                        style={{
+                          flex: 1, padding: '8px 12px', border: '1px solid var(--color-border)',
+                          borderRadius: 'var(--radius-sm)', fontSize: 12, outline: 'none',
+                          background: 'var(--color-bg)', color: 'var(--color-text-primary)',
+                        }}
+                      />
+                      <button onClick={handleAddDisabledModel} className="btn btn-ghost" style={{ padding: '8px 14px', fontSize: 12, border: '1px solid var(--color-border)' }}>
+                        添加
+                      </button>
+                    </div>
+                    <button
+                      onClick={handleSaveDisabledModels}
+                      disabled={disabledModelsSaving}
+                      className="btn btn-primary"
+                      style={{ marginTop: 10, fontSize: 12, padding: '6px 16px' }}
+                    >
+                      {disabledModelsSaving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存禁用列表'}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
           </div>
           <label style={{
             display: 'flex',
@@ -823,48 +969,47 @@ export default function Sites() {
             </div>
           ) : (
             <table className="data-table sites-table">
-            <thead>
-              <tr>
-                <th style={{ width: 44 }}>
-                  <input
-                    type="checkbox"
-                    checked={sortedSites.length > 0 && selectedSiteIds.length === sortedSites.length}
-                    onChange={(e) => toggleSelectAllVisible(e.target.checked)}
-                  />
-                </th>
-                <th>名称</th>
-                <th>外部签到站URL</th>
-                <th>总余额</th>
-                <th>状态</th>
-                <th>系统代理</th>
-                <th>权重</th>
-                <th>平台</th>
-                <th>创建时间</th>
-                <th className="sites-actions-col" style={{ textAlign: 'right' }}>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedSites.map((site, i) => (
-                <tr
-                  key={site.id}
-                  data-testid={`site-row-${site.id}`}
-                  ref={(node) => {
-                    if (node) rowRefs.current.set(site.id, node);
-                    else rowRefs.current.delete(site.id);
-                  }}
-                  onClick={(event) => handleSiteRowClick(site.id, event)}
-                  className={`animate-slide-up stagger-${Math.min(i + 1, 5)} row-selectable ${selectedSiteIds.includes(site.id) ? 'row-selected' : ''} ${highlightSiteId === site.id ? 'row-focus-highlight' : ''}`.trim()}
-                >
-                  <td>
+              <thead>
+                <tr>
+                  <th style={{ width: 44 }}>
                     <input
-                      data-testid={`site-select-${site.id}`}
                       type="checkbox"
-                      checked={selectedSiteIds.includes(site.id)}
-                      onChange={(e) => toggleSiteSelection(site.id, e.target.checked)}
+                      checked={sortedSites.length > 0 && selectedSiteIds.length === sortedSites.length}
+                      onChange={(e) => toggleSelectAllVisible(e.target.checked)}
                     />
-                  </td>
-                  <td style={{ fontWeight: 600 }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+                  </th>
+                  <th>名称</th>
+                  <th>外部签到站URL</th>
+                  <th>总余额</th>
+                  <th>状态</th>
+                  <th>系统代理</th>
+                  <th>权重</th>
+                  <th>平台</th>
+                  <th>创建时间</th>
+                  <th className="sites-actions-col" style={{ textAlign: 'right' }}>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedSites.map((site, i) => (
+                  <tr
+                    key={site.id}
+                    data-testid={`site-row-${site.id}`}
+                    ref={(node) => {
+                      if (node) rowRefs.current.set(site.id, node);
+                      else rowRefs.current.delete(site.id);
+                    }}
+                    onClick={(event) => handleSiteRowClick(site.id, event)}
+                    className={`animate-slide-up stagger-${Math.min(i + 1, 5)} row-selectable ${selectedSiteIds.includes(site.id) ? 'row-selected' : ''} ${highlightSiteId === site.id ? 'row-focus-highlight' : ''}`.trim()}
+                  >
+                    <td>
+                      <input
+                        data-testid={`site-select-${site.id}`}
+                        type="checkbox"
+                        checked={selectedSiteIds.includes(site.id)}
+                        onChange={(e) => toggleSiteSelection(site.id, e.target.checked)}
+                      />
+                    </td>
+                    <td style={{ fontWeight: 600 }}>
                       <a
                         href={site.url}
                         target="_blank"
@@ -876,124 +1021,118 @@ export default function Sites() {
                       >
                         {site.name}
                       </a>
-                      {hasConfiguredCustomHeaders(site.customHeaders) ? (
-                        <span className="badge badge-info" style={{ fontSize: 11 }}>
-                          自定义头
-                        </span>
+                    </td>
+                    <td className="sites-url-cell" style={{ maxWidth: 300 }}>
+                      {site.externalCheckinUrl ? (
+                        <a
+                          href={site.externalCheckinUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="sites-url-link"
+                          style={{
+                            fontSize: 12,
+                            fontFamily: 'var(--font-mono)',
+                            color: 'var(--color-primary)',
+                            textDecoration: 'underline',
+                            wordBreak: 'break-all',
+                          }}
+                        >
+                          {site.externalCheckinUrl}
+                        </a>
                       ) : null}
-                    </div>
-                  </td>
-                  <td className="sites-url-cell" style={{ maxWidth: 300 }}>
-                    {site.externalCheckinUrl ? (
+                    </td>
+                    <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
+                      ${(site.totalBalance || 0).toFixed(2)}
+                    </td>
+                    <td>
+                      <span className={`badge ${site.status === 'disabled' ? 'badge-muted' : 'badge-success'}`} style={{ fontSize: 11 }}>
+                        {site.status === 'disabled' ? '禁用' : '启用'}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={`badge ${site.useSystemProxy ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>
+                        {site.useSystemProxy ? '已开启' : '未开启'}
+                      </span>
+                    </td>
+                    <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
+                      {(site.globalWeight || 1).toFixed(2)}
+                    </td>
+                    <td>
                       <a
-                        href={site.externalCheckinUrl}
+                        href={site.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="sites-url-link"
-                        style={{
-                          fontSize: 12,
-                          fontFamily: 'var(--font-mono)',
-                          color: 'var(--color-primary)',
-                          textDecoration: 'underline',
-                          wordBreak: 'break-all',
-                        }}
+                        style={{ textDecoration: 'none' }}
                       >
-                        {site.externalCheckinUrl}
+                        <span className={`badge ${platformColors[site.platform || ''] || 'badge-muted'}`}>
+                          {site.platform || '-'}
+                        </span>
                       </a>
-                    ) : null}
-                  </td>
-                  <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
-                    ${(site.totalBalance || 0).toFixed(2)}
-                  </td>
-                  <td>
-                    <span className={`badge ${site.status === 'disabled' ? 'badge-muted' : 'badge-success'}`} style={{ fontSize: 11 }}>
-                      {site.status === 'disabled' ? '禁用' : '启用'}
-                    </span>
-                  </td>
-                  <td>
-                    <span className={`badge ${site.useSystemProxy ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>
-                      {site.useSystemProxy ? '已开启' : '未开启'}
-                    </span>
-                  </td>
-                  <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
-                    {(site.globalWeight || 1).toFixed(2)}
-                  </td>
-                  <td>
-                    <a
-                      href={site.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ textDecoration: 'none' }}
-                    >
-                      <span className={`badge ${platformColors[site.platform || ''] || 'badge-muted'}`}>
-                        {site.platform || '-'}
-                      </span>
-                    </a>
-                  </td>
-                  <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                    <a
-                      href={site.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ color: 'var(--color-text-muted)', textDecoration: 'underline' }}
-                    >
-                      {formatDateTimeLocal(site.createdAt)}
-                    </a>
-                  </td>
-                  <td className="sites-actions-cell" style={{ textAlign: 'right' }}>
-                    <div className="sites-row-actions">
-                      <button
-                        onClick={() => handleTogglePin(site)}
-                        disabled={pinningSiteId === site.id}
-                        className={`btn btn-link ${site.isPinned ? 'btn-link-warning' : 'btn-link-primary'}`}
+                    </td>
+                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                      <a
+                        href={site.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: 'var(--color-text-muted)', textDecoration: 'underline' }}
                       >
-                        {pinningSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.isPinned ? '取消置顶' : '置顶')}
-                      </button>
-                      {sortMode === 'custom' && (
-                        <>
-                          <button
-                            onClick={() => handleMoveCustomOrder(site, 'up')}
-                            disabled={orderingSiteId === site.id}
-                            className="btn btn-link btn-link-muted"
-                          >
-                            ↑
-                          </button>
-                          <button
-                            onClick={() => handleMoveCustomOrder(site, 'down')}
-                            disabled={orderingSiteId === site.id}
-                            className="btn btn-link btn-link-muted"
-                          >
-                            ↓
-                          </button>
-                        </>
-                      )}
-                      <button
-                        onClick={() => openEdit(site)}
-                        className="btn btn-link btn-link-primary"
-                      >
-                        编辑
-                      </button>
-                      <button
-                        onClick={() => handleToggleStatus(site)}
-                        disabled={togglingSiteId === site.id}
-                        className={`btn btn-link ${site.status === 'disabled' ? 'btn-link-primary' : 'btn-link-warning'}`}
-                      >
-                        {togglingSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.status === 'disabled' ? '启用' : '禁用')}
-                      </button>
-                      <button
-                        onClick={() => handleDelete(site)}
-                        disabled={deleting === site.id}
-                        className="btn btn-link btn-link-danger"
-                      >
-                        {deleting === site.id ? <span className="spinner spinner-sm" /> : null}
-                        删除
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                        {formatDateTimeLocal(site.createdAt)}
+                      </a>
+                    </td>
+                    <td className="sites-actions-cell" style={{ textAlign: 'right' }}>
+                      <div className="sites-row-actions">
+                        <button
+                          onClick={() => handleTogglePin(site)}
+                          disabled={pinningSiteId === site.id}
+                          className={`btn btn-link ${site.isPinned ? 'btn-link-warning' : 'btn-link-primary'}`}
+                        >
+                          {pinningSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.isPinned ? '取消置顶' : '置顶')}
+                        </button>
+                        {sortMode === 'custom' && (
+                          <>
+                            <button
+                              onClick={() => handleMoveCustomOrder(site, 'up')}
+                              disabled={orderingSiteId === site.id}
+                              className="btn btn-link btn-link-muted"
+                            >
+                              ↑
+                            </button>
+                            <button
+                              onClick={() => handleMoveCustomOrder(site, 'down')}
+                              disabled={orderingSiteId === site.id}
+                              className="btn btn-link btn-link-muted"
+                            >
+                              ↓
+                            </button>
+                          </>
+                        )}
+                        <button
+                          onClick={() => openEdit(site)}
+                          className="btn btn-link btn-link-primary"
+                        >
+                          编辑
+                        </button>
+                        <button
+                          onClick={() => handleToggleStatus(site)}
+                          disabled={togglingSiteId === site.id}
+                          className={`btn btn-link ${site.status === 'disabled' ? 'btn-link-primary' : 'btn-link-warning'}`}
+                        >
+                          {togglingSiteId === site.id ? <span className="spinner spinner-sm" /> : (site.status === 'disabled' ? '启用' : '禁用')}
+                        </button>
+                        <button
+                          onClick={() => handleDelete(site)}
+                          disabled={deleting === site.id}
+                          className="btn btn-link btn-link-danger"
+                        >
+                          {deleting === site.id ? <span className="spinner spinner-sm" /> : null}
+                          删除
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )
         ) : (
           <div className="empty-state">

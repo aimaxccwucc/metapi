@@ -49,6 +49,10 @@ describe('settings and auth events', () => {
     config.logCleanupProgramLogsEnabled = false;
     config.logCleanupRetentionDays = 30;
     config.routingFallbackUnitCost = 1;
+    (config as any).telegramEnabled = false;
+    (config as any).telegramApiBaseUrl = 'https://api.telegram.org';
+    (config as any).telegramBotToken = '';
+    (config as any).telegramChatId = '';
   });
 
   afterAll(async () => {
@@ -168,6 +172,49 @@ describe('settings and auth events', () => {
     expect(response.statusCode).toBe(400);
     const body = response.json() as { message?: string };
     expect(body.message).toContain('Telegram Chat ID');
+  });
+
+  it('persists and returns telegram api base url from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        telegramApiBaseUrl: 'https://tg-proxy.example.com/custom/',
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { telegramApiBaseUrl?: string };
+    expect(updated.telegramApiBaseUrl).toBe('https://tg-proxy.example.com/custom');
+    expect((config as any).telegramApiBaseUrl).toBe('https://tg-proxy.example.com/custom');
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'telegram_api_base_url')).get();
+    expect(saved?.value).toBe(JSON.stringify('https://tg-proxy.example.com/custom'));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as { telegramApiBaseUrl?: string };
+    expect(runtime.telegramApiBaseUrl).toBe('https://tg-proxy.example.com/custom');
+  });
+
+  it('rejects invalid telegram api base url when telegram is enabled', async () => {
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        telegramEnabled: true,
+        telegramBotToken: '123456:telegram-token',
+        telegramChatId: '-1001234567890',
+        telegramApiBaseUrl: 'not-a-url',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json() as { message?: string };
+    expect(body.message).toContain('Telegram API Base URL');
   });
 
   it('persists and returns routing fallback unit cost from runtime settings', async () => {

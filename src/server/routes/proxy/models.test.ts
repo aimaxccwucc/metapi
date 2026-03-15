@@ -352,11 +352,17 @@ describe('/v1/models route', () => {
       },
     ]).run();
 
+    await db.insert(schema.downstreamApiKeys).values({
+      name: 'search-key',
+      key: 'sk-search-key',
+      enabled: true,
+    }).run();
+
     const response = await app.inject({
       method: 'GET',
       url: '/v1/models',
       headers: {
-        authorization: 'Bearer change-me-proxy-sk-token',
+        authorization: 'Bearer sk-search-key',
       },
     });
 

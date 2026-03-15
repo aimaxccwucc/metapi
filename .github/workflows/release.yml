@@ -21,10 +21,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -57,10 +57,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -201,7 +201,7 @@ jobs:
           if [ -n "${APPLE_APP_SPECIFIC_PASSWORD_INPUT:-}" ]; then export APPLE_APP_SPECIFIC_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD_INPUT"; fi
           if [ -n "${APPLE_TEAM_ID_INPUT:-}" ]; then export APPLE_TEAM_ID="$APPLE_TEAM_ID_INPUT"; fi
           for attempt in 1 2; do
-            echo "Desktop build attempt ${attempt}/2"
+            echo "Desktop build (host arch) attempt ${attempt}/2"
             if npm run package:desktop; then
               break
             fi
@@ -210,6 +210,20 @@ jobs:
             fi
             sleep 90
           done
+          if [ "${RUNNER_ARCH:-}" != "X64" ]; then
+            for attempt in 1 2; do
+              echo "Desktop build (mac intel x64) attempt ${attempt}/2"
+              if npm run package:desktop:mac:intel; then
+                break
+              fi
+              if [ "$attempt" -eq 2 ]; then
+                exit 1
+              fi
+              sleep 90
+            done
+          else
+            echo "Runner is already X64, skip extra Intel build"
+          fi
 
       - name: Upload desktop package
         uses: actions/upload-artifact@v4
@@ -270,7 +284,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Ensure Docker Hub secrets are configured
         run: |
@@ -343,7 +357,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Ensure Docker Hub secrets are configured
         run: |

@@ -3,6 +3,7 @@ import { and, eq } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import {
   ensureDefaultTokenForAccount,
+  isMaskedTokenValue,
   listTokensWithRelations,
   normalizeTokenForDisplay,
   maskToken,
@@ -32,6 +33,7 @@ type SyncExecutionResult = {
   synced: boolean;
   created: number;
   updated: number;
+  maskedSkipped?: number;
   total: number;
   defaultTokenId?: number | null;
 };
@@ -261,6 +263,16 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
     }
 
     const synced = await syncTokensFromUpstream(accountId, tokens);
+    if ((synced.created + synced.updated) === 0 && synced.maskedSkipped > 0) {
+      return {
+        ...base,
+        status: 'skipped',
+        reason: 'upstream_masked_tokens',
+        message: `上游仅返回脱敏令牌（含*），跳过 ${synced.maskedSkipped} 条，无法同步明文令牌`,
+        synced: false,
+        ...synced,
+      };
+    }
     return {
       ...base,
       status: 'synced',
@@ -606,7 +618,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     };
   });
 
-  app.put<{ Params: { id: string }; Body: { name?: string; token?: string; enabled?: boolean; isDefault?: boolean; source?: string } }>('/api/account-tokens/:id', async (request, reply) => {
+  app.put<{ Params: { id: string }; Body: { name?: string; token?: string; group?: string; enabled?: boolean; isDefault?: boolean; source?: string } }>('/api/account-tokens/:id', async (request, reply) => {
     const tokenId = Number.parseInt(request.params.id, 10);
     if (Number.isNaN(tokenId)) {
       return reply.code(400).send({ success: false, message: '令牌 ID 无效' });
@@ -638,6 +650,10 @@ export async function accountTokensRoutes(app: FastifyInstance) {
         return reply.code(400).send({ success: false, message: '令牌不能为空' });
       }
       updates.token = tokenValue;
+    }
+
+    if (body.group !== undefined) {
+      updates.tokenGroup = (body.group || '').trim() || null;
     }
 
     if (body.enabled !== undefined) updates.enabled = body.enabled;
@@ -705,6 +721,13 @@ export async function accountTokensRoutes(app: FastifyInstance) {
 
     if (isApiKeyConnection(row.accounts)) {
       return reply.code(400).send({ success: false, message: 'API Key 连接不支持管理账号令牌' });
+    }
+
+    if (isMaskedTokenValue(row.account_tokens.token)) {
+      return reply.code(409).send({
+        success: false,
+        message: '当前仅保存了脱敏令牌，无法展开/复制。请在站点重新生成并同步，或手动更新为完整令牌。',
+      });
     }
 
     const tokenValue = normalizeTokenForDisplay(row.account_tokens.token, row.sites.platform);

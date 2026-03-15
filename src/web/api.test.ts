@@ -1,0 +1,100 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { api, type ProxyTestRequestEnvelope } from './api.js';
+import { persistAuthSession } from './authSession.js';
+
+function createMemoryStorage() {
+  const store = new Map<string, string>();
+  return {
+    getItem(key: string) {
+      return store.has(key) ? store.get(key)! : null;
+    },
+    setItem(key: string, value: string) {
+      store.set(key, value);
+    },
+    removeItem(key: string) {
+      store.delete(key);
+    },
+  };
+}
+
+function installPendingFetch() {
+  const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) return;
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+  }));
+
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+describe('api proxy test timeout handling', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('localStorage', createMemoryStorage());
+    persistAuthSession(globalThis.localStorage as Storage, 'token-1');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('keeps image generation proxy tests alive past the default 30 second timeout', async () => {
+    installPendingFetch();
+
+    const payload: ProxyTestRequestEnvelope = {
+      method: 'POST',
+      path: '/v1/images/generations',
+      requestKind: 'json',
+      jsonBody: {
+        model: 'gemini-imagen',
+        prompt: 'banana cat',
+      },
+    };
+
+    let settled = false;
+    const promise = api.proxyTest(payload);
+    const handled = promise
+      .then(() => ({ ok: true as const }))
+      .catch((error: Error) => ({ ok: false as const, error }))
+      .finally(() => {
+        settled = true;
+      });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    const result = await handled;
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error('Expected image generation proxy test to time out');
+    }
+    expect(result.error.message).toBe('请求超时（150s）');
+  });
+
+  it('still uses the default 30 second timeout for generic proxy tests', async () => {
+    installPendingFetch();
+
+    const payload: ProxyTestRequestEnvelope = {
+      method: 'POST',
+      path: '/v1/embeddings',
+      requestKind: 'json',
+      jsonBody: {
+        model: 'text-embedding-3-small',
+        input: 'hello',
+      },
+    };
+
+    const promise = api.proxyTest(payload).catch((error: Error) => error);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await expect(promise).resolves.toMatchObject({ message: '请求超时（30s）' });
+  });
+});

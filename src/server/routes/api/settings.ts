@@ -2,11 +2,9 @@
 import cron from 'node-cron';
 import { config } from '../../config.js';
 import { db, runtimeDbDialect, schema } from '../../db/index.js';
-import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { updateBalanceRefreshCron, updateCheckinCron, updateSiteHealthRefreshCron } from '../../services/checkinScheduler.js';
 import { sendNotification } from '../../services/notifyService.js';
-import { exportBackup, importAllApiHubAccountsMerge, importBackup, type BackupExportType } from '../../services/backupService.js';
-import { startBackgroundTask } from '../../services/backgroundTaskService.js';
+import { exportBackup, importBackup, type BackupExportType } from '../../services/backupService.js';
 import {
   maskConnectionString,
   migrateCurrentDatabase,
@@ -17,7 +15,6 @@ import {
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { extractClientIp, isIpAllowed } from '../../middleware/auth.js';
 import { invalidateSiteProxyCache, normalizeSiteProxyUrl } from '../../services/siteProxy.js';
-import { performFactoryReset } from '../../services/factoryResetService.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -34,6 +31,7 @@ interface RuntimeSettingsBody {
   serverChanEnabled?: boolean;
   serverChanKey?: string;
   telegramEnabled?: boolean;
+  telegramApiBaseUrl?: string;
   telegramBotToken?: string;
   telegramChatId?: string;
   smtpEnabled?: boolean;
@@ -139,6 +137,10 @@ function isValidHttpUrl(raw: string): boolean {
   }
 }
 
+function normalizeTelegramApiBaseUrl(raw: string): string {
+  return String(raw || '').trim().replace(/\/+$/, '');
+}
+
 function applyImportedSettingToRuntime(key: string, value: unknown) {
   switch (key) {
     case 'checkin_cron': {
@@ -200,6 +202,11 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
     }
     case 'telegram_enabled': {
       config.telegramEnabled = !!value;
+      return;
+    }
+    case 'telegram_api_base_url': {
+      if (typeof value !== 'string') return;
+      config.telegramApiBaseUrl = normalizeTelegramApiBaseUrl(value) || 'https://api.telegram.org';
       return;
     }
     case 'telegram_bot_token': {
@@ -298,6 +305,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     serverChanEnabled: config.serverChanEnabled,
     serverChanKeyMasked: maskSecret(config.serverChanKey),
     telegramEnabled: config.telegramEnabled,
+    telegramApiBaseUrl: config.telegramApiBaseUrl,
     telegramBotTokenMasked: maskSecret(config.telegramBotToken),
     telegramChatId: config.telegramChatId,
     smtpEnabled: config.smtpEnabled,
@@ -428,11 +436,15 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
 
     const telegramTouched = body.telegramEnabled !== undefined
+      || body.telegramApiBaseUrl !== undefined
       || body.telegramBotToken !== undefined
       || body.telegramChatId !== undefined;
     const nextTelegramEnabled = body.telegramEnabled !== undefined
       ? !!body.telegramEnabled
       : config.telegramEnabled;
+    const nextTelegramApiBaseUrl = body.telegramApiBaseUrl !== undefined
+      ? normalizeTelegramApiBaseUrl(body.telegramApiBaseUrl)
+      : config.telegramApiBaseUrl;
     const nextTelegramBotToken = body.telegramBotToken !== undefined
       ? String(body.telegramBotToken || '').trim()
       : config.telegramBotToken;
@@ -449,6 +461,11 @@ export async function settingsRoutes(app: FastifyInstance) {
       if (!nextTelegramChatId) {
         return reply.code(400).send({ success: false, message: 'Telegram Chat ID 不能为空（启用 Telegram 时）' });
       }
+      if (nextTelegramApiBaseUrl && !isValidHttpUrl(nextTelegramApiBaseUrl)) {
+        return reply.code(400).send({ success: false, message: 'Telegram API Base URL 无效，请填写 http/https 地址' });
+      }
+    } else if (body.telegramApiBaseUrl !== undefined && nextTelegramApiBaseUrl && !isValidHttpUrl(nextTelegramApiBaseUrl)) {
+      return reply.code(400).send({ success: false, message: 'Telegram API Base URL 无效，请填写 http/https 地址' });
     }
 
     if (body.checkinCron !== undefined) {
@@ -569,6 +586,16 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.telegramEnabled = !!body.telegramEnabled;
       upsertSetting('telegram_enabled', config.telegramEnabled);
+    }
+
+    if (body.telegramApiBaseUrl !== undefined) {
+      const normalizedTelegramApiBaseUrl = normalizeTelegramApiBaseUrl(body.telegramApiBaseUrl);
+      const nextTelegramApiBaseUrl = normalizedTelegramApiBaseUrl || 'https://api.telegram.org';
+      if (nextTelegramApiBaseUrl !== config.telegramApiBaseUrl) {
+        changedLabels.push('Telegram API Base URL');
+      }
+      config.telegramApiBaseUrl = nextTelegramApiBaseUrl;
+      upsertSetting('telegram_api_base_url', config.telegramApiBaseUrl);
     }
 
     if (body.telegramBotToken !== undefined) {
@@ -842,27 +869,6 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post<{ Body: { data?: Record<string, unknown> } }>('/api/settings/backup/import-all-api-hub-merge', async (request, reply) => {
-    const payload = request.body?.data;
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return reply.code(400).send({ success: false, message: '导入数据格式错误：需要 JSON 对象' });
-    }
-
-    try {
-      const result = await importAllApiHubAccountsMerge(payload);
-      return {
-        success: true,
-        message: 'all-api-hub 账号已合并导入',
-        ...result,
-      };
-    } catch (err: any) {
-      return reply.code(400).send({
-        success: false,
-        message: err?.message || '导入失败',
-      });
-    }
-  });
-
   app.post('/api/settings/notify/test', async (_, reply) => {
     try {
       const result = await sendNotification(
@@ -887,68 +893,4 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/api/settings/maintenance/clear-cache', async (_, reply) => {
-    const deletedModelAvailability = (await db.delete(schema.modelAvailability).run()).changes;
-    const deletedRouteChannels = (await db.delete(schema.routeChannels).run()).changes;
-    const deletedTokenRoutes = (await db.delete(schema.tokenRoutes).run()).changes;
-
-    const { task, reused } = startBackgroundTask(
-      {
-        type: 'maintenance',
-        title: '清理缓存并重建路由',
-        dedupeKey: 'refresh-models-and-rebuild-routes',
-        notifyOnFailure: true,
-        successMessage: (currentTask) => {
-          const rebuild = (currentTask.result as any)?.rebuild;
-          if (!rebuild) return '缓存清理后重建路由已完成';
-          return `缓存清理后重建完成：新增路由 ${rebuild.createdRoutes}，移除旧路由 ${rebuild.removedRoutes ?? 0}，新增通道 ${rebuild.createdChannels}，移除通道 ${rebuild.removedChannels}`;
-        },
-        failureMessage: (currentTask) => `缓存清理后重建失败：${currentTask.error || 'unknown error'}`,
-      },
-      async () => refreshModelsAndRebuildRoutes(),
-    );
-
-    return reply.code(202).send({
-      success: true,
-      queued: true,
-      reused,
-      jobId: task.id,
-      message: '缓存已清理，重建路由已开始执行',
-      deletedModelAvailability,
-      deletedRouteChannels,
-      deletedTokenRoutes,
-    });
-  });
-
-  app.post('/api/settings/maintenance/clear-usage', async () => {
-    const deletedProxyLogs = (await db.delete(schema.proxyLogs).run()).changes;
-
-    await db.update(schema.routeChannels).set({
-      successCount: 0,
-      failCount: 0,
-      totalLatencyMs: 0,
-      totalCost: 0,
-      lastUsedAt: null,
-      lastFailAt: null,
-      cooldownUntil: null,
-    }).run();
-
-    await db.update(schema.accounts).set({
-      balanceUsed: 0,
-      updatedAt: new Date().toISOString(),
-    }).run();
-
-    appendSettingsEvent({
-      type: 'status',
-      title: '占用统计与使用日志已清理',
-      message: `已清理使用日志 ${deletedProxyLogs} 条，并重置路由与账号占用统计`,
-      level: 'warning',
-    });
-
-    return {
-      success: true,
-      message: '占用统计已清理',
-      deletedProxyLogs,
-    };
-  });
 }

@@ -10,6 +10,7 @@ type RuntimeSettings = {
     barkEnabled: boolean;
     serverChanEnabled: boolean;
     telegramEnabled: boolean;
+    telegramApiBaseUrl: string;
     telegramChatId: string;
     smtpEnabled: boolean;
     smtpHost: string;
@@ -32,6 +33,7 @@ export default function NotificationSettings() {
         barkEnabled: true,
         serverChanEnabled: false,
         telegramEnabled: false,
+        telegramApiBaseUrl: 'https://api.telegram.org',
         telegramChatId: '',
         smtpEnabled: false,
         smtpHost: '',
@@ -74,6 +76,7 @@ export default function NotificationSettings() {
                 barkEnabled: runtimeInfo.barkEnabled ?? true,
                 serverChanEnabled: !!runtimeInfo.serverChanEnabled,
                 telegramEnabled: !!runtimeInfo.telegramEnabled,
+                telegramApiBaseUrl: runtimeInfo.telegramApiBaseUrl || 'https://api.telegram.org',
                 telegramChatId: runtimeInfo.telegramChatId || '',
                 smtpEnabled: !!runtimeInfo.smtpEnabled,
                 smtpHost: runtimeInfo.smtpHost || '',
@@ -110,6 +113,7 @@ export default function NotificationSettings() {
                 barkEnabled: runtime.barkEnabled,
                 serverChanEnabled: runtime.serverChanEnabled,
                 telegramEnabled: runtime.telegramEnabled,
+                telegramApiBaseUrl: runtime.telegramApiBaseUrl,
                 telegramChatId: runtime.telegramChatId,
                 smtpEnabled: runtime.smtpEnabled,
                 smtpHost: runtime.smtpHost,
@@ -325,6 +329,19 @@ export default function NotificationSettings() {
                     </div>
 
                     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '16px 20px', opacity: runtime.telegramEnabled ? 1 : 0.6, transition: 'opacity 0.2s' }}>
+                        <div style={{ gridColumn: '1 / -1' }}>
+                            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>Telegram API Base URL</div>
+                            <input
+                                value={runtime.telegramApiBaseUrl}
+                                onChange={(e) => setRuntime((prev) => ({ ...prev, telegramApiBaseUrl: e.target.value }))}
+                                placeholder="例如: https://your-proxy.example.com"
+                                style={inputStyle}
+                                disabled={!runtime.telegramEnabled}
+                            />
+                            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                留空或使用默认值时直连官方 Telegram API；如需国内反代，可填写反代前缀。
+                            </div>
+                        </div>
                         <div>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>Telegram Chat ID</div>
                             <input

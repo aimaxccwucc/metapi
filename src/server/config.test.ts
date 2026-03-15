@@ -32,6 +32,12 @@ describe('buildConfig', () => {
     expect(config.listenHost).toBe('127.0.0.1');
   });
 
+  it('defaults telegram api base url to the official endpoint', () => {
+    const config = buildConfig({});
+
+    expect(config.telegramApiBaseUrl).toBe('https://api.telegram.org');
+  });
+
   it('accepts JSON request bodies larger than Fastify default 1 MiB', async () => {
     const app = Fastify(buildFastifyOptions(buildConfig({})));
     const largeText = 'a'.repeat(2 * 1024 * 1024);

@@ -10,7 +10,7 @@ async function request(url: string, options: RequestOptions = {}) {
   let timeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(() => {
     controller.abort();
   }, timeoutMs);
-  let cleanupExternalSignal = () => {};
+  let cleanupExternalSignal = () => { };
 
   if (externalSignal) {
     if (externalSignal.aborted) {
@@ -24,7 +24,11 @@ async function request(url: string, options: RequestOptions = {}) {
 
   const token = getAuthToken(localStorage);
   if (!token) {
+    const hadToken = !!localStorage.getItem('auth_token');
     clearAuthSession(localStorage);
+    if (hadToken && typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+      window.location.reload();
+    }
     throw new Error('Session expired');
   }
   const headers: Record<string, string> = {
@@ -65,7 +69,7 @@ async function request(url: string, options: RequestOptions = {}) {
             message = `${message}: ${text.slice(0, 120)}`;
           }
         }
-      } catch {}
+      } catch { }
       throw new Error(message);
     }
     return res.json();
@@ -130,6 +134,17 @@ export type ProxyTestRequestEnvelope = {
   multipartFields?: Record<string, string>;
   multipartFiles?: ProxyTestMultipartFile[];
 };
+
+const DEFAULT_PROXY_TEST_TIMEOUT_MS = 30_000;
+const LONG_RUNNING_PROXY_TEST_TIMEOUT_MS = 150_000;
+
+function resolveProxyTestTimeoutMs(data: ProxyTestRequestEnvelope) {
+  if (data.jobMode) return LONG_RUNNING_PROXY_TEST_TIMEOUT_MS;
+  if (data.path === '/v1/images/generations') return LONG_RUNNING_PROXY_TEST_TIMEOUT_MS;
+  if (data.path === '/v1/images/edits') return LONG_RUNNING_PROXY_TEST_TIMEOUT_MS;
+  if (data.path === '/v1/videos' && data.method === 'POST') return LONG_RUNNING_PROXY_TEST_TIMEOUT_MS;
+  return DEFAULT_PROXY_TEST_TIMEOUT_MS;
+}
 
 export type ProxyTestJobResponse = {
   jobId: string;
@@ -235,6 +250,8 @@ export const api = {
   deleteSite: (id: number) => request(`/api/sites/${id}`, { method: 'DELETE' }),
   batchUpdateSites: (data: any) => request('/api/sites/batch', { method: 'POST', body: JSON.stringify(data) }),
   detectSite: (url: string) => request('/api/sites/detect', { method: 'POST', body: JSON.stringify({ url }) }),
+  getSiteDisabledModels: (siteId: number) => request(`/api/sites/${siteId}/disabled-models`),
+  updateSiteDisabledModels: (siteId: number, models: string[]) => request(`/api/sites/${siteId}/disabled-models`, { method: 'PUT', body: JSON.stringify({ models }) }),
 
   // Accounts
   getAccounts: () => request('/api/accounts'),
@@ -247,6 +264,8 @@ export const api = {
   deleteAccount: (id: number) => request(`/api/accounts/${id}`, { method: 'DELETE' }),
   batchUpdateAccounts: (data: any) => request('/api/accounts/batch', { method: 'POST', body: JSON.stringify(data) }),
   refreshBalance: (id: number) => request(`/api/accounts/${id}/balance`, { method: 'POST' }),
+  getAccountModels: (id: number) => request(`/api/accounts/${id}/models`),
+  addAccountAvailableModels: (accountId: number, models: string[]) => request(`/api/accounts/${accountId}/models/manual`, { method: 'POST', body: JSON.stringify({ models }) }),
   refreshAccountHealth: (data?: { accountId?: number; wait?: boolean }) => request('/api/accounts/health/refresh', {
     method: 'POST',
     body: JSON.stringify(data || {}),
@@ -426,13 +445,25 @@ export const api = {
   getTestChatJob: (jobId: string) => request(`/api/test/chat/jobs/${encodeURIComponent(jobId)}`),
   deleteTestChatJob: (jobId: string) => request(`/api/test/chat/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' }),
   startProxyTestJob: (data: ProxyTestRequestEnvelope) =>
-    request('/api/test/proxy/jobs', { method: 'POST', body: JSON.stringify(data) }),
+    request('/api/test/proxy/jobs', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: resolveProxyTestTimeoutMs(data),
+    }),
   getProxyTestJob: (jobId: string) => request(`/api/test/proxy/jobs/${encodeURIComponent(jobId)}`),
   deleteProxyTestJob: (jobId: string) => request(`/api/test/proxy/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' }),
   testProxy: (data: ProxyTestRequestEnvelope) =>
-    request('/api/test/proxy', { method: 'POST', body: JSON.stringify(data) }),
+    request('/api/test/proxy', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: resolveProxyTestTimeoutMs(data),
+    }),
   proxyTest: (data: ProxyTestRequestEnvelope) =>
-    request('/api/test/proxy', { method: 'POST', body: JSON.stringify(data) }),
+    request('/api/test/proxy', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: resolveProxyTestTimeoutMs(data),
+    }),
   testChat: (data: TestChatRequestPayload) =>
     request('/api/test/chat', { method: 'POST', body: JSON.stringify(data) }),
   testProxyStream: async (data: ProxyTestRequestEnvelope, signal?: AbortSignal) => {

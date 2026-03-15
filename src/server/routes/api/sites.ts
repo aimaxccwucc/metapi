@@ -2,9 +2,10 @@ import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
 import { and, eq, sql } from 'drizzle-orm';
 import { detectSite } from '../../services/siteDetector.js';
-import { startBackgroundTask } from '../../services/backgroundTaskService.js';
-import { executeCleanupUnreachableSites, executeRefreshSiteReachability } from '../../services/siteHealthService.js';
 import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services/siteProxy.js';
+import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
+import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
+import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
 
 function normalizeSiteStatus(input: unknown): 'active' | 'disabled' | null {
   if (input === undefined || input === null) return null;
@@ -28,13 +29,6 @@ function normalizePinnedFlag(input: unknown): boolean | null {
 
 function normalizeUseSystemProxyFlag(input: unknown): boolean | null {
   return normalizePinnedFlag(input);
-}
-
-function normalizeBatchIds(input: unknown): number[] {
-  if (!Array.isArray(input)) return [];
-  return input
-    .map((item) => Number.parseInt(String(item), 10))
-    .filter((id) => Number.isFinite(id) && id > 0);
 }
 
 function normalizeSortOrder(input: unknown): number | null {
@@ -93,6 +87,64 @@ function normalizeOptionalExternalCheckinUrl(input: unknown): {
 }
 
 export async function sitesRoutes(app: FastifyInstance) {
+  function invalidateSiteCaches() {
+    invalidateSiteProxyCache();
+    invalidateTokenRouterCache();
+  }
+
+  async function applySiteStatusSideEffects(
+    siteId: number,
+    existingSiteName: string,
+    normalizedStatus: 'active' | 'disabled',
+  ) {
+    const now = new Date().toISOString();
+    if (normalizedStatus === 'disabled') {
+      await db.update(schema.accounts)
+        .set({ status: 'disabled', updatedAt: now })
+        .where(eq(schema.accounts.siteId, siteId))
+        .run();
+
+      try {
+        const createdAt = formatUtcSqlDateTime(new Date());
+        await db.insert(schema.events).values({
+          type: 'status',
+          title: '站点已禁用',
+          message: `${existingSiteName} 已禁用，关联账号已全部置为禁用`,
+          level: 'warning',
+          relatedId: siteId,
+          relatedType: 'site',
+          createdAt,
+        }).run();
+      } catch { }
+      return;
+    }
+
+    await db.update(schema.accounts)
+      .set({ status: 'active', updatedAt: now })
+      .where(and(eq(schema.accounts.siteId, siteId), eq(schema.accounts.status, 'disabled')))
+      .run();
+
+    try {
+      const createdAt = formatUtcSqlDateTime(new Date());
+      await db.insert(schema.events).values({
+        type: 'status',
+        title: '站点已启用',
+        message: `${existingSiteName} 已启用，关联禁用账号已恢复为活跃`,
+        level: 'info',
+        relatedId: siteId,
+        relatedType: 'site',
+        createdAt,
+      }).run();
+    } catch { }
+  }
+
+  function normalizeBatchIds(input: unknown): number[] {
+    if (!Array.isArray(input)) return [];
+    return input
+      .map((item) => Number.parseInt(String(item), 10))
+      .filter((id) => Number.isFinite(id) && id > 0);
+  }
+
   // List all sites
   app.get('/api/sites', async () => {
     const siteRows = await db.select().from(schema.sites).all();
@@ -122,13 +174,14 @@ export async function sitesRoutes(app: FastifyInstance) {
     apiKey?: string;
     proxyUrl?: string | null;
     useSystemProxy?: boolean;
+    customHeaders?: string | null;
     externalCheckinUrl?: string | null;
     status?: string;
     isPinned?: boolean;
     sortOrder?: number;
     globalWeight?: number;
   } }>('/api/sites', async (request, reply) => {
-    const { name, url, platform, apiKey, proxyUrl, useSystemProxy, externalCheckinUrl, status, isPinned, sortOrder, globalWeight } = request.body;
+    const { name, url, platform, apiKey, proxyUrl, useSystemProxy, customHeaders, externalCheckinUrl, status, isPinned, sortOrder, globalWeight } = request.body;
     const normalizedSiteUrl = normalizeSiteBaseUrl(url);
     const normalizedStatus = normalizeSiteStatus(status);
     if (status !== undefined && !normalizedStatus) {
@@ -158,6 +211,10 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (globalWeight !== undefined && normalizedGlobalWeight === null) {
       return reply.code(400).send({ error: 'Invalid globalWeight value. Expected a positive number.' });
     }
+    const normalizedCustomHeaders = parseSiteCustomHeadersInput(customHeaders);
+    if (!normalizedCustomHeaders.valid) {
+      return reply.code(400).send({ error: normalizedCustomHeaders.error || 'Invalid customHeaders.' });
+    }
 
     const existingSites = await db.select().from(schema.sites).all();
     const maxSortOrder = existingSites.reduce((max, site) => Math.max(max, site.sortOrder || 0), -1);
@@ -177,6 +234,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       apiKey,
       proxyUrl: parsedProxyUrl.proxyUrl,
       useSystemProxy: normalizedUseSystemProxy ?? false,
+      customHeaders: normalizedCustomHeaders.customHeaders,
       externalCheckinUrl: normalizedExternalCheckinUrl.url,
       status: normalizedStatus ?? 'active',
       isPinned: normalizedPinned ?? false,
@@ -191,7 +249,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (!result) {
       return reply.code(500).send({ error: 'Create site failed' });
     }
-    invalidateSiteProxyCache();
+    invalidateSiteCaches();
     return result;
   });
 
@@ -203,6 +261,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     apiKey?: string;
     proxyUrl?: string | null;
     useSystemProxy?: boolean;
+    customHeaders?: string | null;
     externalCheckinUrl?: string | null;
     status?: string;
     isPinned?: boolean;
@@ -249,6 +308,10 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.globalWeight !== undefined && normalizedGlobalWeight === null) {
       return reply.code(400).send({ error: 'Invalid globalWeight value. Expected a positive number.' });
     }
+    const normalizedCustomHeaders = parseSiteCustomHeadersInput(body.customHeaders);
+    if (!normalizedCustomHeaders.valid) {
+      return reply.code(400).send({ error: normalizedCustomHeaders.error || 'Invalid customHeaders.' });
+    }
 
     if (body.name !== undefined) updates.name = body.name;
     if (body.url !== undefined) updates.url = normalizeSiteBaseUrl(body.url);
@@ -256,6 +319,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.apiKey !== undefined) updates.apiKey = body.apiKey;
     if (parsedProxyUrl.present) updates.proxyUrl = parsedProxyUrl.proxyUrl;
     if (body.useSystemProxy !== undefined) updates.useSystemProxy = normalizedUseSystemProxy;
+    if (normalizedCustomHeaders.present) updates.customHeaders = normalizedCustomHeaders.customHeaders;
     if (normalizedExternalCheckinUrl.present) updates.externalCheckinUrl = normalizedExternalCheckinUrl.url;
     if (body.status !== undefined) updates.status = normalizedStatus;
     if (body.isPinned !== undefined) updates.isPinned = normalizedPinned;
@@ -263,48 +327,22 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.globalWeight !== undefined) updates.globalWeight = normalizedGlobalWeight;
     updates.updatedAt = new Date().toISOString();
     await db.update(schema.sites).set(updates).where(eq(schema.sites.id, id)).run();
-    invalidateSiteProxyCache();
 
     if (body.status !== undefined && normalizedStatus) {
-      const now = new Date().toISOString();
-      if (normalizedStatus === 'disabled') {
-        await db.update(schema.accounts)
-          .set({ status: 'disabled', updatedAt: now })
-          .where(eq(schema.accounts.siteId, id))
-          .run();
-
-        try {
-          await db.insert(schema.events).values({
-            type: 'status',
-            title: '站点已禁用',
-            message: `${existingSite.name} 已禁用，关联账号已全部置为禁用`,
-            level: 'warning',
-            relatedId: id,
-            relatedType: 'site',
-            createdAt: new Date().toISOString(),
-          }).run();
-        } catch {}
-      } else {
-        await db.update(schema.accounts)
-          .set({ status: 'active', updatedAt: now })
-          .where(and(eq(schema.accounts.siteId, id), eq(schema.accounts.status, 'disabled')))
-          .run();
-
-        try {
-          await db.insert(schema.events).values({
-            type: 'status',
-            title: '站点已启用',
-            message: `${existingSite.name} 已启用，关联禁用账号已恢复为活跃`,
-            level: 'info',
-            relatedId: id,
-            relatedType: 'site',
-            createdAt: new Date().toISOString(),
-          }).run();
-        } catch {}
-      }
+      await applySiteStatusSideEffects(id, existingSite.name, normalizedStatus);
     }
 
+    invalidateSiteCaches();
+
     return await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+  });
+
+  // Delete a site
+  app.delete<{ Params: { id: string } }>('/api/sites/:id', async (request) => {
+    const id = parseInt(request.params.id);
+    await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
+    invalidateSiteCaches();
+    return { success: true };
   });
 
   app.post<{ Body?: { ids?: number[]; action?: string } }>('/api/sites/batch', async (request, reply) => {
@@ -346,19 +384,7 @@ export async function sitesRoutes(app: FastifyInstance) {
             .set({ status: nextStatus, updatedAt: new Date().toISOString() })
             .where(eq(schema.sites.id, id))
             .run();
-
-          const now = new Date().toISOString();
-          if (nextStatus === 'disabled') {
-            await db.update(schema.accounts)
-              .set({ status: 'disabled', updatedAt: now })
-              .where(eq(schema.accounts.siteId, id))
-              .run();
-          } else {
-            await db.update(schema.accounts)
-              .set({ status: 'active', updatedAt: now })
-              .where(and(eq(schema.accounts.siteId, id), eq(schema.accounts.status, 'disabled')))
-              .run();
-          }
+          await applySiteStatusSideEffects(id, existingSite.name, nextStatus);
         }
         successIds.push(id);
       } catch (error: any) {
@@ -366,7 +392,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       }
     }
 
-    invalidateSiteProxyCache();
+    invalidateSiteCaches();
     return {
       success: true,
       successIds,
@@ -374,86 +400,60 @@ export async function sitesRoutes(app: FastifyInstance) {
     };
   });
 
-  // Delete a site
-  app.delete<{ Params: { id: string } }>('/api/sites/:id', async (request) => {
+  // Get disabled models for a site
+  app.get<{ Params: { id: string } }>('/api/sites/:id/disabled-models', async (request, reply) => {
     const id = parseInt(request.params.id);
-    await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
-    invalidateSiteProxyCache();
-    return { success: true };
+    if (Number.isNaN(id)) {
+      return reply.code(400).send({ error: 'Invalid site id' });
+    }
+    const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+    if (!existingSite) {
+      return reply.code(404).send({ error: 'Site not found' });
+    }
+    const rows = await db.select({ modelName: schema.siteDisabledModels.modelName })
+      .from(schema.siteDisabledModels)
+      .where(eq(schema.siteDisabledModels.siteId, id))
+      .all();
+    return { siteId: id, models: rows.map((r) => r.modelName) };
+  });
+
+  // Update disabled models for a site (full replace)
+  app.put<{ Params: { id: string }; Body: { models?: string[] } }>('/api/sites/:id/disabled-models', async (request, reply) => {
+    const id = parseInt(request.params.id);
+    if (Number.isNaN(id)) {
+      return reply.code(400).send({ error: 'Invalid site id' });
+    }
+    const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+    if (!existingSite) {
+      return reply.code(404).send({ error: 'Site not found' });
+    }
+    const rawModels = request.body?.models;
+    if (!Array.isArray(rawModels)) {
+      return reply.code(400).send({ error: 'models must be an array of strings' });
+    }
+    const models = rawModels
+      .filter((m): m is string => typeof m === 'string')
+      .map((m) => m.trim())
+      .filter((m) => m.length > 0);
+    const uniqueModels = Array.from(new Set(models));
+
+    await db.delete(schema.siteDisabledModels)
+      .where(eq(schema.siteDisabledModels.siteId, id))
+      .run();
+
+    if (uniqueModels.length > 0) {
+      await db.insert(schema.siteDisabledModels).values(
+        uniqueModels.map((modelName) => ({ siteId: id, modelName })),
+      ).run();
+    }
+
+    invalidateSiteCaches();
+    return { siteId: id, models: uniqueModels };
   });
 
   // Detect platform for a URL
   app.post<{ Body: { url: string } }>('/api/sites/detect', async (request) => {
     const result = await detectSite(request.body.url);
     return result || { error: 'Could not detect platform' };
-  });
-
-  app.post<{ Body?: { wait?: boolean } }>('/api/sites/health/refresh', async (request) => {
-    if (request.body?.wait) {
-      const result = await executeRefreshSiteReachability();
-      return { success: true, ...result };
-    }
-
-    const { task, reused } = startBackgroundTask(
-      {
-        type: 'status',
-        title: '检测站点存活状态',
-        dedupeKey: 'refresh-all-site-reachability',
-        notifyOnFailure: true,
-        successMessage: (currentTask) => {
-          const summary = (currentTask.result as { summary?: { alive: number; unreachable: number } })?.summary;
-          if (!summary) return '站点存活检测已完成';
-          return `站点存活检测完成：可达 ${summary.alive}，不可达 ${summary.unreachable}`;
-        },
-        failureMessage: (currentTask) => `站点存活检测失败：${currentTask.error || 'unknown error'}`,
-      },
-      async () => executeRefreshSiteReachability(),
-    );
-
-    return {
-      success: true,
-      queued: true,
-      reused,
-      jobId: task.id,
-      status: task.status,
-      message: reused ? '站点存活检测进行中，请稍后查看任务中心' : '已开始检测站点存活状态，请稍后查看任务中心',
-    };
-  });
-
-  app.post<{ Body?: { wait?: boolean; dryRun?: boolean } }>('/api/sites/cleanup-unreachable', async (request) => {
-    const dryRun = request.body?.dryRun === true;
-    if (request.body?.wait) {
-      const result = await executeCleanupUnreachableSites(dryRun);
-      return { success: true, ...result };
-    }
-
-    const dedupeKey = dryRun ? 'cleanup-unreachable-sites-dryrun' : 'cleanup-unreachable-sites';
-    const title = dryRun ? '预检失活站点（不删除）' : '移除失活站点及账号';
-
-    const { task, reused } = startBackgroundTask(
-      {
-        type: 'status',
-        title,
-        dedupeKey,
-        notifyOnFailure: true,
-        successMessage: (currentTask) => {
-          const summary = (currentTask.result as { summary?: { unreachableSites: number; removedSites: number; removedAccounts: number; dryRun: boolean } })?.summary;
-          if (!summary) return `${title}已完成`;
-          if (summary.dryRun) return `预检完成：不可达站点 ${summary.unreachableSites}`;
-          return `移除完成：站点 ${summary.removedSites}，账号 ${summary.removedAccounts}`;
-        },
-        failureMessage: (currentTask) => `${title}失败：${currentTask.error || 'unknown error'}`,
-      },
-      async () => executeCleanupUnreachableSites(dryRun),
-    );
-
-    return {
-      success: true,
-      queued: true,
-      reused,
-      jobId: task.id,
-      status: task.status,
-      message: reused ? `${title}进行中，请稍后查看任务中心` : `已开始${title}，请稍后查看任务中心`,
-    };
   });
 }

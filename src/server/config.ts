@@ -62,6 +62,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     serverChanEnabled: parseBoolean(env.SERVERCHAN_ENABLED, true),
     serverChanKey: env.SERVERCHAN_KEY || '',
     telegramEnabled: parseBoolean(env.TELEGRAM_ENABLED, false),
+    telegramApiBaseUrl: 'https://api.telegram.org',
     telegramBotToken: env.TELEGRAM_BOT_TOKEN || '',
     telegramChatId: env.TELEGRAM_CHAT_ID || '',
     smtpEnabled: parseBoolean(env.SMTP_ENABLED, false),

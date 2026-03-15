@@ -138,6 +138,37 @@ describe('account tokens sync routes with site status', () => {
     expect(tokenRows.length).toBe(0);
   });
 
+  it('skips masked upstream token values and does not store them', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    getApiTokensMock.mockResolvedValue([
+      { name: 'masked-only', key: 'sk-abc***xyz', enabled: true },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      synced: false,
+      status: 'skipped',
+      reason: 'upstream_masked_tokens',
+      maskedSkipped: 1,
+      total: 0,
+      created: 0,
+      updated: 0,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows.length).toBe(0);
+  });
+
   it('rejects sync and token management for apikey connections', async () => {
     const { account } = await seedAccount({ siteStatus: 'active', accessToken: '' });
     await db.update(schema.accounts)
@@ -449,5 +480,27 @@ describe('account tokens sync routes with site status', () => {
 
     const existing = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, token.id)).get();
     expect(existing).toBeDefined();
+  });
+
+  it('rejects retrieving token value when stored token is masked', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'masked-token',
+      token: 'sk-mask***tail',
+      source: 'sync',
+      enabled: true,
+      isDefault: false,
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/account-tokens/${token.id}/value`,
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      success: false,
+    });
   });
 });

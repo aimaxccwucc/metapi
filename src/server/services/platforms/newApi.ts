@@ -319,6 +319,10 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   private parseGroupKeys(payload: any): string[] {
+    if (payload && typeof payload === 'object' && payload?.success === false) {
+      return [];
+    }
+
     const source = payload?.data ?? payload;
     if (Array.isArray(source)) {
       return source
@@ -329,10 +333,26 @@ export class NewApiAdapter extends BasePlatformAdapter {
     if (source && typeof source === 'object') {
       return Object.keys(source)
         .map((key) => key.trim())
+        .filter((key) => !['success', 'message', 'code', 'data', 'error'].includes(key.toLowerCase()))
         .filter(Boolean);
     }
 
     return [];
+  }
+
+  private resolveGroupFetchErrorMessage(payload: any): string {
+    const message = typeof payload?.message === 'string' ? payload.message.trim() : '';
+    const normalized = message.toLowerCase();
+    const indicatesExpired = normalized.includes('expired')
+      || normalized.includes('invalid token')
+      || normalized.includes('access token')
+      || normalized.includes('unauthorized')
+      || normalized.includes('forbidden')
+      || normalized.includes('未登录')
+      || normalized.includes('登录')
+      || normalized.includes('过期');
+    if (indicatesExpired) return '账号会话可能已过期，请重新登录后再拉取分组';
+    return message || '拉取分组失败';
   }
 
   private normalizeTokenItems(items: any[]): ApiTokenInfo[] {
@@ -1241,11 +1261,15 @@ export class NewApiAdapter extends BasePlatformAdapter {
   async getUserGroups(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string[]> {
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     const dedupe = (groups: string[]) => Array.from(new Set(groups.map((item) => item.trim()).filter(Boolean)));
+    let terminalError: string | null = null;
 
     try {
       const res = await this.fetchJson<any>(`${baseUrl}/api/user/self/groups`, {
         headers: this.authHeaders(accessToken, resolvedUserId || undefined),
       });
+      if (res?.success === false) {
+        terminalError = this.resolveGroupFetchErrorMessage(res);
+      }
       const parsed = dedupe(this.parseGroupKeys(res));
       if (parsed.length > 0) return parsed;
     } catch {}
@@ -1254,6 +1278,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
       const res = await this.fetchJson<any>(`${baseUrl}/api/user_group_map`, {
         headers: this.authHeaders(accessToken, resolvedUserId || undefined),
       });
+      if (res?.success === false) {
+        terminalError = this.resolveGroupFetchErrorMessage(res);
+      }
       const parsed = dedupe(this.parseGroupKeys(res));
       if (parsed.length > 0) return parsed;
     } catch {}
@@ -1265,15 +1292,25 @@ export class NewApiAdapter extends BasePlatformAdapter {
 
       try {
         const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self/groups`, { headers });
+        if (res?.success === false) {
+          terminalError = this.resolveGroupFetchErrorMessage(res);
+        }
         const parsed = dedupe(this.parseGroupKeys(res));
         if (parsed.length > 0) return parsed;
       } catch {}
 
       try {
         const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/user_group_map`, { headers });
+        if (res?.success === false) {
+          terminalError = this.resolveGroupFetchErrorMessage(res);
+        }
         const parsed = dedupe(this.parseGroupKeys(res));
         if (parsed.length > 0) return parsed;
       } catch {}
+    }
+
+    if (terminalError) {
+      throw new Error(terminalError);
     }
 
     return ['default'];

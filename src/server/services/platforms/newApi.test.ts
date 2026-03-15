@@ -16,6 +16,7 @@ const CHECKIN_ALREADY_TOKEN = 'checkin-already-token';
 const CHECKIN_INVALID_URL_TOKEN = 'checkin-invalid-url-token';
 const CHECKIN_CLOUDFLARE_530_TOKEN = 'checkin-cloudflare-530-token';
 const BALANCE_FAIL_TOKEN = 'balance-fail-token';
+const GROUP_EXPIRED_TOKEN = 'group-expired-token';
 const SHIELD_LOGIN_USERNAME = 'shield-user';
 const SHIELD_LOGIN_PASSWORD = 'shield-pass';
 const SHIELD_LOGIN_TOKEN = 'login-session-token';
@@ -389,6 +390,19 @@ describe('NewApiAdapter', () => {
         }
       }
 
+      if (req.url === '/api/user/self/groups') {
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${GROUP_EXPIRED_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: 'access token expired' }));
+          return;
+        }
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === 'Bearer session-token') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, data: { default: true, gemini: true } }));
+          return;
+        }
+      }
+
       if (req.url === '/api/user/sign_in') {
         if (typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`session=${CHECKIN_ALREADY_TOKEN}`)) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -577,6 +591,20 @@ describe('NewApiAdapter', () => {
 
     expect(result.success).toBe(false);
     expect(result.message).toBe('今天已经签到过啦');
+  });
+
+  it('returns clean groups from data object without envelope keys', async () => {
+    const adapter = new NewApiAdapter();
+    const groups = await adapter.getUserGroups(baseUrl, 'session-token', 11494);
+
+    expect(groups).toEqual(['default', 'gemini']);
+    expect(groups).not.toContain('success');
+    expect(groups).not.toContain('message');
+  });
+
+  it('throws expired-session error when group endpoint reports invalid access token', async () => {
+    const adapter = new NewApiAdapter();
+    await expect(adapter.getUserGroups(baseUrl, GROUP_EXPIRED_TOKEN, 11494)).rejects.toThrow('账号会话可能已过期');
   });
 
   it('sends all compatibility user-id headers when userId is known', async () => {

@@ -20,11 +20,13 @@ describe('sites health and cleanup routes', () => {
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');
     const routesModule = await import('./sites.js');
+    const customRoutesModule = await import('../../custom/register.js');
     db = dbModule.db;
     schema = dbModule.schema;
 
     app = Fastify();
     await app.register(routesModule.sitesRoutes);
+    await app.register(customRoutesModule.registerCustomRoutes);
   });
 
   beforeEach(async () => {

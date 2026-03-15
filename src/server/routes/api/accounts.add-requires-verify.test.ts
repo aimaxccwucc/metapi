@@ -142,7 +142,7 @@ describe('accounts add requires token verification success', () => {
   it('allows saving unverified session only when explicitly requested', async () => {
     verifyTokenMock.mockResolvedValueOnce({ tokenType: 'unknown' });
 
-    const site = db.insert(schema.sites).values({
+    const site = await db.insert(schema.sites).values({
       name: 'Shielded Site',
       url: 'https://shielded.example.com',
       platform: 'new-api',
@@ -165,7 +165,7 @@ describe('accounts add requires token verification success', () => {
     expect(body.queued).toBe(false);
     expect(body.initTaskId).toBeUndefined();
 
-    const accounts = db.select().from(schema.accounts).all();
+    const accounts = await db.select().from(schema.accounts).all();
     expect(accounts).toHaveLength(1);
     expect(accounts[0]?.checkinEnabled).toBe(false);
     expect(accounts[0]?.accessToken).toBe('session-token');

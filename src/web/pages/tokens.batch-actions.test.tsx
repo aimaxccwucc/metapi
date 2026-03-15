@@ -92,16 +92,20 @@ describe('Tokens batch actions', () => {
       });
 
       const batchButton = root.root.find((node) => node.props['data-testid'] === 'tokens-batch-delete');
-      const originalConfirm = globalThis.confirm;
-      globalThis.confirm = vi.fn(() => true);
-      try {
-        await act(async () => {
-          batchButton.props.onClick();
-        });
-        await flushMicrotasks();
-      } finally {
-        globalThis.confirm = originalConfirm;
-      }
+      await act(async () => {
+        batchButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const confirmButton = root.root
+        .findAll((node) => node.type === 'button')
+        .find((node) => Array.isArray(node.children) && node.children.some((child) => child === '确认删除'));
+      expect(confirmButton).toBeTruthy();
+
+      await act(async () => {
+        confirmButton!.props.onClick();
+      });
+      await flushMicrotasks();
 
       expect(apiMock.batchUpdateAccountTokens).toHaveBeenCalledWith({
         ids: [1, 2],

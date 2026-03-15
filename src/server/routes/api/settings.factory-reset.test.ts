@@ -26,6 +26,7 @@ describe('settings factory reset api', () => {
     const configModule = await import('../../config.js');
     const serviceModule = await import('../../services/factoryResetService.js');
     const settingsRoutesModule = await import('./settings.js');
+    const customRoutesModule = await import('../../custom/register.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
@@ -34,6 +35,7 @@ describe('settings factory reset api', () => {
 
     app = Fastify();
     await app.register(settingsRoutesModule.settingsRoutes);
+    await app.register(customRoutesModule.registerCustomRoutes);
   });
 
   beforeEach(async () => {

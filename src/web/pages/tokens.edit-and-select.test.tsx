@@ -10,6 +10,7 @@ const { apiMock } = vi.hoisted(() => ({
     getSites: vi.fn(),
     getAccountTokens: vi.fn(),
     getAccountTokenValue: vi.fn(),
+    getAccountTokenGroups: vi.fn(),
     updateAccountToken: vi.fn(),
   },
 }));
@@ -98,6 +99,10 @@ describe('Tokens edit modal and row selection', () => {
       success: true,
       token: 'sk-focus-real',
     });
+    apiMock.getAccountTokenGroups.mockResolvedValue({
+      success: true,
+      groups: ['default', 'vip'],
+    });
     apiMock.updateAccountToken.mockResolvedValue({
       success: true,
     });
@@ -131,11 +136,25 @@ describe('Tokens edit modal and row selection', () => {
       expect(rendered).toContain('sk-focus-real');
       expect(rendered).toContain('基本信息');
       expect(rendered).toContain('状态设置');
+      expect(rendered).toContain('分组');
       const modals = root.root.findAll((node) => {
         const className = typeof node.props?.className === 'string' ? node.props.className : '';
         return className.includes('modal-content') && collectText(node).includes('编辑令牌');
       });
       expect(modals).toHaveLength(1);
+      expect(apiMock.getAccountTokenGroups).toHaveBeenCalledWith(1);
+
+      const saveButton = root.root
+        .findAll((node) => node.type === 'button')
+        .find((node) => collectText(node).includes('保存修改'));
+      expect(saveButton).toBeTruthy();
+
+      await act(async () => {
+        saveButton!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.updateAccountToken).toHaveBeenCalledWith(22, expect.objectContaining({ group: 'default' }));
     } finally {
       root?.unmount();
     }
@@ -177,6 +196,34 @@ describe('Tokens edit modal and row selection', () => {
 
       expect(JSON.stringify(root.toJSON())).toContain('已选 ');
       expect(JSON.stringify(root.toJSON())).toContain('"1"');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('does not repeatedly refetch groups when edit-group loading fails once', async () => {
+    apiMock.getAccountTokenGroups.mockRejectedValueOnce(new Error('账号会话可能已过期，请重新登录后再拉取分组'));
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = buildRoot();
+      });
+      await flushMicrotasks();
+
+      const editButton = root.root
+        .findAll((node) => node.type === 'button')
+        .find((node) => collectText(node).includes('编辑'));
+      expect(editButton).toBeTruthy();
+
+      await act(async () => {
+        editButton!.props.onClick({ stopPropagation: () => undefined });
+      });
+
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(apiMock.getAccountTokenGroups).toHaveBeenCalledTimes(1);
     } finally {
       root?.unmount();
     }

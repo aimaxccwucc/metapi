@@ -7,6 +7,7 @@ import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { MobileCard, MobileField } from '../components/MobileCard.js';
 import { useIsMobile } from '../components/useIsMobile.js';
+import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import { clearFocusParams, readFocusTokenId } from './helpers/navigationFocus.js';
 import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { tr } from '../i18n.js';
@@ -134,15 +135,24 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
   const [rowLoading, setRowLoading] = useState<Record<string, boolean>>({});
   const [selectedTokenIds, setSelectedTokenIds] = useState<number[]>([]);
   const [batchActionLoading, setBatchActionLoading] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState<null | {
+    mode: 'single' | 'batch';
+    tokenId?: number;
+    tokenName?: string;
+    count?: number;
+  }>(null);
   const [form, setForm] = useState(initialCreateForm);
   const [editForm, setEditForm] = useState({
     name: '',
     token: '',
+    group: 'default',
     enabled: true,
     isDefault: false,
   });
   const [groupOptions, setGroupOptions] = useState<string[]>(['default']);
   const [groupLoading, setGroupLoading] = useState(false);
+  const [editGroupOptions, setEditGroupOptions] = useState<string[]>(['default']);
+  const [editGroupLoading, setEditGroupLoading] = useState(false);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editingTokenIdRef = useRef<number | null>(null);
@@ -220,6 +230,60 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       cancelled = true;
     };
   }, [showAdd, form.accountId]);
+
+  useEffect(() => {
+    if (!editingToken?.id || !editingToken?.accountId) {
+      setEditGroupLoading(false);
+      setEditGroupOptions(['default']);
+      return;
+    }
+
+    const currentGroup = (editingToken?.tokenGroup || '').trim() || 'default';
+    let cancelled = false;
+    setEditGroupLoading(true);
+    api.getAccountTokenGroups(editingToken.accountId)
+      .then((res: any) => {
+        if (cancelled) return;
+        const groups = Array.isArray(res?.groups)
+          ? res.groups.map((item: any) => String(item || '').trim()).filter(Boolean)
+          : [];
+        const normalized = Array.from(new Set(groups));
+        setEditGroupOptions((current) => {
+          const next = normalized.length > 0 ? normalized : ['default'];
+          if (next.includes(currentGroup)) return next;
+          return [...next, currentGroup];
+        });
+      })
+      .catch((error: any) => {
+        if (cancelled) return;
+        setEditGroupOptions((current) => (current.includes(currentGroup) ? current : [...current, currentGroup]));
+        toast.error(error?.message || '拉取分组失败，已保留当前分组');
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setEditGroupLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [editingToken?.id, editingToken?.accountId]);
+
+  const accountClusteredTokens = useMemo(() => {
+    const accountLabel = (token: any) => String(token?.account?.username || `account-${token?.accountId || 0}`).toLowerCase();
+    const siteLabel = (token: any) => String(token?.site?.name || '').toLowerCase();
+    const tokenName = (token: any) => String(token?.name || '').toLowerCase();
+
+    return [...tokens].sort((left, right) => {
+      const accountCmp = accountLabel(left).localeCompare(accountLabel(right));
+      if (accountCmp !== 0) return accountCmp;
+      const siteCmp = siteLabel(left).localeCompare(siteLabel(right));
+      if (siteCmp !== 0) return siteCmp;
+      const nameCmp = tokenName(left).localeCompare(tokenName(right));
+      if (nameCmp !== 0) return nameCmp;
+      return Number(left?.id || 0) - Number(right?.id || 0);
+    });
+  }, [tokens]);
 
   const activeAccounts = useMemo(() => accounts.filter(isAccountSyncable), [accounts]);
 
@@ -304,12 +368,15 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       setSelectedTokenIds([]);
       return;
     }
-    setSelectedTokenIds(tokens.map((token) => token.id));
+    setSelectedTokenIds(accountClusteredTokens.map((token) => token.id));
   };
 
-  const runBatchTokenAction = async (action: 'enable' | 'disable' | 'delete') => {
+  const runBatchTokenAction = async (action: 'enable' | 'disable' | 'delete', skipDeleteConfirm = false) => {
     if (selectedTokenIds.length === 0) return;
-    if (action === 'delete' && typeof globalThis.confirm === 'function' && !globalThis.confirm(`确认删除选中的 ${selectedTokenIds.length} 个令牌？`)) return;
+    if (action === 'delete' && !skipDeleteConfirm) {
+      setDeleteConfirm({ mode: 'batch', count: selectedTokenIds.length });
+      return;
+    }
 
     setBatchActionLoading(true);
     try {
@@ -333,6 +400,23 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     }
   };
 
+  const confirmDelete = async () => {
+    const target = deleteConfirm;
+    if (!target) return;
+
+    setDeleteConfirm(null);
+    if (target.mode === 'single' && target.tokenId) {
+      await withRowLoading(`token-${target.tokenId}-delete`, async () => {
+        await api.deleteAccountToken(target.tokenId!);
+        toast.success('令牌已删除');
+        await load();
+      });
+      return;
+    }
+
+    await runBatchTokenAction('delete', true);
+  };
+
   const openEditPanel = useCallback((token: any) => {
     setShowAdd(false);
     setCreateHintModelName('');
@@ -341,6 +425,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     setEditForm({
       name: token?.name || '',
       token: '',
+      group: (token?.tokenGroup || '').trim() || 'default',
       enabled: token?.enabled !== false,
       isDefault: !!token?.isDefault,
     });
@@ -372,6 +457,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     setEditForm({
       name: '',
       token: '',
+      group: 'default',
       enabled: true,
       isDefault: false,
     });
@@ -384,6 +470,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       await api.updateAccountToken(editingToken.id, {
         name: editForm.name.trim() || editingToken.name,
         token: editForm.token.trim() || undefined,
+        group: editForm.group || 'default',
         enabled: editForm.enabled,
         isDefault: editForm.isDefault,
       });
@@ -404,17 +491,21 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
   };
 
   const handleCopyToken = async (tokenId: number, tokenName: string) => {
-    await withRowLoading(`token-${tokenId}-copy`, async () => {
-      const res = await api.getAccountTokenValue(tokenId);
-      const tokenValue = (res?.token || '').trim();
-      if (!tokenValue) {
-        toast.error('令牌为空，无法复制');
-        return;
-      }
+    try {
+      await withRowLoading(`token-${tokenId}-copy`, async () => {
+        const res = await api.getAccountTokenValue(tokenId);
+        const tokenValue = (res?.token || '').trim();
+        if (!tokenValue) {
+          toast.error('令牌为空，无法复制');
+          return;
+        }
 
-      await copyText(tokenValue);
-      toast.success(`已复制令牌：${tokenName || `token-${tokenId}`}`);
-    });
+        await copyText(tokenValue);
+        toast.success(`已复制令牌：${tokenName || `token-${tokenId}`}`);
+      });
+    } catch (error: any) {
+      toast.error(error?.message || '复制令牌失败');
+    }
   };
 
   const handleAddToken = async () => {
@@ -639,6 +730,18 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
         新增令牌会调用站点 API 创建新密钥，再自动同步到本地。支持设置分组、额度、过期时间和 IP 白名单；已存在密钥可直接用“同步站点令牌”读取。
       </div>
 
+      <DeleteConfirmModal
+        open={Boolean(deleteConfirm)}
+        onClose={() => setDeleteConfirm(null)}
+        onConfirm={confirmDelete}
+        title="确认删除令牌"
+        confirmText="确认删除"
+        loading={batchActionLoading || (deleteConfirm?.mode === 'single' && !!rowLoading[`token-${deleteConfirm?.tokenId}-delete`])}
+        description={deleteConfirm?.mode === 'single'
+          ? <>确定要删除令牌 <strong>{deleteConfirm.tokenName || `#${deleteConfirm.tokenId}`}</strong> 吗？</>
+          : <>确定要删除选中的 <strong>{deleteConfirm?.count || 0}</strong> 个令牌吗？</>}
+      />
+
       <CenteredModal
         open={Boolean(editingToken)}
         onClose={closeEditPanel}
@@ -693,6 +796,19 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                     lineHeight: 1.5,
                   }}
                   disabled={editingTokenValueLoading}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>分组</div>
+                <ModernSelect
+                  value={editForm.group || 'default'}
+                  onChange={(nextValue) => setEditForm((prev) => ({ ...prev, group: nextValue || 'default' }))}
+                  options={(editGroupOptions.length > 0 ? editGroupOptions : ['default']).map((group) => ({
+                    value: group,
+                    label: group,
+                  }))}
+                  placeholder={editGroupLoading ? '分组加载中...' : '选择分组'}
+                  disabled={editGroupLoading}
                 />
               </div>
             </div>
@@ -890,7 +1006,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
         ) : tokens.length > 0 ? (
           isMobile ? (
             <div className="mobile-card-list">
-              {tokens.map((token: any) => {
+              {accountClusteredTokens.map((token: any) => {
                 const loadingPrefix = `token-${token.id}`;
                 return (
                   <MobileCard
@@ -929,6 +1045,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                       )}
                     />
                     <MobileField label="账号" value={token.account?.username || `account-${token.accountId}`} />
+                    <MobileField label="分组" value={token.tokenGroup || 'default'} />
                     <MobileField
                       label="状态"
                       value={(
@@ -982,11 +1099,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                         {rowLoading[`${loadingPrefix}-toggle`] ? <span className="spinner spinner-sm" /> : (token.enabled ? '禁用' : '启用')}
                       </button>
                       <button
-                        onClick={() => withRowLoading(`${loadingPrefix}-delete`, async () => {
-                          await api.deleteAccountToken(token.id);
-                          toast.success('令牌已删除');
-                          await load();
-                        })}
+                        onClick={() => setDeleteConfirm({ mode: 'single', tokenId: token.id, tokenName: token.name || '' })}
                         disabled={!!rowLoading[`${loadingPrefix}-delete`]}
                         className="btn btn-link btn-link-danger"
                       >
@@ -1004,7 +1117,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                 <th style={{ width: 44 }}>
                   <input
                     type="checkbox"
-                    checked={tokens.length > 0 && selectedTokenIds.length === tokens.length}
+                    checked={accountClusteredTokens.length > 0 && selectedTokenIds.length === accountClusteredTokens.length}
                     onChange={(e) => toggleSelectAllTokens(e.target.checked)}
                   />
                 </th>
@@ -1012,6 +1125,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                 <th>令牌值</th>
                 <th>来源站点</th>
                 <th>账号</th>
+                <th>分组</th>
                 <th>状态</th>
                 <th>默认</th>
                 <th>更新时间</th>
@@ -1019,7 +1133,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
               </tr>
             </thead>
             <tbody>
-              {tokens.map((token: any, i: number) => {
+              {accountClusteredTokens.map((token: any, i: number) => {
                 const loadingPrefix = `token-${token.id}`;
                 return (
                   <tr
@@ -1063,6 +1177,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                       )}
                     </td>
                     <td>{token.account?.username || `account-${token.accountId}`}</td>
+                    <td>{token.tokenGroup || 'default'}</td>
                     <td>
                       <span className={`badge ${token.enabled ? 'badge-success' : 'badge-muted'}`} style={{ fontSize: 11 }}>
                         {token.enabled ? '启用' : '禁用'}
@@ -1111,11 +1226,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                           {rowLoading[`${loadingPrefix}-toggle`] ? <span className="spinner spinner-sm" /> : (token.enabled ? '禁用' : '启用')}
                         </button>
                         <button
-                          onClick={() => withRowLoading(`${loadingPrefix}-delete`, async () => {
-                            await api.deleteAccountToken(token.id);
-                            toast.success('令牌已删除');
-                            await load();
-                          })}
+                          onClick={() => setDeleteConfirm({ mode: 'single', tokenId: token.id, tokenName: token.name || '' })}
                           disabled={!!rowLoading[`${loadingPrefix}-delete`]}
                           className="btn btn-link btn-link-danger token-table-action-btn"
                         >

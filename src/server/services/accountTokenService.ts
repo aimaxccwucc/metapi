@@ -46,6 +46,12 @@ function normalizeTokenValue(token: string | null | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+export function isMaskedTokenValue(token: string | null | undefined): boolean {
+  const value = (token || '').trim();
+  if (!value) return false;
+  return value.includes('*') || value.includes('•');
+}
+
 function normalizeTokenGroup(value: string | null | undefined, tokenName?: string | null): string | null {
   const explicit = (value || '').trim();
   if (explicit.length > 0) return explicit;
@@ -200,11 +206,16 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
 
   let created = 0;
   let updated = 0;
+  let maskedSkipped = 0;
   let index = existing.length + 1;
 
   for (const upstream of upstreamTokens) {
     const tokenValue = normalizeTokenValue(upstream.key);
     if (!tokenValue) continue;
+    if (isMaskedTokenValue(tokenValue)) {
+      maskedSkipped++;
+      continue;
+    }
 
     const tokenName = normalizeTokenName(upstream.name, index);
     const enabled = upstream.enabled ?? true;
@@ -259,6 +270,7 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
   return {
     created,
     updated,
+    maskedSkipped,
     total: existing.length,
     defaultTokenId: repaired?.id || null,
   };

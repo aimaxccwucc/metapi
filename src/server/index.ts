@@ -18,38 +18,31 @@ import { testRoutes } from './routes/api/test.js';
 import { monitorRoutes } from './routes/api/monitor.js';
 import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { proxyRoutes } from './routes/proxy/router.js';
+import { registerCustomRoutes } from './custom/register.js';
 import { startScheduler } from './services/checkinScheduler.js';
-import { startProxyLogRetentionService, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
+import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
 import { buildStartupSummaryLines } from './services/startupInfo.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
 import { migrateSiteApiKeysToAccounts } from './services/siteApiKeyMigrationService.js';
 import { ensureDefaultSitesSeeded } from './services/defaultSiteSeedService.js';
+import { ensureRuntimeDatabaseReady } from './runtimeDatabaseBootstrap.js';
 import { isPublicApiRoute, registerDesktopRoutes } from './desktop.js';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, normalize, resolve, sep } from 'path';
+import { normalizeLogCleanupRetentionDays } from './services/logCleanupService.js';
 import {
   db,
+  ensureProxyFileCompatibilityColumns,
   ensureProxyLogBillingDetailsColumn,
   ensureRouteGroupingCompatibilityColumns,
+  ensureSharedIndexCompatibility,
   ensureSiteCompatibilityColumns,
   runtimeDbDialect,
   schema,
   switchRuntimeDatabase,
   type RuntimeDbDialect,
 } from './db/index.js';
-
-let sqliteMigrationsBootstrapped = false;
-
-async function ensureSqliteRuntimeMigrations() {
-  if (runtimeDbDialect !== 'sqlite') return;
-  const migrateModule = await import('./db/migrate.js');
-  if (sqliteMigrationsBootstrapped) {
-    migrateModule.runSqliteMigrations();
-    return;
-  }
-  sqliteMigrationsBootstrapped = true;
-}
 
 function toSettingsMap(rows: Array<{ key: string; value: string }>) {
   return new Map(rows.map((row) => [row.key, row.value]));
@@ -114,6 +107,17 @@ function extractSavedRuntimeDatabaseConfig(settingsMap: Map<string, string>): { 
   };
 }
 
+const LOG_CLEANUP_SETTING_KEYS = [
+  'log_cleanup_cron',
+  'log_cleanup_usage_logs_enabled',
+  'log_cleanup_program_logs_enabled',
+  'log_cleanup_retention_days',
+] as const;
+
+function hasExplicitLogCleanupSettings(settingsMap: Map<string, string>): boolean {
+  return LOG_CLEANUP_SETTING_KEYS.some((key) => settingsMap.has(key));
+}
+
 function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const authToken = parseSettingFromMap<string>(settingsMap, 'auth_token');
   if (typeof authToken === 'string' && authToken) config.authToken = authToken;
@@ -130,9 +134,22 @@ function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const balanceRefreshCron = parseSettingFromMap<string>(settingsMap, 'balance_refresh_cron');
   if (typeof balanceRefreshCron === 'string' && balanceRefreshCron) config.balanceRefreshCron = balanceRefreshCron;
 
-  const siteHealthRefreshCron = parseSettingFromMap<string>(settingsMap, 'site_health_refresh_cron');
-  if (typeof siteHealthRefreshCron === 'string' && siteHealthRefreshCron) {
-    config.siteHealthRefreshCron = siteHealthRefreshCron;
+  const logCleanupCron = parseSettingFromMap<string>(settingsMap, 'log_cleanup_cron');
+  if (typeof logCleanupCron === 'string' && logCleanupCron) config.logCleanupCron = logCleanupCron;
+
+  const logCleanupUsageLogsEnabled = parseSettingFromMap<boolean>(settingsMap, 'log_cleanup_usage_logs_enabled');
+  if (typeof logCleanupUsageLogsEnabled === 'boolean') {
+    config.logCleanupUsageLogsEnabled = logCleanupUsageLogsEnabled;
+  }
+
+  const logCleanupProgramLogsEnabled = parseSettingFromMap<boolean>(settingsMap, 'log_cleanup_program_logs_enabled');
+  if (typeof logCleanupProgramLogsEnabled === 'boolean') {
+    config.logCleanupProgramLogsEnabled = logCleanupProgramLogsEnabled;
+  }
+
+  const logCleanupRetentionDays = parseSettingFromMap<number>(settingsMap, 'log_cleanup_retention_days');
+  if (typeof logCleanupRetentionDays === 'number' && Number.isFinite(logCleanupRetentionDays) && logCleanupRetentionDays >= 1) {
+    config.logCleanupRetentionDays = normalizeLogCleanupRetentionDays(logCleanupRetentionDays);
   }
 
   const routingWeights = parseSettingFromMap<Partial<typeof config.routingWeights>>(settingsMap, 'routing_weights');
@@ -159,6 +176,11 @@ function applyRuntimeSettings(settingsMap: Map<string, string>) {
 
   const telegramEnabled = parseSettingFromMap<boolean>(settingsMap, 'telegram_enabled');
   if (typeof telegramEnabled === 'boolean') config.telegramEnabled = telegramEnabled;
+
+  const telegramApiBaseUrl = parseSettingFromMap<string>(settingsMap, 'telegram_api_base_url');
+  if (typeof telegramApiBaseUrl === 'string' && telegramApiBaseUrl.trim()) {
+    config.telegramApiBaseUrl = telegramApiBaseUrl.trim().replace(/\/+$/, '');
+  }
 
   const telegramBotToken = parseSettingFromMap<string>(settingsMap, 'telegram_bot_token');
   if (typeof telegramBotToken === 'string') config.telegramBotToken = telegramBotToken;
@@ -203,8 +225,12 @@ function applyRuntimeSettings(settingsMap: Map<string, string>) {
   }
 }
 
-// Ensure sqlite tables exist before reading runtime settings.
-await ensureSqliteRuntimeMigrations();
+// Ensure the current runtime database is bootstrapped before reading settings.
+await ensureRuntimeDatabaseReady({
+  dialect: runtimeDbDialect,
+  connectionString: config.dbUrl,
+  ssl: config.dbSsl,
+});
 
 // Load runtime config overrides from settings
 try {
@@ -212,21 +238,44 @@ try {
   const initialMap = toSettingsMap(initialRows);
   const savedDbConfig = extractSavedRuntimeDatabaseConfig(initialMap);
   const activeDbUrl = (config.dbUrl || '').trim();
+  const originalRuntimeConfig = {
+    dialect: runtimeDbDialect,
+    dbUrl: activeDbUrl,
+    ssl: config.dbSsl,
+  };
   if (savedDbConfig && (savedDbConfig.dialect !== runtimeDbDialect || savedDbConfig.dbUrl !== activeDbUrl || savedDbConfig.ssl !== config.dbSsl)) {
     try {
       await switchRuntimeDatabase(savedDbConfig.dialect, savedDbConfig.dbUrl, savedDbConfig.ssl);
-      await ensureSqliteRuntimeMigrations();
       console.log(`Loaded runtime DB config from settings: ${savedDbConfig.dialect}`);
     } catch (error) {
+      const currentDbUrl = (config.dbUrl || '').trim();
+      const switchedAway = runtimeDbDialect !== originalRuntimeConfig.dialect
+        || currentDbUrl !== originalRuntimeConfig.dbUrl
+        || config.dbSsl !== originalRuntimeConfig.ssl;
+      if (switchedAway) {
+        await switchRuntimeDatabase(
+          originalRuntimeConfig.dialect,
+          originalRuntimeConfig.dbUrl,
+          originalRuntimeConfig.ssl,
+        );
+      }
       console.warn(`Failed to switch runtime DB from settings: ${(error as Error)?.message || 'unknown error'}`);
     }
   }
 
   await ensureSiteCompatibilityColumns();
   await ensureRouteGroupingCompatibilityColumns();
+  await ensureProxyFileCompatibilityColumns();
+  await ensureSharedIndexCompatibility();
   const finalRows = await db.select().from(schema.settings).all();
   const finalMap = toSettingsMap(finalRows);
   applyRuntimeSettings(finalMap);
+  config.logCleanupConfigured = hasExplicitLogCleanupSettings(finalMap);
+  if (!config.logCleanupConfigured && config.proxyLogRetentionDays > 0) {
+    config.logCleanupUsageLogsEnabled = true;
+    config.logCleanupProgramLogsEnabled = false;
+    config.logCleanupRetentionDays = normalizeLogCleanupRetentionDays(config.proxyLogRetentionDays);
+  }
   await ensureProxyLogBillingDetailsColumn();
   await repairStoredCreatedAtValues();
   await migrateSiteApiKeysToAccounts();
@@ -290,6 +339,7 @@ await app.register(taskRoutes);
 await app.register(testRoutes);
 await app.register(monitorRoutes);
 await app.register(downstreamApiKeysRoutes);
+await app.register(registerCustomRoutes);
 
 // Register OpenAI-compatible proxy routes
 await app.register(proxyRoutes);
@@ -323,7 +373,7 @@ if (existsSync(webDir)) {
 
 // Start scheduler
 await startScheduler();
-startProxyLogRetentionService();
+setLegacyProxyLogRetentionFallbackEnabled(!config.logCleanupConfigured);
 app.addHook('onClose', async () => {
   stopProxyLogRetentionService();
 });

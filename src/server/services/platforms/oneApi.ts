@@ -129,23 +129,48 @@ export class OneApiAdapter extends BasePlatformAdapter {
 
   async getUserGroups(baseUrl: string, accessToken: string): Promise<string[]> {
     const headers = { Authorization: `Bearer ${accessToken}` };
+    const resolveGroupFetchErrorMessage = (payload: any): string => {
+      const message = typeof payload?.message === 'string' ? payload.message.trim() : '';
+      const normalized = message.toLowerCase();
+      const indicatesExpired = normalized.includes('expired')
+        || normalized.includes('invalid token')
+        || normalized.includes('access token')
+        || normalized.includes('unauthorized')
+        || normalized.includes('forbidden')
+        || normalized.includes('未登录')
+        || normalized.includes('登录')
+        || normalized.includes('过期');
+      if (indicatesExpired) return '账号会话可能已过期，请重新登录后再拉取分组';
+      return message || '拉取分组失败';
+    };
     const extractGroupKeys = (payload: any): string[] => {
+      if (payload && typeof payload === 'object' && payload?.success === false) return [];
       const source = payload?.data || payload;
       if (!source || typeof source !== 'object') return [];
-      return Object.keys(source).map((key) => key.trim()).filter(Boolean);
+      return Object.keys(source)
+        .map((key) => key.trim())
+        .filter((key) => !['success', 'message', 'code', 'data', 'error'].includes(key.toLowerCase()))
+        .filter(Boolean);
     };
+    let terminalError: string | null = null;
 
     try {
       const groupMap = await this.fetchJson<any>(`${baseUrl}/api/user_group_map`, { headers });
+      if (groupMap?.success === false) terminalError = resolveGroupFetchErrorMessage(groupMap);
       const keys = extractGroupKeys(groupMap);
       if (keys.length > 0) return Array.from(new Set(keys));
     } catch {}
 
     try {
       const groups = await this.fetchJson<any>(`${baseUrl}/api/user/self/groups`, { headers });
+      if (groups?.success === false) terminalError = resolveGroupFetchErrorMessage(groups);
       const keys = extractGroupKeys(groups);
       if (keys.length > 0) return Array.from(new Set(keys));
     } catch {}
+
+    if (terminalError) {
+      throw new Error(terminalError);
+    }
 
     return ['default'];
   }

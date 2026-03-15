@@ -145,7 +145,7 @@ export async function refreshModelsForAccount(accountId: number) {
           updatedAt: new Date().toISOString(),
         }).where(eq(schema.accounts.id, account.id)).run();
       }
-    } catch {}
+    } catch { }
   }
 
   let enabledTokens = await db.select()
@@ -354,23 +354,37 @@ export async function rebuildTokenRoutesFromAvailability() {
     )
     .all();
 
+  // Load site-level disabled models
+  const disabledModelRows = await db.select().from(schema.siteDisabledModels).all();
+  const disabledModelsBySite = new Map<number, Set<string>>();
+  for (const row of disabledModelRows) {
+    if (!disabledModelsBySite.has(row.siteId)) disabledModelsBySite.set(row.siteId, new Set());
+    disabledModelsBySite.get(row.siteId)!.add(row.modelName);
+  }
+
+  function isModelDisabledForSite(siteId: number, modelName: string): boolean {
+    const disabled = disabledModelsBySite.get(siteId);
+    return !!disabled && disabled.has(modelName);
+  }
+
   const modelCandidates = new Map<string, Map<string, { accountId: number; tokenId: number | null }>>();
-  const addModelCandidate = (modelNameRaw: string | null | undefined, accountId: number, tokenId: number | null) => {
+  const addModelCandidate = (modelNameRaw: string | null | undefined, accountId: number, tokenId: number | null, siteId: number) => {
     const modelName = (modelNameRaw || '').trim();
     if (!modelName) return;
+    if (isModelDisabledForSite(siteId, modelName)) return;
     if (!modelCandidates.has(modelName)) modelCandidates.set(modelName, new Map());
     const candidateKey = `${accountId}:${tokenId ?? 'account'}`;
     modelCandidates.get(modelName)!.set(candidateKey, { accountId, tokenId });
   };
 
   for (const row of tokenRows) {
-    addModelCandidate(row.token_model_availability.modelName, row.accounts.id, row.account_tokens.id);
+    addModelCandidate(row.token_model_availability.modelName, row.accounts.id, row.account_tokens.id, row.accounts.siteId);
   }
 
   for (const row of accountRows) {
     if (!isApiKeyConnection(row.accounts)) continue;
     if (!(row.accounts.apiToken || '').trim()) continue;
-    addModelCandidate(row.model_availability.modelName, row.accounts.id, null);
+    addModelCandidate(row.model_availability.modelName, row.accounts.id, null, row.accounts.siteId);
   }
 
   const routes = await db.select().from(schema.tokenRoutes).all();

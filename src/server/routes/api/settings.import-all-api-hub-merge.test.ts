@@ -19,11 +19,13 @@ describe('settings import all-api-hub merge route', () => {
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');
     const settingsRoutesModule = await import('./settings.js');
+    const customRoutesModule = await import('../../custom/register.js');
     db = dbModule.db;
     schema = dbModule.schema;
 
     app = Fastify();
     await app.register(settingsRoutesModule.settingsRoutes);
+    await app.register(customRoutesModule.registerCustomRoutes);
   });
 
   beforeEach(() => {

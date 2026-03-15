@@ -498,6 +498,7 @@ npm run dev
 npm run build          # Build frontend + backend
 npm run build:web      # Build frontend only (Vite)
 npm run build:server   # Build backend only (TypeScript)
+npm run dist:desktop:mac:intel # Build mac Intel (x64) desktop installer
 npm test               # Run all tests
 npm run test:watch     # Watch mode
 npm run db:generate    # Generate Drizzle migration files

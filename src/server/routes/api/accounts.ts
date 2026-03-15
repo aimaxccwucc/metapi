@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { db, schema } from '../../db/index.js';
+import { db, schema, runtimeDbDialect } from '../../db/index.js';
 import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { refreshBalance } from '../../services/balanceService.js';
 import { getAdapter } from '../../services/platforms/index.js';
@@ -25,8 +25,7 @@ import {
   type RuntimeHealthState,
 } from '../../services/accountHealthService.js';
 import { appendSessionTokenRebindHint } from '../../services/alertRules.js';
-import { withExplicitProxyRequestInit } from '../../services/siteProxy.js';
-import { repairAllAccountKeys } from '../../services/accountKeyRepairService.js';
+import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -47,6 +46,8 @@ type AccountCapabilities = {
   canRefreshBalance: boolean;
   proxyOnly: boolean;
 };
+
+type VerifyFailureReason = 'needs-user-id' | 'invalid-user-id' | 'shield-blocked' | null;
 
 function hasSessionTokenValue(value: string | null | undefined): boolean {
   return typeof value === 'string' && value.trim().length > 0;
@@ -79,6 +80,13 @@ function buildCapabilitiesFromCredentialMode(
 function buildCapabilitiesForAccount(account: typeof schema.accounts.$inferSelect): AccountCapabilities {
   const credentialMode = resolveStoredCredentialMode(account);
   return buildCapabilitiesFromCredentialMode(credentialMode, hasSessionTokenValue(account.accessToken));
+}
+
+function normalizeBatchIds(input: unknown): number[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((item) => Number.parseInt(String(item), 10))
+    .filter((id) => Number.isFinite(id) && id > 0);
 }
 
 function normalizePinnedFlag(input: unknown): boolean | null {
@@ -126,6 +134,10 @@ type LoginFailureInfo = {
   shieldBlocked: boolean;
 };
 
+const ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS = 10_000;
+const ACCOUNT_VERIFY_TIMEOUT_MS = 10_000;
+const ACCOUNT_VERIFY_DIAG_TIMEOUT_MS = 2_500;
+
 function normalizeLoginFailure(message: string | null | undefined): LoginFailureInfo {
   const raw = (message || '').trim();
   const lowered = raw.toLowerCase();
@@ -169,10 +181,65 @@ function summarizeAccountHealthRefresh(results: AccountHealthRefreshResult[]) {
   };
 }
 
+async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function isVerificationTimeoutError(error: unknown): boolean {
+  const name = typeof error === 'object' && error && 'name' in error
+    ? String((error as { name?: unknown }).name || '')
+    : '';
+  const message = typeof error === 'object' && error && 'message' in error
+    ? String((error as { message?: unknown }).message || '')
+    : String(error || '');
+  const lowered = `${name} ${message}`.toLowerCase();
+  return lowered.includes('timeout') || lowered.includes('timed out') || lowered.includes('abort');
+}
+
+function resolveUserIdFailureReason(message: string, hasProvidedUserId: boolean): VerifyFailureReason {
+  const lowered = String(message || '').trim().toLowerCase();
+  if (!lowered) return null;
+
+  if (
+    lowered.includes('mismatch')
+    || lowered.includes('not match')
+    || lowered.includes('invalid user id')
+    || lowered.includes('wrong user id')
+  ) {
+    return 'invalid-user-id';
+  }
+
+  if (
+    lowered.includes('missing new-api-user')
+    || lowered.includes('new-api-user required')
+    || lowered.includes('requires user id')
+    || lowered.includes('missing user id')
+  ) {
+    return 'needs-user-id';
+  }
+
+  if (lowered.includes('new-api-user') || lowered.includes('user id')) {
+    return hasProvidedUserId ? 'invalid-user-id' : 'needs-user-id';
+  }
+
+  return null;
+}
+
 async function refreshRuntimeHealthForRow(row: AccountWithSiteRow): Promise<AccountHealthRefreshResult> {
   const accountId = row.accounts.id;
   const username = row.accounts.username;
   const siteName = row.sites.name;
+  const capabilities = buildCapabilitiesForAccount(row.accounts);
 
   if ((row.accounts.status || 'active') === 'disabled' || (row.sites.status || 'active') === 'disabled') {
     setAccountRuntimeHealth(accountId, {
@@ -190,8 +257,23 @@ async function refreshRuntimeHealthForRow(row: AccountWithSiteRow): Promise<Acco
     };
   }
 
+  if (capabilities.proxyOnly) {
+    return {
+      accountId,
+      username,
+      siteName,
+      status: 'skipped',
+      state: 'unknown',
+      message: '仅代理账号不支持会话健康检查',
+    };
+  }
+
   try {
-    await refreshBalance(accountId);
+    await withTimeout(
+      () => refreshBalance(accountId),
+      ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS,
+      `站点健康检查超时（${Math.max(1, Math.round(ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS / 1000))}s）`,
+    );
     const refreshedAccount = await db.select().from(schema.accounts)
       .where(eq(schema.accounts.id, accountId))
       .get();
@@ -199,6 +281,7 @@ async function refreshRuntimeHealthForRow(row: AccountWithSiteRow): Promise<Acco
       accountStatus: refreshedAccount?.status || row.accounts.status,
       siteStatus: row.sites.status,
       extraConfig: refreshedAccount?.extraConfig ?? row.accounts.extraConfig,
+      sessionCapable: capabilities.canRefreshBalance,
     });
 
     return {
@@ -247,34 +330,6 @@ async function executeRefreshAccountRuntimeHealth(accountId?: number) {
   };
 }
 
-function buildAccountKeyRepairTaskDetailMessage(results: Awaited<ReturnType<typeof repairAllAccountKeys>>['results']): string {
-  if (!Array.isArray(results) || results.length === 0) return '';
-
-  const renderRows = (rows: typeof results, withReason = false) => {
-    const sliced = rows.slice(0, 12).map((item) => {
-      const base = `${item.accountName || `#${item.accountId}`} @ ${item.siteName || 'unknown-site'}`;
-      if (!withReason) return base;
-      const reason = String(item.message || item.reason || '').trim();
-      if (!reason) return base;
-      return reason.length <= 32 ? `${base}(${reason})` : `${base}(${reason.slice(0, 32)}...)`;
-    });
-    if (rows.length > 12) sliced.push(`...等${rows.length}个`);
-    return sliced.join('、');
-  };
-
-  const repairedRows = results.filter((item) => item.status === 'repaired' || item.status === 'created' || item.status === 'synced');
-  const alreadyRows = results.filter((item) => item.status === 'already_ok');
-  const skippedRows = results.filter((item) => item.status === 'skipped');
-  const failedRows = results.filter((item) => item.status === 'failed');
-
-  return [
-    `修复(${repairedRows.length}): ${repairedRows.length > 0 ? renderRows(repairedRows) : '-'}`,
-    `已正常(${alreadyRows.length}): ${alreadyRows.length > 0 ? renderRows(alreadyRows) : '-'}`,
-    `跳过(${skippedRows.length}): ${skippedRows.length > 0 ? renderRows(skippedRows, true) : '-'}`,
-    `失败(${failedRows.length}): ${failedRows.length > 0 ? renderRows(failedRows, true) : '-'}`,
-  ].join('\n');
-}
-
 export async function accountsRoutes(app: FastifyInstance) {
   // List all accounts (with site info)
   app.get('/api/accounts', async () => {
@@ -295,6 +350,19 @@ export async function accountsRoutes(app: FastifyInstance) {
     for (const row of todaySpendRows) {
       if (row.accountId == null) continue;
       spendByAccount[row.accountId] = Number(row.totalSpend || 0);
+    }
+
+    const modelCountRows = await db.select({
+      accountId: schema.modelAvailability.accountId,
+      modelCount: sql<number>`count(*)`,
+    }).from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.available, true))
+      .groupBy(schema.modelAvailability.accountId)
+      .all();
+    const modelCountByAccount: Record<number, number> = {};
+    for (const row of modelCountRows) {
+      if (row.accountId == null) continue;
+      modelCountByAccount[row.accountId] = Number(row.modelCount || 0);
     }
 
     // Aggregate today's checkin rewards per account
@@ -342,6 +410,11 @@ export async function accountsRoutes(app: FastifyInstance) {
           accountStatus: r.accounts.status,
           siteStatus: r.sites.status,
           extraConfig: r.accounts.extraConfig,
+          sessionCapable: buildCapabilitiesFromCredentialMode(
+            credentialMode,
+            hasSessionTokenValue(r.accounts.accessToken),
+          ).canRefreshBalance,
+          hasDiscoveredModels: (modelCountByAccount[r.accounts.id] || 0) > 0,
         }),
       };
     });
@@ -473,9 +546,122 @@ export async function accountsRoutes(app: FastifyInstance) {
     const adapter = getAdapter(site.platform);
     if (!adapter) return { success: false, message: `不支持的平台: ${site.platform}` };
 
+    const normalizedPlatform = String(adapter.platformName || site.platform || '').trim().toLowerCase();
+    const parsedPlatformUserId = typeof platformUserId === 'number' && Number.isFinite(platformUserId) && platformUserId > 0
+      ? Math.trunc(platformUserId)
+      : undefined;
+    const hasProvidedUserId = parsedPlatformUserId !== undefined;
+    const skipRawShieldDetection = normalizedPlatform === 'new-api' || normalizedPlatform === 'anyrouter';
+    const diagnoseVerificationFailure = async (): Promise<VerifyFailureReason> => {
+      const parseFailureReason = (bodyText: string, contentType: string): VerifyFailureReason => {
+        const text = bodyText || '';
+        const ct = (contentType || '').toLowerCase();
+        if (
+          !skipRawShieldDetection
+          && ct.includes('text/html')
+          && /var\s+arg1\s*=|acw_sc__v2|cdn_sec_tc|<script/i.test(text)
+        ) {
+          return 'shield-blocked';
+        }
+
+        try {
+          const body = JSON.parse(text) as any;
+          const message = typeof body?.message === 'string' ? body.message : '';
+          const userIdReason = resolveUserIdFailureReason(message, hasProvidedUserId);
+          if (userIdReason) return userIdReason;
+          if (!skipRawShieldDetection && /shield|challenge|captcha|acw_sc__v2|arg1/i.test(message)) {
+            return 'shield-blocked';
+          }
+        } catch { }
+
+        return null;
+      };
+
+      try {
+        const { fetch } = await import('undici');
+        const candidates = new Set<string>();
+        const raw = accessToken.startsWith('Bearer ') ? accessToken.slice(7).trim() : accessToken;
+        if (raw) {
+          if (raw.includes('=')) candidates.add(raw);
+          candidates.add(`session=${raw}`);
+          candidates.add(`token=${raw}`);
+        }
+
+        const diagnosticUserId = hasProvidedUserId ? String(parsedPlatformUserId) : '0';
+        const headerVariants: Record<string, string>[] = [
+          { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'New-Api-User': diagnosticUserId },
+        ];
+
+        for (const cookie of candidates) {
+          headerVariants.push({
+            Cookie: cookie,
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            ...(hasProvidedUserId ? { 'New-Api-User': diagnosticUserId } : {}),
+          });
+        }
+
+        for (const headers of headerVariants) {
+          try {
+            const testRes = await fetch(
+              `${site.url}/api/user/self`,
+              withSiteRecordProxyRequestInit(site, {
+                headers,
+                signal: AbortSignal.timeout(ACCOUNT_VERIFY_DIAG_TIMEOUT_MS),
+              }),
+            );
+            const bodyText = await testRes.text();
+            const contentType = testRes.headers.get('content-type') || '';
+            const reason = parseFailureReason(bodyText, contentType);
+            if (reason) return reason;
+          } catch { }
+        }
+      } catch { }
+
+      return null;
+    };
+    const buildVerificationFailureResponse = (failureReason: VerifyFailureReason) => {
+      if (failureReason === 'needs-user-id') {
+        return {
+          success: false,
+          needsUserId: true,
+          message: 'This site requires a user ID. Please fill in your site user ID.',
+        };
+      }
+
+      if (failureReason === 'invalid-user-id') {
+        return {
+          success: false,
+          invalidUserId: true,
+          message: 'The provided user ID does not match this token. Please check your site user ID.',
+        };
+      }
+
+      if (failureReason === 'shield-blocked') {
+        return {
+          success: false,
+          shieldBlocked: true,
+          message: 'This site is shielded by anti-bot challenge. Create an API key on the target site and import that key.',
+        };
+      }
+
+      return null;
+    };
+
+    if (!hasProvidedUserId && (normalizedPlatform === 'new-api' || normalizedPlatform === 'anyrouter')) {
+      const preflightReason = await diagnoseVerificationFailure();
+      if (preflightReason === 'needs-user-id') {
+        return buildVerificationFailureResponse(preflightReason);
+      }
+    }
+
     if (credentialMode === 'apikey') {
       try {
-        const models = await adapter.getModels(site.url, accessToken, platformUserId);
+        const models = await withTimeout(
+          () => adapter.getModels(site.url, accessToken, parsedPlatformUserId),
+          ACCOUNT_VERIFY_TIMEOUT_MS,
+          `Token verification timed out (${Math.max(1, Math.round(ACCOUNT_VERIFY_TIMEOUT_MS / 1000))}s)`,
+        );
         const availableModels = Array.isArray(models) ? models.filter((item) => typeof item === 'string' && item.trim().length > 0) : [];
         if (availableModels.length === 0) {
           return {
@@ -490,6 +676,10 @@ export async function accountsRoutes(app: FastifyInstance) {
           models: availableModels.slice(0, 10),
         };
       } catch (err: any) {
+        if (isVerificationTimeoutError(err)) {
+          const failure = buildVerificationFailureResponse(await diagnoseVerificationFailure());
+          if (failure) return failure;
+        }
         return {
           success: false,
           message: err?.message || 'API Key 验证失败',
@@ -499,8 +689,16 @@ export async function accountsRoutes(app: FastifyInstance) {
 
     let result: any;
     try {
-      result = await adapter.verifyToken(site.url, accessToken, platformUserId);
+      result = await withTimeout(
+        () => adapter.verifyToken(site.url, accessToken, parsedPlatformUserId),
+        ACCOUNT_VERIFY_TIMEOUT_MS,
+        `Token verification timed out (${Math.max(1, Math.round(ACCOUNT_VERIFY_TIMEOUT_MS / 1000))}s)`,
+      );
     } catch (err: any) {
+      if (isVerificationTimeoutError(err)) {
+        const failure = buildVerificationFailureResponse(await diagnoseVerificationFailure());
+        if (failure) return failure;
+      }
       return {
         success: false,
         message: appendSessionTokenRebindHint(err?.message || 'Token 验证失败'),
@@ -533,14 +731,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     // Try to explain unknown failures: missing user id vs anti-bot challenge page.
-    const normalizedPlatform = String(adapter.platformName || site.platform || '').trim().toLowerCase();
-    // New-API family already runs shield-aware probing inside adapters.
-    // Raw fallback probe below does not include challenge-solving and can
-    // misclassify valid Cookie/Session flows as shield-blocked.
-    const skipRawShieldDetection = normalizedPlatform === 'new-api' || normalizedPlatform === 'anyrouter';
-    type VerifyFailureReason = 'needs-user-id' | 'shield-blocked' | null;
     const detectVerifyFailureReason = async (): Promise<VerifyFailureReason> => {
-      const deadlineAt = Date.now() + 8_000;
       const parseFailureReason = (bodyText: string, contentType: string): VerifyFailureReason => {
         const text = bodyText || '';
         const ct = (contentType || '').toLowerCase();
@@ -555,7 +746,8 @@ export async function accountsRoutes(app: FastifyInstance) {
         try {
           const body = JSON.parse(text) as any;
           const message = typeof body?.message === 'string' ? body.message : '';
-          if (/mismatch|new-api-user|user id/i.test(message)) return 'needs-user-id';
+          const userIdReason = resolveUserIdFailureReason(message, hasProvidedUserId);
+          if (userIdReason) return userIdReason;
           if (!skipRawShieldDetection && /shield|challenge|captcha|acw_sc__v2|arg1/i.test(message)) {
             return 'shield-blocked';
           }
@@ -574,8 +766,9 @@ export async function accountsRoutes(app: FastifyInstance) {
           candidates.add(`token=${raw}`);
         }
 
+        const diagnosticUserId = hasProvidedUserId ? String(parsedPlatformUserId) : '0';
         const headerVariants: Record<string, string>[] = [
-          { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'New-Api-User': '0' },
+          { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', 'New-Api-User': diagnosticUserId },
         ];
 
         for (const cookie of candidates) {
@@ -583,13 +776,19 @@ export async function accountsRoutes(app: FastifyInstance) {
             Cookie: cookie,
             'Content-Type': 'application/json',
             'X-Requested-With': 'XMLHttpRequest',
+            ...(hasProvidedUserId ? { 'New-Api-User': diagnosticUserId } : {}),
           });
         }
 
         for (const headers of headerVariants) {
-          if (Date.now() > deadlineAt) break;
           try {
-            const testRes = await fetch(`${site.url}/api/user/self`, withExplicitProxyRequestInit(site.proxyUrl, { headers }));
+            const testRes = await fetch(
+              `${site.url}/api/user/self`,
+              withSiteRecordProxyRequestInit(site, {
+                headers,
+                signal: AbortSignal.timeout(ACCOUNT_VERIFY_DIAG_TIMEOUT_MS),
+              }),
+            );
             const bodyText = await testRes.text();
             const contentType = testRes.headers.get('content-type') || '';
             const reason = parseFailureReason(bodyText, contentType);
@@ -607,6 +806,14 @@ export async function accountsRoutes(app: FastifyInstance) {
         success: false,
         needsUserId: true,
         message: 'This site requires a user ID. Please fill in your site user ID.',
+      };
+    }
+
+    if (failureReason === 'invalid-user-id') {
+      return {
+        success: false,
+        invalidUserId: true,
+        message: 'The provided user ID does not match this token. Please check your site user ID.',
       };
     }
 
@@ -747,7 +954,7 @@ export async function accountsRoutes(app: FastifyInstance) {
   );
 
   // Add an account (manual credential input)
-  app.post<{ Body: { siteId: number; username?: string; accessToken: string; apiToken?: string; platformUserId?: number; checkinEnabled?: boolean; credentialMode?: AccountCredentialMode; refreshToken?: string; tokenExpiresAt?: number | string; allowUnverified?: boolean; preverified?: { tokenType?: 'session' | 'apikey'; username?: string; apiToken?: string } } }>('/api/accounts', async (request, reply) => {
+  app.post<{ Body: { siteId: number; username?: string; accessToken: string; apiToken?: string; platformUserId?: number; checkinEnabled?: boolean; credentialMode?: AccountCredentialMode; refreshToken?: string; tokenExpiresAt?: number | string; skipModelFetch?: boolean; allowUnverified?: boolean; preverified?: { tokenType?: 'session' | 'apikey'; username?: string; apiToken?: string } } }>('/api/accounts', async (request, reply) => {
     const body = request.body;
     const site = await db.select().from(schema.sites).where(eq(schema.sites.id, body.siteId)).get();
     if (!site) {
@@ -760,7 +967,6 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     const credentialMode = resolveRequestedCredentialMode(body.credentialMode);
-    const allowUnverified = body.allowUnverified === true;
     const rawAccessToken = (body.accessToken || '').trim();
     if (!rawAccessToken) {
       return reply.code(400).send({ success: false, message: '请填写 Token' });
@@ -770,8 +976,9 @@ export async function accountsRoutes(app: FastifyInstance) {
     let accessToken = rawAccessToken;
     let apiToken = (body.apiToken || '').trim();
     let tokenType: 'session' | 'apikey' | 'unknown' = 'unknown';
-    let isUnverifiedBinding = false;
     let verifiedModels: string[] = [];
+    let isUnverifiedBinding = false;
+    const allowUnverified = body.allowUnverified === true;
     const preverified = body.preverified && typeof body.preverified === 'object'
       ? body.preverified
       : null;
@@ -789,29 +996,35 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     if (tokenType === 'unknown' && credentialMode === 'apikey') {
-      try {
-        const models = await adapter.getModels(site.url, rawAccessToken, body.platformUserId);
-        verifiedModels = Array.isArray(models)
-          ? models.filter((item) => typeof item === 'string' && item.trim().length > 0)
-          : [];
-      } catch (err: any) {
-        return reply.code(400).send({
-          success: false,
-          message: err?.message || 'API Key 验证失败',
-        });
-      }
+      if (body.skipModelFetch === true) {
+        tokenType = 'apikey';
+        accessToken = '';
+        if (!apiToken) apiToken = rawAccessToken;
+      } else {
+        try {
+          const models = await adapter.getModels(site.url, rawAccessToken, body.platformUserId);
+          verifiedModels = Array.isArray(models)
+            ? models.filter((item) => typeof item === 'string' && item.trim().length > 0)
+            : [];
+        } catch (err: any) {
+          return reply.code(400).send({
+            success: false,
+            message: err?.message || 'API Key 验证失败',
+          });
+        }
 
-      if (verifiedModels.length === 0) {
-        return reply.code(400).send({
-          success: false,
-          requiresVerification: true,
-          message: 'API Key 验证失败：未获取到可用模型',
-        });
-      }
+        if (verifiedModels.length === 0) {
+          return reply.code(400).send({
+            success: false,
+            requiresVerification: true,
+            message: 'API Key 验证失败：未获取到可用模型',
+          });
+        }
 
-      tokenType = 'apikey';
-      accessToken = '';
-      if (!apiToken) apiToken = rawAccessToken;
+        tokenType = 'apikey';
+        accessToken = '';
+        if (!apiToken) apiToken = rawAccessToken;
+      }
     } else if (tokenType === 'unknown') {
       let verifyResult: any;
       try {
@@ -829,11 +1042,11 @@ export async function accountsRoutes(app: FastifyInstance) {
           tokenType = 'session';
           isUnverifiedBinding = true;
         } else {
-        return reply.code(400).send({
-          success: false,
-          requiresVerification: true,
-          message: 'Token 验证失败，请先点击“验证 Token”，验证成功后再绑定账号',
-        });
+          return reply.code(400).send({
+            success: false,
+            requiresVerification: true,
+            message: 'Token 验证失败，请先点击“验证 Token”，验证成功后再绑定账号',
+          });
         }
       }
 
@@ -934,10 +1147,13 @@ export async function accountsRoutes(app: FastifyInstance) {
         if (tokenType === 'session') {
           try { await refreshBalance(accountId); } catch { }
         }
-        try {
-          await refreshModelsForAccount(accountId);
-          rebuildTokenRoutesFromAvailability();
-        } catch { }
+
+        if (body.skipModelFetch !== true) {
+          try {
+            await refreshModelsForAccount(accountId);
+            await rebuildTokenRoutesFromAvailability();
+          } catch { }
+        }
         return { accountId };
       });
       initializationTaskId = initializationTask.task.id;
@@ -956,10 +1172,10 @@ export async function accountsRoutes(app: FastifyInstance) {
       capabilities,
       modelCount: verifiedModels.length,
       apiTokenFound: !!apiToken,
-      usernameDetected: !!(!body.username && username),
       queued: initializationQueued,
       initTaskId: initializationTaskId || undefined,
       unverified: isUnverifiedBinding,
+      usernameDetected: !!(!body.username && username),
     };
   });
 
@@ -1026,6 +1242,14 @@ export async function accountsRoutes(app: FastifyInstance) {
     updates.updatedAt = new Date().toISOString();
     await db.update(schema.accounts).set(updates).where(eq(schema.accounts.id, id)).run();
 
+    const nextAccessToken = typeof updates.accessToken === 'string' ? updates.accessToken : account.accessToken;
+    const nextExtraConfig = typeof updates.extraConfig === 'string' ? updates.extraConfig : account.extraConfig;
+    const explicitNextMode = getCredentialModeFromExtraConfig(nextExtraConfig);
+    const nextCredentialMode =
+      explicitNextMode && explicitNextMode !== 'auto'
+        ? explicitNextMode
+        : (hasSessionTokenValue(nextAccessToken) ? 'session' : 'apikey');
+
     if (typeof updates.apiToken === 'string' && updates.apiToken.trim()) {
       try {
         await ensureDefaultTokenForAccount(id, updates.apiToken, { name: 'default', source: 'manual' });
@@ -1048,6 +1272,68 @@ export async function accountsRoutes(app: FastifyInstance) {
       await rebuildTokenRoutesFromAvailability();
     } catch { }
     return { success: true };
+  });
+
+  app.post<{ Body?: { ids?: number[]; action?: string } }>('/api/accounts/batch', async (request, reply) => {
+    const ids = normalizeBatchIds(request.body?.ids);
+    const action = String(request.body?.action || '').trim();
+    if (ids.length === 0) {
+      return reply.code(400).send({ message: 'ids is required' });
+    }
+    if (!['enable', 'disable', 'delete', 'refreshBalance'].includes(action)) {
+      return reply.code(400).send({ message: 'Invalid action' });
+    }
+
+    const successIds: number[] = [];
+    const failedItems: Array<{ id: number; message: string }> = [];
+    let shouldRebuildRoutes = false;
+
+    for (const id of ids) {
+      try {
+        if (action === 'refreshBalance') {
+          const result = await refreshBalance(id);
+          if (!result) {
+            failedItems.push({ id, message: 'Account not found or balance refresh unsupported' });
+            continue;
+          }
+          successIds.push(id);
+          continue;
+        }
+
+        const existing = await db.select().from(schema.accounts).where(eq(schema.accounts.id, id)).get();
+        if (!existing) {
+          failedItems.push({ id, message: 'Account not found' });
+          continue;
+        }
+
+        if (action === 'delete') {
+          await db.delete(schema.accounts).where(eq(schema.accounts.id, id)).run();
+          shouldRebuildRoutes = true;
+        } else {
+          const nextStatus = action === 'enable' ? 'active' : 'disabled';
+          await db.update(schema.accounts)
+            .set({ status: nextStatus, updatedAt: new Date().toISOString() })
+            .where(eq(schema.accounts.id, id))
+            .run();
+        }
+
+        successIds.push(id);
+      } catch (error: any) {
+        failedItems.push({ id, message: error?.message || 'Batch operation failed' });
+      }
+    }
+
+    if (shouldRebuildRoutes) {
+      try {
+        await rebuildTokenRoutesFromAvailability();
+      } catch { }
+    }
+
+    return {
+      success: true,
+      successIds,
+      failedItems,
+    };
   });
 
   app.post<{ Body?: { accountId?: number; wait?: boolean } }>('/api/accounts/health/refresh', async (request, reply) => {
@@ -1102,49 +1388,6 @@ export async function accountsRoutes(app: FastifyInstance) {
     });
   });
 
-  app.post<{ Body?: { wait?: boolean } }>('/api/accounts/keys/repair', async (request, reply) => {
-    if (request.body?.wait) {
-      const result = await repairAllAccountKeys();
-      return { success: true, ...result };
-    }
-
-    const { task, reused } = startBackgroundTask(
-      {
-        type: 'token',
-        title: '账号 Key 一键修复',
-        dedupeKey: 'repair-all-account-keys',
-        notifyOnFailure: true,
-        successTitle: (currentTask) => {
-          const summary = (currentTask.result as Awaited<ReturnType<typeof repairAllAccountKeys>> | null)?.summary;
-          if (!summary) return '账号 Key 一键修复已完成';
-          return `账号 Key 一键修复已完成（修复${summary.repaired + summary.created + summary.synced}/失败${summary.failed}/跳过${summary.skipped}）`;
-        },
-        failureTitle: () => '账号 Key 一键修复失败',
-        successMessage: (currentTask) => {
-          const payload = (currentTask.result as Awaited<ReturnType<typeof repairAllAccountKeys>> | null);
-          if (!payload?.summary) return '账号 Key 一键修复任务已完成';
-          const detail = buildAccountKeyRepairTaskDetailMessage(payload.results || []);
-          return detail
-            ? `账号 Key 一键修复完成：修复 ${payload.summary.repaired + payload.summary.created + payload.summary.synced}，已正常 ${payload.summary.alreadyOk}，跳过 ${payload.summary.skipped}，失败 ${payload.summary.failed}\n${detail}`
-            : `账号 Key 一键修复完成：修复 ${payload.summary.repaired + payload.summary.created + payload.summary.synced}，已正常 ${payload.summary.alreadyOk}，跳过 ${payload.summary.skipped}，失败 ${payload.summary.failed}`;
-        },
-        failureMessage: (currentTask) => `账号 Key 一键修复失败：${currentTask.error || 'unknown error'}`,
-      },
-      async () => repairAllAccountKeys(),
-    );
-
-    return reply.code(202).send({
-      success: true,
-      queued: true,
-      reused,
-      jobId: task.id,
-      status: task.status,
-      message: reused
-        ? '账号 Key 修复任务执行中，请稍后查看任务中心'
-        : '已开始账号 Key 一键修复，请稍后查看任务中心',
-    });
-  });
-
   // Refresh balance for an account
   app.post<{ Params: { id: string } }>('/api/accounts/:id/balance', async (request, reply) => {
     const id = parseInt(request.params.id);
@@ -1160,6 +1403,145 @@ export async function accountsRoutes(app: FastifyInstance) {
       return { message: err?.message || 'failed to fetch balance' };
     }
   });
+
+  // Get model list for an account (available models + disabled status at site level)
+  app.get<{ Params: { id: string } }>('/api/accounts/:id/models', async (request, reply) => {
+    const accountId = parseInt(request.params.id, 10);
+    if (!Number.isFinite(accountId) || accountId <= 0) {
+      return reply.code(400).send({ message: '账号 ID 无效' });
+    }
+
+    const account = await db.select().from(schema.accounts)
+      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .where(eq(schema.accounts.id, accountId))
+      .get();
+
+    if (!account) {
+      return reply.code(404).send({ message: '账号不存在' });
+    }
+
+    const siteId = account.accounts.siteId;
+
+    // Get available models for this account
+    const modelRows = await db.select({
+      modelName: schema.modelAvailability.modelName,
+      available: schema.modelAvailability.available,
+      latencyMs: schema.modelAvailability.latencyMs,
+      isManual: schema.modelAvailability.isManual,
+    }).from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.accountId, accountId))
+      .all();
+
+    // Get disabled models for this site
+    const disabledRows = await db.select({
+      modelName: schema.siteDisabledModels.modelName,
+    }).from(schema.siteDisabledModels)
+      .where(eq(schema.siteDisabledModels.siteId, siteId))
+      .all();
+
+    const disabledSet = new Set(disabledRows.map((r) => r.modelName));
+
+    const models = modelRows
+      .filter((r) => r.available)
+      .map((r) => ({
+        name: r.modelName,
+        latencyMs: r.latencyMs,
+        disabled: disabledSet.has(r.modelName),
+        isManual: !!r.isManual,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    return {
+      siteId,
+      siteName: account.sites.name,
+      models,
+      totalCount: models.length,
+      disabledCount: models.filter((m) => m.disabled).length,
+    };
+  });
+
+  // Add models manually to an account
+  app.post<{ Params: { id: string }; Body: { models: string[] } }>('/api/accounts/:id/models/manual', async (request, reply) => {
+    const accountId = parseInt(request.params.id, 10);
+    if (!Number.isFinite(accountId) || accountId <= 0) {
+      return reply.code(400).send({ message: '账号 ID 无效' });
+    }
+
+    const { models } = request.body;
+    if (!Array.isArray(models) || models.length === 0) {
+      return reply.code(400).send({ message: '模型列表不能为空' });
+    }
+
+    const normalizedModels = Array.from(new Set(models.map(m => String(m).trim()).filter(m => m.length > 0)));
+    if (normalizedModels.length === 0) {
+      return reply.code(400).send({ message: '模型列表不能为空' });
+    }
+
+    const account = await db.select().from(schema.accounts)
+      .where(eq(schema.accounts.id, accountId))
+      .get();
+
+    if (!account) {
+      return reply.code(404).send({ message: '账号不存在' });
+    }
+
+    try {
+      await db.transaction(async (tx) => {
+        const checkedAt = new Date().toISOString();
+        for (const modelName of normalizedModels) {
+          if (runtimeDbDialect === 'mysql') {
+            const existing = await tx.select()
+              .from(schema.modelAvailability)
+              .where(and(eq(schema.modelAvailability.accountId, accountId), eq(schema.modelAvailability.modelName, modelName)))
+              .get();
+
+            if (existing) {
+              await tx.update(schema.modelAvailability)
+                .set({ available: true, latencyMs: null, isManual: true, checkedAt })
+                .where(eq(schema.modelAvailability.id, existing.id))
+                .run();
+            } else {
+              await tx.insert(schema.modelAvailability).values({
+                accountId,
+                modelName,
+                available: true,
+                isManual: true,
+                latencyMs: null,
+                checkedAt,
+              }).run();
+            }
+          } else {
+            // SQLite / PostgreSQL path
+            await (tx.insert(schema.modelAvailability)
+              .values({
+                accountId,
+                modelName,
+                available: true,
+                isManual: true,
+                latencyMs: null,
+                checkedAt,
+              }) as any)
+              .onConflictDoUpdate({
+                target: [schema.modelAvailability.accountId, schema.modelAvailability.modelName],
+                set: {
+                  available: true,
+                  isManual: true,
+                  latencyMs: null,
+                  checkedAt,
+                },
+              })
+              .run();
+          }
+        }
+      });
+
+      try {
+        await rebuildTokenRoutesFromAvailability();
+      } catch { }
+
+      return { success: true };
+    } catch (err: any) {
+      return reply.code(500).send({ success: false, message: err?.message || '保存失败' });
+    }
+  });
 }
-
-

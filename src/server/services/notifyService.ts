@@ -218,7 +218,8 @@ export async function sendNotification(
   }
 
   if (config.telegramEnabled && config.telegramBotToken && config.telegramChatId) {
-    const telegramApiUrl = `https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`;
+    const telegramApiBaseUrl = String(config.telegramApiBaseUrl || 'https://api.telegram.org').replace(/\/+$/, '');
+    const telegramApiUrl = `${telegramApiBaseUrl}/bot${config.telegramBotToken}/sendMessage`;
     const text = buildTelegramText(title, resolvedMessage, level, timeFootnote);
     tasks.push({
       channel: 'telegram',

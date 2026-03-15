@@ -390,6 +390,7 @@ npm run dev
 npm run build          # 构建前端 + 后端
 npm run build:web      # 仅构建前端（Vite）
 npm run build:server   # 仅构建后端（TypeScript）
+npm run dist:desktop:mac:intel # 构建 mac Intel (x64) 桌面安装包
 npm test               # 运行全部测试
 npm run test:watch     # 监听模式
 npm run db:generate    # 生成 Drizzle 迁移文件

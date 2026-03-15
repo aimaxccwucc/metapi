@@ -198,4 +198,28 @@ describe('notifyService', () => {
     expect(payload.text || '').toContain('Local Time:');
     expect(payload.text || '').toContain('UTC Time:');
   });
+
+  it('uses TELEGRAM_API_BASE_URL when configured', async () => {
+    const { config } = await import('../config.js');
+    (config as any).telegramEnabled = true;
+    (config as any).telegramBotToken = '123456:telegram-token';
+    (config as any).telegramChatId = '-1001234567890';
+    (config as any).telegramApiBaseUrl = 'https://tg-proxy.example.com/custom/';
+    config.smtpEnabled = false;
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+    });
+
+    const { sendNotification } = await import('./notifyService.js');
+    await sendNotification('测试通知', 'message', 'warning', { bypassThrottle: true, throwOnFailure: true });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://tg-proxy.example.com/custom/bot123456:telegram-token/sendMessage',
+      expect.objectContaining({
+        method: 'POST',
+      }),
+    );
+  });
 });
