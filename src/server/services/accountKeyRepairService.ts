@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
 import { ensureDefaultTokenForAccount, repairDefaultToken, syncTokensFromUpstream } from './accountTokenService.js';
+import { resolvePreferredTokenGroup } from './modelPricingService.js';
 import { getAdapter } from './platforms/index.js';
 
 export type AccountKeyRepairStatus = 'already_ok' | 'repaired' | 'created' | 'synced' | 'skipped' | 'failed';
@@ -214,8 +215,26 @@ async function repairSingleAccount(row: AccountWithSiteRow): Promise<AccountKeyR
     }
 
     if (upstreamTokens.length === 0) {
+      const availableGroups = await adapter.getUserGroups(site.url, accessToken, platformUserId).catch(() => ['default']);
+      const preferredGroup = await resolvePreferredTokenGroup({
+        site: {
+          id: site.id,
+          url: site.url,
+          platform: site.platform,
+          apiKey: site.apiKey,
+        },
+        account: {
+          id: account.id,
+          accessToken: account.accessToken,
+          apiToken: account.apiToken,
+        },
+        modelName: '__default__',
+        totalTokens: 0,
+        availableGroups,
+      });
       const created = await adapter.createApiToken(site.url, accessToken, platformUserId, {
         name: 'metapi-default',
+        group: preferredGroup.group,
       });
       if (!created) {
         return {

@@ -34,7 +34,7 @@ type RecoveryMigration = RecoveryMigrationRecord & {
   statements: string[];
 };
 
-const VERIFIED_BOOTSTRAP_TAG = '0009_model_availability_is_manual';
+const VERIFIED_BOOTSTRAP_TAG = '0011_fuzzy_vulcan';
 const VERIFIED_SCHEMA_MARKERS: SchemaMarker[] = [
   { table: 'sites' },
   { table: 'settings' },
@@ -57,6 +57,22 @@ const VERIFIED_SCHEMA_MARKERS: SchemaMarker[] = [
   { table: 'account_tokens', column: 'token_group' },
   // 0009: is_manual column on model_availability
   { table: 'model_availability', column: 'is_manual' },
+  // 0010: site health columns
+  { table: 'sites', column: 'health_status' },
+  { table: 'sites', column: 'health_reason' },
+  { table: 'sites', column: 'health_checked_at' },
+  // 0011: route model circuits table
+  { table: 'route_model_circuits' },
+  { table: 'route_model_circuits', column: 'channel_id' },
+  { table: 'route_model_circuits', column: 'model_name' },
+  { table: 'route_model_circuits', column: 'state' },
+  { table: 'route_model_circuits', column: 'fail_count' },
+  { table: 'route_model_circuits', column: 'opened_at' },
+  { table: 'route_model_circuits', column: 'open_until' },
+  { table: 'route_model_circuits', column: 'last_error_at' },
+  { table: 'route_model_circuits', column: 'last_success_at' },
+  { table: 'route_model_circuits', column: 'probe_in_flight' },
+  { table: 'route_model_circuits', column: 'updated_at' },
 ];
 
 
@@ -142,9 +158,36 @@ function normalizeSqlForMatch(sqlText: string): string {
 
 function extractFailedSqlFromError(error: unknown): string | null {
   const message = normalizeSchemaErrorMessage(error);
-  const matched = message.match(/Failed to run the query '([\s\S]*?)'/i);
-  const sqlText = matched?.[1]?.trim();
-  return sqlText && sqlText.length > 0 ? sqlText : null;
+  const marker = 'Failed to run the query ';
+  const markerIndex = message.search(/failed to run the query /i);
+  if (markerIndex < 0) return null;
+
+  const quotedStart = message.indexOf("'", markerIndex + marker.length - 1);
+  if (quotedStart < 0) return null;
+
+  let quotedEnd = -1;
+  for (let index = quotedStart + 1; index < message.length; index += 1) {
+    if (message[index] !== "'") continue;
+    const remainder = message.slice(index + 1).trimStart().toLowerCase();
+    if (
+      remainder.length === 0
+      || remainder.startsWith('duplicate ')
+      || remainder.startsWith('sqliteerror:')
+      || remainder.startsWith('error:')
+      || remainder.startsWith('|')
+    ) {
+      quotedEnd = index;
+      break;
+    }
+  }
+
+  if (quotedEnd < 0) {
+    quotedEnd = message.lastIndexOf("'");
+    if (quotedEnd <= quotedStart) return null;
+  }
+
+  const sqlText = message.slice(quotedStart + 1, quotedEnd).trim();
+  return sqlText.length > 0 ? sqlText : null;
 }
 
 function findMatchingSingleStatementMigration(
@@ -405,14 +448,16 @@ export function runSqliteMigrations(): void {
   const sqlite = new Database(dbPath);
   bootstrapLegacyDrizzleMigrations(sqlite, migrationsFolder);
 
-  try {
-    migrate(drizzle(sqlite), { migrationsFolder });
-  } catch (error) {
-    if (!tryRecoverDuplicateColumnMigrationError(sqlite, migrationsFolder, error)) {
-      sqlite.close();
-      throw error;
+  for (;;) {
+    try {
+      migrate(drizzle(sqlite), { migrationsFolder });
+      break;
+    } catch (error) {
+      if (!tryRecoverDuplicateColumnMigrationError(sqlite, migrationsFolder, error)) {
+        sqlite.close();
+        throw error;
+      }
     }
-    migrate(drizzle(sqlite), { migrationsFolder });
   }
 
   sqlite.close();

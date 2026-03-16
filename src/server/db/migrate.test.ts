@@ -26,7 +26,14 @@ function applyMigrationSql(sqlite: Database.Database, sqlText: string) {
     .filter((statement) => statement.length > 0);
 
   for (const statement of statements) {
-    sqlite.exec(statement);
+    try {
+      sqlite.exec(statement);
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error || '').toLowerCase();
+      if (!message.includes('duplicate column')) {
+        throw error;
+      }
+    }
   }
 }
 
@@ -208,6 +215,23 @@ describe('sqlite migrate bootstrap', () => {
     sqlite.close();
   });
 
+  it('extracts failed SQL when the statement contains quoted literals', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'metapi-migrate-extract-failed-sql-'));
+    process.env.DATA_DIR = dataDir;
+    vi.resetModules();
+
+    const migrateModule = await import('./migrate.js');
+    const { __migrateTestUtils } = migrateModule;
+
+    const error = new Error(
+      "DrizzleError: Failed to run the query 'ALTER TABLE `sites` ADD `health_status` text DEFAULT 'unknown' NOT NULL;' duplicate column name: health_status",
+    );
+
+    expect(__migrateTestUtils.extractFailedSqlFromError(error)).toBe(
+      "ALTER TABLE `sites` ADD `health_status` text DEFAULT 'unknown' NOT NULL;",
+    );
+  });
+
   it('recovers duplicate-column errors inside multi-statement migrations by replaying the full migration', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'metapi-migrate-recover-multi-'));
     process.env.DATA_DIR = dataDir;
@@ -283,6 +307,8 @@ describe('sqlite migrate bootstrap', () => {
       '0007_account_token_group',
       '0008_sqlite_schema_backfill',
       '0009_model_availability_is_manual',
+      '0010_site_health_status',
+      '0011_fuzzy_vulcan',
     ]);
     const appliedEntries = journalEntries.filter((entry) => !missingTags.has(entry.tag));
 

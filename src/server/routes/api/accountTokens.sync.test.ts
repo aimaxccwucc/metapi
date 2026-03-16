@@ -6,11 +6,16 @@ import { mkdtempSync } from 'node:fs';
 import { and, eq, sql } from 'drizzle-orm';
 import { mergeAccountExtraConfig } from '../../services/accountExtraConfig.js';
 
+const undiciFetchMock = vi.fn();
 const getApiTokensMock = vi.fn();
 const getApiTokenMock = vi.fn();
 const createApiTokenMock = vi.fn();
 const getUserGroupsMock = vi.fn();
 const deleteApiTokenMock = vi.fn();
+
+vi.mock('undici', () => ({
+  fetch: (...args: unknown[]) => undiciFetchMock(...args),
+}));
 
 vi.mock('../../services/platforms/index.js', () => ({
   getAdapter: () => ({
@@ -72,6 +77,7 @@ describe('account tokens sync routes with site status', () => {
   });
 
   beforeEach(async () => {
+    undiciFetchMock.mockReset();
     getApiTokensMock.mockReset();
     getApiTokenMock.mockReset();
     createApiTokenMock.mockReset();
@@ -415,6 +421,39 @@ describe('account tokens sync routes with site status', () => {
     const { account } = await seedAccount({ siteStatus: 'active' });
     getUserGroupsMock.mockResolvedValue(['default', 'vip']);
 
+    undiciFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        data: [
+          {
+            model_name: 'gpt-4o',
+            quota_type: 0,
+            model_ratio: 1,
+            completion_ratio: 1,
+            model_price: null,
+            enable_groups: ['default', 'vip'],
+          },
+        ],
+        group_ratio: { default: 1, vip: 0.25 },
+      }),
+      text: async () => JSON.stringify({
+        success: true,
+        data: [
+          {
+            model_name: 'gpt-4o',
+            quota_type: 0,
+            model_ratio: 1,
+            completion_ratio: 1,
+            model_price: null,
+            enable_groups: ['default', 'vip'],
+          },
+        ],
+        group_ratio: { default: 1, vip: 0.25 },
+      }),
+    } as any);
+
     const response = await app.inject({
       method: 'GET',
       url: `/api/account-tokens/groups/${account.id}`,
@@ -424,6 +463,7 @@ describe('account tokens sync routes with site status', () => {
     expect(response.json()).toMatchObject({
       success: true,
       groups: ['default', 'vip'],
+      groupRatios: { default: 1, vip: 0.25 },
     });
     expect(getUserGroupsMock).toHaveBeenCalledTimes(1);
   });

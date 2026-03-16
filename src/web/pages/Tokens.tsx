@@ -18,6 +18,31 @@ type TokensPanelProps = {
   onEmbeddedActionsChange?: (actions: React.ReactNode | null) => void;
 };
 
+type AccountTokenGroupResponse = {
+  success?: boolean;
+  groups?: string[];
+  groupRatios?: Record<string, number>;
+};
+
+const normalizeGroupRatios = (value: unknown): Record<string, number> => {
+  if (!value || typeof value !== 'object') return {};
+  const result: Record<string, number> = {};
+  for (const [key, rawRatio] of Object.entries(value as Record<string, unknown>)) {
+    const group = String(key || '').trim();
+    const ratio = Number(rawRatio);
+    if (!group || !Number.isFinite(ratio) || ratio <= 0) continue;
+    result[group] = ratio;
+  }
+  return result;
+};
+
+const formatGroupRatioLabel = (group: string, ratios: Record<string, number>) => {
+  const ratio = ratios[group];
+  if (!Number.isFinite(ratio) || ratio <= 0) return group;
+  const normalizedRatio = Number.isInteger(ratio) ? String(ratio) : ratio.toFixed(2).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+  return `${group} (${normalizedRatio}x)`;
+};
+
 type AccountTokenSyncResult = {
   status?: string;
   success?: boolean;
@@ -150,8 +175,10 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     isDefault: false,
   });
   const [groupOptions, setGroupOptions] = useState<string[]>(['default']);
+  const [groupRatios, setGroupRatios] = useState<Record<string, number>>({});
   const [groupLoading, setGroupLoading] = useState(false);
   const [editGroupOptions, setEditGroupOptions] = useState<string[]>(['default']);
+  const [editGroupRatios, setEditGroupRatios] = useState<Record<string, number>>({});
   const [editGroupLoading, setEditGroupLoading] = useState(false);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -196,13 +223,14 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     if (!showAdd || !form.accountId) {
       setGroupLoading(false);
       setGroupOptions(['default']);
+      setGroupRatios({});
       return;
     }
 
     let cancelled = false;
     setGroupLoading(true);
     api.getAccountTokenGroups(form.accountId)
-      .then((res: any) => {
+      .then((res: AccountTokenGroupResponse) => {
         if (cancelled) return;
         const groups = Array.isArray(res?.groups)
           ? res.groups.map((item: any) => String(item || '').trim()).filter(Boolean)
@@ -210,6 +238,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
         const normalized = Array.from(new Set(groups));
         const nextOptions = normalized.length > 0 ? normalized : ['default'];
         setGroupOptions(nextOptions);
+        setGroupRatios(normalizeGroupRatios(res?.groupRatios));
         setForm((prev) => {
           if (nextOptions.includes(prev.group)) return prev;
           return { ...prev, group: nextOptions[0] };
@@ -218,6 +247,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       .catch((error: any) => {
         if (cancelled) return;
         setGroupOptions(['default']);
+        setGroupRatios({});
         setForm((prev) => ({ ...prev, group: 'default' }));
         toast.error(error?.message || '拉取分组失败，已回退 default');
       })
@@ -235,6 +265,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     if (!editingToken?.id || !editingToken?.accountId) {
       setEditGroupLoading(false);
       setEditGroupOptions(['default']);
+      setEditGroupRatios({});
       return;
     }
 
@@ -242,12 +273,13 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     let cancelled = false;
     setEditGroupLoading(true);
     api.getAccountTokenGroups(editingToken.accountId)
-      .then((res: any) => {
+      .then((res: AccountTokenGroupResponse) => {
         if (cancelled) return;
         const groups = Array.isArray(res?.groups)
           ? res.groups.map((item: any) => String(item || '').trim()).filter(Boolean)
           : [];
         const normalized = Array.from(new Set(groups));
+        setEditGroupRatios(normalizeGroupRatios(res?.groupRatios));
         setEditGroupOptions((current) => {
           const next = normalized.length > 0 ? normalized : ['default'];
           if (next.includes(currentGroup)) return next;
@@ -256,6 +288,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       })
       .catch((error: any) => {
         if (cancelled) return;
+        setEditGroupRatios({});
         setEditGroupOptions((current) => (current.includes(currentGroup) ? current : [...current, currentGroup]));
         toast.error(error?.message || '拉取分组失败，已保留当前分组');
       })
@@ -805,7 +838,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                   onChange={(nextValue) => setEditForm((prev) => ({ ...prev, group: nextValue || 'default' }))}
                   options={(editGroupOptions.length > 0 ? editGroupOptions : ['default']).map((group) => ({
                     value: group,
-                    label: group,
+                    label: formatGroupRatioLabel(group, editGroupRatios),
                   }))}
                   placeholder={editGroupLoading ? '分组加载中...' : '选择分组'}
                   disabled={editGroupLoading}
@@ -937,7 +970,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
               onChange={(nextValue) => setForm((prev) => ({ ...prev, group: nextValue }))}
               options={(groupOptions.length > 0 ? groupOptions : ['default']).map((group) => ({
                 value: group,
-                label: group,
+                label: formatGroupRatioLabel(group, groupRatios),
               }))}
               placeholder={groupLoading ? '分组加载中...' : '选择分组'}
               disabled={!form.accountId || groupLoading}

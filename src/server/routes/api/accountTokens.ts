@@ -14,6 +14,7 @@ import {
 import { getAdapter } from '../../services/platforms/index.js';
 import { getCredentialModeFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
+import { buildAvailableGroupRatios, fetchModelPricingCatalog } from '../../services/modelPricingService.js';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -773,7 +774,27 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
       const groups = await adapter.getUserGroups(site.url, account.accessToken, platformUserId);
       const normalized = Array.from(new Set((groups || []).map((item) => String(item || '').trim()).filter(Boolean)));
-      return { success: true, groups: normalized.length > 0 ? normalized : ['default'] };
+      const availableGroups = normalized.length > 0 ? normalized : ['default'];
+      let groupRatios = buildAvailableGroupRatios(availableGroups, null, false);
+      try {
+        const catalog = await fetchModelPricingCatalog({
+          site: {
+            id: site.id,
+            url: site.url,
+            platform: site.platform,
+            apiKey: site.apiKey,
+          },
+          account: {
+            id: account.id,
+            accessToken: account.accessToken,
+            apiToken: account.apiToken,
+          },
+          modelName: '__metadata__',
+          totalTokens: 0,
+        });
+        groupRatios = buildAvailableGroupRatios(availableGroups, catalog?.groupRatio, false);
+      } catch {}
+      return { success: true, groups: availableGroups, groupRatios };
     } catch (error: any) {
       return reply.code(502).send({
         success: false,

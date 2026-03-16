@@ -10,7 +10,11 @@ import { getAdapter } from '../../services/platforms/index.js';
 import { getPreferredAccountToken, syncTokensFromUpstream } from '../../services/accountTokenService.js';
 import { resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { buildModelAnalysis } from '../../services/modelAnalysisService.js';
-import { fallbackTokenCost, fetchModelPricingCatalog } from '../../services/modelPricingService.js';
+import {
+  fallbackTokenCost,
+  fetchModelPricingCatalog,
+  resolvePreferredTokenGroup,
+} from '../../services/modelPricingService.js';
 import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
 import { getUpstreamModelDescriptionsCached } from '../../services/upstreamModelDescriptionService.js';
 import { getRunningTaskByDedupeKey, startBackgroundTask } from '../../services/backgroundTaskService.js';
@@ -1944,7 +1948,24 @@ export async function statsRoutes(app: FastifyInstance) {
           MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
           `list groups timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
         );
-        const targetGroup = String(groups.find((item) => String(item || '').trim().length > 0) || 'default').trim() || 'default';
+        const preferredGroup = await resolvePreferredTokenGroup({
+          site: {
+            id: site.id,
+            url: site.url,
+            platform: site.platform,
+            apiKey: site.apiKey,
+          },
+          account: {
+            id: account.id,
+            accessToken: account.accessToken,
+            apiToken: account.apiToken,
+          },
+          modelName,
+          totalTokens: 0,
+          availableGroups: groups,
+          modelNames: [modelName],
+        });
+        const targetGroup = preferredGroup.group;
         const safeModelPart = modelName.replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 32) || 'model';
         const generatedName = `metapi-auto-${safeModelPart}-${Date.now().toString().slice(-6)}`;
         const created = await withTimeout(

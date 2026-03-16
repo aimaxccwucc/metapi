@@ -556,6 +556,132 @@ describe('/api/models/marketplace', () => {
     expect(body.reason).toContain('probe succeeded via videos');
   });
 
+  it('auto-creates a model-scoped key using the preferred pricing group', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-auto-key',
+      url: 'https://site-auto-key.example.com',
+      platform: 'new-api',
+      status: 'active',
+      apiKey: '',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'auto-key-user',
+      accessToken: 'session-auto-key',
+      apiToken: '',
+      status: 'active',
+      balance: 1,
+      extraConfig: JSON.stringify({ platformUserId: 114514 }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4o-mini',
+      available: true,
+      latencyMs: 110,
+    }).run();
+
+    const jsonResponse = (payload: unknown, status = 200) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => payload,
+      text: async () => JSON.stringify(payload),
+    });
+
+    let createdTokenPayload: Record<string, unknown> | null = null;
+    undiciFetchMock.mockImplementation(async (url: unknown, init?: any) => {
+      const target = String(url || '');
+      if (target.endsWith('/api/user/self/groups')) {
+        return jsonResponse({ success: true, data: ['default', 'cheap'] });
+      }
+      if (target.endsWith('/api/pricing')) {
+        return jsonResponse({
+          success: true,
+          data: [
+            {
+              model_name: 'gpt-4o-mini',
+              quota_type: 0,
+              model_ratio: 1,
+              completion_ratio: 1,
+              model_price: null,
+              enable_groups: ['default', 'cheap'],
+            },
+          ],
+          group_ratio: { default: 5, cheap: 0.5 },
+        });
+      }
+      if (target.endsWith('/api/token/') && String(init?.method || 'GET').toUpperCase() === 'POST') {
+        createdTokenPayload = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>;
+        return jsonResponse({ success: true });
+      }
+      if (target.includes('/api/token/?p=0&size=100')) {
+        return jsonResponse({
+          success: true,
+          data: createdTokenPayload ? [
+            {
+              name: createdTokenPayload.name,
+              key: 'sk-auto-created',
+              status: 1,
+              group: createdTokenPayload.group,
+            },
+          ] : [],
+        });
+      }
+      if (target.endsWith('/v1/models')) {
+        return jsonResponse({ data: [{ id: 'gpt-4o-mini' }] });
+      }
+      if (target.endsWith('/v1/chat/completions')) {
+        return jsonResponse({
+          id: 'resp_auto_key',
+          model: 'gpt-4o-mini',
+          choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        });
+      }
+      throw new Error(`unexpected fetch: ${String(init?.method || 'GET')} ${target}`);
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'gpt-4o-mini',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      success: boolean;
+      available: boolean;
+      autoKeyCreated: boolean;
+      autoKeyName: string | null;
+      autoKeyGroup: string | null;
+      usedApiKeySource: string | null;
+    };
+    expect(body.success).toBe(true);
+    expect(body.available).toBe(true);
+    expect(body.autoKeyCreated).toBe(true);
+    expect(body.autoKeyGroup).toBe('cheap');
+    expect(body.autoKeyName).toMatch(/^metapi-auto-gpt-4o-mini-/);
+    expect(body.usedApiKeySource).toBe(`auto:${body.autoKeyName}`);
+    expect(createdTokenPayload).toMatchObject({
+      group: 'cheap',
+      model_limits_enabled: true,
+      model_limits: 'gpt-4o-mini',
+    });
+
+    const tokenRows = await db.select().from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(1);
+    expect(tokenRows[0]).toMatchObject({
+      token: 'sk-auto-created',
+      tokenGroup: 'cheap',
+      enabled: true,
+    });
+  });
+
   it('uses gemini native embedding probe for official gemini sites', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-gemini',
