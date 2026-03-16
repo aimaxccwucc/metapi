@@ -12,6 +12,7 @@ import {
   startBackgroundTask,
   summarizeCheckinResults,
 } from './backgroundTaskService.js';
+import { upsertSetting } from '../db/upsertSetting.js';
 import { formatLocalDate } from './localTimeService.js';
 import { executeRefreshSiteReachability } from './siteHealthService.js';
 
@@ -86,7 +87,7 @@ function createCheckinTask(cronExpr: string) {
               return !item?.result?.success;
             })
             .map((item) => item.accountId);
-          persistCheckinRetryState({
+          await persistCheckinRetryState({
             day: today,
             failedAccountIds,
             retryAttempts: 0,
@@ -127,9 +128,9 @@ function normalizeRetryState(raw: unknown): CheckinRetryState | null {
   };
 }
 
-function readCheckinRetryState(): CheckinRetryState | null {
+async function readCheckinRetryState(): Promise<CheckinRetryState | null> {
   try {
-    const row = db.select().from(schema.settings).where(eq(schema.settings.key, CHECKIN_RETRY_STATE_KEY)).get();
+    const row = await db.select().from(schema.settings).where(eq(schema.settings.key, CHECKIN_RETRY_STATE_KEY)).get();
     if (!row?.value) return null;
     return normalizeRetryState(JSON.parse(row.value));
   } catch {
@@ -137,25 +138,19 @@ function readCheckinRetryState(): CheckinRetryState | null {
   }
 }
 
-function persistCheckinRetryState(state: CheckinRetryState) {
-  db.insert(schema.settings)
-    .values({ key: CHECKIN_RETRY_STATE_KEY, value: JSON.stringify(state) })
-    .onConflictDoUpdate({
-      target: schema.settings.key,
-      set: { value: JSON.stringify(state) },
-    })
-    .run();
+async function persistCheckinRetryState(state: CheckinRetryState): Promise<void> {
+  await upsertSetting(CHECKIN_RETRY_STATE_KEY, state);
 }
 
-function clearCheckinRetryState() {
-  db.delete(schema.settings).where(eq(schema.settings.key, CHECKIN_RETRY_STATE_KEY)).run();
+async function clearCheckinRetryState(): Promise<void> {
+  await db.delete(schema.settings).where(eq(schema.settings.key, CHECKIN_RETRY_STATE_KEY)).run();
 }
 
 function createCheckinRetryTask(cronExpr: string) {
   return cron.schedule(cronExpr, async () => {
     const now = new Date();
     const today = formatLocalDate(now);
-    const retryState = readCheckinRetryState();
+    const retryState = await readCheckinRetryState();
 
     if (!retryState || retryState.day !== today || retryState.failedAccountIds.length === 0) {
       return;
@@ -163,7 +158,7 @@ function createCheckinRetryTask(cronExpr: string) {
 
     if (retryState.retryAttempts >= CHECKIN_RETRY_MAX_ATTEMPTS) {
       console.log(`[Scheduler] Check-in retry skipped: reached max attempts (${CHECKIN_RETRY_MAX_ATTEMPTS})`);
-      clearCheckinRetryState();
+      await clearCheckinRetryState();
       return;
     }
 
@@ -199,7 +194,7 @@ function createCheckinRetryTask(cronExpr: string) {
           failureMessage: (currentTask) => `${taskLabel}失败：${currentTask.error || 'unknown error'}`,
         },
         async () => {
-          const latestState = readCheckinRetryState();
+          const latestState = await readCheckinRetryState();
           if (!latestState || latestState.day !== today || latestState.failedAccountIds.length === 0) {
             return {
               summary: { total: 0, success: 0, skipped: 0, failed: 0 },
@@ -230,14 +225,14 @@ function createCheckinRetryTask(cronExpr: string) {
             .map((item) => item.accountId);
 
           if (remainingFailedAccountIds.length > 0 && attempt < CHECKIN_RETRY_MAX_ATTEMPTS) {
-            persistCheckinRetryState({
+            await persistCheckinRetryState({
               day: today,
               failedAccountIds: remainingFailedAccountIds,
               retryAttempts: attempt,
               updatedAt: new Date().toISOString(),
             });
           } else {
-            clearCheckinRetryState();
+            await clearCheckinRetryState();
           }
 
           return {

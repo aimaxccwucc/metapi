@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
+import { upsertSetting } from '../db/upsertSetting.js';
 import { sendNotification } from './notifyService.js';
 
 export type BackgroundTaskStatus = 'pending' | 'running' | 'succeeded' | 'failed';
@@ -194,13 +195,7 @@ function toSerializableTaskValue(value: unknown, seen = new WeakSet<object>(), d
 async function persistTaskSnapshot() {
   try {
     const snapshot = buildTaskSnapshot();
-    await db.insert(schema.settings)
-      .values({ key: TASK_STORAGE_KEY, value: JSON.stringify(snapshot) })
-      .onConflictDoUpdate({
-        target: schema.settings.key,
-        set: { value: JSON.stringify(snapshot) },
-      })
-      .run();
+    await upsertSetting(TASK_STORAGE_KEY, snapshot);
   } catch {}
 }
 

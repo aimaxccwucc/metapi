@@ -100,6 +100,110 @@ describe('refreshModelsForAccount credential discovery', () => {
     expect(tokenRows).toHaveLength(0);
   });
 
+  it('serializes concurrent refreshes for the same account', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    let started = 0;
+    let releaseDiscovery = null as null | (() => void);
+    const discoveryGate = new Promise<void>((resolve) => {
+      releaseDiscovery = resolve;
+    });
+    getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => {
+      started += 1;
+      if (token !== 'session-token') return [];
+      await discoveryGate;
+      return ['gpt-4o-mini'];
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'site-concurrent',
+      url: 'https://site-concurrent.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'concurrent-user',
+      accessToken: 'session-token',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    const firstRefresh = refreshModelsForAccount(account.id);
+    const secondRefresh = refreshModelsForAccount(account.id);
+
+    await vi.waitFor(() => {
+      expect(started).toBe(1);
+    });
+    releaseDiscovery?.();
+
+    const [firstResult, secondResult] = await Promise.all([firstRefresh, secondRefresh]);
+
+    expect(firstResult.status).toBe('success');
+    expect(secondResult.status).toBe('success');
+    expect(getModelsMock).toHaveBeenCalledTimes(2);
+
+    const rows = await db.select().from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.accountId, account.id))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.modelName).toBe('gpt-4o-mini');
+  });
+
+  it('dedupes account model names case-insensitively across credentials', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => {
+      if (token === 'account-token') return ['GLM-4.6', 'Embedding-3'];
+      if (token === 'managed-token') return ['glm-4.6', 'embedding-3'];
+      return [];
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'site-case-dedupe',
+      url: 'https://site-case-dedupe.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'case-user',
+      accessToken: '',
+      apiToken: 'account-token',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'managed',
+      token: 'managed-token',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).run();
+
+    const result = await refreshModelsForAccount(account.id);
+
+    expect(result).toMatchObject({
+      accountId: account.id,
+      refreshed: true,
+      status: 'success',
+      modelCount: 2,
+      tokenScanned: 1,
+      discoveredByCredential: true,
+    });
+    expect(result.modelsPreview).toEqual(['GLM-4.6', 'Embedding-3']);
+
+    const accountRows = await db.select().from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.accountId, account.id))
+      .all();
+    expect(accountRows.map((row) => row.modelName).sort()).toEqual(['Embedding-3', 'GLM-4.6']);
+
+    const tokenRows = await db.select().from(schema.tokenModelAvailability).all();
+    expect(tokenRows.map((row) => row.modelName).sort()).toEqual(['embedding-3', 'glm-4.6']);
+  });
+
   it('marks runtime health unhealthy when model discovery fails', async () => {
     getApiTokenMock.mockResolvedValue(null);
     getModelsMock.mockRejectedValue(new Error('HTTP 401: invalid token'));

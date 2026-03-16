@@ -85,6 +85,51 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     expect(channels[0]?.manualOverride).toBe(false);
   });
 
+  it('dedupes exact routes when availability differs only by case', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'route-case-site',
+      url: 'https://route-case-site.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'route-case-user',
+      accessToken: '',
+      apiToken: 'sk-route-case',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'GLM-4.6',
+      available: true,
+    }).run();
+
+    const existingRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'glm-4.6',
+      enabled: true,
+    }).returning().get();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.models).toBe(1);
+    expect(rebuild.createdRoutes).toBe(0);
+
+    const routes = await db.select().from(schema.tokenRoutes).all();
+    expect(routes).toHaveLength(1);
+    expect(routes[0]?.id).toBe(existingRoute.id);
+    expect(routes[0]?.modelPattern).toBe('glm-4.6');
+
+    const channels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, existingRoute.id))
+      .all();
+    expect(channels).toHaveLength(1);
+    expect(channels[0]?.accountId).toBe(account.id);
+    expect(channels[0]?.tokenId ?? null).toBeNull();
+  });
+
   it('removes stale exact routes and keeps wildcard routes on rebuild', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-1',

@@ -1,6 +1,7 @@
 import { asc, eq } from 'drizzle-orm';
 import cron from 'node-cron';
 import { db, schema } from '../db/index.js';
+import { upsertSetting } from '../db/upsertSetting.js';
 import { getPlatformUserIdFromExtraConfig, mergeAccountExtraConfig, type AccountCredentialMode } from './accountExtraConfig.js';
 import { repairDefaultToken } from './accountTokenService.js';
 
@@ -791,13 +792,7 @@ async function importPreferencesSection(section: PreferencesBackupSection): Prom
     for (const row of section.settings) {
       if (!isSettingValueAcceptable(row.key, row.value)) continue;
 
-      await tx.insert(schema.settings).values({
-        key: row.key,
-        value: stringifySettingValue(row.value),
-      }).onConflictDoUpdate({
-        target: schema.settings.key,
-        set: { value: stringifySettingValue(row.value) },
-      }).run();
+      await upsertSetting(row.key, row.value, tx);
       applied.push({ key: row.key, value: row.value });
     }
   });
@@ -868,7 +863,7 @@ export async function importAllApiHubAccountsMerge(data: RawBackupData): Promise
       let site = siteByKey.get(siteKey) || null;
       if (!site) {
         const now = new Date().toISOString();
-        site = await tx.insert(schema.sites).values({
+        const insertedSite = await tx.insert(schema.sites).values({
           name: siteName,
           url: siteUrl,
           externalCheckinUrl: importedExternalCheckinUrl,
@@ -879,7 +874,11 @@ export async function importAllApiHubAccountsMerge(data: RawBackupData): Promise
           globalWeight: 1,
           createdAt: now,
           updatedAt: now,
-        }).returning().get();
+        }).run();
+        const insertedSiteId = Number(insertedSite.lastInsertRowid || 0);
+        site = insertedSiteId > 0
+          ? await tx.select().from(schema.sites).where(eq(schema.sites.id, insertedSiteId)).get()
+          : null;
         if (!site) {
           result.skippedRows += 1;
           continue;
@@ -949,7 +948,7 @@ export async function importAllApiHubAccountsMerge(data: RawBackupData): Promise
         if (platformUserId > 0) {
           extraConfigPatch.platformUserId = platformUserId;
         }
-        const created = await tx.insert(schema.accounts).values({
+        const insertedAccount = await tx.insert(schema.accounts).values({
           siteId: site.id,
           username,
           accessToken: accountAccessToken,
@@ -968,7 +967,11 @@ export async function importAllApiHubAccountsMerge(data: RawBackupData): Promise
           extraConfig: JSON.stringify(extraConfigPatch),
           createdAt,
           updatedAt,
-        }).returning().get();
+        }).run();
+        const insertedAccountId = Number(insertedAccount.lastInsertRowid || 0);
+        const created = insertedAccountId > 0
+          ? await tx.select().from(schema.accounts).where(eq(schema.accounts.id, insertedAccountId)).get()
+          : null;
         if (!created) {
           result.skippedRows += 1;
           continue;

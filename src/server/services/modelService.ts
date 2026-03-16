@@ -10,6 +10,8 @@ import { clearAllRouteDecisionSnapshots } from './routeDecisionSnapshotStore.js'
 const API_TOKEN_DISCOVERY_TIMEOUT_MS = 8_000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 12_000;
 const MODEL_REFRESH_BATCH_SIZE = 3;
+const accountRefreshLocks = new Map<number, Promise<unknown>>();
+let globalRefreshAndRebuildLock: Promise<unknown> | null = null;
 
 type ModelRefreshErrorCode = 'timeout' | 'unauthorized' | 'empty_models' | 'unknown';
 
@@ -39,8 +41,49 @@ function isApiKeyConnection(account: typeof schema.accounts.$inferSelect): boole
   return !(account.accessToken || '').trim();
 }
 
+function normalizeModelIdentity(modelName: string | null | undefined): string {
+  return (modelName || '').trim().toLowerCase();
+}
+
 function normalizeModels(models: string[]): string[] {
-  return Array.from(new Set(models.filter((model) => typeof model === 'string' && model.trim().length > 0)));
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const rawModel of models) {
+    if (typeof rawModel !== 'string') continue;
+    const model = rawModel.trim();
+    if (!model) continue;
+    const dedupeKey = model.toLowerCase();
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    normalized.push(model);
+  }
+  return normalized;
+}
+
+async function withAccountRefreshLock<T>(accountId: number, fn: () => Promise<T>): Promise<T> {
+  const previous = accountRefreshLocks.get(accountId) || Promise.resolve();
+  const run = previous.catch(() => undefined).then(fn);
+  accountRefreshLocks.set(accountId, run);
+  try {
+    return await run;
+  } finally {
+    if (accountRefreshLocks.get(accountId) === run) {
+      accountRefreshLocks.delete(accountId);
+    }
+  }
+}
+
+async function withGlobalRefreshAndRebuildLock<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = globalRefreshAndRebuildLock || Promise.resolve();
+  const run = previous.catch(() => undefined).then(fn);
+  globalRefreshAndRebuildLock = run;
+  try {
+    return await run;
+  } finally {
+    if (globalRefreshAndRebuildLock === run) {
+      globalRefreshAndRebuildLock = null;
+    }
+  }
 }
 
 function isExactModelPattern(modelPattern: string): boolean {
@@ -67,252 +110,259 @@ async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, timeoutMe
 }
 
 export async function refreshModelsForAccount(accountId: number) {
-  const row = await db.select().from(schema.accounts)
-    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-    .where(eq(schema.accounts.id, accountId))
-    .get();
+  return await withAccountRefreshLock(accountId, async () => {
+    const row = await db.select().from(schema.accounts)
+        .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+        .where(eq(schema.accounts.id, accountId))
+        .get();
 
-  if (!row) {
-    return {
-      accountId,
-      refreshed: false,
-      status: 'failed',
-      errorCode: 'account_not_found',
-      errorMessage: '账号不存在',
-      modelCount: 0,
-      modelsPreview: [],
-      reason: 'account_not_found',
-    };
-  }
-
-  const account = row.accounts;
-  const site = row.sites;
-  const adapter = getAdapter(site.platform);
-
-  const accountTokens = await db.select()
-    .from(schema.accountTokens)
-    .where(eq(schema.accountTokens.accountId, accountId))
-    .all();
-
-  await db.delete(schema.modelAvailability)
-    .where(eq(schema.modelAvailability.accountId, accountId))
-    .run();
-
-  for (const token of accountTokens) {
-    await db.delete(schema.tokenModelAvailability)
-      .where(eq(schema.tokenModelAvailability.tokenId, token.id))
-      .run();
-  }
-
-  if (isSiteDisabled(site.status)) {
-    return {
-      accountId,
-      refreshed: false,
-      status: 'skipped',
-      errorCode: 'site_disabled',
-      errorMessage: '站点已禁用',
-      modelCount: 0,
-      modelsPreview: [],
-      reason: 'site_disabled',
-    };
-  }
-
-  if (!adapter || account.status !== 'active') {
-    return {
-      accountId,
-      refreshed: false,
-      status: 'skipped',
-      errorCode: 'adapter_or_status',
-      errorMessage: '平台不可用或账号未激活',
-      modelCount: 0,
-      modelsPreview: [],
-      reason: 'adapter_or_status',
-    };
-  }
-
-  const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
-  let discoveredApiToken: string | null = null;
-
-  if (!account.apiToken && account.accessToken) {
-    try {
-      discoveredApiToken = await withTimeout(
-        () => adapter.getApiToken(site.url, account.accessToken, platformUserId),
-        API_TOKEN_DISCOVERY_TIMEOUT_MS,
-        `api token discovery timeout (${Math.round(API_TOKEN_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
-      );
-      if (discoveredApiToken) {
-        ensureDefaultTokenForAccount(account.id, discoveredApiToken, { name: 'default', source: 'sync' });
-        await db.update(schema.accounts).set({
-          apiToken: discoveredApiToken,
-          updatedAt: new Date().toISOString(),
-        }).where(eq(schema.accounts.id, account.id)).run();
+      if (!row) {
+        return {
+          accountId,
+          refreshed: false,
+          status: 'failed',
+          errorCode: 'account_not_found',
+          errorMessage: '账号不存在',
+          modelCount: 0,
+          modelsPreview: [],
+          reason: 'account_not_found',
+        };
       }
-    } catch { }
-  }
 
-  let enabledTokens = await db.select()
-    .from(schema.accountTokens)
-    .where(and(eq(schema.accountTokens.accountId, account.id), eq(schema.accountTokens.enabled, true)))
-    .all();
+      const account = row.accounts;
+      const site = row.sites;
+      const adapter = getAdapter(site.platform);
 
-  // Last fallback: if still no managed token but account has a legacy apiToken, mirror it into token table.
-  if (!isApiKeyConnection(account) && enabledTokens.length === 0) {
-    const fallback = discoveredApiToken || account.apiToken || null;
-    if (fallback) {
-      ensureDefaultTokenForAccount(account.id, fallback, { name: 'default', source: 'legacy' });
-      enabledTokens = await db.select()
+      const accountTokens = await db.select()
+        .from(schema.accountTokens)
+        .where(eq(schema.accountTokens.accountId, accountId))
+        .all();
+
+      await db.delete(schema.modelAvailability)
+        .where(eq(schema.modelAvailability.accountId, accountId))
+        .run();
+
+      for (const token of accountTokens) {
+        await db.delete(schema.tokenModelAvailability)
+          .where(eq(schema.tokenModelAvailability.tokenId, token.id))
+          .run();
+      }
+
+      if (isSiteDisabled(site.status)) {
+        return {
+          accountId,
+          refreshed: false,
+          status: 'skipped',
+          errorCode: 'site_disabled',
+          errorMessage: '站点已禁用',
+          modelCount: 0,
+          modelsPreview: [],
+          reason: 'site_disabled',
+        };
+      }
+
+      if (!adapter || account.status !== 'active') {
+        return {
+          accountId,
+          refreshed: false,
+          status: 'skipped',
+          errorCode: 'adapter_or_status',
+          errorMessage: '平台不可用或账号未激活',
+          modelCount: 0,
+          modelsPreview: [],
+          reason: 'adapter_or_status',
+        };
+      }
+
+      const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
+      let discoveredApiToken: string | null = null;
+
+      if (!account.apiToken && account.accessToken) {
+        try {
+          discoveredApiToken = await withTimeout(
+            () => adapter.getApiToken(site.url, account.accessToken, platformUserId),
+            API_TOKEN_DISCOVERY_TIMEOUT_MS,
+            `api token discovery timeout (${Math.round(API_TOKEN_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
+          );
+          if (discoveredApiToken) {
+            await ensureDefaultTokenForAccount(account.id, discoveredApiToken, { name: 'default', source: 'sync' });
+            await db.update(schema.accounts).set({
+              apiToken: discoveredApiToken,
+              updatedAt: new Date().toISOString(),
+            }).where(eq(schema.accounts.id, account.id)).run();
+          }
+        } catch { }
+      }
+
+      let enabledTokens = await db.select()
         .from(schema.accountTokens)
         .where(and(eq(schema.accountTokens.accountId, account.id), eq(schema.accountTokens.enabled, true)))
         .all();
-    }
-  }
 
-  const accountModels = new Set<string>();
-  const modelLatency = new Map<string, number | null>();
-  let scannedTokenCount = 0;
-  let discoveredByCredential = false;
-  const attemptedCredentials = new Set<string>();
-  const failureMessages: string[] = [];
-  const recordFailure = (err: unknown) => {
-    const message = (err as { message?: string })?.message || String(err || '');
-    if (message) failureMessages.push(message);
-  };
-
-  const mergeDiscoveredModels = (models: string[], latencyMs: number | null) => {
-    for (const modelName of models) {
-      accountModels.add(modelName);
-      const prev = modelLatency.get(modelName);
-      if (prev === undefined || prev === null) {
-        modelLatency.set(modelName, latencyMs);
-        continue;
+      // Last fallback: if still no managed token but account has a legacy apiToken, mirror it into token table.
+      if (!isApiKeyConnection(account) && enabledTokens.length === 0) {
+        const fallback = discoveredApiToken || account.apiToken || null;
+        if (fallback) {
+          await ensureDefaultTokenForAccount(account.id, fallback, { name: 'default', source: 'legacy' });
+          enabledTokens = await db.select()
+            .from(schema.accountTokens)
+            .where(and(eq(schema.accountTokens.accountId, account.id), eq(schema.accountTokens.enabled, true)))
+            .all();
+        }
       }
-      if (latencyMs === null) continue;
-      if (latencyMs < prev) modelLatency.set(modelName, latencyMs);
-    }
-  };
 
-  const discoverModelsWithCredential = async (credentialRaw: string | null | undefined) => {
-    const credential = (credentialRaw || '').trim();
-    if (!credential) return;
-    if (attemptedCredentials.has(credential)) return;
-    attemptedCredentials.add(credential);
+      const accountModels = new Map<string, string>();
+      const modelLatency = new Map<string, number | null>();
+      let scannedTokenCount = 0;
+      let discoveredByCredential = false;
+      const attemptedCredentials = new Set<string>();
+      const failureMessages: string[] = [];
+      const recordFailure = (err: unknown) => {
+        const message = (err as { message?: string })?.message || String(err || '');
+        if (message) failureMessages.push(message);
+      };
 
-    const startedAt = Date.now();
-    let models: string[] = [];
-    try {
-      models = normalizeModels(
-        await withTimeout(
-          () => adapter.getModels(site.url, credential, platformUserId),
-          MODEL_DISCOVERY_TIMEOUT_MS,
-          `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
-        ),
-      );
-    } catch (err) {
-      recordFailure(err);
-      models = [];
-    }
-    if (models.length === 0) return;
-    discoveredByCredential = true;
-    const latencyMs = Date.now() - startedAt;
-    mergeDiscoveredModels(models, latencyMs);
-  };
+      const mergeDiscoveredModels = (models: string[], latencyMs: number | null) => {
+        for (const modelName of models) {
+          const identity = normalizeModelIdentity(modelName);
+          if (!identity) continue;
+          if (!accountModels.has(identity)) {
+            accountModels.set(identity, modelName);
+          }
+          const prev = modelLatency.get(identity);
+          if (prev === undefined || prev === null) {
+            modelLatency.set(identity, latencyMs);
+            continue;
+          }
+          if (latencyMs === null) continue;
+          if (latencyMs < prev) modelLatency.set(identity, latencyMs);
+        }
+      };
 
-  // Prefer account-level credential discovery so model availability does not rely on managed tokens.
-  await discoverModelsWithCredential(account.apiToken);
-  await discoverModelsWithCredential(discoveredApiToken);
-  await discoverModelsWithCredential(account.accessToken);
+      const discoverModelsWithCredential = async (credentialRaw: string | null | undefined) => {
+        const credential = (credentialRaw || '').trim();
+        if (!credential) return;
+        if (attemptedCredentials.has(credential)) return;
+        attemptedCredentials.add(credential);
 
-  for (const token of enabledTokens) {
-    const startedAt = Date.now();
-    let models: string[] = [];
+        const startedAt = Date.now();
+        let models: string[] = [];
+        try {
+          models = normalizeModels(
+            await withTimeout(
+              () => adapter.getModels(site.url, credential, platformUserId),
+              MODEL_DISCOVERY_TIMEOUT_MS,
+              `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
+            ),
+          );
+        } catch (err) {
+          recordFailure(err);
+          models = [];
+        }
+        if (models.length === 0) return;
+        discoveredByCredential = true;
+        const latencyMs = Date.now() - startedAt;
+        mergeDiscoveredModels(models, latencyMs);
+      };
 
-    try {
-      models = normalizeModels(
-        await withTimeout(
-          () => adapter.getModels(site.url, token.token, platformUserId),
-          MODEL_DISCOVERY_TIMEOUT_MS,
-          `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
-        ),
-      );
-    } catch (err) {
-      recordFailure(err);
-      models = [];
-    }
+      // Prefer account-level credential discovery so model availability does not rely on managed tokens.
+      await discoverModelsWithCredential(account.apiToken);
+      await discoverModelsWithCredential(discoveredApiToken);
+      await discoverModelsWithCredential(account.accessToken);
 
-    if (models.length === 0) continue;
+      for (const token of enabledTokens) {
+        const startedAt = Date.now();
+        let models: string[] = [];
 
-    const latencyMs = Date.now() - startedAt;
-    const checkedAt = new Date().toISOString();
+        try {
+          models = normalizeModels(
+            await withTimeout(
+              () => adapter.getModels(site.url, token.token, platformUserId),
+              MODEL_DISCOVERY_TIMEOUT_MS,
+              `model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
+            ),
+          );
+        } catch (err) {
+          recordFailure(err);
+          models = [];
+        }
 
-    await db.insert(schema.tokenModelAvailability).values(
-      models.map((modelName) => ({
-        tokenId: token.id,
-        modelName,
-        available: true,
-        latencyMs,
+        if (models.length === 0) continue;
+
+        const latencyMs = Date.now() - startedAt;
+        const checkedAt = new Date().toISOString();
+
+        await db.insert(schema.tokenModelAvailability).values(
+          models.map((modelName) => ({
+            tokenId: token.id,
+            modelName,
+            available: true,
+            latencyMs,
+            checkedAt,
+          })),
+        ).run();
+
+        scannedTokenCount++;
+        mergeDiscoveredModels(models, latencyMs);
+      }
+
+      if (accountModels.size === 0) {
+        const firstMessage = failureMessages[0] || '';
+        const errorCode = firstMessage ? classifyModelDiscoveryError(firstMessage) : 'empty_models';
+        const errorMessage = buildModelFailureMessage(errorCode, firstMessage);
+        await setAccountRuntimeHealth(account.id, {
+          state: 'unhealthy',
+          reason: errorMessage,
+          source: 'model-discovery',
+          checkedAt: new Date().toISOString(),
+        });
+        return {
+          accountId,
+          refreshed: true,
+          status: 'failed',
+          errorCode,
+          errorMessage,
+          modelCount: 0,
+          modelsPreview: [],
+          tokenScanned: scannedTokenCount,
+          discoveredByCredential,
+          discoveredApiToken: !!discoveredApiToken,
+        };
+      }
+
+      const checkedAt = new Date().toISOString();
+      const accountModelNames = Array.from(accountModels.values());
+      await db.insert(schema.modelAvailability).values(
+        accountModelNames.map((modelName) => ({
+          accountId: account.id,
+          modelName,
+          available: true,
+          latencyMs: modelLatency.get(normalizeModelIdentity(modelName)) ?? null,
+          checkedAt,
+        })),
+      ).run();
+
+      await setAccountRuntimeHealth(account.id, {
+        state: 'healthy',
+        reason: '模型探测成功',
+        source: 'model-discovery',
         checkedAt,
-      })),
-    ).run();
+      });
 
-    scannedTokenCount++;
-    mergeDiscoveredModels(models, latencyMs);
-  }
-
-  if (accountModels.size === 0) {
-    const firstMessage = failureMessages[0] || '';
-    const errorCode = firstMessage ? classifyModelDiscoveryError(firstMessage) : 'empty_models';
-    const errorMessage = buildModelFailureMessage(errorCode, firstMessage);
-    await setAccountRuntimeHealth(account.id, {
-      state: 'unhealthy',
-      reason: errorMessage,
-      source: 'model-discovery',
-      checkedAt: new Date().toISOString(),
-    });
-    return {
-      accountId,
-      refreshed: true,
-      status: 'failed',
-      errorCode,
-      errorMessage,
-      modelCount: 0,
-      modelsPreview: [],
-      tokenScanned: scannedTokenCount,
-      discoveredByCredential,
-      discoveredApiToken: !!discoveredApiToken,
-    };
-  }
-
-  const checkedAt = new Date().toISOString();
-  await db.insert(schema.modelAvailability).values(
-    Array.from(accountModels).map((modelName) => ({
-      accountId: account.id,
-      modelName,
-      available: true,
-      latencyMs: modelLatency.get(modelName) ?? null,
-      checkedAt,
-    })),
-  ).run();
-
-  await setAccountRuntimeHealth(account.id, {
-    state: 'healthy',
-    reason: '模型探测成功',
-    source: 'model-discovery',
-    checkedAt,
+      const modelsPreview = accountModelNames.slice(0, 10);
+      return {
+        accountId,
+        refreshed: true,
+        status: 'success',
+        errorCode: null,
+        errorMessage: '',
+        modelCount: accountModelNames.length,
+        modelsPreview,
+        tokenScanned: scannedTokenCount,
+        discoveredByCredential,
+        discoveredApiToken: !!discoveredApiToken,
+      };
   });
-
-  const modelsPreview = Array.from(accountModels).slice(0, 10);
-  return {
-    accountId,
-    refreshed: true,
-    status: 'success',
-    errorCode: null,
-    errorMessage: '',
-    modelCount: accountModels.size,
-    modelsPreview,
-    tokenScanned: scannedTokenCount,
-    discoveredByCredential,
-    discoveredApiToken: !!discoveredApiToken,
-  };
 }
 
 async function refreshModelsForAllActiveAccounts() {
@@ -369,14 +419,18 @@ export async function rebuildTokenRoutesFromAvailability() {
     return !!disabled && disabled.has(modelName);
   }
 
-  const modelCandidates = new Map<string, Map<string, { accountId: number; tokenId: number | null }>>();
+  const modelCandidates = new Map<string, { modelName: string; candidates: Map<string, { accountId: number; tokenId: number | null }> }>();
   const addModelCandidate = (modelNameRaw: string | null | undefined, accountId: number, tokenId: number | null, siteId: number) => {
     const modelName = (modelNameRaw || '').trim();
     if (!modelName) return;
     if (isModelDisabledForSite(siteId, modelName)) return;
-    if (!modelCandidates.has(modelName)) modelCandidates.set(modelName, new Map());
+    const identity = normalizeModelIdentity(modelName);
+    if (!identity) return;
+    if (!modelCandidates.has(identity)) {
+      modelCandidates.set(identity, { modelName, candidates: new Map() });
+    }
     const candidateKey = `${accountId}:${tokenId ?? 'account'}`;
-    modelCandidates.get(modelName)!.set(candidateKey, { accountId, tokenId });
+    modelCandidates.get(identity)!.candidates.set(candidateKey, { accountId, tokenId });
   };
 
   for (const row of tokenRows) {
@@ -397,8 +451,11 @@ export async function rebuildTokenRoutesFromAvailability() {
   let removedChannels = 0;
   let removedRoutes = 0;
 
-  for (const [modelName, candidateMap] of modelCandidates.entries()) {
-    let route = routes.find((r) => r.modelPattern === modelName);
+  for (const { modelName, candidates: candidateMap } of modelCandidates.values()) {
+    let route = routes.find((r) => (
+      isExactModelPattern(r.modelPattern)
+      && normalizeModelIdentity(r.modelPattern) === normalizeModelIdentity(modelName)
+    ));
     if (!route) {
       const inserted = await db.insert(schema.tokenRoutes).values({
         modelPattern: modelName,
@@ -465,10 +522,11 @@ export async function rebuildTokenRoutesFromAvailability() {
     }
   }
 
-  const latestModelNames = new Set<string>(Array.from(modelCandidates.keys()));
+  const latestModelNames = new Set<string>(Array.from(modelCandidates.values(), ({ modelName }) => modelName));
+  const latestModelIdentities = new Set<string>(Array.from(modelCandidates.keys()));
   for (const route of routes) {
     const modelPattern = (route.modelPattern || '').trim();
-    if (!modelPattern || !isExactModelPattern(modelPattern) || latestModelNames.has(modelPattern)) {
+    if (!modelPattern || !isExactModelPattern(modelPattern) || latestModelNames.has(modelPattern) || latestModelIdentities.has(normalizeModelIdentity(modelPattern))) {
       continue;
     }
 
@@ -499,7 +557,9 @@ export async function rebuildTokenRoutesFromAvailability() {
 }
 
 export async function refreshModelsAndRebuildRoutes() {
-  const refresh = await refreshModelsForAllActiveAccounts();
-  const rebuild = await rebuildTokenRoutesFromAvailability();
-  return { refresh, rebuild };
+  return await withGlobalRefreshAndRebuildLock(async () => {
+    const refresh = await refreshModelsForAllActiveAccounts();
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+    return { refresh, rebuild };
+  });
 }

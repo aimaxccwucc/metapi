@@ -2,6 +2,7 @@
 import cron from 'node-cron';
 import { config } from '../../config.js';
 import { db, runtimeDbDialect, schema } from '../../db/index.js';
+import { upsertSetting as saveSetting } from '../../db/upsertSetting.js';
 import { updateBalanceRefreshCron, updateCheckinCron, updateSiteHealthRefreshCron } from '../../services/checkinScheduler.js';
 import { sendNotification } from '../../services/notifyService.js';
 import { exportBackup, importBackup, type BackupExportType } from '../../services/backupService.js';
@@ -77,13 +78,7 @@ function maskSecret(value: string): string {
 }
 
 async function upsertSetting(key: string, value: unknown) {
-  await db.insert(schema.settings)
-    .values({ key, value: JSON.stringify(value) })
-    .onConflictDoUpdate({
-      target: schema.settings.key,
-      set: { value: JSON.stringify(value) },
-    })
-    .run();
+  await saveSetting(key, value);
 }
 
 async function appendSettingsEvent(input: {

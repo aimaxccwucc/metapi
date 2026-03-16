@@ -81,6 +81,7 @@ describe('settings maintenance custom routes', () => {
       reused: boolean;
       jobId: string;
       deletedModelAvailability: number;
+      deletedTokenModelAvailability: number;
       deletedRouteChannels: number;
       deletedTokenRoutes: number;
     };
@@ -89,6 +90,7 @@ describe('settings maintenance custom routes', () => {
     expect(body.reused).toBe(false);
     expect(body.jobId.length).toBeGreaterThan(8);
     expect(typeof body.deletedModelAvailability).toBe('number');
+    expect(typeof body.deletedTokenModelAvailability).toBe('number');
     expect(typeof body.deletedRouteChannels).toBe('number');
     expect(typeof body.deletedTokenRoutes).toBe('number');
     expect(refreshModelsAndRebuildRoutesMock).toHaveBeenCalledTimes(1);
