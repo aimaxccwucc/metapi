@@ -74,9 +74,24 @@ type ResolvedChannelBinding = {
   sourceModel: string;
 };
 
+type AccountBindingWarmupState = {
+  refreshed: boolean;
+  repaired: boolean;
+  hasEnabledToken?: boolean;
+};
+
+const CHANNEL_BATCH_WARMUP_CONCURRENCY = 6;
+
 function buildChannelPairKey(accountId: number, tokenId: number | null | undefined, sourceModel: string): string {
   const normalizedTokenId = typeof tokenId === 'number' && Number.isFinite(tokenId) ? tokenId : 0;
   return `${accountId}::${normalizedTokenId}::${sourceModel.trim().toLowerCase()}`;
+}
+
+async function hasEnabledAccountToken(accountId: number): Promise<boolean> {
+  const row = await db.select({ id: schema.accountTokens.id }).from(schema.accountTokens)
+    .where(and(eq(schema.accountTokens.accountId, accountId), eq(schema.accountTokens.enabled, true)))
+    .get();
+  return !!row;
 }
 
 async function findAccountTokenForSourceModel(accountId: number, sourceModel: string): Promise<number | null> {
@@ -86,6 +101,7 @@ async function findAccountTokenForSourceModel(accountId: number, sourceModel: st
   const rows = await db.select({
     tokenId: schema.accountTokens.id,
     isDefault: schema.accountTokens.isDefault,
+    modelName: schema.tokenModelAvailability.modelName,
   }).from(schema.tokenModelAvailability)
     .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
     .where(
@@ -97,12 +113,11 @@ async function findAccountTokenForSourceModel(accountId: number, sourceModel: st
     )
     .all();
 
-  const supported: Array<{ tokenId: number; isDefault: boolean | null }> = [];
-  for (const row of rows) {
-    if (await tokenSupportsModel(row.tokenId, normalizedSourceModel)) {
-      supported.push(row);
-    }
-  }
+  const supported = rows.filter((row) => {
+    const availableModelName = row.modelName?.trim();
+    if (!availableModelName) return false;
+    return availableModelName === normalizedSourceModel || isModelAliasEquivalent(availableModelName, normalizedSourceModel);
+  });
   if (supported.length === 0) return null;
   const preferred = supported.find((row) => row.isDefault) || supported[0];
   return preferred?.tokenId ?? null;
@@ -114,6 +129,7 @@ async function resolveChannelBinding(params: {
   tokenId?: number;
   sourceModel?: string;
   allowAccountRepair?: boolean;
+  warmupState?: AccountBindingWarmupState;
 }): Promise<ResolvedChannelBinding> {
   const { route, accountId } = params;
   const exactRoute = isExactModelPattern(route.modelPattern);
@@ -141,18 +157,32 @@ async function resolveChannelBinding(params: {
     };
   }
 
+  const warmupState = params.warmupState ?? { refreshed: false, repaired: false };
+  if (typeof warmupState.hasEnabledToken !== 'boolean') {
+    warmupState.hasEnabledToken = await hasEnabledAccountToken(accountId);
+  }
+
   const resolveImplicitToken = async (): Promise<number | null> => {
-    const refreshed = await findAccountTokenForSourceModel(accountId, requestedSourceModel);
-    if (refreshed) return refreshed;
-    await refreshModelsForAccount(accountId);
+    const existing = await findAccountTokenForSourceModel(accountId, requestedSourceModel);
+    if (existing) return existing;
+    if (!warmupState.refreshed && warmupState.hasEnabledToken) {
+      await refreshModelsForAccount(accountId);
+      warmupState.refreshed = true;
+    }
     return await findAccountTokenForSourceModel(accountId, requestedSourceModel);
   };
 
   let resolvedTokenId = await resolveImplicitToken();
-  if (!resolvedTokenId && params.allowAccountRepair !== false) {
+  if (!resolvedTokenId && params.allowAccountRepair !== false && !warmupState.repaired) {
     const repair = await repairAccountKeysForAccount(accountId);
+    warmupState.repaired = true;
     if (repair && !['failed', 'skipped'].includes(repair.status)) {
-      await refreshModelsForAccount(accountId);
+      warmupState.hasEnabledToken = true;
+      const shouldRefreshAfterRepair = !warmupState.refreshed || ['created', 'synced'].includes(repair.status);
+      if (shouldRefreshAfterRepair) {
+        await refreshModelsForAccount(accountId);
+        warmupState.refreshed = true;
+      }
       resolvedTokenId = await findAccountTokenForSourceModel(accountId, requestedSourceModel);
     }
   }
@@ -177,6 +207,19 @@ async function resolveChannelBinding(params: {
     tokenId: resolvedTokenId,
     sourceModel: requestedSourceModel,
   };
+}
+
+async function runGroupsWithConcurrency<T>(groups: T[][], limit: number, worker: (group: T[]) => Promise<void>): Promise<void> {
+  const concurrency = Math.max(1, Math.min(limit, groups.length || 1));
+  let cursor = 0;
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= groups.length) return;
+      await worker(groups[index]);
+    }
+  }));
 }
 
 async function getPatternTokenCandidates(modelPattern: string): Promise<Array<{ tokenId: number; accountId: number; sourceModel: string }>> {
@@ -624,41 +667,55 @@ export async function tokensRoutes(app: FastifyInstance) {
     let created = 0;
     let skipped = 0;
     const errors: string[] = [];
+    const warmupStateByAccount = new Map<number, AccountBindingWarmupState>();
+    const groupedItems = new Map<number, Array<{ accountId: number; tokenId?: number; sourceModel?: string }>>();
 
     for (const item of body.channels) {
       if (!item?.accountId || typeof item.accountId !== 'number') {
         errors.push('无效的 accountId');
         continue;
       }
-
-      try {
-        const resolved = await resolveChannelBinding({
-          route,
-          accountId: item.accountId,
-          tokenId: item.tokenId,
-          sourceModel: item.sourceModel,
-        });
-        const pairKey = buildChannelPairKey(resolved.accountId, resolved.tokenId, resolved.sourceModel);
-        if (existingPairs.has(pairKey)) {
-          skipped += 1;
-          continue;
-        }
-
-        await db.insert(schema.routeChannels).values({
-          routeId,
-          accountId: resolved.accountId,
-          tokenId: resolved.tokenId,
-          sourceModel: resolved.sourceModel || null,
-          priority: 0,
-          weight: 10,
-          manualOverride: true,
-        }).run();
-        existingPairs.add(pairKey);
-        created += 1;
-      } catch (e: any) {
-        errors.push(e.message || `添加通道失败: accountId=${item.accountId}`);
-      }
+      const group = groupedItems.get(item.accountId);
+      if (group) group.push(item);
+      else groupedItems.set(item.accountId, [item]);
     }
+
+    await runGroupsWithConcurrency(Array.from(groupedItems.values()), CHANNEL_BATCH_WARMUP_CONCURRENCY, async (group) => {
+      const accountId = group[0]!.accountId;
+      const warmupState = warmupStateByAccount.get(accountId) || { refreshed: false, repaired: false };
+      warmupStateByAccount.set(accountId, warmupState);
+
+      for (const item of group) {
+        try {
+          const resolved = await resolveChannelBinding({
+            route,
+            accountId: item.accountId,
+            tokenId: item.tokenId,
+            sourceModel: item.sourceModel,
+            warmupState,
+          });
+          const pairKey = buildChannelPairKey(resolved.accountId, resolved.tokenId, resolved.sourceModel);
+          if (existingPairs.has(pairKey)) {
+            skipped += 1;
+            continue;
+          }
+
+          await db.insert(schema.routeChannels).values({
+            routeId,
+            accountId: resolved.accountId,
+            tokenId: resolved.tokenId,
+            sourceModel: resolved.sourceModel || null,
+            priority: 0,
+            weight: 10,
+            manualOverride: true,
+          }).run();
+          existingPairs.add(pairKey);
+          created += 1;
+        } catch (e: any) {
+          errors.push(e.message || `添加通道失败: accountId=${item.accountId}`);
+        }
+      }
+    });
 
     if (created > 0) {
       await clearRouteDecisionSnapshot(routeId);

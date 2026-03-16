@@ -234,4 +234,53 @@ describe('PUT /api/channels/batch', () => {
     expect(routeChannels[0]?.sourceModel).toBe('gpt-5.2-codex');
     expect(routeChannels[0]?.manualOverride).toBe(true);
   });
+
+  it('reuses account warmup work for repeated entries in the same batch', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'warmup-site',
+      url: 'https://warmup-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'warmup-user',
+      accessToken: 'session-token',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 're:^gpt-5.2-codex$',
+      enabled: true,
+    }).returning().get();
+
+    getApiTokensMock.mockResolvedValue([{ name: 'default', key: 'sk-created', enabled: true, tokenGroup: 'default' }]);
+    getApiTokenMock.mockResolvedValue(null);
+    createApiTokenMock.mockResolvedValue(true);
+    getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
+      if (credential === 'session-token' || credential === 'sk-created') {
+        return ['gpt-5.2-codex'];
+      }
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/channels/batch`,
+      payload: {
+        channels: [
+          { accountId: account.id, sourceModel: 'gpt-5.2-codex' },
+          { accountId: account.id, sourceModel: 'gpt-5.2-codex' },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ success: true, created: 1, skipped: 1, errors: [] });
+    expect(getApiTokensMock).toHaveBeenCalledTimes(1);
+    expect(getModelsMock).toHaveBeenCalledTimes(3);
+    expect(createApiTokenMock).not.toHaveBeenCalled();
+  });
 });
