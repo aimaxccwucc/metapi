@@ -180,15 +180,13 @@ export default function ManualRoutePanel({
               tr(editingRouteId ? '保存群组' : '创建群组')
             )}
           </button>
-          {editingRouteId ? (
-            <button
-              onClick={onCancel}
-              className="btn btn-ghost"
-              style={{ alignSelf: 'flex-start', border: '1px solid var(--color-border)' }}
-            >
-              {tr('取消编辑')}
-            </button>
-          ) : null}
+          <button
+            onClick={onCancel}
+            className="btn btn-ghost"
+            style={{ alignSelf: 'flex-start', border: '1px solid var(--color-border)' }}
+          >
+            {tr(editingRouteId ? '取消编辑' : '取消创建')}
+          </button>
         </div>
       </div>
     </div>

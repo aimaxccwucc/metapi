@@ -957,6 +957,9 @@ function mapProxyLogRow(
 ) {
   return {
     ...row.proxy_logs,
+    routeId: row.proxy_logs.routeId ?? null,
+    channelId: row.proxy_logs.channelId ?? null,
+    accountId: row.proxy_logs.accountId ?? null,
     ...(options?.includeBillingDetails
       ? { billingDetails: parseProxyLogBillingDetails(row.proxy_logs.billingDetails) }
       : {}),

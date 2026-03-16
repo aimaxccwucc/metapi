@@ -109,6 +109,17 @@ async function runPerKeySequential<T>(params: {
   );
 }
 
+export async function repairAccountKeysForAccount(accountId: number): Promise<AccountKeyRepairExecutionResult | null> {
+  const row = await db.select()
+    .from(schema.accounts)
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .where(eq(schema.accounts.id, accountId))
+    .get() as AccountWithSiteRow | undefined;
+
+  if (!row) return null;
+  return await repairSingleAccount(row);
+}
+
 async function repairSingleAccount(row: AccountWithSiteRow): Promise<AccountKeyRepairExecutionResult> {
   const base = buildBaseResult(row);
   const account = row.accounts;

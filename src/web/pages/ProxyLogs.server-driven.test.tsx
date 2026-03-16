@@ -59,6 +59,9 @@ function buildListResponse(overrides?: Partial<{
         retryCount: 0,
         estimatedCost: 1.23,
         errorMessage: 'downstream: /v1/chat upstream: /api/chat',
+        routeId: 22,
+        channelId: 11,
+        accountId: 33,
         username: 'tester',
         siteName: 'main-site',
         siteUrl: 'https://main-site.example.com',
@@ -295,3 +298,34 @@ describe('ProxyLogs server-driven page', () => {
     }
   });
 });
+
+
+  it('renders route and channel trace identity in expanded detail', async () => {
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const row = root!.root.find((node) => (
+        node.type === 'tr' && node.props['data-testid'] === 'proxy-log-row-101'
+      ));
+      await act(async () => {
+        row.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root!.root).replace(/\s+/g, ' ');
+      expect(text).toContain('链路: 路由 #22 / 通道 #11 / 账号 #33');
+    } finally {
+      root?.unmount();
+    }
+  });

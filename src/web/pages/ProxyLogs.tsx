@@ -587,6 +587,12 @@ export default function ProxyLogs() {
               const billingProcessLines = detail ? buildBillingProcessLines(detailLog) : [];
               const isExpanded = expanded === log.id;
 
+              const traceIdentity = [
+                detailLog.routeId ? `路由 #${detailLog.routeId}` : null,
+                detailLog.channelId ? `通道 #${detailLog.channelId}` : null,
+                detailLog.accountId ? `账号 #${detailLog.accountId}` : null,
+              ].filter(Boolean).join(' / ');
+
               return (
                 <MobileCard
                   key={log.id}
@@ -609,6 +615,7 @@ export default function ProxyLogs() {
                   {isExpanded ? (
                     <div className="mobile-card-extra">
                       <MobileField label="重试" value={log.retryCount > 0 ? log.retryCount : 0} />
+                      {traceIdentity ? <MobileField label="链路" value={traceIdentity} /> : null}
                       {detailState?.loading && <div style={{ color: 'var(--color-text-muted)' }}>加载详情中...</div>}
                       {detailState?.error && <div style={{ color: 'var(--color-danger)' }}>{detailState.error}</div>}
                       {billingDetailSummary && <div style={{ color: 'var(--color-text-muted)' }}>{billingDetailSummary}</div>}
@@ -661,6 +668,11 @@ export default function ProxyLogs() {
                 const pathMeta = parseProxyLogPathMeta(detailLog.errorMessage);
                 const billingDetailSummary = detail ? formatBillingDetailSummary(detailLog) : null;
                 const billingProcessLines = detail ? buildBillingProcessLines(detailLog) : [];
+                const traceIdentity = [
+                  detailLog.routeId ? `路由 #${detailLog.routeId}` : null,
+                  detailLog.channelId ? `通道 #${detailLog.channelId}` : null,
+                  detailLog.accountId ? `账号 #${detailLog.accountId}` : null,
+                ].filter(Boolean).join(' / ');
 
                 return (
                   <React.Fragment key={log.id}>
@@ -760,6 +772,11 @@ export default function ProxyLogs() {
                                         </>
                                       )}
                                     </div>
+                                    {traceIdentity ? (
+                                      <div>
+                                        链路: <strong style={{ color: 'var(--color-text-primary)' }}>{traceIdentity}</strong>
+                                      </div>
+                                    ) : null}
                                     {detailState?.loading && <div style={{ color: 'var(--color-text-muted)' }}>加载详情中...</div>}
                                     {detailState?.error && <div style={{ color: 'var(--color-danger)' }}>{detailState.error}</div>}
                                     {billingDetailSummary && (

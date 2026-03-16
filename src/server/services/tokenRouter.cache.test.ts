@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +7,19 @@ import { eq } from 'drizzle-orm';
 type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
 type ConfigModule = typeof import('../config.js');
+
+const getApiTokensMock = vi.fn();
+const getApiTokenMock = vi.fn();
+const createApiTokenMock = vi.fn();
+
+vi.mock('./platforms/index.js', () => ({
+  getAdapter: () => ({
+    getApiTokens: (...args: unknown[]) => getApiTokensMock(...args),
+    getApiToken: (...args: unknown[]) => getApiTokenMock(...args),
+    createApiToken: (...args: unknown[]) => createApiTokenMock(...args),
+  }),
+}));
+
 
 describe('TokenRouter runtime cache', () => {
   let db: DbModule['db'];
@@ -34,6 +47,12 @@ describe('TokenRouter runtime cache', () => {
   });
 
   beforeEach(async () => {
+    getApiTokensMock.mockReset();
+    getApiTokenMock.mockReset();
+    createApiTokenMock.mockReset();
+    getApiTokensMock.mockResolvedValue([]);
+    getApiTokenMock.mockResolvedValue(null);
+    createApiTokenMock.mockResolvedValue(false);
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.accountTokens).run();

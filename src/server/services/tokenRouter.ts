@@ -18,6 +18,7 @@ import {
   recordModelCircuitFailure,
   recordModelCircuitSuccess,
 } from './modelCircuitBreaker.js';
+import { repairAccountKeysForAccount } from './accountKeyRepairService.js';
 
 interface RouteMatch {
   route: typeof schema.tokenRoutes.$inferSelect;
@@ -258,6 +259,7 @@ type CandidateEligibilityOptions = {
   bypassSourceModelCheck?: boolean;
   excludeChannelIds?: number[];
   nowIso?: string;
+  allowTokenRepair?: boolean;
 };
 
 type CostSignal = {
@@ -468,6 +470,8 @@ function resolveModelNameForCircuit(
 }
 
 export class TokenRouter {
+  private readonly tokenRepairAttempts = new Set<string>();
+
   /**
    * Find matching route and select a channel for the given model.
    * Returns null if no route/channel available.
@@ -481,6 +485,7 @@ export class TokenRouter {
     options: {
       downstreamPolicy?: DownstreamRoutingPolicy;
       candidateFilter?: TokenRouterCandidateFilter;
+      allowTokenRepair?: boolean;
     } = {},
   ): Promise<SelectedChannel | null> {
     const downstreamPolicy = options.downstreamPolicy ?? DEFAULT_DOWNSTREAM_POLICY;
@@ -502,6 +507,23 @@ export class TokenRouter {
         nowIso,
       }).length === 0
     ));
+
+    if (available.length === 0 && options.allowTokenRepair !== false) {
+      const repaired = await this.repairUnavailableCandidateTokens(match.channels, {
+        requestedModel,
+        bypassSourceModelCheck,
+        nowIso,
+      });
+      if (repaired) {
+        available = match.channels.filter((candidate) => (
+          this.getCandidateEligibilityReasons(candidate, {
+            requestedModel,
+            bypassSourceModelCheck,
+            nowIso: new Date().toISOString(),
+          }).length === 0
+        ));
+      }
+    }
 
     if (options.candidateFilter) {
       available = await options.candidateFilter(available, { requestedModel });
@@ -562,6 +584,7 @@ export class TokenRouter {
     options: {
       downstreamPolicy?: DownstreamRoutingPolicy;
       candidateFilter?: TokenRouterCandidateFilter;
+      allowTokenRepair?: boolean;
     } = {},
   ): Promise<SelectedChannel | null> {
     const downstreamPolicy = options.downstreamPolicy ?? DEFAULT_DOWNSTREAM_POLICY;
@@ -584,6 +607,25 @@ export class TokenRouter {
         nowIso,
       }).length === 0
     ));
+
+    if (available.length === 0 && options.allowTokenRepair !== false) {
+      const repaired = await this.repairUnavailableCandidateTokens(match.channels, {
+        requestedModel,
+        bypassSourceModelCheck,
+        excludeChannelIds,
+        nowIso,
+      });
+      if (repaired) {
+        available = match.channels.filter((candidate) => (
+          this.getCandidateEligibilityReasons(candidate, {
+            requestedModel,
+            bypassSourceModelCheck,
+            excludeChannelIds,
+            nowIso: new Date().toISOString(),
+          }).length === 0
+        ));
+      }
+    }
 
     if (options.candidateFilter) {
       available = await options.candidateFilter(available, { requestedModel });
@@ -1083,6 +1125,38 @@ export class TokenRouter {
 
   private async loadRouteMatch(route: typeof schema.tokenRoutes.$inferSelect): Promise<RouteMatch> {
     return await loadRouteMatch(route);
+  }
+
+  private async repairUnavailableCandidateTokens(
+    candidates: RouteChannelCandidate[],
+    options: CandidateEligibilityOptions,
+  ): Promise<boolean> {
+    let repaired = false;
+
+    for (const candidate of candidates) {
+      const reasons = this.getCandidateEligibilityReasons(candidate, {
+        ...options,
+        allowTokenRepair: false,
+      });
+      if (reasons.length === 0) continue;
+      if (!reasons.includes('令牌不可用')) continue;
+      if (reasons.some((reason) => reason !== '令牌不可用')) continue;
+
+      const repairKey = `${candidate.account.id}:${candidate.channel.id}`;
+      if (this.tokenRepairAttempts.has(repairKey)) continue;
+      this.tokenRepairAttempts.add(repairKey);
+
+      try {
+        const result = await repairAccountKeysForAccount(candidate.account.id);
+        if (!result || ['failed', 'skipped'].includes(result.status)) continue;
+        invalidateTokenRouterCache();
+        repaired = true;
+      } catch {
+        // Ignore account repair errors and continue evaluating other candidates.
+      }
+    }
+
+    return repaired;
   }
 
   private resolveChannelTokenValue(candidate: {

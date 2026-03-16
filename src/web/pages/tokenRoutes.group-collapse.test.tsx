@@ -748,3 +748,120 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 });
+
+
+  it('keeps route list in loading state before summaries resolve and allows cancelling group creation', async () => {
+    let resolveRoutes: ((value: any[]) => void) | null = null;
+    apiMock.getRoutesSummary.mockReturnValue(new Promise((resolve) => {
+      resolveRoutes = resolve;
+    }));
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+
+      expect(collectText(root!.root)).toContain('正在加载路由');
+
+      const createButton = findButtonByText(root!.root, '新建群组');
+      await act(async () => {
+        createButton.props.onClick();
+      });
+      expect(collectText(root!.root)).toContain('取消创建');
+
+      const cancelButton = findButtonByText(root!.root, '取消创建');
+      await act(async () => {
+        cancelButton.props.onClick();
+      });
+      expect(collectText(root!.root)).toContain('新建群组');
+
+      await act(async () => {
+        resolveRoutes?.([
+          {
+            id: 1,
+            modelPattern: 'kimi-k2.5',
+            displayName: 'kimi-k2.5',
+            displayIcon: null,
+            modelMapping: null,
+            enabled: true,
+            channelCount: 1,
+            enabledChannelCount: 1,
+            siteNames: ['Moonshot'],
+            decisionSnapshot: null,
+            decisionRefreshedAt: null,
+          },
+        ]);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(collectText(root!.root)).toContain('共 1 条路由');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('searches wildcard terms against route patterns and display names', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        id: 1,
+        modelPattern: 'kimi-k2.5',
+        displayName: 'kimi-k2.5',
+        displayIcon: null,
+        modelMapping: null,
+        enabled: true,
+        channelCount: 1,
+        enabledChannelCount: 1,
+        siteNames: ['Moonshot'],
+        decisionSnapshot: null,
+        decisionRefreshedAt: null,
+      },
+      {
+        id: 2,
+        modelPattern: 'gpt-4o-mini',
+        displayName: 'gpt-4o-mini',
+        displayIcon: null,
+        modelMapping: null,
+        enabled: true,
+        channelCount: 1,
+        enabledChannelCount: 1,
+        siteNames: ['OpenAI'],
+        decisionSnapshot: null,
+        decisionRefreshedAt: null,
+      },
+    ]);
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const searchInput = findInputByPlaceholder(root!.root, '搜索模型路由');
+      await act(async () => {
+        searchInput.props.onChange({ target: { value: '*kimi*' } });
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root!.root);
+      expect(text).toContain('kimi-k2.5');
+      expect(text).not.toContain('没有匹配的路由');
+      expect(text).not.toContain('gpt-4o-mini');
+    } finally {
+      root?.unmount();
+    }
+  });

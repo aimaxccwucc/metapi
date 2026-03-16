@@ -4,6 +4,7 @@ import {
   getModelPatternError,
   isExactModelPattern,
   matchesModelPattern,
+  matchesRouteSearchTerm,
   parseRegexModelPattern,
 } from './utils.js';
 
@@ -25,6 +26,19 @@ describe('token route utils pattern parsing', () => {
     expect(matchesModelPattern('claude-opus-4-6', 'claude-*')).toBe(true);
     expect(parseRegexModelPattern('claude-*')).toEqual({ regex: null, error: null });
     expect(isExactModelPattern('claude-*')).toBe(false);
+  });
+
+  it('matches route search terms against wildcard and regex patterns', () => {
+    const route = {
+      modelPattern: 'kimi-k2.5',
+      displayName: 'moonshot kimi',
+      siteNames: ['Moonshot', 'Primary'],
+    };
+
+    expect(matchesRouteSearchTerm(route, '*kimi*')).toBe(true);
+    expect(matchesRouteSearchTerm(route, 're:^kimi-')).toBe(true);
+    expect(matchesRouteSearchTerm(route, 'moonshot')).toBe(true);
+    expect(matchesRouteSearchTerm(route, 'claude')).toBe(false);
   });
 
   it('returns a validation error for invalid explicit regex', () => {

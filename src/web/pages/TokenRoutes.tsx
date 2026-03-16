@@ -46,6 +46,7 @@ import {
   normalizeRouteDisplayIconValue,
   inferEndpointTypesFromPlatform,
   getModelPatternError,
+  matchesRouteSearchTerm,
 } from './token-routes/utils.js';
 import { useRouteChannels } from './token-routes/useRouteChannels.js';
 import RouteFilterBar from './token-routes/RouteFilterBar.js';
@@ -66,6 +67,7 @@ const ROUTE_ICON_OPTIONS: RouteIconOption[] = [
 export default function TokenRoutes() {
   const navigate = useNavigate();
   const [routeSummaries, setRouteSummaries] = useState<RouteSummaryRow[]>([]);
+  const [loadingRoutes, setLoadingRoutes] = useState(true);
   const [modelCandidates, setModelCandidates] = useState<RouteModelCandidatesByModelName>({});
   const [missingTokenModelsByName, setMissingTokenModelsByName] = useState<MissingTokenModelsByName>({});
   const [endpointTypesByModel, setEndpointTypesByModel] = useState<Record<string, string[]>>({});
@@ -178,26 +180,31 @@ export default function TokenRoutes() {
   };
 
   const load = async () => {
-    const [summaryRows, candidateRows] = await Promise.all([
-      api.getRoutesSummary(),
-      api.getModelTokenCandidates(),
-    ]);
+    setLoadingRoutes(true);
+    try {
+      const [summaryRows, candidateRows] = await Promise.all([
+        api.getRoutesSummary(),
+        api.getModelTokenCandidates(),
+      ]);
 
-    const summaries = (summaryRows || []) as RouteSummaryRow[];
-    setRouteSummaries(summaries);
-    setModelCandidates((candidateRows?.models || {}) as RouteModelCandidatesByModelName);
-    setMissingTokenModelsByName(
-      normalizeMissingTokenModels((candidateRows?.modelsWithoutToken || {}) as MissingTokenModelsByName),
-    );
-    setEndpointTypesByModel(candidateRows?.endpointTypesByModel || {});
-    const decisionPlaceholder: Record<number, RouteDecision | null> = {};
-    for (const route of summaries) {
-      decisionPlaceholder[route.id] = route.decisionSnapshot || null;
+      const summaries = (summaryRows || []) as RouteSummaryRow[];
+      setRouteSummaries(summaries);
+      setModelCandidates((candidateRows?.models || {}) as RouteModelCandidatesByModelName);
+      setMissingTokenModelsByName(
+        normalizeMissingTokenModels((candidateRows?.modelsWithoutToken || {}) as MissingTokenModelsByName),
+      );
+      setEndpointTypesByModel(candidateRows?.endpointTypesByModel || {});
+      const decisionPlaceholder: Record<number, RouteDecision | null> = {};
+      for (const route of summaries) {
+        decisionPlaceholder[route.id] = route.decisionSnapshot || null;
+      }
+      setDecisionByRoute(decisionPlaceholder);
+      setDecisionAutoSkipped(
+        summaries.some((route) => isExactModelPattern(route.modelPattern) && !route.decisionSnapshot),
+      );
+    } finally {
+      setLoadingRoutes(false);
     }
-    setDecisionByRoute(decisionPlaceholder);
-    setDecisionAutoSkipped(
-      summaries.some((route) => isExactModelPattern(route.modelPattern) && !route.decisionSnapshot),
-    );
   };
 
   useEffect(() => {
@@ -587,17 +594,9 @@ export default function TokenRoutes() {
     if (search.trim()) {
       const terms = search
         .trim()
-        .toLowerCase()
         .split(/\s+/)
         .filter(Boolean);
-      list = list.filter((route) => {
-        const haystacks = [
-          route.modelPattern,
-          route.displayName || '',
-          ...(route.siteNames || []),
-        ].map((value) => String(value || '').toLowerCase());
-        return terms.every((term) => haystacks.some((value) => value.includes(term)));
-      });
+      list = list.filter((route) => terms.every((term) => matchesRouteSearchTerm(route, term)));
     }
 
     return list;
@@ -953,7 +952,7 @@ export default function TokenRoutes() {
         </div>
 
         <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500, marginLeft: 'auto' }}>
-          {tr('共')} {filteredRoutes.length} {tr('条路由')}
+          {loadingRoutes ? tr('路由加载中...') : `${tr('共')} ${filteredRoutes.length} ${tr('条路由')}`}
         </span>
       </div>
 
@@ -1104,7 +1103,14 @@ export default function TokenRoutes() {
         </div>
       )}
 
-      {filteredRoutes.length === 0 && (
+      {loadingRoutes ? (
+        <div className="card">
+          <div className="empty-state">
+            <div className="empty-state-title">{tr('正在加载路由...')}</div>
+            <div className="empty-state-desc">{tr('正在同步路由、候选模型和缺失令牌信息。')}</div>
+          </div>
+        </div>
+      ) : filteredRoutes.length === 0 && (
         <div className="card">
           <div className="empty-state">
             <svg className="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">

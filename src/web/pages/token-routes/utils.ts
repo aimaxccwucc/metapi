@@ -163,6 +163,30 @@ export function getModelPatternError(modelPattern: string): string | null {
   return `模型匹配正则错误：${parsed.error}`;
 }
 
+export function matchesRouteSearchTerm(
+  route: Pick<RouteRow | RouteSummaryRow, 'modelPattern' | 'displayName'> & { siteNames?: string[] | null },
+  rawTerm: string,
+): boolean {
+  const term = rawTerm.trim();
+  if (!term) return true;
+
+  const searchTargets = [
+    route.modelPattern,
+    route.displayName || '',
+    ...(route.siteNames || []),
+  ].map((value) => String(value || '').trim()).filter(Boolean);
+
+  if (searchTargets.length === 0) return false;
+
+  const isPatternTerm = !!parseRegexModelPattern(term).regex || /[\*\?\[]/.test(term);
+  if (isPatternTerm) {
+    return searchTargets.some((value) => matchesModelPattern(value, term));
+  }
+
+  const loweredTerm = term.toLowerCase();
+  return searchTargets.some((value) => value.toLowerCase().includes(loweredTerm));
+}
+
 export function resolveRouteTitle(route: Pick<RouteRow | RouteSummaryRow, 'displayName' | 'modelPattern'>): string {
   const title = (route.displayName || '').trim();
   return title || route.modelPattern;

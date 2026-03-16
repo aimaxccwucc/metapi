@@ -92,12 +92,12 @@ async function handleChatProxyRequest(
 
   while (retryCount <= MAX_RETRIES) {
     let selected = retryCount === 0
-      ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-      : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
+      ? await tokenRouter.selectChannelWithOptions(requestedModel, { downstreamPolicy, allowTokenRepair: true })
+      : await tokenRouter.selectNextChannelWithOptions(requestedModel, excludeChannelIds, { downstreamPolicy, allowTokenRepair: true });
 
     if (!selected && retryCount === 0) {
       await refreshModelsAndRebuildRoutes();
-      selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
+      selected = await tokenRouter.selectChannelWithOptions(requestedModel, { downstreamPolicy, allowTokenRepair: true });
     }
 
     if (!selected) {
