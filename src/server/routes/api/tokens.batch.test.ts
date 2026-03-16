@@ -1,9 +1,23 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { describe, expect, it, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { eq } from 'drizzle-orm';
+
+const getApiTokensMock = vi.fn();
+const getApiTokenMock = vi.fn();
+const createApiTokenMock = vi.fn();
+const getModelsMock = vi.fn();
+
+vi.mock('../../services/platforms/index.js', () => ({
+  getAdapter: () => ({
+    getApiTokens: (...args: unknown[]) => getApiTokensMock(...args),
+    getApiToken: (...args: unknown[]) => getApiTokenMock(...args),
+    createApiToken: (...args: unknown[]) => createApiTokenMock(...args),
+    getModels: (...args: unknown[]) => getModelsMock(...args),
+  }),
+}));
 
 type DbModule = typeof import('../../db/index.js');
 
@@ -60,6 +74,16 @@ describe('PUT /api/channels/batch', () => {
   });
 
   beforeEach(async () => {
+    getApiTokensMock.mockReset();
+    getApiTokenMock.mockReset();
+    createApiTokenMock.mockReset();
+    getModelsMock.mockReset();
+    getApiTokensMock.mockResolvedValue([]);
+    getApiTokenMock.mockResolvedValue(null);
+    createApiTokenMock.mockResolvedValue(false);
+    getModelsMock.mockResolvedValue([]);
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.tokenRoutes).run();
@@ -153,5 +177,61 @@ describe('PUT /api/channels/batch', () => {
     expect(dbB?.weight).toBe(23);
     expect(dbA?.manualOverride).toBe(true);
     expect(dbB?.manualOverride).toBe(true);
+  });
+
+  it('auto-creates account keys for missing-token accounts when batch adding route channels', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'auto-key-site',
+      url: 'https://auto-key-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'missing-token-user',
+      accessToken: 'session-token',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.2-codex',
+      enabled: true,
+    }).returning().get();
+
+    getApiTokensMock.mockResolvedValue([{ name: 'default', key: 'sk-created', enabled: true, tokenGroup: 'default' }]);
+    getApiTokenMock.mockResolvedValue(null);
+    createApiTokenMock.mockResolvedValue(true);
+    getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
+      if (credential === 'session-token' || credential === 'sk-created') {
+        return ['gpt-5.2-codex'];
+      }
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/channels/batch`,
+      payload: {
+        channels: [
+          { accountId: account.id, sourceModel: 'gpt-5.2-codex' },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ success: true, created: 1, skipped: 0, errors: [] });
+
+    const tokens = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.accountId, account.id)).all();
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]?.token).toBe('sk-created');
+
+    const routeChannels = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.routeId, route.id)).all();
+    expect(routeChannels).toHaveLength(1);
+    expect(routeChannels[0]?.accountId).toBe(account.id);
+    expect(routeChannels[0]?.tokenId ?? null).toBeNull();
+    expect(routeChannels[0]?.sourceModel).toBe('gpt-5.2-codex');
+    expect(routeChannels[0]?.manualOverride).toBe(true);
   });
 });

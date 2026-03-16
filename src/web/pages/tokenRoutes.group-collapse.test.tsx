@@ -13,6 +13,7 @@ const { apiMock, getBrandMock } = vi.hoisted(() => ({
     getRouteWideDecisionsBatch: vi.fn(),
     updateRoute: vi.fn(),
     addRoute: vi.fn(),
+    batchAddChannels: vi.fn(),
   },
   getBrandMock: vi.fn(),
 }));
@@ -73,6 +74,7 @@ describe('TokenRoutes grouped source models', () => {
     apiMock.getRouteWideDecisionsBatch.mockResolvedValue({ decisions: {} });
     apiMock.updateRoute.mockResolvedValue({});
     apiMock.addRoute.mockResolvedValue({});
+    apiMock.batchAddChannels.mockResolvedValue({ success: true, created: 1, skipped: 0, errors: [] });
   });
 
   afterEach(() => {
@@ -861,6 +863,98 @@ describe('TokenRoutes grouped source models', () => {
       expect(text).toContain('kimi-k2.5');
       expect(text).not.toContain('没有匹配的路由');
       expect(text).not.toContain('gpt-4o-mini');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('selects visible accounts in add-channel modal and includes missing-token accounts for auto repair', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        id: 1,
+        modelPattern: 'gpt-5.2-codex',
+        displayName: 'gpt-5.2-codex',
+        displayIcon: null,
+        modelMapping: null,
+        enabled: true,
+        channelCount: 0,
+        enabledChannelCount: 0,
+        siteNames: ['Site A'],
+        decisionSnapshot: null,
+        decisionRefreshedAt: null,
+      },
+    ]);
+    apiMock.getRouteChannels.mockResolvedValue([]);
+    apiMock.getModelTokenCandidates.mockResolvedValue({
+      models: {
+        'gpt-5.2-codex': [
+          {
+            accountId: 101,
+            tokenId: 1001,
+            tokenName: 'default-token',
+            isDefault: true,
+            username: 'ready-user',
+            siteId: 11,
+            siteName: 'Site A',
+          },
+        ],
+      },
+      modelsWithoutToken: {
+        'gpt-5.2-codex': [
+          { accountId: 202, username: 'missing-user', siteId: 22, siteName: 'Site B' },
+        ],
+      },
+    });
+    apiMock.batchAddChannels.mockResolvedValue({ success: true, created: 2, skipped: 0, errors: [] });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const expandBtn = root!.root.find((node) =>
+        node.type === 'div' && String(node.props.className || '').includes('route-card-collapsed'),
+      );
+      await act(async () => {
+        expandBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const addChannelButton = findButtonByText(root!.root, '添加通道');
+      await act(async () => {
+        addChannelButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const textBeforeSubmit = collectText(root!.root);
+      expect(textBeforeSubmit).toContain('全选当前结果');
+      expect(textBeforeSubmit).toContain('自动创建Key');
+      expect(textBeforeSubmit).toContain('missing-user @ Site B');
+
+      const selectAllButton = findButtonByText(root!.root, '全选当前结果');
+      await act(async () => {
+        selectAllButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const submitButton = findButtonByText(root!.root, '批量添加');
+      await act(async () => {
+        submitButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.batchAddChannels).toHaveBeenCalledWith(1, expect.arrayContaining([
+        expect.objectContaining({ accountId: 101 }),
+        expect.objectContaining({ accountId: 202, sourceModel: 'gpt-5.2-codex' }),
+      ]));
     } finally {
       root?.unmount();
     }

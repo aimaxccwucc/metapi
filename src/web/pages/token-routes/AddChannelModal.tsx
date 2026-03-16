@@ -46,14 +46,6 @@ export default function AddChannelModal({
   const [selectedAccounts, setSelectedAccounts] = useState<Record<number, ChannelSelection>>({});
   const [submitting, setSubmitting] = useState(false);
 
-  const filteredAccounts = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return candidateView.accountOptions;
-    return candidateView.accountOptions.filter((option) =>
-      option.label.toLowerCase().includes(q),
-    );
-  }, [candidateView.accountOptions, searchQuery]);
-
   const missingAccounts = useMemo(() => {
     if (!missingTokenHints || missingTokenHints.length === 0) return [];
     const seen = new Map<number, { accountId: number; label: string; modelName: string }>();
@@ -74,7 +66,50 @@ export default function AddChannelModal({
     return missingAccounts.filter((item) => item.label.toLowerCase().includes(q));
   }, [missingAccounts, searchQuery]);
 
+  const autoCreateMissingByAccountId = useMemo(() => {
+    const next = new Map<number, { modelName: string }>();
+    for (const item of missingAccounts) {
+      if (!next.has(item.accountId)) {
+        next.set(item.accountId, { modelName: item.modelName });
+      }
+    }
+    return next;
+  }, [missingAccounts]);
+
+  const allSelectableAccounts = useMemo(() => {
+    const next = new Map<number, RouteAccountOption>();
+    for (const account of candidateView.accountOptions) {
+      next.set(account.id, account);
+    }
+    for (const item of missingAccounts) {
+      if (!next.has(item.accountId)) {
+        next.set(item.accountId, {
+          id: item.accountId,
+          label: item.label,
+        });
+      }
+    }
+    return Array.from(next.values()).sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+  }, [candidateView.accountOptions, missingAccounts]);
+
+  const filteredSelectableAccounts = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return allSelectableAccounts;
+    return allSelectableAccounts.filter((option) => option.label.toLowerCase().includes(q));
+  }, [allSelectableAccounts, searchQuery]);
+
+  const selectableVisibleAccounts = filteredSelectableAccounts;
+
+  const buildInitialSelection = (accountId: number): ChannelSelection => ({
+    accountId,
+    sourceModel: autoCreateMissingByAccountId.get(accountId)?.modelName
+      || candidateView.tokenOptionsByAccountId[accountId]?.[0]?.sourceModel,
+  });
+
   const selectedCount = Object.keys(selectedAccounts).length;
+  const selectableVisibleIds = selectableVisibleAccounts.map((account) => account.id);
+  const selectableVisibleSelectedCount = selectableVisibleIds.filter((accountId) => !!selectedAccounts[accountId]).length;
+  const allVisibleSelected = selectableVisibleIds.length > 0 && selectableVisibleSelectedCount === selectableVisibleIds.length;
 
   const toggleAccount = (account: RouteAccountOption) => {
     setSelectedAccounts((prev) => {
@@ -83,13 +118,31 @@ export default function AddChannelModal({
         delete next[account.id];
         return next;
       }
-      const tokens = candidateView.tokenOptionsByAccountId[account.id] || [];
       return {
         ...prev,
-        [account.id]: {
-          accountId: account.id,
-        },
+        [account.id]: buildInitialSelection(account.id),
       };
+    });
+  };
+
+  const selectVisibleAccounts = () => {
+    setSelectedAccounts((prev) => {
+      const next = { ...prev };
+      for (const account of selectableVisibleAccounts) {
+        if (next[account.id]) continue;
+        next[account.id] = buildInitialSelection(account.id);
+      }
+      return next;
+    });
+  };
+
+  const clearVisibleAccounts = () => {
+    setSelectedAccounts((prev) => {
+      const next = { ...prev };
+      for (const accountId of selectableVisibleIds) {
+        delete next[accountId];
+      }
+      return next;
     });
   };
 
@@ -179,35 +232,57 @@ export default function AddChannelModal({
           />
         </div>
 
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+            {tr('当前可批量选择')} {selectableVisibleAccounts.length} {tr('个账号')}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ fontSize: 12, padding: '6px 10px' }}
+              onClick={allVisibleSelected ? clearVisibleAccounts : selectVisibleAccounts}
+              disabled={submitting || selectableVisibleAccounts.length === 0}
+            >
+              {allVisibleSelected ? tr('清空当前结果') : tr('全选当前结果')}
+            </button>
+          </div>
+        </div>
+
         <div style={{ maxHeight: 360, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {filteredAccounts.length === 0 && filteredMissingAccounts.length === 0 ? (
+          {filteredSelectableAccounts.length === 0 ? (
             <div style={{ fontSize: 13, color: 'var(--color-text-muted)', padding: '12px 0', textAlign: 'center' }}>
-              {candidateView.accountOptions.length === 0 && missingAccounts.length === 0
+              {allSelectableAccounts.length === 0
                 ? tr('当前没有可用的账号，请确认已有账号的令牌支持调用此模型')
                 : tr('没有匹配的账号')}
             </div>
           ) : (
             <>
-              {filteredAccounts.map((account) => {
+              {filteredSelectableAccounts.map((account) => {
                 const isSelected = !!selectedAccounts[account.id];
                 const tokens = candidateView.tokenOptionsByAccountId[account.id] || [];
                 const selection = selectedAccounts[account.id];
-                const isExisting = existingChannelAccountIds?.has(account.id);
+                const missingHint = autoCreateMissingByAccountId.get(account.id) || null;
+                const willAutoCreateToken = !!missingHint && tokens.length === 0;
+                const isExisting = !!existingChannelAccountIds?.has(account.id);
                 const tokenBinding = describeTokenBinding(tokens, selection?.tokenId || 0);
 
                 return (
                   <div
                     key={account.id}
-                    onClick={() => toggleAccount(account)}
+                    onClick={() => {
+                      toggleAccount(account);
+                    }}
                     style={{
                       padding: '8px 10px',
                       borderRadius: 'var(--radius-sm)',
                       border: `1px solid ${isSelected ? 'var(--color-primary)' : 'var(--color-border)'}`,
                       background: isSelected ? 'color-mix(in srgb, var(--color-primary) 6%, transparent)' : 'transparent',
                       cursor: 'pointer',
+                      opacity: 1,
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <input
                         type="checkbox"
                         checked={isSelected}
@@ -215,10 +290,32 @@ export default function AddChannelModal({
                         style={{ cursor: 'pointer', pointerEvents: 'none' }}
                       />
                       <span style={{ fontSize: 13, fontWeight: 500 }}>{account.label}</span>
-                      {isExisting && (
+                      {isExisting ? (
                         <span className="badge badge-muted" style={{ fontSize: 10 }}>{tr('已添加')}</span>
-                      )}
+                      ) : null}
+                      {willAutoCreateToken ? (
+                        <span className="badge badge-info" style={{ fontSize: 10 }}>{tr('自动创建Key')}</span>
+                      ) : null}
+                      {missingHint && onCreateTokenForMissing ? (
+                        <button
+                          type="button"
+                          className="btn btn-link"
+                          style={{ fontSize: 11, padding: '2px 6px' }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onCreateTokenForMissing(account.id, missingHint.modelName);
+                          }}
+                        >
+                          {tr('创建令牌')}
+                        </button>
+                      ) : null}
                     </div>
+
+                    {willAutoCreateToken ? (
+                      <div style={{ marginTop: 6, paddingLeft: 24, fontSize: 11, color: 'var(--color-text-muted)', lineHeight: 1.4 }}>
+                        {tr('当前账号缺少可用 key，提交后会先自动创建并刷新模型覆盖，再创建通道。')}
+                      </div>
+                    ) : null}
 
                     {isSelected && tokens.length > 0 && (
                       <div style={{ marginTop: 6, paddingLeft: 24 }} onClick={(e) => e.stopPropagation()}>
@@ -231,7 +328,7 @@ export default function AddChannelModal({
                           })()}
                           onChange={(nextValue) => {
                             if (nextValue === '0') {
-                              updateTokenForAccount(account.id, 0, '');
+                              updateTokenForAccount(account.id, 0, selection?.sourceModel || '');
                               return;
                             }
                             const [tokenRaw, ...sourceParts] = nextValue.split('::');
@@ -263,36 +360,11 @@ export default function AddChannelModal({
                 );
               })}
 
-              {/* Missing token hints */}
-              {filteredMissingAccounts.length > 0 && (
-                <div style={{ borderTop: '1px dashed var(--color-border)', paddingTop: 8, marginTop: 4, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 2 }}>
-                    {tr('以下账号可用此模型但缺少令牌')}:
-                  </div>
-                  {filteredMissingAccounts.map((item) => (
-                    <div
-                      key={item.accountId}
-                      style={{
-                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                        padding: '6px 10px', borderRadius: 'var(--radius-sm)',
-                        border: '1px dashed var(--color-border)', background: 'var(--color-bg)',
-                      }}
-                    >
-                      <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{item.label}</span>
-                      {onCreateTokenForMissing && (
-                        <button
-                          type="button"
-                          className="btn btn-link"
-                          style={{ fontSize: 11, padding: '2px 6px' }}
-                          onClick={() => onCreateTokenForMissing(item.accountId, item.modelName)}
-                        >
-                          {tr('创建令牌')}
-                        </button>
-                      )}
-                    </div>
-                  ))}
+              {filteredMissingAccounts.length > 0 ? (
+                <div style={{ borderTop: '1px dashed var(--color-border)', paddingTop: 8, marginTop: 4, fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                  {tr('缺少令牌的账号已支持直接勾选，提交时会自动创建可用 key。')}
                 </div>
-              )}
+              ) : null}
             </>
           )}
         </div>

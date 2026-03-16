@@ -1,9 +1,10 @@
 ﻿import { FastifyInstance } from 'fastify';
 import { and, eq, inArray } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
-import { rebuildTokenRoutesFromAvailability, refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
+import { rebuildTokenRoutesFromAvailability, refreshModelsAndRebuildRoutes, refreshModelsForAccount } from '../../services/modelService.js';
 import { normalizeRouteRoutingStrategy } from '../../services/routeRoutingStrategy.js';
 import { invalidateTokenRouterCache, matchesModelPattern, tokenRouter } from '../../services/tokenRouter.js';
+import { repairAccountKeysForAccount } from '../../services/accountKeyRepairService.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import {
   clearRouteDecisionSnapshot,
@@ -65,6 +66,117 @@ async function checkTokenBelongsToAccount(tokenId: number, accountId: number): P
     .where(and(eq(schema.accountTokens.id, tokenId), eq(schema.accountTokens.accountId, accountId)))
     .get();
   return !!row;
+}
+
+type ResolvedChannelBinding = {
+  accountId: number;
+  tokenId: number | null;
+  sourceModel: string;
+};
+
+function buildChannelPairKey(accountId: number, tokenId: number | null | undefined, sourceModel: string): string {
+  const normalizedTokenId = typeof tokenId === 'number' && Number.isFinite(tokenId) ? tokenId : 0;
+  return `${accountId}::${normalizedTokenId}::${sourceModel.trim().toLowerCase()}`;
+}
+
+async function findAccountTokenForSourceModel(accountId: number, sourceModel: string): Promise<number | null> {
+  const normalizedSourceModel = sourceModel.trim();
+  if (!normalizedSourceModel) return await getDefaultTokenId(accountId);
+
+  const rows = await db.select({
+    tokenId: schema.accountTokens.id,
+    isDefault: schema.accountTokens.isDefault,
+  }).from(schema.tokenModelAvailability)
+    .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
+    .where(
+      and(
+        eq(schema.accountTokens.accountId, accountId),
+        eq(schema.accountTokens.enabled, true),
+        eq(schema.tokenModelAvailability.available, true),
+      ),
+    )
+    .all();
+
+  const supported: Array<{ tokenId: number; isDefault: boolean | null }> = [];
+  for (const row of rows) {
+    if (await tokenSupportsModel(row.tokenId, normalizedSourceModel)) {
+      supported.push(row);
+    }
+  }
+  if (supported.length === 0) return null;
+  const preferred = supported.find((row) => row.isDefault) || supported[0];
+  return preferred?.tokenId ?? null;
+}
+
+async function resolveChannelBinding(params: {
+  route: typeof schema.tokenRoutes.$inferSelect;
+  accountId: number;
+  tokenId?: number;
+  sourceModel?: string;
+  allowAccountRepair?: boolean;
+}): Promise<ResolvedChannelBinding> {
+  const { route, accountId } = params;
+  const exactRoute = isExactModelPattern(route.modelPattern);
+  const requestedSourceModel = typeof params.sourceModel === 'string'
+    ? params.sourceModel.trim()
+    : (exactRoute ? route.modelPattern.trim() : '');
+
+  if (!requestedSourceModel) {
+    throw new Error('当前路由必须指定来源模型后才能添加通道');
+  }
+
+  if (params.tokenId && !await checkTokenBelongsToAccount(params.tokenId, accountId)) {
+    throw new Error(`令牌 ${params.tokenId} 不属于账号 ${accountId}`);
+  }
+
+  if (params.tokenId) {
+    const supports = await tokenSupportsModel(params.tokenId, requestedSourceModel);
+    if (!supports) {
+      throw new Error('该令牌不支持当前模型');
+    }
+    return {
+      accountId,
+      tokenId: params.tokenId,
+      sourceModel: requestedSourceModel,
+    };
+  }
+
+  const resolveImplicitToken = async (): Promise<number | null> => {
+    const refreshed = await findAccountTokenForSourceModel(accountId, requestedSourceModel);
+    if (refreshed) return refreshed;
+    await refreshModelsForAccount(accountId);
+    return await findAccountTokenForSourceModel(accountId, requestedSourceModel);
+  };
+
+  let resolvedTokenId = await resolveImplicitToken();
+  if (!resolvedTokenId && params.allowAccountRepair !== false) {
+    const repair = await repairAccountKeysForAccount(accountId);
+    if (repair && !['failed', 'skipped'].includes(repair.status)) {
+      await refreshModelsForAccount(accountId);
+      resolvedTokenId = await findAccountTokenForSourceModel(accountId, requestedSourceModel);
+    }
+  }
+
+  if (!resolvedTokenId) {
+    throw new Error('账号当前没有支持该模型的可用 key，已尝试自动创建但仍不可用');
+  }
+
+  if (exactRoute) {
+    const defaultTokenId = await getDefaultTokenId(accountId);
+    if (defaultTokenId && defaultTokenId === resolvedTokenId) {
+      return {
+        accountId,
+        tokenId: null,
+        sourceModel: requestedSourceModel,
+      };
+    }
+  }
+
+  return {
+    accountId,
+    tokenId: resolvedTokenId,
+    sourceModel: requestedSourceModel,
+  };
 }
 
 async function getPatternTokenCandidates(modelPattern: string): Promise<Array<{ tokenId: number; accountId: number; sourceModel: string }>> {
@@ -506,11 +618,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       .where(eq(schema.routeChannels.routeId, routeId))
       .all();
     const existingPairs = new Set<string>(
-      existingChannels.map((channel) => {
-        const tokenId = typeof channel.tokenId === 'number' && Number.isFinite(channel.tokenId) ? channel.tokenId : 0;
-        const sourceModel = (channel.sourceModel || '').trim().toLowerCase();
-        return `${channel.accountId}::${tokenId}::${sourceModel}`;
-      }),
+      existingChannels.map((channel) => buildChannelPairKey(channel.accountId, channel.tokenId, channel.sourceModel || '')),
     );
 
     let created = 0;
@@ -523,29 +631,24 @@ export async function tokensRoutes(app: FastifyInstance) {
         continue;
       }
 
-      const sourceModel = typeof item.sourceModel === 'string'
-        ? item.sourceModel.trim()
-        : (isExactModelPattern(route.modelPattern) ? route.modelPattern.trim() : '');
-      const effectiveTokenId = item.tokenId ?? await getDefaultTokenId(item.accountId);
-
-      if (item.tokenId && !await checkTokenBelongsToAccount(item.tokenId, item.accountId)) {
-        errors.push(`令牌 ${item.tokenId} 不属于账号 ${item.accountId}`);
-        continue;
-      }
-
-      const tokenIdForKey = typeof effectiveTokenId === 'number' && Number.isFinite(effectiveTokenId) ? effectiveTokenId : 0;
-      const pairKey = `${item.accountId}::${tokenIdForKey}::${sourceModel.toLowerCase()}`;
-      if (existingPairs.has(pairKey)) {
-        skipped += 1;
-        continue;
-      }
-
       try {
+        const resolved = await resolveChannelBinding({
+          route,
+          accountId: item.accountId,
+          tokenId: item.tokenId,
+          sourceModel: item.sourceModel,
+        });
+        const pairKey = buildChannelPairKey(resolved.accountId, resolved.tokenId, resolved.sourceModel);
+        if (existingPairs.has(pairKey)) {
+          skipped += 1;
+          continue;
+        }
+
         await db.insert(schema.routeChannels).values({
           routeId,
-          accountId: item.accountId,
-          tokenId: effectiveTokenId,
-          sourceModel: sourceModel || null,
+          accountId: resolved.accountId,
+          tokenId: resolved.tokenId,
+          sourceModel: resolved.sourceModel || null,
           priority: 0,
           weight: 10,
           manualOverride: true,
@@ -762,38 +865,38 @@ export async function tokensRoutes(app: FastifyInstance) {
       return reply.code(404).send({ success: false, message: '路由不存在' });
     }
 
-    const sourceModel = typeof body.sourceModel === 'string'
-      ? body.sourceModel.trim()
-      : (isExactModelPattern(route.modelPattern) ? route.modelPattern.trim() : '');
-    const effectiveTokenId = body.tokenId ?? await getDefaultTokenId(body.accountId);
-
-    if (body.tokenId && !await checkTokenBelongsToAccount(body.tokenId, body.accountId)) {
-      return reply.code(400).send({ success: false, message: '令牌不存在或不属于当前账号' });
-    }
-
-    if (isExactModelPattern(route.modelPattern) && effectiveTokenId && !await tokenSupportsModel(effectiveTokenId, route.modelPattern)) {
-      return reply.code(400).send({ success: false, message: '该令牌不支持当前模型' });
+    let resolved: ResolvedChannelBinding;
+    try {
+      resolved = await resolveChannelBinding({
+        route,
+        accountId: body.accountId,
+        tokenId: body.tokenId,
+        sourceModel: body.sourceModel,
+      });
+    } catch (error: any) {
+      return reply.code(400).send({ success: false, message: error?.message || '创建通道失败' });
     }
 
     const duplicate = (await db.select().from(schema.routeChannels)
       .where(eq(schema.routeChannels.routeId, routeId))
       .all())
-      .some((channel) =>
-        channel.accountId === body.accountId
-        && (channel.tokenId ?? null) === (body.tokenId ?? null)
-        && (channel.sourceModel || '').trim().toLowerCase() === sourceModel.toLowerCase(),
-      );
+      .some((channel) => buildChannelPairKey(channel.accountId, channel.tokenId, channel.sourceModel || '') === buildChannelPairKey(
+        resolved.accountId,
+        resolved.tokenId,
+        resolved.sourceModel,
+      ));
     if (duplicate) {
       return reply.code(400).send({ success: false, message: '该来源模型的通道已存在' });
     }
 
     const insertedChannel = await db.insert(schema.routeChannels).values({
       routeId,
-      accountId: body.accountId,
-      tokenId: body.tokenId,
-      sourceModel: sourceModel || null,
+      accountId: resolved.accountId,
+      tokenId: resolved.tokenId,
+      sourceModel: resolved.sourceModel || null,
       priority: body.priority ?? 0,
       weight: body.weight ?? 10,
+      manualOverride: true,
     }).run();
     const channelId = Number(insertedChannel.lastInsertRowid || 0);
     if (channelId <= 0) {
