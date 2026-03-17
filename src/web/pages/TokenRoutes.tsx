@@ -22,6 +22,7 @@ import {
   type MissingTokenModelsByName,
 } from './helpers/routeMissingTokenHints.js';
 import { buildVisibleRouteList } from './helpers/routeListVisibility.js';
+import { buildZeroChannelPlaceholderRoutes } from './helpers/zeroChannelRoutes.js';
 
 import type {
   RouteSortBy,
@@ -70,6 +71,8 @@ export default function TokenRoutes() {
   const [loadingRoutes, setLoadingRoutes] = useState(true);
   const [modelCandidates, setModelCandidates] = useState<RouteModelCandidatesByModelName>({});
   const [missingTokenModelsByName, setMissingTokenModelsByName] = useState<MissingTokenModelsByName>({});
+  const [missingTokenGroupModelsByName, setMissingTokenGroupModelsByName] = useState<MissingTokenModelsByName>({});
+  const [showZeroChannelRoutes, setShowZeroChannelRoutes] = useState(false);
   const [endpointTypesByModel, setEndpointTypesByModel] = useState<Record<string, string[]>>({});
 
   const [search, setSearch] = useState('');
@@ -193,6 +196,9 @@ export default function TokenRoutes() {
       setMissingTokenModelsByName(
         normalizeMissingTokenModels((candidateRows?.modelsWithoutToken || {}) as MissingTokenModelsByName),
       );
+      setMissingTokenGroupModelsByName(
+        normalizeMissingTokenModels((candidateRows?.modelsMissingTokenGroups || {}) as MissingTokenModelsByName),
+      );
       setEndpointTypesByModel(candidateRows?.endpointTypesByModel || {});
       const decisionPlaceholder: Record<number, RouteDecision | null> = {};
       for (const route of summaries) {
@@ -255,6 +261,16 @@ export default function TokenRoutes() {
   const canSaveRoute = !saving
     && !!form.modelPattern.trim()
     && !getModelPatternError(form.modelPattern);
+
+  const zeroChannelPlaceholderRoutes = useMemo(
+    () => buildZeroChannelPlaceholderRoutes(routeSummaries, missingTokenModelsByName, missingTokenGroupModelsByName),
+    [routeSummaries, missingTokenModelsByName, missingTokenGroupModelsByName],
+  );
+
+  const visibleRouteRows = useMemo(
+    () => (showZeroChannelRoutes ? [...routeSummaries, ...zeroChannelPlaceholderRoutes] : routeSummaries),
+    [routeSummaries, showZeroChannelRoutes, zeroChannelPlaceholderRoutes],
+  );
 
   const previewModelSamples = useMemo(() => {
     const names = new Set<string>();
@@ -391,22 +407,22 @@ export default function TokenRoutes() {
 
   // Stable derived value: only changes when route patterns change (not on enabled toggle)
   const routePatterns = useMemo(
-    () => routeSummaries.map((r) => ({ id: r.id, modelPattern: r.modelPattern })),
+    () => visibleRouteRows.map((r) => ({ id: r.id, modelPattern: r.modelPattern })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [routeSummaries.map((r) => `${r.id}:${r.modelPattern}`).join(',')],
+    [visibleRouteRows.map((r) => `${r.id}:${r.modelPattern}`).join(',')],
   );
 
   const routeBrandById = useMemo(() => {
     const next = new Map<number, BrandInfo | null>();
-    for (const route of routeSummaries) {
+    for (const route of visibleRouteRows) {
       next.set(route.id, resolveRouteBrand(route));
     }
     return next;
-  }, [routeSummaries]);
+  }, [visibleRouteRows]);
 
   const listVisibleRoutes = useMemo(
-    () => buildVisibleRouteList(routeSummaries, isExactModelPattern, matchesModelPattern),
-    [routeSummaries],
+    () => buildVisibleRouteList(visibleRouteRows, isExactModelPattern, matchesModelPattern),
+    [visibleRouteRows],
   );
 
   const brandList = useMemo(() => {
@@ -503,7 +519,7 @@ export default function TokenRoutes() {
   const routeBrandIconCandidates = useMemo(() => {
     const byIcon = new Map<string, BrandInfo>();
 
-    for (const route of routeSummaries) {
+    for (const route of visibleRouteRows) {
       const brand = resolveRouteBrand(route);
       if (brand) byIcon.set(brand.icon, brand);
     }
@@ -515,7 +531,7 @@ export default function TokenRoutes() {
 
     return Array.from(byIcon.values())
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
-  }, [routeSummaries, modelCandidates]);
+  }, [visibleRouteRows, modelCandidates]);
 
   const routeIconSelectOptions = useMemo<RouteIconOption[]>(() => ([
     ...ROUTE_ICON_OPTIONS,
@@ -916,6 +932,14 @@ export default function TokenRoutes() {
             ) : (
               tr('刷新选中概率')
             )}
+          </button>
+
+          <button
+            onClick={() => setShowZeroChannelRoutes((v) => !v)}
+            className={`btn btn-ghost${showZeroChannelRoutes ? ' is-active' : ''}`}
+            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+          >
+            {showZeroChannelRoutes ? tr('隐藏占位路由') : tr('显示占位路由')}
           </button>
 
           <button

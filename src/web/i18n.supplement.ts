@@ -810,4 +810,8 @@ export const zhToEnSupplemental: Record<string, string> = {
   '已选': 'selected',
   '搜索模型...': 'Search models...',
   '无匹配模型': 'No matching models',
+  '清空': 'Clear',
+  '占位': 'Placeholder',
+  '显示占位路由': 'Show placeholder routes',
+  '隐藏占位路由': 'Hide placeholder routes',
 };

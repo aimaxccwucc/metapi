@@ -111,6 +111,7 @@ function RouteCardInner({
 }: RouteCardProps) {
   const routeIcon = resolveRouteIcon(route);
   const exactRoute = isExactModelPattern(route.modelPattern);
+  const readOnlyRoute = route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true;
   const title = resolveRouteTitle(route);
   const routingStrategy = route.routingStrategy === 'round_robin' ? 'round_robin' : 'weighted';
   const routingStrategyOptions = [
@@ -184,22 +185,30 @@ function RouteCardInner({
             <span className="badge badge-muted" style={{ fontSize: 10, flexShrink: 0 }}>{route.modelPattern}</span>
           ) : null}
 
-          <button
-            className={`badge route-enable-toggle ${route.enabled ? 'is-enabled' : 'is-disabled'}`}
-            style={{ fontSize: 11, cursor: 'pointer', border: 'none', flexShrink: 0, minWidth: 36, textAlign: 'center' }}
-            onClick={(e) => { e.stopPropagation(); onToggleEnabled(route); }}
-            data-tooltip={route.enabled ? '点击禁用此路由' : '点击启用此路由'}
-          >
-            {route.enabled ? tr('启用') : tr('禁用')}
-          </button>
+          {readOnlyRoute ? (
+            <span className="badge badge-muted" style={{ fontSize: 11, flexShrink: 0, minWidth: 36, textAlign: 'center' }}>
+              {tr('占位')}
+            </span>
+          ) : (
+            <button
+              className={`badge route-enable-toggle ${route.enabled ? 'is-enabled' : 'is-disabled'}`}
+              style={{ fontSize: 11, cursor: 'pointer', border: 'none', flexShrink: 0, minWidth: 36, textAlign: 'center' }}
+              onClick={(e) => { e.stopPropagation(); onToggleEnabled(route); }}
+              data-tooltip={route.enabled ? '点击禁用此路由' : '点击启用此路由'}
+            >
+              {route.enabled ? tr('启用') : tr('禁用')}
+            </button>
+          )}
 
           <span className="badge badge-info" style={{ fontSize: 10, flexShrink: 0 }}>
             {route.channelCount} {tr('通道')}
           </span>
 
-          <span className="badge badge-muted" style={{ fontSize: 10, flexShrink: 0 }}>
-            {routingStrategy === 'round_robin' ? tr('轮询') : tr('权重随机')}
-          </span>
+          {!readOnlyRoute && (
+            <span className="badge badge-muted" style={{ fontSize: 10, flexShrink: 0 }}>
+              {routingStrategy === 'round_robin' ? tr('轮询') : tr('权重随机')}
+            </span>
+          )}
 
           <svg
             width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2"
@@ -236,14 +245,18 @@ function RouteCardInner({
           {route.displayName && route.displayName.trim() !== route.modelPattern ? (
             <span className="badge badge-muted" style={{ fontSize: 10 }}>{route.modelPattern}</span>
           ) : null}
-          <button
-            className={`badge route-enable-toggle ${route.enabled ? 'is-enabled' : 'is-disabled'}`}
-            style={{ fontSize: 11, cursor: 'pointer', border: 'none' }}
-            onClick={(e) => { e.stopPropagation(); onToggleEnabled(route); }}
-            data-tooltip={route.enabled ? '点击禁用此路由' : '点击启用此路由'}
-          >
-            {route.enabled ? tr('启用') : tr('禁用')}
-          </button>
+          {readOnlyRoute ? (
+            <span className="badge badge-muted" style={{ fontSize: 11 }}>{tr('占位')}</span>
+          ) : (
+            <button
+              className={`badge route-enable-toggle ${route.enabled ? 'is-enabled' : 'is-disabled'}`}
+              style={{ fontSize: 11, cursor: 'pointer', border: 'none' }}
+              onClick={(e) => { e.stopPropagation(); onToggleEnabled(route); }}
+              data-tooltip={route.enabled ? '点击禁用此路由' : '点击启用此路由'}
+            >
+              {route.enabled ? tr('启用') : tr('禁用')}
+            </button>
+          )}
           <span className="badge badge-info" style={{ fontSize: 10 }}>
             {route.channelCount} {tr('通道')}
           </span>
@@ -253,10 +266,12 @@ function RouteCardInner({
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {!exactRoute && (
+          {!exactRoute && !readOnlyRoute && (
             <button onClick={() => onEdit(route)} className="btn btn-link">{tr('编辑群组')}</button>
           )}
-          <button onClick={() => onDelete(route.id)} className="btn btn-link btn-link-danger">{tr('删除路由')}</button>
+          {!readOnlyRoute && (
+            <button onClick={() => onDelete(route.id)} className="btn btn-link btn-link-danger">{tr('删除路由')}</button>
+          )}
           <button
             onClick={() => onToggleExpand(route.id)}
             className="btn btn-ghost"
