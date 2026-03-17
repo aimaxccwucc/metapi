@@ -61,7 +61,7 @@ export default function ManualRoutePanel({
     if (reMatch) {
       return new Set(reMatch[1].split('|').map((s) => s.trim()).filter(Boolean));
     }
-    if (/^[^*?[\\|^$(){}+.]+$/.test(pattern)) return new Set([pattern]);
+    if (/^[^*?[\\|^$(){}+]+$/.test(pattern)) return new Set([pattern]);
     return new Set<string>();
   }, [form.modelPattern]);
 
