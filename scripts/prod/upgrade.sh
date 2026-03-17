@@ -31,16 +31,13 @@ require_cmd() {
   command -v "$name" >/dev/null 2>&1 || die "$name not found"
 }
 
-copy_tree() {
+backup_copy() {
   local src="$1"
   local dest="$2"
   if [ ! -e "$src" ]; then
     return 0
   fi
   mkdir -p "$(dirname "$dest")"
-  if cp -al "$src" "$dest" 2>/dev/null; then
-    return 0
-  fi
   cp -a "$src" "$dest"
 }
 
@@ -103,9 +100,9 @@ echo "image_ref=$OLD_IMAGE_REF" >>"$BACKUP_DIR/state.env"
 echo "image_tag=$IMAGE_TAG" >>"$BACKUP_DIR/state.env"
 
 echo "[2/8] Backup deploy files and data to $BACKUP_DIR"
-copy_tree "$DEPLOY_DIR/docker-compose.yml" "$BACKUP_DIR/docker-compose.yml"
-copy_tree "$DEPLOY_DIR/.env" "$BACKUP_DIR/.env"
-copy_tree "$DEPLOY_DIR/data" "$BACKUP_DIR/data"
+backup_copy "$DEPLOY_DIR/docker-compose.yml" "$BACKUP_DIR/docker-compose.yml"
+backup_copy "$DEPLOY_DIR/.env" "$BACKUP_DIR/.env"
+backup_copy "$DEPLOY_DIR/data" "$BACKUP_DIR/data"
 
 # Hint: if Docker Hub is unreachable and the base image isn't present locally,
 # the build step may fail. You can pre-pull or override it:
