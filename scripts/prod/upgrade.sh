@@ -48,7 +48,19 @@ health_check() {
   local url="$1"
   local name="$2"
   echo "[check] $name: $url"
-  curl -fsS -I --max-time 20 "$url" | sed -n '1,6p'
+  if curl -fsS -I --connect-timeout 5 --max-time 20 "$url" | sed -n '1,6p'; then
+    return 0
+  fi
+
+  # Some hosts have flaky IPv6 connectivity to Cloudflare. Retry forcing IPv4
+  # for hostnames, but avoid forcing IPv4 on IPv6 literals like http://[::1]/.
+  if [[ "$url" != http://[* && "$url" != https://[* ]]; then
+    echo "[check] $name retry with IPv4"
+    curl -4 -fsS -I --connect-timeout 5 --max-time 20 "$url" | sed -n '1,6p'
+    return 0
+  fi
+
+  return 1
 }
 
 require_cmd docker
