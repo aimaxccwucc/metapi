@@ -55,6 +55,7 @@ const platformColors: Record<string, string> = {
   claude: 'badge-warning',
   gemini: 'badge-info',
   cliproxyapi: 'badge-info',
+  codex: 'badge-success',
 };
 
 const SITE_PLATFORM_OPTIONS = [
@@ -70,6 +71,7 @@ const SITE_PLATFORM_OPTIONS = [
   { value: 'claude', label: 'claude' },
   { value: 'gemini', label: 'gemini' },
   { value: 'cliproxyapi', label: 'cliproxyapi' },
+  { value: 'codex', label: 'codex' },
 ];
 
 export default function Sites() {
