@@ -123,6 +123,7 @@ function applyParsedPayloadToAggregate(
   }
 
   return {
+    format: parsed.format,
     events: parsed.events,
     rest: parsed.rest,
     state,
