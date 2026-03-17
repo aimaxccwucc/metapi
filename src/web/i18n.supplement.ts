@@ -810,5 +810,4 @@ export const zhToEnSupplemental: Record<string, string> = {
   '已选': 'selected',
   '搜索模型...': 'Search models...',
   '无匹配模型': 'No matching models',
-  '清空': 'Clear',
 };

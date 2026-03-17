@@ -6,6 +6,20 @@ DEPLOY_DIR="/home/tanmw/metapi-deploy"
 IMAGE_TAG="metapi-local:latest"
 RUNTIME_BASE_IMAGE="${RUNTIME_BASE_IMAGE:-node:22-bookworm-slim}"
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  cat <<'EOF'
+Usage:
+  bash scripts/dev/deploy-prod-local.sh
+
+Builds a minimal runtime Docker image from local source and recreates the
+production container managed by /home/tanmw/metapi-deploy/docker-compose.yml.
+
+For safer production upgrades with backup and auto-rollback, use:
+  bash scripts/prod/upgrade.sh
+EOF
+  exit 0
+fi
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker not found" >&2
   exit 1
@@ -73,6 +87,12 @@ ENV DATA_DIR=/app/data
 
 CMD ["sh", "-c", "node dist/server/db/migrate.js && node dist/server/index.js"]
 EOF
+
+echo "[2.5/6] Ensure runtime base image is available locally"
+if ! docker image inspect "$RUNTIME_BASE_IMAGE" >/dev/null 2>&1; then
+  echo "Base image $RUNTIME_BASE_IMAGE is missing locally; attempting to pull..."
+  docker pull "$RUNTIME_BASE_IMAGE"
+fi
 
 echo "[3/6] Build runtime image from local artifacts"
 docker build -f "$STAGE_DIR/Dockerfile" -t "$IMAGE_TAG" "$STAGE_DIR"
