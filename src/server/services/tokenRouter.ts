@@ -271,7 +271,14 @@ export function isRegexModelPattern(pattern: string): boolean {
   const normalized = pattern.trim();
   if (!normalized) return false;
   if (normalized.toLowerCase().startsWith('re:')) return true;
-  return /^\/(?:[^\\/]|\\.)+\/[a-z]*$/i.test(normalized);
+  return /^\/(?:[^\/]|\\.)+\/[a-z]*$/i.test(normalized);
+}
+
+function isExactRouteModelPattern(pattern: string): boolean {
+  const normalizedPattern = (pattern || '').trim();
+  if (!normalizedPattern) return false;
+  if (isRegexModelPattern(normalizedPattern)) return false;
+  return !/[\*\?\[]/.test(normalizedPattern);
 }
 
 function looksLikeRegexBody(pattern: string): boolean {
@@ -1102,10 +1109,13 @@ export class TokenRouter {
       routes = routes.filter((route) => allowSet.has(route.id));
     }
 
-    // Find matching route by model pattern or display alias.
-    const matchedRoute = routes.find((r) => {
-      return matchesRouteRequestModel(model, r);
-    });
+    // Find matching route: exact match first, then display alias, then pattern.
+    const matchedRoute = routes.find((route) => (
+      isExactRouteModelPattern(route.modelPattern)
+      && (route.modelPattern || '').trim() === model
+    ))
+      || routes.find((route) => isRouteDisplayNameMatch(model, route.displayName))
+      || routes.find((route) => matchesModelPattern(model, route.modelPattern));
 
     if (!matchedRoute) return null;
 
