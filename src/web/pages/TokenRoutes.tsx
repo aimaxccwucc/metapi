@@ -35,6 +35,7 @@ import type {
   MissingTokenRouteSiteActionItem,
   GroupRouteItem,
 } from './token-routes/types.js';
+import type { ModelHintMap } from './token-routes/ManualRoutePanel.js';
 import {
   AUTO_ROUTE_DECISION_LIMIT,
   ROUTE_RENDER_CHUNK,
@@ -278,6 +279,14 @@ export default function TokenRoutes() {
       const normalized = modelName.trim();
       if (normalized) names.add(normalized);
     }
+    for (const modelName of Object.keys(missingTokenModelsByName || {})) {
+      const normalized = modelName.trim();
+      if (normalized) names.add(normalized);
+    }
+    for (const modelName of Object.keys(missingTokenGroupModelsByName || {})) {
+      const normalized = modelName.trim();
+      if (normalized) names.add(normalized);
+    }
     for (const route of routeSummaries) {
       const normalized = route.modelPattern.trim();
       if (normalized && isExactModelPattern(route.modelPattern)) names.add(normalized);
@@ -285,7 +294,22 @@ export default function TokenRoutes() {
     return Array.from(names)
       .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
       .slice(0, 800);
-  }, [modelCandidates, routeSummaries]);
+  }, [modelCandidates, missingTokenModelsByName, missingTokenGroupModelsByName, routeSummaries]);
+
+  const modelHintsByName: ModelHintMap = useMemo(() => {
+    const result: ModelHintMap = {};
+    for (const modelName of Object.keys(missingTokenModelsByName || {})) {
+      const normalized = modelName.trim();
+      if (!normalized) continue;
+      result[normalized] = { ...(result[normalized] || {}), missingToken: true };
+    }
+    for (const modelName of Object.keys(missingTokenGroupModelsByName || {})) {
+      const normalized = modelName.trim();
+      if (!normalized) continue;
+      result[normalized] = { ...(result[normalized] || {}), missingGroup: true };
+    }
+    return result;
+  }, [missingTokenModelsByName, missingTokenGroupModelsByName]);
 
   const resetRouteForm = () => {
     setForm({ modelPattern: '', displayName: '', displayIcon: '' });
@@ -1046,6 +1070,7 @@ export default function TokenRoutes() {
         canSave={canSaveRoute}
         routeIconSelectOptions={routeIconSelectOptions}
         previewModelSamples={previewModelSamples}
+        modelHintsByName={modelHintsByName}
         onSave={handleAddRoute}
         onCancel={handleCancelEditRoute}
       />

@@ -15,9 +15,12 @@ type ManualRoutePanelProps = {
   canSave: boolean;
   routeIconSelectOptions: RouteIconOption[];
   previewModelSamples: string[];
+  modelHintsByName?: ModelHintMap;
   onSave: () => void;
   onCancel: () => void;
 };
+
+export type ModelHintMap = Record<string, { missingToken?: boolean; missingGroup?: boolean }>;
 
 export default function ManualRoutePanel({
   show,
@@ -28,11 +31,13 @@ export default function ManualRoutePanel({
   canSave,
   routeIconSelectOptions,
   previewModelSamples,
+  modelHintsByName,
   onSave,
   onCancel,
 }: ManualRoutePanelProps) {
   const presence = useAnimatedVisibility(show, 220);
   const [modelSearch, setModelSearch] = useState('');
+  const [showOnlyAvailable, setShowOnlyAvailable] = useState(false);
 
   const modelPatternError = useMemo(
     () => getModelPatternError(form.modelPattern),
@@ -67,9 +72,18 @@ export default function ManualRoutePanel({
 
   const filteredModelList = useMemo(() => {
     const q = modelSearch.trim().toLowerCase();
-    if (!q) return previewModelSamples;
-    return previewModelSamples.filter((m) => m.toLowerCase().includes(q));
-  }, [previewModelSamples, modelSearch]);
+    let list = previewModelSamples;
+    if (q) {
+      list = list.filter((m) => m.toLowerCase().includes(q));
+    }
+    if (showOnlyAvailable) {
+      list = list.filter((modelName) => {
+        const hint = modelHintsByName?.[modelName];
+        return !hint?.missingToken && !hint?.missingGroup;
+      });
+    }
+    return list;
+  }, [previewModelSamples, modelSearch, showOnlyAvailable, modelHintsByName]);
 
   const handleToggleModel = (modelName: string) => {
     const next = new Set(selectedModels);
@@ -163,6 +177,15 @@ export default function ManualRoutePanel({
               <span style={{ fontSize: 12, color: 'var(--color-text-secondary)', flexShrink: 0 }}>
                 {tr('勾选模型')}（{selectedModels.size > 0 ? `${selectedModels.size} ${tr('已选')}` : tr('可选')}）
               </span>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-text-secondary)' }}>
+                <input
+                  type="checkbox"
+                  checked={showOnlyAvailable}
+                  onChange={(e) => setShowOnlyAvailable(e.target.checked)}
+                  style={{ cursor: 'pointer' }}
+                />
+                {tr('仅可用')}
+              </label>
               <input
                 placeholder={tr('搜索模型...')}
                 value={modelSearch}
@@ -184,28 +207,54 @@ export default function ManualRoutePanel({
               {filteredModelList.length === 0 ? (
                 <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--color-text-muted)' }}>{tr('无匹配模型')}</div>
               ) : (
-                filteredModelList.slice(0, 200).map((modelName) => (
-                  <div
-                    key={modelName}
-                    onClick={() => handleToggleModel(modelName)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      padding: '4px 12px',
-                      cursor: 'pointer',
-                      background: selectedModels.has(modelName) ? 'var(--color-bg-hover)' : 'transparent',
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      readOnly
-                      checked={selectedModels.has(modelName)}
-                      style={{ cursor: 'pointer', flexShrink: 0 }}
-                    />
-                    <code style={{ fontSize: 12, color: 'var(--color-text-primary)' }}>{modelName}</code>
-                  </div>
-                ))
+                filteredModelList.slice(0, 200).map((modelName) => {
+                  const hint = modelHintsByName?.[modelName];
+                  const badges: string[] = [];
+                  if (hint?.missingToken) badges.push(tr('缺令牌'));
+                  if (hint?.missingGroup) badges.push(tr('缺分组'));
+
+                  return (
+                    <div
+                      key={modelName}
+                      onClick={() => handleToggleModel(modelName)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        padding: '4px 12px',
+                        cursor: 'pointer',
+                        background: selectedModels.has(modelName) ? 'var(--color-bg-hover)' : 'transparent',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        readOnly
+                        checked={selectedModels.has(modelName)}
+                        style={{ cursor: 'pointer', flexShrink: 0 }}
+                      />
+                      <code style={{ fontSize: 12, color: 'var(--color-text-primary)' }}>{modelName}</code>
+                      {badges.length > 0 && (
+                        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                          {badges.map((text) => (
+                            <span
+                              key={text}
+                              style={{
+                                fontSize: 10,
+                                padding: '1px 6px',
+                                borderRadius: 999,
+                                border: '1px solid var(--color-border)',
+                                color: 'var(--color-text-muted)',
+                                background: 'var(--color-bg-card)',
+                              }}
+                            >
+                              {text}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>
