@@ -1,4 +1,5 @@
 ﻿import { FastifyInstance } from 'fastify';
+import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import { db, schema } from '../../db/index.js';
 import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
 import {
@@ -974,6 +975,8 @@ function mapProxyLogRow(
   };
 }
 
+const limitModelTokenCandidatesRead = createRateLimitGuard({ bucket: 'models-token-candidates-read', max: 30, windowMs: 60_000 });
+
 export async function statsRoutes(app: FastifyInstance) {
   const proxyLogBaseFields = getProxyLogBaseSelectFields();
 
@@ -1601,7 +1604,7 @@ export async function statsRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get('/api/models/token-candidates', async () => {
+  app.get('/api/models/token-candidates', { preHandler: [limitModelTokenCandidatesRead] }, async () => {
     const resolveTokenGroupLabel = (tokenGroup: string | null, tokenName: string | null): string | null => {
       const explicit = (tokenGroup || '').trim();
       if (explicit) return explicit;
