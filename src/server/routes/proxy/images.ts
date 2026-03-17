@@ -3,6 +3,7 @@ import { fetch } from 'undici';
 import { db, schema } from '../../db/index.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
+import { buildUpstreamUrl } from './upstreamUrl.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
@@ -64,7 +65,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
 
       excludeChannelIds.push(selected.channel.id);
 
-      const targetUrl = `${selected.site.url}/v1/images/generations`;
+      const targetUrl = buildUpstreamUrl(selected.site.url, '/v1/images/generations');
       const forwardBody = { ...body, model: selected.actualModel };
       const startTime = Date.now();
 
@@ -173,7 +174,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
       }
 
       excludeChannelIds.push(selected.channel.id);
-      const targetUrl = `${selected.site.url}/v1/images/edits`;
+      const targetUrl = buildUpstreamUrl(selected.site.url, '/v1/images/edits');
       const startTime = Date.now();
 
       try {

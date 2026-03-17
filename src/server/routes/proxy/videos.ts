@@ -4,6 +4,7 @@ import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
+import { buildUpstreamUrl } from './upstreamUrl.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
@@ -86,7 +87,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
       }
 
       excludeChannelIds.push(selected.channel.id);
-      const targetUrl = `${selected.site.url}/v1/videos`;
+      const targetUrl = buildUpstreamUrl(selected.site.url, '/v1/videos');
       const startTime = Date.now();
 
       try {
