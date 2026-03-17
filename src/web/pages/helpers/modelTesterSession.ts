@@ -1275,3 +1275,16 @@ export const findLastLoadingAssistantIndex = (messages: ChatMessage[]): number =
 export const countConversationTurns = (messages: ChatMessage[]): number =>
   messages.reduce((turns, message) => turns + (message.role === 'user' ? 1 : 0), 0);
 
+export const buildGeminiNativeConversationProxyEnvelope = (
+  messages: ChatMessage[],
+  inputs: ModelTesterInputs,
+  parameterEnabled: ParameterEnabled,
+): TesterProxyEnvelope => {
+  const envelope = buildConversationRequestEnvelope(messages, { ...inputs, protocol: 'gemini' }, parameterEnabled);
+  return {
+    ...envelope,
+    path: `/gemini${envelope.path}${inputs.stream ? '?alt=sse' : ''}`,
+    jobMode: false,
+  };
+};
+

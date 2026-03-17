@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import { mergeMarketplaceMetadata, shouldHydrateMarketplaceMetadata } from './helpers/modelsMarketplaceMetadata.js';
+import SiteBadgeLink from '../components/SiteBadgeLink.js';
 import { tr } from '../i18n.js';
 
 type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate';
@@ -830,8 +831,8 @@ export default function Models() {
                                 key={`${source.siteId}-${source.accountId}`}
                                 style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 8 }}
                               >
-                                <div style={{ fontSize: 12, marginBottom: 6 }}>
-                                  <strong>{source.siteName}</strong> · {source.username || `ID:${source.accountId}`}
+                                 <div style={{ fontSize: 12, marginBottom: 6 }}>
+                                  <SiteBadgeLink siteId={source.siteId} siteName={source.siteName} badgeStyle={{ fontSize: 11 }} /> · {source.username || `ID:${source.accountId}`}
                                 </div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                   {Object.entries(source.groupPricing).map(([group, pricing]) => (
@@ -1079,9 +1080,9 @@ export default function Models() {
                                         key={`${source.siteId}-${source.accountId}`}
                                         style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 8 }}
                                       >
-                                        <div style={{ fontSize: 12, marginBottom: 6 }}>
-                                          <strong>{source.siteName}</strong> · {source.username || `ID:${source.accountId}`}
-                                        </div>
+                                         <div style={{ fontSize: 12, marginBottom: 6 }}>
+                                           <SiteBadgeLink siteId={source.siteId} siteName={source.siteName} badgeStyle={{ fontSize: 11 }} /> · {source.username || `ID:${source.accountId}`}
+                                         </div>
                                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                           {Object.entries(source.groupPricing).map(([group, pricing]) => (
                                             <span key={group} className="badge badge-info">
