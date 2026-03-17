@@ -263,9 +263,8 @@ export default function TokenRoutes() {
       if (normalized) names.add(normalized);
     }
     for (const route of routeSummaries) {
-      if (!isExactModelPattern(route.modelPattern)) continue;
       const normalized = route.modelPattern.trim();
-      if (normalized) names.add(normalized);
+      if (normalized && isExactModelPattern(route.modelPattern)) names.add(normalized);
     }
     return Array.from(names)
       .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))

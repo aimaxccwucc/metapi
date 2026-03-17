@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { BrandGlyph } from '../../components/BrandIcon.js';
 import ModernSelect from '../../components/ModernSelect.js';
 import { useAnimatedVisibility } from '../../components/useAnimatedVisibility.js';
@@ -32,6 +32,7 @@ export default function ManualRoutePanel({
   onCancel,
 }: ManualRoutePanelProps) {
   const presence = useAnimatedVisibility(show, 220);
+  const [modelSearch, setModelSearch] = useState('');
 
   const modelPatternError = useMemo(
     () => getModelPatternError(form.modelPattern),
@@ -52,6 +53,42 @@ export default function ManualRoutePanel({
     if (!normalizedPattern || modelPatternError) return [] as string[];
     return previewModelSamples.filter((modelName) => matchesModelPattern(modelName, normalizedPattern));
   }, [form.modelPattern, modelPatternError, previewModelSamples]);
+
+  const selectedModels = useMemo(() => {
+    const pattern = form.modelPattern.trim();
+    if (!pattern) return new Set<string>();
+    const reMatch = pattern.match(/^re:\^\(([^)]+)\)\$$/);
+    if (reMatch) {
+      return new Set(reMatch[1].split('|').map((s) => s.trim()).filter(Boolean));
+    }
+    if (/^[^*?[\\|^$(){}+.]+$/.test(pattern)) return new Set([pattern]);
+    return new Set<string>();
+  }, [form.modelPattern]);
+
+  const filteredModelList = useMemo(() => {
+    const q = modelSearch.trim().toLowerCase();
+    if (!q) return previewModelSamples;
+    return previewModelSamples.filter((m) => m.toLowerCase().includes(q));
+  }, [previewModelSamples, modelSearch]);
+
+  const handleToggleModel = (modelName: string) => {
+    const next = new Set(selectedModels);
+    if (next.has(modelName)) {
+      next.delete(modelName);
+    } else {
+      next.add(modelName);
+    }
+    const arr = Array.from(next).sort();
+    let pattern = '';
+    if (arr.length === 0) {
+      pattern = '';
+    } else if (arr.length === 1) {
+      pattern = arr[0];
+    } else {
+      pattern = `re:^(${arr.join('|')})$`;
+    }
+    setForm((f) => ({ ...f, modelPattern: pattern }));
+  };
 
   if (!presence.shouldRender) return null;
 
@@ -111,6 +148,66 @@ export default function ManualRoutePanel({
         {modelPatternError && (
           <div style={{ fontSize: 12, color: 'var(--color-danger)', marginTop: -4 }}>
             {modelPatternError}
+          </div>
+        )}
+        {previewModelSamples.length > 0 && (
+          <div
+            style={{
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--color-bg)',
+              overflow: 'hidden',
+            }}
+          >
+            <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 12, color: 'var(--color-text-secondary)', flexShrink: 0 }}>
+                {tr('勾选模型')}（{selectedModels.size > 0 ? `${selectedModels.size} ${tr('已选')}` : tr('可选')}）
+              </span>
+              <input
+                placeholder={tr('搜索模型...')}
+                value={modelSearch}
+                onChange={(e) => setModelSearch(e.target.value)}
+                style={{
+                  flex: 1,
+                  padding: '3px 8px',
+                  fontSize: 12,
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'var(--color-bg-card)',
+                  color: 'var(--color-text-primary)',
+                  outline: 'none',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              />
+            </div>
+            <div style={{ maxHeight: 180, overflowY: 'auto', padding: '4px 0' }}>
+              {filteredModelList.length === 0 ? (
+                <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--color-text-muted)' }}>{tr('无匹配模型')}</div>
+              ) : (
+                filteredModelList.slice(0, 200).map((modelName) => (
+                  <div
+                    key={modelName}
+                    onClick={() => handleToggleModel(modelName)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '4px 12px',
+                      cursor: 'pointer',
+                      background: selectedModels.has(modelName) ? 'var(--color-bg-hover)' : 'transparent',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      readOnly
+                      checked={selectedModels.has(modelName)}
+                      style={{ cursor: 'pointer', flexShrink: 0 }}
+                    />
+                    <code style={{ fontSize: 12, color: 'var(--color-text-primary)' }}>{modelName}</code>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         )}
         {form.modelPattern.trim() && !modelPatternError && (

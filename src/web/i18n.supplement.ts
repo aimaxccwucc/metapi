@@ -806,4 +806,9 @@ export const zhToEnSupplemental: Record<string, string> = {
   'Webhook 地址': 'Webhook address',
   'Webhook 开关': 'Webhook switch',
   'Webhook 响应状态 ${response.status}': 'Webhook response status ${response.status}',
+  '勾选模型': 'Select Models',
+  '已选': 'selected',
+  '搜索模型...': 'Search models...',
+  '无匹配模型': 'No matching models',
+  '清空': 'Clear',
 };
