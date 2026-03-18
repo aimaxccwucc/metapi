@@ -292,8 +292,7 @@ export default function TokenRoutes() {
       if (normalized && isExactModelPattern(route.modelPattern)) names.add(normalized);
     }
     return Array.from(names)
-      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
-      .slice(0, 800);
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
   }, [modelCandidates, missingTokenModelsByName, missingTokenGroupModelsByName, routeSummaries]);
 
   const modelHintsByName: ModelHintMap = useMemo(() => {
