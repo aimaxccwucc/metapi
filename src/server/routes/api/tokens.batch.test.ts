@@ -9,6 +9,8 @@ const getApiTokensMock = vi.fn();
 const getApiTokenMock = vi.fn();
 const createApiTokenMock = vi.fn();
 const getModelsMock = vi.fn();
+const getUserGroupsMock = vi.fn();
+const resolvePreferredTokenGroupMock = vi.fn();
 
 vi.mock('../../services/platforms/index.js', () => ({
   getAdapter: () => ({
@@ -16,8 +18,17 @@ vi.mock('../../services/platforms/index.js', () => ({
     getApiToken: (...args: unknown[]) => getApiTokenMock(...args),
     createApiToken: (...args: unknown[]) => createApiTokenMock(...args),
     getModels: (...args: unknown[]) => getModelsMock(...args),
+    getUserGroups: (...args: unknown[]) => getUserGroupsMock(...args),
   }),
 }));
+
+vi.mock('../../services/modelPricingService.js', async () => {
+  const actual = await vi.importActual('../../services/modelPricingService.js') as Record<string, unknown>;
+  return {
+    ...actual,
+    resolvePreferredTokenGroup: (...args: unknown[]) => resolvePreferredTokenGroupMock(...args),
+  };
+});
 
 type DbModule = typeof import('../../db/index.js');
 
@@ -78,10 +89,14 @@ describe('PUT /api/channels/batch', () => {
     getApiTokenMock.mockReset();
     createApiTokenMock.mockReset();
     getModelsMock.mockReset();
+    getUserGroupsMock.mockReset();
+    resolvePreferredTokenGroupMock.mockReset();
     getApiTokensMock.mockResolvedValue([]);
     getApiTokenMock.mockResolvedValue(null);
     createApiTokenMock.mockResolvedValue(false);
     getModelsMock.mockResolvedValue([]);
+    getUserGroupsMock.mockResolvedValue(['default']);
+    resolvePreferredTokenGroupMock.mockResolvedValue({ group: 'default', availableGroups: ['default'], candidateGroups: ['default'], groupRatios: { default: 1 }, catalog: null });
     await db.delete(schema.tokenModelAvailability).run();
     await db.delete(schema.modelAvailability).run();
     await db.delete(schema.routeChannels).run();
@@ -233,6 +248,69 @@ describe('PUT /api/channels/batch', () => {
     expect(routeChannels[0]?.tokenId ?? null).toBeNull();
     expect(routeChannels[0]?.sourceModel).toBe('gpt-5.2-codex');
     expect(routeChannels[0]?.manualOverride).toBe(true);
+  });
+
+  it('auto-creates token in lowest-ratio group when route create sees missing groups', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'group-ratio-site',
+      url: 'https://group-ratio-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'group-ratio-user',
+      accessToken: 'session-token',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'kimi-k2.5',
+      available: true,
+    }).run();
+
+    getUserGroupsMock.mockResolvedValue(['default', 'vip']);
+    resolvePreferredTokenGroupMock.mockResolvedValue({
+      group: 'vip',
+      availableGroups: ['default', 'vip'],
+      candidateGroups: ['default', 'vip'],
+      groupRatios: { default: 1, vip: 0.25 },
+      catalog: null,
+    });
+    createApiTokenMock.mockResolvedValue(true);
+    getApiTokensMock.mockResolvedValue([
+      { name: 'metapi-vip-kimi-k2-5', key: 'sk-vip-created', enabled: true, tokenGroup: 'vip' },
+    ]);
+    getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
+      if (credential === 'session-token' || credential === 'sk-vip-created') {
+        return ['kimi-k2.5'];
+      }
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        modelPattern: 'kimi-k2.5',
+        enabled: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(createApiTokenMock).toHaveBeenCalledTimes(1);
+    expect(createApiTokenMock.mock.calls[0]?.[3]).toMatchObject({ group: 'vip' });
+
+    const tokens = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.accountId, account.id)).all();
+    expect(tokens.some((item: { token: string | null; tokenGroup: string | null }) => item.token === 'sk-vip-created' && item.tokenGroup === 'vip')).toBe(true);
+
+    const route = response.json() as { id: number };
+    const channels = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.routeId, route.id)).all();
+    expect(channels.length).toBeGreaterThan(0);
+    expect(channels[0]?.sourceModel).toBe('kimi-k2.5');
   });
 
   it('reuses account warmup work for repeated entries in the same batch', async () => {
