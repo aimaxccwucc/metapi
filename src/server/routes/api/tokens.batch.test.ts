@@ -10,7 +10,7 @@ const getApiTokenMock = vi.fn();
 const createApiTokenMock = vi.fn();
 const getModelsMock = vi.fn();
 const getUserGroupsMock = vi.fn();
-const resolvePreferredTokenGroupMock = vi.fn();
+const fetchModelPricingCatalogMock = vi.fn();
 
 vi.mock('../../services/platforms/index.js', () => ({
   getAdapter: () => ({
@@ -26,7 +26,7 @@ vi.mock('../../services/modelPricingService.js', async () => {
   const actual = await vi.importActual('../../services/modelPricingService.js') as Record<string, unknown>;
   return {
     ...actual,
-    resolvePreferredTokenGroup: (...args: unknown[]) => resolvePreferredTokenGroupMock(...args),
+    fetchModelPricingCatalog: (...args: unknown[]) => fetchModelPricingCatalogMock(...args),
   };
 });
 
@@ -90,13 +90,13 @@ describe('PUT /api/channels/batch', () => {
     createApiTokenMock.mockReset();
     getModelsMock.mockReset();
     getUserGroupsMock.mockReset();
-    resolvePreferredTokenGroupMock.mockReset();
+    fetchModelPricingCatalogMock.mockReset();
     getApiTokensMock.mockResolvedValue([]);
     getApiTokenMock.mockResolvedValue(null);
     createApiTokenMock.mockResolvedValue(false);
     getModelsMock.mockResolvedValue([]);
     getUserGroupsMock.mockResolvedValue(['default']);
-    resolvePreferredTokenGroupMock.mockResolvedValue({ group: 'default', availableGroups: ['default'], candidateGroups: ['default'], groupRatios: { default: 1 }, catalog: null });
+    fetchModelPricingCatalogMock.mockResolvedValue(null);
     await db.delete(schema.tokenModelAvailability).run();
     await db.delete(schema.modelAvailability).run();
     await db.delete(schema.routeChannels).run();
@@ -273,12 +273,20 @@ describe('PUT /api/channels/batch', () => {
     }).run();
 
     getUserGroupsMock.mockResolvedValue(['default', 'vip']);
-    resolvePreferredTokenGroupMock.mockResolvedValue({
-      group: 'vip',
-      availableGroups: ['default', 'vip'],
-      candidateGroups: ['default', 'vip'],
-      groupRatios: { default: 1, vip: 0.25 },
-      catalog: null,
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      groupRatio: { default: 1, vip: 0.25 },
+      models: [
+        {
+          modelName: 'kimi-k2.5',
+          quotaType: 0,
+          modelDescription: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          ownerBy: null,
+          enableGroups: ['default', 'vip'],
+          groupPricing: {},
+        },
+      ],
     });
     createApiTokenMock.mockResolvedValue(true);
     getApiTokensMock.mockResolvedValue([

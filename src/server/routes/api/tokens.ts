@@ -8,7 +8,7 @@ import { repairAccountKeysForAccount } from '../../services/accountKeyRepairServ
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { getAdapter } from '../../services/platforms/index.js';
 import { resolvePlatformUserId, getCredentialModeFromExtraConfig } from '../../services/accountExtraConfig.js';
-import { resolvePreferredTokenGroup } from '../../services/modelPricingService.js';
+import { fetchModelPricingCatalog, selectPreferredTokenGroup } from '../../services/modelPricingService.js';
 import { syncTokensFromUpstream } from '../../services/accountTokenService.js';
 import {
   clearRouteDecisionSnapshot,
@@ -85,6 +85,7 @@ type AccountBindingWarmupState = {
 };
 
 const CHANNEL_BATCH_WARMUP_CONCURRENCY = 6;
+const ROUTE_AUTOCREATE_SOFT_TIMEOUT_MS = 4_000;
 
 function buildChannelPairKey(accountId: number, tokenId: number | null | undefined, sourceModel: string): string {
   const normalizedTokenId = typeof tokenId === 'number' && Number.isFinite(tokenId) ? tokenId : 0;
@@ -122,99 +123,20 @@ function buildAutoTokenName(modelName: string, preferredGroup: string): string {
   return `metapi-${normalizedGroup}-${normalizedModel}`.slice(0, 64);
 }
 
-async function ensurePreferredTokenCoverageForModel(accountId: number, modelName: string): Promise<boolean> {
-  const row = await db.select()
-    .from(schema.accounts)
-    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-    .where(eq(schema.accounts.id, accountId))
-    .get();
-  if (!row) return false;
-
-  const account = row.accounts;
-  const site = row.sites;
-  if ((account.status || 'active') !== 'active' || (site.status || 'active') !== 'active') return false;
-  if (isApiKeyConnection(account)) return false;
-  if (!(account.accessToken || '').trim()) return false;
-
-  const adapter = getAdapter(site.platform);
-  if (!adapter) return false;
-
-  const normalizedModelName = modelName.trim();
-  if (!normalizedModelName) return false;
-
-  const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
-  const availableGroups = await adapter.getUserGroups(site.url, account.accessToken, platformUserId).catch(() => ['default']);
-  const preferred = await resolvePreferredTokenGroup({
-    site: {
-      id: site.id,
-      url: site.url,
-      platform: site.platform,
-      apiKey: site.apiKey,
-    },
-    account: {
-      id: account.id,
-      accessToken: account.accessToken,
-      apiToken: account.apiToken,
-    },
-    modelName: normalizedModelName,
-    modelNames: [normalizedModelName],
-    totalTokens: 0,
-    availableGroups,
-  });
-  const preferredGroupKey = preferred.group.trim().toLowerCase() || 'default';
-
-  const coverageRows = await db.select({
-    tokenGroup: schema.accountTokens.tokenGroup,
-    tokenName: schema.accountTokens.name,
-    availableModelName: schema.tokenModelAvailability.modelName,
-  })
-    .from(schema.tokenModelAvailability)
-    .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
-    .where(
-      and(
-        eq(schema.accountTokens.accountId, accountId),
-        eq(schema.accountTokens.enabled, true),
-        eq(schema.tokenModelAvailability.available, true),
-      ),
-    )
-    .all();
-
-  const hasPreferredCoverage = coverageRows.some((item) => {
-    const availableModelName = (item.availableModelName || '').trim();
-    if (!availableModelName) return false;
-    if (availableModelName !== normalizedModelName && !isModelAliasEquivalent(availableModelName, normalizedModelName)) return false;
-    const groupLabel = resolveTokenGroupLabel(item.tokenGroup, item.tokenName);
-    return (groupLabel || 'default').trim().toLowerCase() === preferredGroupKey;
-  });
-  if (hasPreferredCoverage) return false;
-
-  const created = await adapter.createApiToken(site.url, account.accessToken, platformUserId, {
-    name: buildAutoTokenName(normalizedModelName, preferred.group),
-    group: preferred.group,
-  });
-  if (!created) return false;
-
-  let upstreamTokens = await adapter.getApiTokens(site.url, account.accessToken, platformUserId).catch(() => []);
-  if (upstreamTokens.length === 0) {
-    const single = await adapter.getApiToken(site.url, account.accessToken, platformUserId).catch(() => null);
-    if (single) {
-      upstreamTokens = [{ name: 'default', key: single, enabled: true, tokenGroup: preferred.group }];
-    }
-  }
-  if (upstreamTokens.length === 0) return false;
-
-  await syncTokensFromUpstream(account.id, upstreamTokens);
-  await refreshModelsForAccount(account.id);
-  return true;
-}
-
 async function ensurePreferredTokenCoverageForPattern(modelPattern: string): Promise<void> {
+  const startedAt = Date.now();
   const rows = await db.select({
     modelName: schema.modelAvailability.modelName,
     accountId: schema.accounts.id,
     accessToken: schema.accounts.accessToken,
+    apiToken: schema.accounts.apiToken,
+    username: schema.accounts.username,
     extraConfig: schema.accounts.extraConfig,
     accountStatus: schema.accounts.status,
+    siteId: schema.sites.id,
+    siteUrl: schema.sites.url,
+    sitePlatform: schema.sites.platform,
+    siteApiKey: schema.sites.apiKey,
     siteStatus: schema.sites.status,
   })
     .from(schema.modelAvailability)
@@ -223,18 +145,141 @@ async function ensurePreferredTokenCoverageForPattern(modelPattern: string): Pro
     .where(eq(schema.modelAvailability.available, true))
     .all();
 
-  const seen = new Set<string>();
+  type AccountModelContext = {
+    accountId: number;
+    modelNames: Set<string>;
+    accessToken: string;
+    apiToken: string | null;
+    username: string | null;
+    extraConfig: string | null;
+    site: {
+      id: number;
+      url: string;
+      platform: string;
+      apiKey: string | null;
+    };
+  };
+
+  const accountContexts = new Map<number, AccountModelContext>();
   for (const row of rows) {
     const modelName = (row.modelName || '').trim();
     if (!modelName || !matchesModelPattern(modelName, modelPattern)) continue;
     if ((row.accountStatus || 'active') !== 'active' || (row.siteStatus || 'active') !== 'active') continue;
     if (!(row.accessToken || '').trim()) continue;
     if (getCredentialModeFromExtraConfig(row.extraConfig) === 'apikey') continue;
-    const dedupeKey = `${row.accountId}::${modelName.toLowerCase()}`;
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
-    await ensurePreferredTokenCoverageForModel(row.accountId, modelName);
+
+    const current = accountContexts.get(row.accountId);
+    if (current) {
+      current.modelNames.add(modelName);
+      continue;
+    }
+
+    accountContexts.set(row.accountId, {
+      accountId: row.accountId,
+      modelNames: new Set([modelName]),
+      accessToken: row.accessToken,
+      apiToken: row.apiToken,
+      username: row.username,
+      extraConfig: row.extraConfig,
+      site: {
+        id: row.siteId,
+        url: row.siteUrl,
+        platform: row.sitePlatform,
+        apiKey: row.siteApiKey,
+      },
+    });
   }
+
+  for (const context of accountContexts.values()) {
+    if (Date.now() - startedAt > 20_000) break;
+
+    const adapter = getAdapter(context.site.platform);
+    if (!adapter) continue;
+
+    const platformUserId = resolvePlatformUserId(context.extraConfig, context.username);
+    const availableGroups = await adapter.getUserGroups(context.site.url, context.accessToken, platformUserId).catch(() => ['default']);
+    const pricingCatalog = await fetchModelPricingCatalog({
+      site: context.site,
+      account: {
+        id: context.accountId,
+        accessToken: context.accessToken,
+        apiToken: context.apiToken,
+      },
+      modelName: '__metadata__',
+      totalTokens: 0,
+    }).catch(() => null);
+
+    const coverageRows = await db.select({
+      tokenGroup: schema.accountTokens.tokenGroup,
+      tokenName: schema.accountTokens.name,
+      availableModelName: schema.tokenModelAvailability.modelName,
+    })
+      .from(schema.tokenModelAvailability)
+      .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
+      .where(
+        and(
+          eq(schema.accountTokens.accountId, context.accountId),
+          eq(schema.accountTokens.enabled, true),
+          eq(schema.tokenModelAvailability.available, true),
+        ),
+      )
+      .all();
+
+    let createdAny = false;
+    for (const modelName of context.modelNames) {
+      if (Date.now() - startedAt > 20_000) break;
+      const normalizedModelName = modelName.trim();
+      if (!normalizedModelName) continue;
+
+      const preferred = selectPreferredTokenGroup({
+        availableGroups,
+        modelNames: [normalizedModelName],
+        catalog: pricingCatalog,
+      });
+      const preferredGroupKey = preferred.group.trim().toLowerCase() || 'default';
+
+      const hasPreferredCoverage = coverageRows.some((item) => {
+        const availableModelName = (item.availableModelName || '').trim();
+        if (!availableModelName) return false;
+        if (availableModelName !== normalizedModelName && !isModelAliasEquivalent(availableModelName, normalizedModelName)) return false;
+        const groupLabel = resolveTokenGroupLabel(item.tokenGroup, item.tokenName);
+        return (groupLabel || 'default').trim().toLowerCase() === preferredGroupKey;
+      });
+      if (hasPreferredCoverage) continue;
+
+      const created = await adapter.createApiToken(context.site.url, context.accessToken, platformUserId, {
+        name: buildAutoTokenName(normalizedModelName, preferred.group),
+        group: preferred.group,
+      });
+      if (!created) continue;
+      createdAny = true;
+    }
+
+    if (!createdAny) continue;
+
+    let upstreamTokens = await adapter.getApiTokens(context.site.url, context.accessToken, platformUserId).catch(() => []);
+    if (upstreamTokens.length === 0) {
+      const single = await adapter.getApiToken(context.site.url, context.accessToken, platformUserId).catch(() => null);
+      if (single) {
+        upstreamTokens = [{ name: 'default', key: single, enabled: true, tokenGroup: 'default' }];
+      }
+    }
+    if (upstreamTokens.length === 0) continue;
+
+    await syncTokensFromUpstream(context.accountId, upstreamTokens);
+    await refreshModelsForAccount(context.accountId);
+  }
+}
+
+async function runWithSoftTimeout(task: Promise<void>, timeoutMs: number): Promise<void> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    task.catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timeoutHandle = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timeoutHandle) clearTimeout(timeoutHandle);
 }
 
 async function hasEnabledAccountToken(accountId: number): Promise<boolean> {
@@ -436,7 +481,7 @@ async function getMatchedExactRouteChannelCandidates(modelPattern: string): Prom
 }
 
 async function populateRouteChannelsByModelPattern(routeId: number, modelPattern: string): Promise<number> {
-  await ensurePreferredTokenCoverageForPattern(modelPattern);
+  await runWithSoftTimeout(ensurePreferredTokenCoverageForPattern(modelPattern), ROUTE_AUTOCREATE_SOFT_TIMEOUT_MS);
   const routeCandidates = await getMatchedExactRouteChannelCandidates(modelPattern);
   const availabilityCandidates = (await getPatternTokenCandidates(modelPattern)).map((candidate) => ({
     tokenId: candidate.tokenId,
