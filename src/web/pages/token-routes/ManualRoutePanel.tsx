@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { BrandGlyph } from '../../components/BrandIcon.js';
 import ModernSelect from '../../components/ModernSelect.js';
 import { useAnimatedVisibility } from '../../components/useAnimatedVisibility.js';
@@ -22,6 +22,56 @@ type ManualRoutePanelProps = {
 
 export type ModelHintMap = Record<string, { missingToken?: boolean; missingGroup?: boolean }>;
 
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseExactModelSetPattern(pattern: string): Set<string> {
+  const trimmed = pattern.trim();
+  if (!trimmed) return new Set<string>();
+  if (/^[^*?[\\|^$(){}+]+$/.test(trimmed)) return new Set([trimmed]);
+
+  const reMatch = trimmed.match(/^re:\^\((.*)\)\$$/);
+  if (!reMatch) return new Set<string>();
+
+  const body = reMatch[1];
+  const parts: string[] = [];
+  let current = '';
+
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (ch === '\\' && i + 1 < body.length) {
+      current += ch + body[i + 1];
+      i += 1;
+      continue;
+    }
+    if (ch === '|') {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+
+  const decoded = parts
+    .map((part) => part.replace(/\\([.*+?^${}()|[\]\\])/g, '$1').trim())
+    .filter(Boolean);
+
+  if (decoded.some((item, index) => escapeRegexLiteral(item) !== parts[index])) {
+    return new Set<string>();
+  }
+
+  return new Set(decoded);
+}
+
+function buildExactModelSetPattern(models: Iterable<string>): string {
+  const values = Array.from(new Set(Array.from(models).map((item) => item.trim()).filter(Boolean))).sort();
+  if (values.length === 0) return '';
+  if (values.length === 1) return values[0];
+  return `re:^(${values.map(escapeRegexLiteral).join('|')})$`;
+}
+
 export default function ManualRoutePanel({
   show,
   editingRouteId,
@@ -38,6 +88,13 @@ export default function ManualRoutePanel({
   const presence = useAnimatedVisibility(show, 220);
   const [modelSearch, setModelSearch] = useState('');
   const [showOnlyAvailable, setShowOnlyAvailable] = useState(false);
+
+  useEffect(() => {
+    if (!show) {
+      setModelSearch('');
+      setShowOnlyAvailable(false);
+    }
+  }, [show]);
 
   const modelPatternError = useMemo(
     () => getModelPatternError(form.modelPattern),
@@ -60,14 +117,7 @@ export default function ManualRoutePanel({
   }, [form.modelPattern, modelPatternError, previewModelSamples]);
 
   const selectedModels = useMemo(() => {
-    const pattern = form.modelPattern.trim();
-    if (!pattern) return new Set<string>();
-    const reMatch = pattern.match(/^re:\^\(([^)]+)\)\$$/);
-    if (reMatch) {
-      return new Set(reMatch[1].split('|').map((s) => s.trim()).filter(Boolean));
-    }
-    if (/^[^*?[\\|^$(){}+]+$/.test(pattern)) return new Set([pattern]);
-    return new Set<string>();
+    return parseExactModelSetPattern(form.modelPattern);
   }, [form.modelPattern]);
 
   const filteredModelList = useMemo(() => {
@@ -93,14 +143,7 @@ export default function ManualRoutePanel({
       next.add(modelName);
     }
     const arr = Array.from(next).sort();
-    let pattern = '';
-    if (arr.length === 0) {
-      pattern = '';
-    } else if (arr.length === 1) {
-      pattern = arr[0];
-    } else {
-      pattern = `re:^(${arr.join('|')})$`;
-    }
+    const pattern = buildExactModelSetPattern(arr);
     setForm((f) => ({ ...f, modelPattern: pattern }));
   };
 
