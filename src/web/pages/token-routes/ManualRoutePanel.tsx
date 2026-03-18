@@ -135,6 +135,11 @@ export default function ManualRoutePanel({
     return list;
   }, [previewModelSamples, modelSearch, showOnlyAvailable, modelHintsByName]);
 
+  const visibleModelList = useMemo(() => {
+    if (modelSearch.trim()) return filteredModelList;
+    return filteredModelList.slice(0, 200);
+  }, [filteredModelList, modelSearch]);
+
   const handleToggleModel = (modelName: string) => {
     const next = new Set(selectedModels);
     if (next.has(modelName)) {
@@ -250,7 +255,7 @@ export default function ManualRoutePanel({
               {filteredModelList.length === 0 ? (
                 <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--color-text-muted)' }}>{tr('无匹配模型')}</div>
               ) : (
-                filteredModelList.slice(0, 200).map((modelName) => {
+                visibleModelList.map((modelName) => {
                   const hint = modelHintsByName?.[modelName];
                   const badges: string[] = [];
                   if (hint?.missingToken) badges.push(tr('缺令牌'));
@@ -300,6 +305,11 @@ export default function ManualRoutePanel({
                 })
               )}
             </div>
+            {!modelSearch.trim() && filteredModelList.length > visibleModelList.length && (
+              <div style={{ padding: '6px 12px 10px', fontSize: 11, color: 'var(--color-text-muted)', borderTop: '1px solid var(--color-border)' }}>
+                {tr('默认仅显示前 200 个模型；可使用搜索查看其他模型。')}
+              </div>
+            )}
           </div>
         )}
         {form.modelPattern.trim() && !modelPatternError && (
