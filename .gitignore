@@ -28,3 +28,4 @@ docs/plans/
 
 # Local agent state
 .serena/
+.ace-tool/
