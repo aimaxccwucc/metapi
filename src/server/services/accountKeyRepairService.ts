@@ -1,8 +1,8 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
 import { ensureDefaultTokenForAccount, repairDefaultToken, syncTokensFromUpstream } from './accountTokenService.js';
-import { resolvePreferredTokenGroup } from './modelPricingService.js';
+import { fetchModelPricingCatalog } from './modelPricingService.js';
 import { getAdapter } from './platforms/index.js';
 
 export type AccountKeyRepairStatus = 'already_ok' | 'repaired' | 'created' | 'synced' | 'skipped' | 'failed';
@@ -108,6 +108,65 @@ async function runPerKeySequential<T>(params: {
       }
     }),
   );
+}
+
+async function resolveLowestRatioGroup(params: {
+  site: typeof schema.sites.$inferSelect;
+  account: typeof schema.accounts.$inferSelect;
+  availableGroups: string[];
+}): Promise<string | null> {
+  const normalizedGroups = Array.from(new Set(
+    params.availableGroups
+      .map((group) => String(group || '').trim())
+      .filter(Boolean),
+  ));
+  if (normalizedGroups.length === 0) return null;
+  if (normalizedGroups.length === 1) return normalizedGroups[0] || null;
+
+  const availableModelRows = await db.select({
+    modelName: schema.modelAvailability.modelName,
+  }).from(schema.modelAvailability)
+    .where(and(
+      eq(schema.modelAvailability.accountId, params.account.id),
+      eq(schema.modelAvailability.available, true),
+    ))
+    .all();
+
+  const candidateModelName = availableModelRows
+    .map((row) => String(row.modelName || '').trim())
+    .find(Boolean);
+  if (!candidateModelName) return normalizedGroups[0] || null;
+
+  const catalog = await fetchModelPricingCatalog({
+    site: {
+      id: params.site.id,
+      url: params.site.url,
+      platform: params.site.platform,
+      apiKey: params.site.apiKey,
+    },
+    account: {
+      id: params.account.id,
+      accessToken: params.account.accessToken,
+      apiToken: params.account.apiToken,
+    },
+    modelName: candidateModelName,
+  }).catch(() => null);
+
+  const groupRatio = catalog?.groupRatio || {};
+  const modelEntry = catalog?.models.find((item) => item.modelName === candidateModelName)
+    || catalog?.models.find((item) => normalizedGroups.some((group) => item.enableGroups.includes(group)));
+
+  const allowedGroups = new Set(modelEntry?.enableGroups || normalizedGroups);
+  const rankedGroups = normalizedGroups
+    .filter((group) => allowedGroups.has(group))
+    .map((group) => ({
+      group,
+      ratio: typeof groupRatio[group] === 'number' && Number.isFinite(groupRatio[group]) ? groupRatio[group] : Number.POSITIVE_INFINITY,
+    }))
+    .sort((left, right) => left.ratio - right.ratio || left.group.localeCompare(right.group));
+
+  const preferred = rankedGroups.find((item) => Number.isFinite(item.ratio));
+  return preferred?.group || normalizedGroups[0] || null;
 }
 
 export async function repairAccountKeysForAccount(accountId: number): Promise<AccountKeyRepairExecutionResult | null> {
@@ -216,25 +275,14 @@ async function repairSingleAccount(row: AccountWithSiteRow): Promise<AccountKeyR
 
     if (upstreamTokens.length === 0) {
       const availableGroups = await adapter.getUserGroups(site.url, accessToken, platformUserId).catch(() => ['default']);
-      const preferredGroup = await resolvePreferredTokenGroup({
-        site: {
-          id: site.id,
-          url: site.url,
-          platform: site.platform,
-          apiKey: site.apiKey,
-        },
-        account: {
-          id: account.id,
-          accessToken: account.accessToken,
-          apiToken: account.apiToken,
-        },
-        modelName: '__default__',
-        totalTokens: 0,
+      const fallbackGroup = await resolveLowestRatioGroup({
+        site,
+        account,
         availableGroups,
-      });
+      }) || 'default';
       const created = await adapter.createApiToken(site.url, accessToken, platformUserId, {
         name: 'metapi-default',
-        group: preferredGroup.group,
+        group: fallbackGroup,
       });
       if (!created) {
         return {

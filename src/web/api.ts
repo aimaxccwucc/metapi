@@ -4,7 +4,74 @@ type RequestOptions = RequestInit & {
   timeoutMs?: number;
 };
 
-async function request(url: string, options: RequestOptions = {}) {
+function requireAuthToken(): string {
+  const token = getAuthToken(localStorage);
+  if (!token) {
+    const hadToken = !!localStorage.getItem('auth_token');
+    clearAuthSession(localStorage);
+    if (hadToken && typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+      window.location.reload();
+    }
+    throw new Error('Session expired');
+  }
+  return token;
+}
+
+async function extractResponseErrorMessage(res: Response): Promise<string> {
+  let message = `HTTP ${res.status}`;
+  try {
+    const text = await res.text();
+    if (text) {
+      try {
+        const json = JSON.parse(text);
+        if (json?.message && typeof json.message === 'string') {
+          message = json.message;
+        } else if (json?.error && typeof json.error === 'string') {
+          message = json.error;
+        } else if (json?.error?.message && typeof json.error.message === 'string') {
+          message = json.error.message;
+        } else {
+          message = `${message}: ${text.slice(0, 120)}`;
+        }
+      } catch {
+        message = `${message}: ${text.slice(0, 120)}`;
+      }
+    }
+  } catch { }
+  return message;
+}
+
+function parseContentDispositionFilename(headerValue: string | null): string | null {
+  if (!headerValue) return null;
+  const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(headerValue);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const quotedMatch = /filename="([^"]+)"/i.exec(headerValue);
+  if (quotedMatch?.[1]) return quotedMatch[1];
+  const bareMatch = /filename=([^;]+)/i.exec(headerValue);
+  return bareMatch?.[1]?.trim() || null;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(buffer).toString('base64');
+  }
+
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function fetchAuthenticatedResponse(url: string, options: RequestOptions = {}): Promise<Response> {
   const { timeoutMs = 30_000, signal: externalSignal, ...fetchOptions } = options;
   const controller = new AbortController();
   let timeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(() => {
@@ -22,15 +89,7 @@ async function request(url: string, options: RequestOptions = {}) {
     }
   }
 
-  const token = getAuthToken(localStorage);
-  if (!token) {
-    const hadToken = !!localStorage.getItem('auth_token');
-    clearAuthSession(localStorage);
-    if (hadToken && typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
-      window.location.reload();
-    }
-    throw new Error('Session expired');
-  }
+  const token = requireAuthToken();
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${token}`,
   };
@@ -48,31 +107,12 @@ async function request(url: string, options: RequestOptions = {}) {
     if (res.status === 401 || res.status === 403) {
       const hadToken = !!getAuthToken(localStorage);
       clearAuthSession(localStorage);
-      if (hadToken) window.location.reload();
+      if (hadToken && typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+        window.location.reload();
+      }
       throw new Error('Session expired');
     }
-    if (!res.ok) {
-      let message = `HTTP ${res.status}`;
-      try {
-        const text = await res.text();
-        if (text) {
-          try {
-            const json = JSON.parse(text);
-            if (json?.message && typeof json.message === 'string') {
-              message = json.message;
-            } else if (json?.error && typeof json.error === 'string') {
-              message = json.error;
-            } else {
-              message = `${message}: ${text.slice(0, 120)}`;
-            }
-          } catch {
-            message = `${message}: ${text.slice(0, 120)}`;
-          }
-        }
-      } catch { }
-      throw new Error(message);
-    }
-    return res.json();
+    return res;
   } catch (error: any) {
     if (error?.name === 'AbortError') {
       if (externalSignal?.aborted) throw error;
@@ -86,6 +126,14 @@ async function request(url: string, options: RequestOptions = {}) {
     }
     cleanupExternalSignal();
   }
+}
+
+async function request(url: string, options: RequestOptions = {}) {
+  const res = await fetchAuthenticatedResponse(url, options);
+  if (!res.ok) {
+    throw new Error(await extractResponseErrorMessage(res));
+  }
+  return res.json();
 }
 
 function buildQueryString(params?: Record<string, string | number | boolean | null | undefined>) {
@@ -156,7 +204,23 @@ export type ProxyTestJobResponse = {
   expiresAt?: string;
 };
 
+export type SystemProxyTestRequest = {
+  proxyUrl?: string;
+};
+
+export type SystemProxyTestResponse = {
+  success: true;
+  proxyUrl: string;
+  probeUrl: string;
+  finalUrl: string;
+  reachable: true;
+  ok: boolean;
+  statusCode: number;
+  latencyMs: number;
+};
+
 export type ProxyLogStatusFilter = 'all' | 'success' | 'failed';
+export type ProxyLogClientConfidence = 'exact' | 'heuristic' | 'unknown' | null;
 
 export type ProxyLogBillingDetails = {
   quotaType: number;
@@ -204,6 +268,14 @@ export type ProxyLogListItem = {
   siteName?: string | null;
   siteUrl?: string | null;
   errorMessage?: string | null;
+  downstreamKeyId?: number | null;
+  downstreamKeyName?: string | null;
+  downstreamKeyGroupName?: string | null;
+  downstreamKeyTags?: string[];
+  clientFamily?: string | null;
+  clientAppId?: string | null;
+  clientAppName?: string | null;
+  clientConfidence?: ProxyLogClientConfidence;
   promptTokens?: number | null;
   completionTokens?: number | null;
   estimatedCost?: number | null;
@@ -229,9 +301,15 @@ export type ProxyLogsQuery = {
   offset?: number;
   status?: ProxyLogStatusFilter;
   search?: string;
+  client?: string;
   siteId?: number;
   from?: string;
   to?: string;
+};
+
+export type ProxyLogClientOption = {
+  value: string;
+  label: string;
 };
 
 export type ProxyLogsResponse = {
@@ -239,7 +317,98 @@ export type ProxyLogsResponse = {
   total: number;
   page: number;
   pageSize: number;
+  clientOptions: ProxyLogClientOption[];
   summary: ProxyLogsSummary;
+};
+
+export type OAuthProviderInfo = {
+  provider: string;
+  label: string;
+  platform: string;
+  enabled: boolean;
+  loginType: 'oauth';
+  requiresProjectId: boolean;
+  supportsDirectAccountRouting: boolean;
+  supportsCloudValidation: boolean;
+  supportsNativeProxy: boolean;
+};
+
+export type OAuthStartInstructions = {
+  redirectUri: string;
+  callbackPort: number;
+  callbackPath: string;
+  manualCallbackDelayMs: number;
+  sshTunnelCommand?: string;
+  sshTunnelKeyCommand?: string;
+};
+
+export type OAuthStartResponse = {
+  provider: string;
+  state: string;
+  authorizationUrl: string;
+  instructions: OAuthStartInstructions;
+};
+
+export type OAuthSessionInfo = {
+  provider: string;
+  state: string;
+  status: 'pending' | 'success' | 'error';
+  accountId?: number;
+  siteId?: number;
+  error?: string;
+};
+
+export type OAuthQuotaWindowInfo = {
+  supported: boolean;
+  limit?: number | null;
+  used?: number | null;
+  remaining?: number | null;
+  resetAt?: string | null;
+  message?: string | null;
+};
+
+export type OAuthQuotaInfo = {
+  status: 'supported' | 'unsupported' | 'error';
+  source: 'official' | 'reverse_engineered';
+  lastSyncAt?: string | null;
+  lastError?: string | null;
+  providerMessage?: string | null;
+  subscription?: {
+    planType?: string | null;
+    activeStart?: string | null;
+    activeUntil?: string | null;
+  } | null;
+  windows: {
+    fiveHour: OAuthQuotaWindowInfo;
+    sevenDay: OAuthQuotaWindowInfo;
+  };
+  lastLimitResetAt?: string | null;
+};
+
+export type OAuthConnectionInfo = {
+  accountId: number;
+  siteId: number;
+  provider: string;
+  username?: string | null;
+  email?: string | null;
+  accountKey?: string | null;
+  planType?: string | null;
+  projectId?: string | null;
+  modelCount: number;
+  modelsPreview: string[];
+  status: 'healthy' | 'abnormal';
+  quota?: OAuthQuotaInfo | null;
+  routeChannelCount?: number;
+  lastModelSyncAt?: string | null;
+  lastModelSyncError?: string | null;
+  site?: { id: number; name: string; url: string; platform: string } | null;
+};
+
+export type OAuthConnectionsResponse = {
+  items: OAuthConnectionInfo[];
+  total: number;
+  limit: number;
+  offset: number;
 };
 
 export const api = {
@@ -249,6 +418,16 @@ export const api = {
   updateSite: (id: number, data: any) => request(`/api/sites/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteSite: (id: number) => request(`/api/sites/${id}`, { method: 'DELETE' }),
   batchUpdateSites: (data: any) => request('/api/sites/batch', { method: 'POST', body: JSON.stringify(data) }),
+  refreshSiteHealth: (data?: { wait?: boolean }) => request('/api/sites/health/refresh', {
+    method: 'POST',
+    body: JSON.stringify(data || {}),
+    timeoutMs: data?.wait ? 150_000 : 30_000,
+  }),
+  cleanupUnreachableSites: (data?: { wait?: boolean; dryRun?: boolean }) => request('/api/sites/cleanup-unreachable', {
+    method: 'POST',
+    body: JSON.stringify(data || {}),
+    timeoutMs: data?.wait ? 150_000 : 30_000,
+  }),
   detectSite: (url: string) => request('/api/sites/detect', { method: 'POST', body: JSON.stringify({ url }) }),
   getSiteDisabledModels: (siteId: number) => request(`/api/sites/${siteId}/disabled-models`),
   updateSiteDisabledModels: (siteId: number, models: string[]) => request(`/api/sites/${siteId}/disabled-models`, { method: 'PUT', body: JSON.stringify({ models }) }),
@@ -353,12 +532,45 @@ export const api = {
   // Search
   search: (query: string) => request('/api/search', { method: 'POST', body: JSON.stringify({ query, limit: 20 }) }),
 
+  // OAuth
+  getOAuthProviders: () => request('/api/oauth/providers') as Promise<{ providers: OAuthProviderInfo[] }>,
+  startOAuthProvider: (provider: string, data?: { accountId?: number; projectId?: string }) => request(`/api/oauth/providers/${encodeURIComponent(provider)}/start`, {
+    method: 'POST',
+    body: JSON.stringify(data || {}),
+  }) as Promise<OAuthStartResponse>,
+  getOAuthSession: (state: string) => request(`/api/oauth/sessions/${encodeURIComponent(state)}`) as Promise<OAuthSessionInfo>,
+  submitOAuthManualCallback: (state: string, callbackUrl: string) => request(`/api/oauth/sessions/${encodeURIComponent(state)}/manual-callback`, {
+    method: 'POST',
+    body: JSON.stringify({ callbackUrl }),
+  }) as Promise<{ success: true }>,
+  getOAuthConnections: (params?: { limit?: number; offset?: number }) =>
+    request(`/api/oauth/connections${buildQueryString(params)}`) as Promise<OAuthConnectionsResponse>,
+  refreshOAuthConnectionQuota: (accountId: number) => request(`/api/oauth/connections/${accountId}/quota/refresh`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }) as Promise<{ success: true; quota: OAuthQuotaInfo }>,
+  rebindOAuthConnection: (accountId: number) => request(`/api/oauth/connections/${accountId}/rebind`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }) as Promise<OAuthStartResponse>,
+  deleteOAuthConnection: (accountId: number) => request(`/api/oauth/connections/${accountId}`, {
+    method: 'DELETE',
+  }) as Promise<{ success: true }>,
+
   // Events
   getEvents: (params?: string) => request(`/api/events${params ? '?' + params : ''}`),
   getEventCount: () => request('/api/events/count'),
   markEventRead: (id: number) => request(`/api/events/${id}/read`, { method: 'POST' }),
   markAllEventsRead: () => request('/api/events/read-all', { method: 'POST' }),
   clearEvents: () => request('/api/events', { method: 'DELETE' }),
+  getSiteAnnouncements: (params?: string) => request(`/api/site-announcements${params ? '?' + params : ''}`),
+  markSiteAnnouncementRead: (id: number) => request(`/api/site-announcements/${id}/read`, { method: 'POST' }),
+  markAllSiteAnnouncementsRead: () => request('/api/site-announcements/read-all', { method: 'POST' }),
+  clearSiteAnnouncements: () => request('/api/site-announcements', { method: 'DELETE' }),
+  syncSiteAnnouncements: (payload?: { siteId?: number }) => request('/api/site-announcements/sync', {
+    method: 'POST',
+    body: JSON.stringify(payload || {}),
+  }),
   getTasks: (limit = 50) => request(`/api/tasks?limit=${Math.max(1, Math.min(200, Math.trunc(limit)))}`),
   getTask: (id: string) => request(`/api/tasks/${encodeURIComponent(id)}`),
 
@@ -371,6 +583,11 @@ export const api = {
   updateRuntimeSettings: (data: any) => request('/api/settings/runtime', {
     method: 'PUT',
     body: JSON.stringify(data),
+  }),
+  testSystemProxy: (data: SystemProxyTestRequest) => request('/api/settings/system-proxy/test', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    timeoutMs: 20_000,
   }),
   getRuntimeDatabaseConfig: () => request('/api/settings/database/runtime'),
   updateRuntimeDatabaseConfig: (data: { dialect: 'sqlite' | 'mysql' | 'postgres'; connectionString: string; ssl?: boolean }) =>
@@ -401,15 +618,59 @@ export const api = {
   deleteDownstreamApiKey: (id: number) => request(`/api/downstream-keys/${id}`, {
     method: 'DELETE',
   }),
+  batchDownstreamApiKeys: (data: {
+    ids: number[];
+    action: 'enable' | 'disable' | 'delete' | 'resetUsage' | 'updateMetadata';
+    groupOperation?: 'keep' | 'set' | 'clear';
+    groupName?: string;
+    tagOperation?: 'keep' | 'append';
+    tags?: string[];
+  }) =>
+    request('/api/downstream-keys/batch', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   resetDownstreamApiKeyUsage: (id: number) => request(`/api/downstream-keys/${id}/reset-usage`, {
     method: 'POST',
   }),
+  getDownstreamApiKeysSummary: (params?: { range?: '24h' | '7d' | 'all'; status?: 'all' | 'enabled' | 'disabled'; search?: string }) =>
+    request(`/api/downstream-keys/summary${buildQueryString(params)}`),
+  getDownstreamApiKeyOverview: (id: number) => request(`/api/downstream-keys/${id}/overview`),
+  getDownstreamApiKeyTrend: (id: number, params?: { range?: '24h' | '7d' | 'all' }) =>
+    request(`/api/downstream-keys/${id}/trend${buildQueryString(params)}`),
   exportBackup: (type: 'all' | 'accounts' | 'preferences' = 'all') =>
     request(`/api/settings/backup/export?type=${encodeURIComponent(type)}`),
   importBackup: (data: any) =>
     request('/api/settings/backup/import', {
       method: 'POST',
       body: JSON.stringify({ data }),
+    }),
+  getBackupWebdavConfig: () => request('/api/settings/backup/webdav'),
+  saveBackupWebdavConfig: (data: {
+    enabled: boolean;
+    fileUrl: string;
+    username: string;
+    password?: string;
+    clearPassword?: boolean;
+    exportType: 'all' | 'accounts' | 'preferences';
+    autoSyncEnabled: boolean;
+    autoSyncCron: string;
+  }) =>
+    request('/api/settings/backup/webdav', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  exportBackupToWebdav: (type?: 'all' | 'accounts' | 'preferences') =>
+    request('/api/settings/backup/webdav/export', {
+      method: 'POST',
+      body: JSON.stringify(type ? { type } : {}),
+      timeoutMs: 60_000,
+    }),
+  importBackupFromWebdav: () =>
+    request('/api/settings/backup/webdav/import', {
+      method: 'POST',
+      body: JSON.stringify({}),
+      timeoutMs: 60_000,
     }),
   clearRuntimeCache: () => request('/api/settings/maintenance/clear-cache', { method: 'POST' }),
   clearUsageData: () => request('/api/settings/maintenance/clear-usage', { method: 'POST' }),
@@ -432,11 +693,12 @@ export const api = {
     const query = params.toString();
     return request(`/api/models/marketplace${query ? `?${query}` : ''}`, { timeoutMs: options?.refresh ? 45_000 : 15_000 });
   },
-  testMarketplaceModelAvailability: (data: { modelName: string; accountId?: number; siteName?: string }) => request('/api/models/marketplace/test', {
-    method: 'POST',
-    body: JSON.stringify(data),
-    timeoutMs: 45_000,
-  }),
+  testMarketplaceModelAvailability: (data: { modelName: string; accountId?: number; siteName?: string }) =>
+    request('/api/models/marketplace/test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 30_000,
+    }),
   getModelTokenCandidates: () => request('/api/models/token-candidates'),
 
   // Simple chat test from admin panel
@@ -452,6 +714,29 @@ export const api = {
     }),
   getProxyTestJob: (jobId: string) => request(`/api/test/proxy/jobs/${encodeURIComponent(jobId)}`),
   deleteProxyTestJob: (jobId: string) => request(`/api/test/proxy/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' }),
+  getProxyFileContentDataUrl: async (
+    fileId: string,
+    options: Pick<RequestOptions, 'signal' | 'timeoutMs'> = {},
+  ) => {
+    const response = await fetchAuthenticatedResponse(`/v1/files/${encodeURIComponent(fileId)}/content`, {
+      method: 'GET',
+      ...options,
+    });
+    if (!response.ok) {
+      throw new Error(await extractResponseErrorMessage(response));
+    }
+
+    const mimeType = (response.headers.get('content-type') || 'application/octet-stream')
+      .split(';')[0]
+      .trim() || 'application/octet-stream';
+    const filename = parseContentDispositionFilename(response.headers.get('content-disposition'));
+    const base64 = arrayBufferToBase64(await response.arrayBuffer());
+    return {
+      filename,
+      mimeType,
+      data: `data:${mimeType};base64,${base64}`,
+    };
+  },
   testProxy: (data: ProxyTestRequestEnvelope) =>
     request('/api/test/proxy', {
       method: 'POST',

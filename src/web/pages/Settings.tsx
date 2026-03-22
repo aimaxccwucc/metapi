@@ -25,6 +25,7 @@ type DbDialect = 'sqlite' | 'mysql' | 'postgres';
 type RuntimeSettings = {
   checkinCron: string;
   balanceRefreshCron: string;
+  siteHealthRefreshCron: string;
   logCleanupCron: string;
   logCleanupUsageLogsEnabled: boolean;
   logCleanupProgramLogsEnabled: boolean;
@@ -183,6 +184,7 @@ export default function Settings() {
   const [runtime, setRuntime] = useState<RuntimeSettings>({
     checkinCron: '0 8 * * *',
     balanceRefreshCron: '0 * * * *',
+    siteHealthRefreshCron: '*/15 * * * *',
     logCleanupCron: '0 6 * * *',
     logCleanupUsageLogsEnabled: false,
     logCleanupProgramLogsEnabled: false,
@@ -389,6 +391,7 @@ export default function Settings() {
       setRuntime({
         checkinCron: runtimeInfo.checkinCron || '0 8 * * *',
         balanceRefreshCron: runtimeInfo.balanceRefreshCron || '0 * * * *',
+        siteHealthRefreshCron: runtimeInfo.siteHealthRefreshCron || '*/15 * * * *',
         logCleanupCron: runtimeInfo.logCleanupCron || '0 6 * * *',
         logCleanupUsageLogsEnabled: !!runtimeInfo.logCleanupUsageLogsEnabled,
         logCleanupProgramLogsEnabled: !!runtimeInfo.logCleanupProgramLogsEnabled,
@@ -466,6 +469,7 @@ export default function Settings() {
       await api.updateRuntimeSettings({
         checkinCron: runtime.checkinCron,
         balanceRefreshCron: runtime.balanceRefreshCron,
+        siteHealthRefreshCron: runtime.siteHealthRefreshCron,
         logCleanupCron: runtime.logCleanupCron,
         logCleanupUsageLogsEnabled: runtime.logCleanupUsageLogsEnabled,
         logCleanupProgramLogsEnabled: runtime.logCleanupProgramLogsEnabled,
@@ -917,6 +921,14 @@ export default function Settings() {
               <input
                 value={runtime.balanceRefreshCron}
                 onChange={(e) => setRuntime((prev) => ({ ...prev, balanceRefreshCron: e.target.value }))}
+                style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+              />
+            </div>
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>站点存活检测 Cron</div>
+              <input
+                value={runtime.siteHealthRefreshCron}
+                onChange={(e) => setRuntime((prev) => ({ ...prev, siteHealthRefreshCron: e.target.value }))}
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
               />
             </div>

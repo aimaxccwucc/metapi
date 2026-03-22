@@ -7,6 +7,7 @@ import Models from './Models.js';
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getModelsMarketplace: vi.fn(),
+    testMarketplaceModelAvailability: vi.fn(),
   },
 }));
 
@@ -29,9 +30,18 @@ async function flushMicrotasks() {
   });
 }
 
+async function unmountRoot(root: ReturnType<typeof create> | null) {
+  if (!root) return;
+  await act(async () => {
+    root.unmount();
+  });
+}
+
 describe('Models marketplace text', () => {
   const originalDocument = globalThis.document;
   const originalMutationObserver = globalThis.MutationObserver;
+  const originalWindow = globalThis.window;
+  const originalMatchMedia = globalThis.matchMedia;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -69,12 +79,20 @@ describe('Models marketplace text', () => {
         },
       ],
     });
+    apiMock.testMarketplaceModelAvailability.mockResolvedValue({
+      available: true,
+      reason: 'model found in upstream list',
+      latencyMs: 123,
+      autoKeyCreated: false,
+    });
   });
 
   afterEach(() => {
     vi.clearAllMocks();
     globalThis.document = originalDocument;
     globalThis.MutationObserver = originalMutationObserver;
+    globalThis.window = originalWindow;
+    globalThis.matchMedia = originalMatchMedia;
   });
 
   it('renders readable Chinese labels and fallback descriptions for marketplace models', async () => {
@@ -116,7 +134,7 @@ describe('Models marketplace text', () => {
       expect(expandedText).toContain('站点');
       expect(expandedText).toContain('余额');
     } finally {
-      root?.unmount();
+      await unmountRoot(root);
     }
   });
 
@@ -187,7 +205,83 @@ describe('Models marketplace text', () => {
       expect(text).toContain('DeepL');
       expect(text).not.toContain('其他未归类的模型');
     } finally {
-      root?.unmount();
+      await unmountRoot(root);
+    }
+  });
+
+  it('keeps a visible mobile filter entry on small screens', async () => {
+    const nextWindow = (originalWindow ? { ...originalWindow } : {}) as Window & typeof globalThis;
+    nextWindow.innerWidth = 768;
+    nextWindow.addEventListener = nextWindow.addEventListener || (() => {});
+    nextWindow.removeEventListener = nextWindow.removeEventListener || (() => {});
+    nextWindow.matchMedia = (() => ({
+      matches: true,
+      media: '(max-width: 768px)',
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as typeof window.matchMedia;
+    globalThis.window = nextWindow;
+    globalThis.matchMedia = nextWindow.matchMedia;
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      expect(collectText(root!.root)).toContain('筛选');
+    } finally {
+      await unmountRoot(root);
+    }
+  });
+
+  it('keeps the mobile filter entry visible even while the first screen is still loading', async () => {
+    globalThis.window = {
+      innerWidth: 768,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      matchMedia: (() => ({
+        matches: true,
+        media: '(max-width: 768px)',
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      })) as typeof window.matchMedia,
+    } as unknown as Window & typeof globalThis;
+    globalThis.matchMedia = globalThis.window.matchMedia;
+    apiMock.getModelsMarketplace.mockImplementation(() => new Promise(() => {}));
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+
+      expect(collectText(root!.root)).toContain('筛选');
+    } finally {
+      await unmountRoot(root);
     }
   });
 
@@ -317,7 +411,7 @@ describe('Models marketplace text', () => {
       expect(expandedText).not.toContain('user-b');
       expect(expandedText).not.toContain('token-b-1');
     } finally {
-      root?.unmount();
+      await unmountRoot(root);
     }
   });
 
@@ -439,7 +533,7 @@ describe('Models marketplace text', () => {
       expect(collectText(cards[0]!)).toContain('claude-3-5-sonnet');
       expect(collectText(cards[1]!)).toContain('gpt-4o');
     } finally {
-      root?.unmount();
+      await unmountRoot(root);
     }
   });
 
@@ -515,7 +609,57 @@ describe('Models marketplace text', () => {
       expect(collectText(latencyBadge)).toContain('—');
       expect(collectText(root!.root)).not.toContain('680ms');
     } finally {
-      root?.unmount();
+      await unmountRoot(root);
+    }
+  });
+
+  it('runs marketplace availability checks from expanded account details', async () => {
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const cards = root!.root.findAll((node) => (
+        node.type === 'div'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('model-card')
+        && typeof node.props.onClick === 'function'
+      ));
+      expect(cards.length).toBeGreaterThan(0);
+
+      await act(async () => {
+        cards[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const checkButtons = root!.root.findAll((node) => (
+        node.type === 'button'
+        && collectText(node).includes('检测')
+      ));
+      expect(checkButtons.length).toBeGreaterThan(0);
+
+      await act(async () => {
+        await checkButtons[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.testMarketplaceModelAvailability).toHaveBeenCalledWith({
+        modelName: 'gpt-4o',
+        accountId: 1,
+        siteName: 'Demo Site',
+      });
+      expect(collectText(root!.root)).toContain('可用 123ms');
+    } finally {
+      await unmountRoot(root);
     }
   });
 });

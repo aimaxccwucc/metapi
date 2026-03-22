@@ -41,7 +41,6 @@ describe('task routes', () => {
     delete process.env.DATA_DIR;
   });
 
-
   it('lists finished background tasks from /api/tasks', async () => {
     const { startBackgroundTask } = await import('../../services/backgroundTaskService.js');
     startBackgroundTask(

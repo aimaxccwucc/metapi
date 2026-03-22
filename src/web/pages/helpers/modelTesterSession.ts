@@ -70,9 +70,20 @@ export type PlaygroundMultipartFile = {
 };
 
 export type ConversationUploadedFile = {
-  fileId: string;
+  fileId?: string | null;
   filename?: string | null;
   mimeType?: string | null;
+  data?: string | null;
+};
+
+export type ConversationDraftFile = {
+  localId: string;
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  fileId?: string | null;
+  status: 'pending' | 'uploading' | 'uploaded' | 'error';
+  errorMessage?: string | null;
 };
 
 export type TesterProxyEnvelope = {
@@ -132,6 +143,7 @@ export type ModelTesterSessionState = {
   inputs: ModelTesterInputs;
   parameterEnabled: ParameterEnabled;
   messages: ChatMessage[];
+  conversationFiles: ConversationDraftFile[];
   pendingPayload: TesterProxyEnvelope | null;
   pendingJobId?: string | null;
   customRequestMode: boolean;
@@ -199,8 +211,10 @@ const VALID_MODES: ReadonlySet<string> = new Set([
   'videos.inspect',
 ]);
 const VALID_PROTOCOLS: ReadonlySet<string> = new Set(['openai', 'responses', 'claude', 'gemini']);
+const VALID_CONVERSATION_DRAFT_STATUSES: ReadonlySet<string> = new Set(['pending', 'uploading', 'uploaded', 'error']);
 const VALID_PROXY_METHODS: ReadonlySet<string> = new Set(['POST', 'GET', 'DELETE']);
 const VALID_REQUEST_KINDS: ReadonlySet<string> = new Set(['json', 'multipart', 'empty']);
+const LOCAL_PROXY_FILE_ID_PREFIX = 'file-metapi-';
 
 let messageCounter = 0;
 
@@ -226,7 +240,7 @@ const isExactModelPattern = (modelPattern: string): boolean => {
   const normalized = modelPattern.trim();
   if (!normalized) return false;
   if (normalized.toLowerCase().startsWith('re:')) return false;
-  return !/[\*\?\[]/.test(normalized);
+  return !/[\*\?]/.test(normalized);
 };
 
 const splitCommaSeparated = (value: string): string[] =>
@@ -295,10 +309,20 @@ const toOpenAiContentPart = (part: ConversationContentPart): Record<string, unkn
 
   if (part.type === 'input_file') {
     const filePayload: Record<string, unknown> = {};
-    if (typeof part.fileId === 'string' && part.fileId.trim()) filePayload.file_id = part.fileId.trim();
+    const fileId = typeof part.fileId === 'string' && part.fileId.trim()
+      ? part.fileId.trim()
+      : '';
+    const rawData = typeof part.data === 'string' && part.data.trim()
+      ? part.data.trim()
+      : '';
+    const parsed = rawData
+      ? parseDataUrl(rawData)
+      : null;
+    if (fileId) filePayload.file_id = fileId;
+    else if (rawData) filePayload.file_data = parsed?.data || rawData;
     if (typeof part.filename === 'string' && part.filename.trim()) filePayload.filename = part.filename.trim();
-    if (typeof part.data === 'string' && part.data.trim()) filePayload.file_data = part.data.trim();
     if (typeof part.mimeType === 'string' && part.mimeType.trim()) filePayload.mime_type = part.mimeType.trim();
+    else if (parsed?.mimeType) filePayload.mime_type = parsed.mimeType;
     if (Object.keys(filePayload).length === 0) return null;
     return {
       type: 'file',
@@ -341,10 +365,98 @@ const toResponsesContentPart = (part: ConversationContentPart): Record<string, u
       type: 'input_file',
     };
     if (typeof part.fileId === 'string' && part.fileId.trim()) fileBlock.file_id = part.fileId.trim();
+    else if (typeof part.data === 'string' && part.data.trim()) fileBlock.file_data = part.data.trim();
     if (typeof part.filename === 'string' && part.filename.trim()) fileBlock.filename = part.filename.trim();
-    if (typeof part.data === 'string' && part.data.trim()) fileBlock.file_data = part.data.trim();
     if (Object.keys(fileBlock).length === 1) return null;
     return fileBlock;
+  }
+
+  return null;
+};
+
+const toClaudeContentPart = (part: ConversationContentPart): Record<string, unknown> | null => {
+  if (part.type !== 'input_file' || typeof part.data !== 'string' || !part.data.trim()) return null;
+  const parsed = parseDataUrl(part.data);
+  if (!parsed) return null;
+  const mimeType = part.mimeType || parsed.mimeType || 'application/octet-stream';
+  if (mimeType.toLowerCase().startsWith('image/')) {
+    return {
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: mimeType,
+        data: parsed.data,
+      },
+    };
+  }
+  return {
+    type: 'document',
+    source: {
+      type: 'base64',
+      media_type: mimeType,
+      data: parsed.data,
+    },
+    ...(typeof part.filename === 'string' && part.filename.trim()
+      ? { title: part.filename.trim() }
+      : {}),
+  };
+};
+
+const toGeminiContentPart = (part: ConversationContentPart): Record<string, unknown> | null => {
+  if (part.type === 'image_url') {
+    return {
+      fileData: {
+        fileUri: part.url,
+      },
+    };
+  }
+
+  if (part.type === 'image_inline') {
+    const parsed = parseDataUrl(part.dataUrl);
+    if (!parsed) return null;
+    return {
+      inlineData: {
+        mimeType: part.mimeType || parsed.mimeType,
+        data: parsed.data,
+      },
+    };
+  }
+
+  if (part.type === 'input_audio') {
+    const parsed = parseDataUrl(part.dataUrl);
+    if (!parsed) return null;
+    return {
+      inlineData: {
+        mimeType: part.mimeType || parsed.mimeType,
+        data: parsed.data,
+      },
+    };
+  }
+
+  if (part.type === 'input_file') {
+    if (typeof part.data === 'string' && part.data.trim()) {
+      const parsed = parseDataUrl(part.data);
+      if (!parsed) return null;
+      return {
+        inlineData: {
+          mimeType: part.mimeType || parsed.mimeType || 'application/octet-stream',
+          data: parsed.data,
+        },
+      };
+    }
+
+    const fileUri = typeof part.fileId === 'string' && part.fileId.trim()
+      ? part.fileId.trim()
+      : '';
+    if (!fileUri) return null;
+    return {
+      fileData: {
+        fileUri,
+        ...(typeof part.mimeType === 'string' && part.mimeType.trim()
+          ? { mimeType: part.mimeType.trim() }
+          : {}),
+      },
+    };
   }
 
   return null;
@@ -353,8 +465,15 @@ const toResponsesContentPart = (part: ConversationContentPart): Record<string, u
 const toGeminiContents = (messages: ApiChatMessage[]) =>
   messages.map((message) => ({
     role: message.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: message.content }],
-  }));
+    parts: [
+      ...(message.content.trim() ? [{ text: message.content }] : []),
+      ...((Array.isArray(message.parts)
+        ? message.parts
+          .map((part) => toGeminiContentPart(part))
+          .filter((item): item is Record<string, unknown> => !!item)
+        : [])),
+    ],
+  })).filter((message) => Array.isArray(message.parts) && message.parts.length > 0);
 
 const toOpenAiMessageContent = (message: ApiChatMessage): unknown => {
   const parts = Array.isArray(message.parts)
@@ -409,10 +528,21 @@ const toResponsesInput = (messages: ApiChatMessage[]) => {
 const toClaudeMessages = (messages: ApiChatMessage[]) =>
   messages
     .filter((message) => message.role !== 'system' && message.role !== 'developer')
-    .map((message) => ({
-      role: message.role === 'assistant' ? 'assistant' : 'user',
-      content: message.content,
-    }));
+    .map((message) => {
+      const parts = [
+        ...(message.content.trim() ? [{ type: 'text', text: message.content }] : []),
+        ...((Array.isArray(message.parts)
+          ? message.parts
+            .map((part) => toClaudeContentPart(part))
+            .filter((item): item is Record<string, unknown> => !!item)
+          : [])),
+      ];
+
+      return {
+        role: message.role === 'assistant' ? 'assistant' : 'user',
+        content: parts.length > 0 ? parts : message.content,
+      };
+    });
 
 const buildConversationJsonBody = (
   messages: ChatMessage[],
@@ -595,6 +725,42 @@ const parseParameterEnabled = (value: unknown): ParameterEnabled => {
   };
 };
 
+const parseConversationDraftFiles = (value: unknown): ConversationDraftFile[] => {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item, index) => {
+    if (!isRecord(item)) return [];
+    const localId = typeof item.localId === 'string' && item.localId.trim()
+      ? item.localId.trim()
+      : `draft-file-restored-${index}`;
+    const name = typeof item.name === 'string' && item.name.trim()
+      ? item.name.trim()
+      : 'upload.bin';
+    const mimeType = typeof item.mimeType === 'string' && item.mimeType.trim()
+      ? item.mimeType.trim()
+      : 'application/octet-stream';
+    const dataUrl = typeof item.dataUrl === 'string' && item.dataUrl.trim()
+      ? item.dataUrl.trim()
+      : '';
+    if (!dataUrl) return [];
+
+    return [{
+      localId,
+      name,
+      mimeType,
+      dataUrl,
+      ...(typeof item.fileId === 'string' && item.fileId.trim()
+        ? { fileId: item.fileId.trim() }
+        : {}),
+      status: typeof item.status === 'string' && VALID_CONVERSATION_DRAFT_STATUSES.has(item.status)
+        ? item.status as ConversationDraftFile['status']
+        : 'pending',
+      errorMessage: typeof item.errorMessage === 'string'
+        ? item.errorMessage
+        : null,
+    }];
+  });
+};
+
 const parseModeState = (value: unknown): ModelTesterModeState => {
   if (!isRecord(value)) return { ...DEFAULT_MODE_STATE };
   return {
@@ -767,46 +933,6 @@ export const filterModelTesterModelNames = (models: string[], query: string): st
     .map((item) => item.name);
 };
 
-const IMAGE_MODEL_PREFERENCES = [
-  /imagen/i,
-  /gpt-4o-image/i,
-  /gpt-image/i,
-  /flux/i,
-  /qwen[-/.]?image/i,
-  /image-preview/i,
-  /image/i,
-];
-
-const VIDEO_MODEL_PREFERENCES = [
-  /sora/i,
-  /veo/i,
-  /grok-imagine.*video/i,
-  /video/i,
-];
-
-function pickPreferredModel(models: string[], patterns: RegExp[]): string {
-  for (const pattern of patterns) {
-    const matched = models.find((model) => pattern.test(model));
-    if (matched) return matched;
-  }
-  return models[0] || '';
-}
-
-export const getPreferredModelTesterModel = (
-  models: string[],
-  mode: ModelTesterInputs['mode'],
-  fallbackModel = '',
-): string => {
-  if (mode === 'images.generate' || mode === 'images.edit') {
-    return pickPreferredModel(models, IMAGE_MODEL_PREFERENCES) || (models.includes(fallbackModel) ? fallbackModel : '') || models[0] || '';
-  }
-  if (mode === 'videos.create' || mode === 'videos.inspect') {
-    return pickPreferredModel(models, VIDEO_MODEL_PREFERENCES) || (models.includes(fallbackModel) ? fallbackModel : '') || models[0] || '';
-  }
-  if (fallbackModel && models.includes(fallbackModel)) return fallbackModel;
-  return models[0] || fallbackModel || '';
-};
-
 export const createMessage = (role: ChatRole, content: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({
   id: createMessageId(),
   role,
@@ -819,9 +945,18 @@ export const createConversationInputFilePart = (
   file: ConversationUploadedFile,
 ): ConversationContentPart => ({
   type: 'input_file',
-  fileId: file.fileId,
-  filename: file.filename ?? null,
-  mimeType: file.mimeType ?? null,
+  ...(typeof file.fileId === 'string' && file.fileId.trim()
+    ? { fileId: file.fileId.trim() }
+    : {}),
+  ...(typeof file.filename === 'string' && file.filename.trim()
+    ? { filename: file.filename.trim() }
+    : {}),
+  ...(typeof file.mimeType === 'string' && file.mimeType.trim()
+    ? { mimeType: file.mimeType.trim() }
+    : {}),
+  ...(typeof file.data === 'string' && file.data.trim()
+    ? { data: file.data.trim() }
+    : {}),
 });
 
 export const createConversationUserMessage = (
@@ -835,6 +970,79 @@ export const createConversationUserMessage = (
     ...(parts.length > 0 ? { parts } : {}),
   });
 };
+
+export const extractConversationUploadedFilesFromMessage = (
+  message: ChatMessage,
+): ConversationUploadedFile[] => {
+  const parts = Array.isArray(message.parts) ? message.parts : [];
+  return parts.flatMap((part) => {
+    if (part.type !== 'input_file') return [];
+
+    const fileId = typeof part.fileId === 'string' && part.fileId.trim()
+      ? part.fileId.trim()
+      : null;
+    const filename = typeof part.filename === 'string' && part.filename.trim()
+      ? part.filename.trim()
+      : null;
+    const mimeType = typeof part.mimeType === 'string' && part.mimeType.trim()
+      ? part.mimeType.trim()
+      : null;
+    const data = typeof part.data === 'string' && part.data.trim()
+      ? part.data.trim()
+      : null;
+
+    if (!fileId && !data) return [];
+
+    return [{
+      ...(fileId ? { fileId } : {}),
+      ...(filename ? { filename } : {}),
+      ...(mimeType ? { mimeType } : {}),
+      ...(data ? { data } : {}),
+    }];
+  });
+};
+
+export async function resolveConversationReplayFiles(
+  files: ConversationUploadedFile[],
+  protocol: PlaygroundProtocol,
+  loadLocalFile: (fileId: string) => Promise<{ filename?: string | null; mimeType?: string | null; data: string }>,
+): Promise<ConversationUploadedFile[]> {
+  if (protocol !== 'claude' && protocol !== 'gemini') {
+    return files.map((file) => ({ ...file }));
+  }
+
+  return Promise.all(files.map(async (file) => {
+    const fileId = typeof file.fileId === 'string' && file.fileId.trim()
+      ? file.fileId.trim()
+      : '';
+    const data = typeof file.data === 'string' && file.data.trim()
+      ? file.data.trim()
+      : '';
+    if (!fileId || data) {
+      return { ...file };
+    }
+    if (!fileId.startsWith(LOCAL_PROXY_FILE_ID_PREFIX)) {
+      throw new Error(`会话附件 ${fileId} 只有 file_id，当前协议需要可重放的内联数据。`);
+    }
+
+    const resolved = await loadLocalFile(fileId);
+    const resolvedData = typeof resolved?.data === 'string' ? resolved.data.trim() : '';
+    if (!resolvedData) {
+      throw new Error(`会话附件 ${fileId} 缺少可重放的数据。`);
+    }
+
+    return {
+      ...file,
+      ...(typeof resolved?.filename === 'string' && resolved.filename.trim()
+        ? { filename: resolved.filename.trim() }
+        : {}),
+      ...(typeof resolved?.mimeType === 'string' && resolved.mimeType.trim()
+        ? { mimeType: resolved.mimeType.trim() }
+        : {}),
+      data: resolvedData,
+    };
+  }));
+}
 
 export const createLoadingAssistantMessage = (): ChatMessage =>
   createMessage('assistant', '', {
@@ -940,6 +1148,7 @@ export const parseModelTesterSession = (raw: string | null): ModelTesterSessionS
     inputs,
     parameterEnabled,
     messages: sanitizeMessages(parsed.messages),
+    conversationFiles: parseConversationDraftFiles(parsed.conversationFiles),
     pendingPayload: parsePendingPayload(parsed.pendingPayload, inputs, parameterEnabled),
     customRequestMode: toBoolean(parsed.customRequestMode, false),
     customRequestBody: typeof parsed.customRequestBody === 'string' ? parsed.customRequestBody : '',
@@ -988,6 +1197,19 @@ export const buildConversationRequestEnvelope = (
   rawMode: false,
   jsonBody: buildConversationJsonBody(messages, inputs, parameterEnabled),
 });
+
+export const buildGeminiNativeConversationProxyEnvelope = (
+  messages: ChatMessage[],
+  inputs: ModelTesterInputs,
+  parameterEnabled: ParameterEnabled,
+): TesterProxyEnvelope => {
+  const envelope = buildConversationRequestEnvelope(messages, { ...inputs, protocol: 'gemini' }, parameterEnabled);
+  return {
+    ...envelope,
+    path: `/gemini${envelope.path}${inputs.stream ? '?alt=sse' : ''}`,
+    jobMode: false,
+  };
+};
 
 export const buildEmbeddingsRequestEnvelope = (
   inputText: string,
@@ -1274,17 +1496,3 @@ export const findLastLoadingAssistantIndex = (messages: ChatMessage[]): number =
 
 export const countConversationTurns = (messages: ChatMessage[]): number =>
   messages.reduce((turns, message) => turns + (message.role === 'user' ? 1 : 0), 0);
-
-export const buildGeminiNativeConversationProxyEnvelope = (
-  messages: ChatMessage[],
-  inputs: ModelTesterInputs,
-  parameterEnabled: ParameterEnabled,
-): TesterProxyEnvelope => {
-  const envelope = buildConversationRequestEnvelope(messages, { ...inputs, protocol: 'gemini' }, parameterEnabled);
-  return {
-    ...envelope,
-    path: `/gemini${envelope.path}${inputs.stream ? '?alt=sse' : ''}`,
-    jobMode: false,
-  };
-};
-

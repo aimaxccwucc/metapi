@@ -2,11 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom';
 import { api } from '../api.js';
 import { BrandGlyph, getBrand, hashColor, BrandIcon, type BrandInfo } from '../components/BrandIcon.js';
+import SiteBadgeLink from '../components/SiteBadgeLink.js';
 import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
+import MobileFilterSheet from '../components/MobileFilterSheet.js';
 import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
+import { useIsMobile } from '../components/useIsMobile.js';
 import { mergeMarketplaceMetadata, shouldHydrateMarketplaceMetadata } from './helpers/modelsMarketplaceMetadata.js';
-import SiteBadgeLink from '../components/SiteBadgeLink.js';
 import { tr } from '../i18n.js';
 
 type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate';
@@ -40,7 +42,6 @@ interface ModelPricingSource {
 interface ModelAccountInfo {
   id: number;
   site: string;
-  siteUrl: string | null;
   username: string | null;
   latency: number | null;
   balance: number;
@@ -60,8 +61,6 @@ interface ModelRow {
   accounts: ModelAccountInfo[];
 }
 
-type ModelAccountSortColumn = 'none' | 'site' | 'username' | 'tokenCount' | 'latency' | 'balance';
-
 interface ModelsMarketplaceResponse {
   models: ModelRow[];
   meta?: {
@@ -74,12 +73,12 @@ interface ModelsMarketplaceResponse {
 }
 
 type AvailabilityCheckState = {
-  status: 'idle' | 'available' | 'unavailable' | 'error';
-  message?: string;
+  status: 'available' | 'unavailable' | 'error';
+  message: string;
   latencyMs?: number;
-  usedApiKey?: string;
-  usedApiKeySource?: string | null;
-  checkedCredentialCount?: number;
+  autoKeyCreated?: boolean;
+  autoKeyName?: string | null;
+  autoKeyGroup?: string | null;
 };
 
 function isKnownLatency(latency: number | null | undefined): latency is number {
@@ -114,13 +113,6 @@ function getSuccessBadgeClass(rate: number | null) {
   return 'badge-error';
 }
 
-function resolveSiteHref(siteUrl: string | null): string | null {
-  const raw = (siteUrl || '').trim();
-  if (!raw) return null;
-  if (/^https?:\/\//i.test(raw)) return raw;
-  return `https://${raw}`;
-}
-
 function resolveMarketplaceDescription(model: ModelRow, metadataHydrating: boolean): string {
   if (model.description && model.description.trim().length > 0) return model.description;
   if (metadataHydrating) return tr('正在加载模型元数据...');
@@ -143,15 +135,6 @@ function renderGroupPricingValue(pricing: ModelGroupPricing): string {
 }
 
 const PAGE_SIZES = [10, 20, 50];
-
-function compareOptionalNumber(a: number | null | undefined, b: number | null | undefined, dir: 'asc' | 'desc'): number {
-  const aMissing = a == null || !Number.isFinite(a);
-  const bMissing = b == null || !Number.isFinite(b);
-  if (aMissing && bMissing) return 0;
-  if (aMissing) return 1;
-  if (bMissing) return -1;
-  return dir === 'asc' ? Number(a) - Number(b) : Number(b) - Number(a);
-}
 
 function compareModels(a: ModelRow, b: ModelRow, sortBy: SortColumn, sortDir: 'asc' | 'desc'): number {
   if (sortBy === 'name') {
@@ -176,43 +159,9 @@ function compareModels(a: ModelRow, b: ModelRow, sortBy: SortColumn, sortDir: 'a
   return sortDir === 'desc' ? vb - va : va - vb;
 }
 
-function sortModelAccounts(
-  accounts: ModelAccountInfo[],
-  sortBy: ModelAccountSortColumn,
-  sortDir: 'asc' | 'desc',
-): ModelAccountInfo[] {
-  if (sortBy === 'none') return accounts;
-  return [...accounts].sort((a, b) => {
-    if (sortBy === 'site') {
-      const cmp = (a.site || '').localeCompare(b.site || '');
-      if (cmp !== 0) return sortDir === 'asc' ? cmp : -cmp;
-    }
-    if (sortBy === 'username') {
-      const aName = a.username || `ID:${a.id}`;
-      const bName = b.username || `ID:${b.id}`;
-      const cmp = aName.localeCompare(bName);
-      if (cmp !== 0) return sortDir === 'asc' ? cmp : -cmp;
-    }
-    if (sortBy === 'tokenCount') {
-      const cmp = sortDir === 'asc' ? a.tokens.length - b.tokens.length : b.tokens.length - a.tokens.length;
-      if (cmp !== 0) return cmp;
-    }
-    if (sortBy === 'latency') {
-      const cmp = compareOptionalNumber(a.latency, b.latency, sortDir);
-      if (cmp !== 0) return cmp;
-    }
-    if (sortBy === 'balance') {
-      const cmp = sortDir === 'asc' ? a.balance - b.balance : b.balance - a.balance;
-      if (cmp !== 0) return cmp;
-    }
-    return (a.site || '').localeCompare(b.site || '') || (a.username || '').localeCompare(b.username || '');
-  });
-}
-
 /* ---- component ---- */
 export default function Models() {
   const toast = useToast();
-  const toastInfo = toast.info;
   const [data, setData] = useState<ModelsMarketplaceResponse>({ models: [] });
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -226,17 +175,27 @@ export default function Models() {
   const [pageSize, setPageSize] = useState(20);
   const [copied, setCopied] = useState<string | null>(null);
   const [filterCollapsed, setFilterCollapsed] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
   const [metadataHydrating, setMetadataHydrating] = useState(false);
-  const [modelAccountSort, setModelAccountSort] = useState<{ by: ModelAccountSortColumn; dir: 'asc' | 'desc' }>({
-    by: 'none',
-    dir: 'asc',
-  });
   const [availabilityTesting, setAvailabilityTesting] = useState<Record<string, boolean>>({});
   const [availabilityChecks, setAvailabilityChecks] = useState<Record<string, AvailabilityCheckState>>({});
-  const filterPanelPresence = useAnimatedVisibility(!filterCollapsed, 220);
+  const isMobile = useIsMobile();
+  const filterPanelPresence = useAnimatedVisibility(!isMobile && !filterCollapsed, 220);
   const latestPrimaryRequestRef = useRef(0);
   const latestMetadataRequestRef = useRef(0);
   const location = useLocation();
+  const siteIdByName = useMemo(() => {
+    const index = new Map<string, number>();
+    for (const model of data.models) {
+      for (const source of model.pricingSources || []) {
+        const siteName = String(source.siteName || '').trim();
+        const siteId = Number(source.siteId);
+        if (!siteName || !Number.isFinite(siteId) || siteId <= 0 || index.has(siteName)) continue;
+        index.set(siteName, Math.trunc(siteId));
+      }
+    }
+    return index;
+  }, [data.models]);
 
   const loadBaseMarketplace = useCallback(async (refresh = false) => {
     const requestId = ++latestPrimaryRequestRef.current;
@@ -253,9 +212,9 @@ export default function Models() {
       setData(next);
       if (refresh && next.meta?.refreshRequested) {
         if (next.meta.refreshReused) {
-          toastInfo(tr('模型广场刷新进行中'));
+          toast.info(tr('模型广场刷新进行中'));
         } else if (next.meta.refreshQueued) {
-          toastInfo(tr('已开始刷新模型广场'));
+          toast.info(tr('已开始刷新模型广场'));
         }
       }
       return next;
@@ -268,7 +227,7 @@ export default function Models() {
         setLoading(false);
       }
     }
-  }, [toastInfo]);
+  }, [toast]);
 
   const hydrateMarketplaceMetadata = useCallback(async (baseModels: ModelRow[]) => {
     if (!shouldHydrateMarketplaceMetadata(baseModels)) return;
@@ -297,6 +256,16 @@ export default function Models() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (!isMobile) return;
+    if (viewMode !== 'card') {
+      setViewMode('card');
+    }
+    if (!filterCollapsed) {
+      setFilterCollapsed(true);
+    }
+  }, [filterCollapsed, isMobile, viewMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -386,6 +355,9 @@ export default function Models() {
     return list;
   }, [data.models, search, activeSite, activeBrand]);
 
+  // Keep expanded detail consistent with filters (especially site filter).
+  // The list-level filter uses "model has at least one account on this site" semantics;
+  // once a model is shown, its detail should honor the active site as well.
   const detailModels = useMemo(() => {
     const scopedModels = activeSite ? filteredModels.map((model) => {
       const accounts = model.accounts.filter((account) => account.site === activeSite);
@@ -440,35 +412,7 @@ export default function Models() {
     setTimeout(() => setCopied(null), 1500);
   };
 
-  const copyText = (value: string, successText: string) => {
-    navigator.clipboard.writeText(value).then(() => {
-      toast.success(successText);
-    }).catch(() => {
-      toast.error(tr('复制失败'));
-    });
-  };
-
   const accountModelKey = (modelName: string, accountId: number) => `${modelName}::${accountId}`;
-
-  const toggleModelAccountSort = (by: ModelAccountSortColumn) => {
-    setModelAccountSort((prev) => {
-      if (prev.by === by) {
-        return { by, dir: prev.dir === 'asc' ? 'desc' : 'asc' };
-      }
-      const defaultDir: 'asc' | 'desc' = (
-        by === 'latency' || by === 'site' || by === 'username'
-      ) ? 'asc' : 'desc';
-      return {
-        by,
-        dir: defaultDir,
-      };
-    });
-  };
-
-  const modelAccountSortIndicator = (by: ModelAccountSortColumn) => {
-    if (modelAccountSort.by !== by) return '';
-    return modelAccountSort.dir === 'desc' ? '↓' : '↑';
-  };
 
   const testModelAvailability = async (modelName: string, account: ModelAccountInfo) => {
     const key = accountModelKey(modelName, account.id);
@@ -482,26 +426,30 @@ export default function Models() {
         available?: boolean;
         reason?: string;
         latencyMs?: number;
-        usedApiKey?: string;
-        usedApiKeySource?: string | null;
-        checkedCredentialCount?: number;
+        autoKeyCreated?: boolean;
+        autoKeyName?: string | null;
+        autoKeyGroup?: string | null;
       };
       const available = res?.available === true;
+      const state: AvailabilityCheckState = {
+        status: available ? 'available' : 'unavailable',
+        message: res?.reason || (available ? '可用' : '不可用'),
+        latencyMs: Number.isFinite(res?.latencyMs as number) ? Number(res?.latencyMs) : undefined,
+        autoKeyCreated: res?.autoKeyCreated === true,
+        autoKeyName: typeof res?.autoKeyName === 'string' ? res.autoKeyName : null,
+        autoKeyGroup: typeof res?.autoKeyGroup === 'string' ? res.autoKeyGroup : null,
+      };
       setAvailabilityChecks((prev) => ({
         ...prev,
-        [key]: {
-          status: available ? 'available' : 'unavailable',
-          message: res?.reason || (available ? '可用' : '不可用'),
-          latencyMs: Number.isFinite(res?.latencyMs as number) ? Number(res?.latencyMs) : undefined,
-          usedApiKey: typeof res?.usedApiKey === 'string' ? res.usedApiKey : undefined,
-          usedApiKeySource: typeof res?.usedApiKeySource === 'string' ? res.usedApiKeySource : null,
-          checkedCredentialCount: Number.isFinite(res?.checkedCredentialCount as number) ? Number(res?.checkedCredentialCount) : undefined,
-        },
+        [key]: state,
       }));
+
       if (available) {
-        toast.success(`${account.site}/${account.username || account.id}: 模型可用`);
+        toast.success(state.autoKeyCreated
+          ? `${account.site}/${account.username || account.id}: 模型可用，已自动补 Key`
+          : `${account.site}/${account.username || account.id}: 模型可用`);
       } else {
-        toast.info(`${account.site}/${account.username || account.id}: 模型不可用`);
+        toast.info(`${account.site}/${account.username || account.id}: ${state.message}`);
       }
     } catch (error: any) {
       const message = String(error?.message || '检测失败');
@@ -518,18 +466,137 @@ export default function Models() {
     }
   };
 
+  const filterControls = (
+    <>
+      <div className="filter-panel-section">
+        <div className="filter-panel-title">
+          {tr('品牌')}
+          {activeBrand && <button onClick={() => setActiveBrand(null)}>{tr('重置')}</button>}
+        </div>
+        <div
+          className={`filter-item ${!activeBrand ? 'active' : ''}`}
+          onClick={() => setActiveBrand(null)}
+        >
+          <span className="filter-item-icon" style={{ background: 'var(--color-primary-light)', color: 'var(--color-primary)' }}>✓</span>
+          {tr('全部品牌')}
+          <span className="filter-item-count">{data.models.length}</span>
+        </div>
+        {brandList.list.map(([brandName, { count, brand }]) => (
+          <div
+            key={brandName}
+            className={`filter-item ${activeBrand === brandName ? 'active' : ''}`}
+            onClick={() => setActiveBrand(activeBrand === brandName ? null : brandName)}
+          >
+            <span className="filter-item-icon" style={{ background: 'var(--color-bg)', borderRadius: 4, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <BrandGlyph brand={brand} size={14} fallbackText={brandName} />
+            </span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{brandName}</span>
+            <span className="filter-item-count">{count}</span>
+          </div>
+        ))}
+        {brandList.otherCount > 0 && (
+          <div
+            className={`filter-item ${activeBrand === '__other__' ? 'active' : ''}`}
+            onClick={() => setActiveBrand(activeBrand === '__other__' ? null : '__other__')}
+          >
+            <span className="filter-item-icon" style={{ background: 'var(--color-bg)', color: 'var(--color-text-muted)', fontSize: 10, borderRadius: 4 }}>?</span>
+            {tr('其他')}
+            <span className="filter-item-count">{brandList.otherCount}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="filter-panel-section">
+        <div className="filter-panel-title">
+          {tr('供应商')}
+          {activeSite && <button onClick={() => setActiveSite(null)}>{tr('重置')}</button>}
+        </div>
+        {siteMap.map(([site, count]) => (
+          <div
+            key={site}
+            className={`filter-item ${activeSite === site ? 'active' : ''}`}
+            onClick={() => setActiveSite(activeSite === site ? null : site)}
+          >
+            <span className="filter-item-icon" style={{ background: hashColor(site), color: 'white', fontSize: 9, borderRadius: 4 }}>
+              {site.slice(0, 2).toUpperCase()}
+            </span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{site}</span>
+            <span className="filter-item-count">{count}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="filter-panel-section">
+        <div className="filter-panel-title">{tr('排序方式')}</div>
+        {[
+          { key: 'accountCount' as SortColumn, label: tr('账号数') },
+          { key: 'tokenCount' as SortColumn, label: tr('令牌数') },
+          { key: 'avgLatency' as SortColumn, label: tr('延迟') },
+          { key: 'successRate' as SortColumn, label: tr('成功率') },
+          { key: 'name' as SortColumn, label: tr('名称') },
+        ].map(opt => (
+          <div
+            key={opt.key}
+            className={`filter-item ${sortBy === opt.key ? 'active' : ''}`}
+            onClick={() => {
+              if (sortBy === opt.key) {
+                setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+              } else {
+                setSortBy(opt.key);
+                setSortDir(opt.key === 'name' ? 'asc' : 'desc');
+              }
+            }}
+          >
+            {opt.label}
+            {sortBy === opt.key && (
+              <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--color-primary)' }}>
+                {sortDir === 'desc' ? '↓' : '↑'}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </>
+  );
+
   /* ---- loading skeleton ---- */
   if (loading) {
     return (
-      <div className="animate-fade-in">
-        <div className="skeleton" style={{ width: 260, height: 28, marginBottom: 20 }} />
-        <div style={{ display: 'flex', gap: 24 }}>
+      <div className="animate-fade-in" style={{ display: 'flex', gap: 24, minHeight: 400 }}>
+        {!isMobile && (
           <div style={{ width: 240 }}>
             {[...Array(6)].map((_, i) => <div key={i} className="skeleton" style={{ height: 28, marginBottom: 8, borderRadius: 8 }} />)}
           </div>
-          <div style={{ flex: 1 }}>
-            {[...Array(4)].map((_, i) => <div key={i} className="skeleton" style={{ height: 100, marginBottom: 12, borderRadius: 12 }} />)}
+        )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="page-header" style={{ marginBottom: 16 }}>
+            <div>
+              <div className="skeleton" style={{ width: 220, height: 28, marginBottom: 8 }} />
+              <div className="skeleton" style={{ width: 160, height: 16 }} />
+            </div>
+            <div className="page-actions">
+              {isMobile && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}
+                  onClick={() => setShowFilters(true)}
+                >
+                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>
+                  {tr('筛选')}
+                </button>
+              )}
+            </div>
           </div>
+          {isMobile && (
+            <MobileFilterSheet
+              open={showFilters}
+              onClose={() => setShowFilters(false)}
+              title={tr('筛选模型')}
+            >
+              {filterControls}
+            </MobileFilterSheet>
+          )}
+          {[...Array(4)].map((_, i) => <div key={i} className="skeleton" style={{ height: 100, marginBottom: 12, borderRadius: 12 }} />)}
         </div>
       </div>
     );
@@ -537,101 +604,9 @@ export default function Models() {
 
   return (
     <div className="animate-fade-in" style={{ display: 'flex', gap: 24, minHeight: 400 }}>
-      {/* ====== LEFT: Filter Panel ====== */}
-      {filterPanelPresence.shouldRender && (
+      {!isMobile && filterPanelPresence.shouldRender && (
         <div className={`filter-panel filter-collapsible ${filterPanelPresence.isVisible ? '' : 'is-closing'}`.trim()}>
-          {/* Brand filter */}
-          <div className="filter-panel-section">
-            <div className="filter-panel-title">
-              {tr('品牌')}
-              {activeBrand && <button onClick={() => setActiveBrand(null)}>{tr('重置')}</button>}
-            </div>
-            <div
-              className={`filter-item ${!activeBrand ? 'active' : ''}`}
-              onClick={() => setActiveBrand(null)}
-            >
-              <span className="filter-item-icon" style={{ background: 'var(--color-primary-light)', color: 'var(--color-primary)' }}>✓</span>
-              {tr('全部品牌')}
-              <span className="filter-item-count">{data.models.length}</span>
-            </div>
-            {brandList.list.map(([brandName, { count, brand }]) => (
-              <div
-                key={brandName}
-                className={`filter-item ${activeBrand === brandName ? 'active' : ''}`}
-                onClick={() => setActiveBrand(activeBrand === brandName ? null : brandName)}
-              >
-                <span className="filter-item-icon" style={{ background: 'var(--color-bg)', borderRadius: 4, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <BrandGlyph brand={brand} size={14} fallbackText={brandName} />
-                </span>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{brandName}</span>
-                <span className="filter-item-count">{count}</span>
-              </div>
-            ))}
-            {brandList.otherCount > 0 && (
-              <div
-                className={`filter-item ${activeBrand === '__other__' ? 'active' : ''}`}
-                onClick={() => setActiveBrand(activeBrand === '__other__' ? null : '__other__')}
-              >
-                <span className="filter-item-icon" style={{ background: 'var(--color-bg)', color: 'var(--color-text-muted)', fontSize: 10, borderRadius: 4 }}>?</span>
-                {tr('其他')}
-                <span className="filter-item-count">{brandList.otherCount}</span>
-              </div>
-            )}
-          </div>
-
-          {/* Supplier filter */}
-          <div className="filter-panel-section">
-            <div className="filter-panel-title">
-              {tr('供应商')}
-              {activeSite && <button onClick={() => setActiveSite(null)}>{tr('重置')}</button>}
-            </div>
-            {siteMap.map(([site, count]) => (
-              <div
-                key={site}
-                className={`filter-item ${activeSite === site ? 'active' : ''}`}
-                onClick={() => setActiveSite(activeSite === site ? null : site)}
-              >
-                <span className="filter-item-icon" style={{ background: hashColor(site), color: 'white', fontSize: 9, borderRadius: 4 }}>
-                  {site.slice(0, 2).toUpperCase()}
-                </span>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{site}</span>
-                <span className="filter-item-count">{count}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Sort */}
-          <div className="filter-panel-section">
-            <div className="filter-panel-title">{tr('排序方式')}</div>
-            {[
-              { key: 'accountCount' as SortColumn, label: tr('账号数') },
-              { key: 'tokenCount' as SortColumn, label: tr('令牌数') },
-              { key: 'avgLatency' as SortColumn, label: tr('延迟') },
-              { key: 'successRate' as SortColumn, label: tr('成功率') },
-              { key: 'name' as SortColumn, label: tr('名称') },
-            ].map(opt => (
-              <div
-                key={opt.key}
-                className={`filter-item ${sortBy === opt.key ? 'active' : ''}`}
-                onClick={() => {
-                  if (sortBy === opt.key) {
-                    setSortDir(d => d === 'asc' ? 'desc' : 'asc');
-                  } else {
-                    setSortBy(opt.key);
-                    setSortDir(opt.key === 'name' ? 'asc' : 'desc');
-                  }
-                }}
-              >
-                {opt.label}
-                {sortBy === opt.key && (
-                  <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--color-primary)' }}>
-                    {sortDir === 'desc' ? '↓' : '↑'}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-
+          {filterControls}
           <button
             className="btn btn-ghost"
             style={{ width: '100%', fontSize: 12, padding: '6px 10px', marginTop: 8, justifyContent: 'center', border: '1px solid var(--color-border)' }}
@@ -660,8 +635,18 @@ export default function Models() {
             )}
           </div>
           <div className="page-actions">
-            {filterCollapsed && (
-              <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }} onClick={() => setFilterCollapsed(false)}>
+            {(isMobile || filterCollapsed) && (
+              <button
+                className="btn btn-ghost"
+                style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}
+                onClick={() => {
+                  if (isMobile) {
+                    setShowFilters(true);
+                    return;
+                  }
+                  setFilterCollapsed(false);
+                }}
+              >
                 <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>
                 {tr('筛选')}
               </button>
@@ -674,16 +659,28 @@ export default function Models() {
             {metadataHydrating && (
               <span className="badge badge-muted" style={{ fontSize: 11 }}>{tr('加载元数据中...')}</span>
             )}
-            <div className="view-toggle">
-              <button className={`view-toggle-btn ${viewMode === 'card' ? 'active' : ''}`} onClick={() => setViewMode('card')} data-tooltip={tr('卡片视图')} aria-label={tr('卡片视图')}>
-                <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
-              </button>
-              <button className={`view-toggle-btn ${viewMode === 'table' ? 'active' : ''}`} onClick={() => setViewMode('table')} data-tooltip={tr('表格视图')} aria-label={tr('表格视图')}>
-                <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18M3 6h18M3 18h18M10 3v18M14 3v18" /></svg>
-              </button>
-            </div>
+            {!isMobile && (
+              <div className="view-toggle">
+                <button className={`view-toggle-btn ${viewMode === 'card' ? 'active' : ''}`} onClick={() => setViewMode('card')} data-tooltip={tr('卡片视图')} aria-label={tr('卡片视图')}>
+                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
+                </button>
+                <button className={`view-toggle-btn ${viewMode === 'table' ? 'active' : ''}`} onClick={() => setViewMode('table')} data-tooltip={tr('表格视图')} aria-label={tr('表格视图')}>
+                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18M3 6h18M3 18h18M10 3v18M14 3v18" /></svg>
+                </button>
+              </div>
+            )}
           </div>
         </div>
+
+        {isMobile && (
+          <MobileFilterSheet
+            open={showFilters}
+            onClose={() => setShowFilters(false)}
+            title={tr('筛选模型')}
+          >
+            {filterControls}
+          </MobileFilterSheet>
+        )}
 
         {/* Toolbar */}
         <div className="toolbar">
@@ -694,13 +691,13 @@ export default function Models() {
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder={tr('模糊搜索模型名称')}
+              placeholder={tr('搜索模型（支持名称片段）')}
             />
           </div>
           {/* Quick stats */}
           <div style={{ display: 'flex', gap: 16, fontSize: 12, color: 'var(--color-text-muted)', alignItems: 'center' }}>
             <span data-tooltip={tr('所有模型 accountCount 累计值，同一账号在多个模型中会重复计数')}>
-              {tr('覆盖槽位')} <b style={{ color: 'var(--color-text-primary)' }}>{totalCoverageSlots}</b>
+              {tr('覆盖档位')} <b style={{ color: 'var(--color-text-primary)' }}>{totalCoverageSlots}</b>
             </span>
             <span data-tooltip={tr('当前筛选范围内去重后的唯一账号数')}>
               {tr('去重账号')} <b style={{ color: 'var(--color-text-primary)' }}>{uniqueAccountCount}</b>
@@ -717,7 +714,7 @@ export default function Models() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
               </svg>
             </div>
-            <div className="empty-state-title">{tr('暂无模型数据')}</div>
+            <div className="empty-state-title">{tr('暂无模型结果')}</div>
             <div className="empty-state-desc">{tr('请先检查站点与账号状态，然后点击刷新。')}</div>
           </div>
         ) : viewMode === 'card' ? (
@@ -757,7 +754,7 @@ export default function Models() {
                     </div>
                   </div>
                   <div className="model-card-actions" onClick={e => e.stopPropagation()}>
-                    <button type="button" className="model-card-action-btn" data-tooltip={tr('复制模型名')} aria-label={tr('复制模型名')} onClick={() => copyName(m.name)}>
+                    <button className="model-card-action-btn" data-tooltip={tr('复制模型名')} aria-label={tr('复制模型名')} onClick={() => copyName(m.name)}>
                       {copied === m.name ? (
                         <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="var(--color-success)"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
                       ) : (
@@ -831,7 +828,7 @@ export default function Models() {
                                 key={`${source.siteId}-${source.accountId}`}
                                 style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 8 }}
                               >
-                                 <div style={{ fontSize: 12, marginBottom: 6 }}>
+                                <div style={{ fontSize: 12, marginBottom: 6 }}>
                                   <SiteBadgeLink siteId={source.siteId} siteName={source.siteName} badgeStyle={{ fontSize: 11 }} /> · {source.username || `ID:${source.accountId}`}
                                 </div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -850,124 +847,137 @@ export default function Models() {
                       </div>
                     </div>
 
-                    <table className="data-table" style={{ width: '100%' }}>
-                      <thead>
-                        <tr>
-                          <th
-                            style={{ fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
-                            onClick={() => toggleModelAccountSort('site')}
+                    {isMobile ? (
+                      <div style={{ display: 'grid', gap: 8 }}>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)' }}>{tr('账号明细')}</div>
+                        {m.accounts.map((a) => (
+                          <div
+                            key={a.id}
+                            className="card"
+                            style={{ padding: 10, display: 'grid', gap: 8 }}
                           >
-                            {tr('站点')} {modelAccountSortIndicator('site')}
-                          </th>
-                          <th
-                            style={{ fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
-                            onClick={() => toggleModelAccountSort('username')}
-                          >
-                            {tr('账号')} {modelAccountSortIndicator('username')}
-                          </th>
-                          <th
-                            style={{ fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
-                            onClick={() => toggleModelAccountSort('tokenCount')}
-                          >
-                            {tr('令牌')} {modelAccountSortIndicator('tokenCount')}
-                          </th>
-                          <th
-                            style={{ fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
-                            onClick={() => toggleModelAccountSort('latency')}
-                          >
-                            {tr('延迟')} {modelAccountSortIndicator('latency')}
-                          </th>
-                          <th style={{ fontWeight: 500 }}>{tr('可用性检测')}</th>
-                          <th
-                            style={{ fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
-                            onClick={() => toggleModelAccountSort('balance')}
-                          >
-                            {tr('余额')} {modelAccountSortIndicator('balance')}
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {sortModelAccounts(m.accounts, modelAccountSort.by, modelAccountSort.dir).map((a) => {
-                          const rowKey = accountModelKey(m.name, a.id);
-                          const checking = !!availabilityTesting[rowKey];
-                          const check = availabilityChecks[rowKey];
-                          const siteHref = resolveSiteHref(a.siteUrl);
-                          return (
-                          <tr key={a.id}>
-                            <td>
-                              {siteHref ? (
-                                <a href={siteHref} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ textDecoration: 'none' }}>
-                                  <span className="badge badge-info">{a.site}</span>
-                                </a>
-                              ) : (
-                                <span className="badge badge-info">{a.site}</span>
-                              )}
-                            </td>
-                            <td style={{ fontSize: 12 }}>
-                              {siteHref ? (
-                                <a href={siteHref} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: 'inherit', textDecoration: 'underline' }}>
-                                  {a.username || `ID:${a.id}`}
-                                </a>
-                              ) : (
-                                a.username || `ID:${a.id}`
-                              )}
-                            </td>
-                            <td style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                              {a.tokens.length > 0 ? a.tokens.map(t => (
-                                <span key={t.id} className={`badge ${t.isDefault ? 'badge-success' : 'badge-muted'}`} style={{ fontSize: 11 }}>{t.name}</span>
-                              )) : <span style={{ color: 'var(--color-text-muted)' }}>—</span>}
-                            </td>
-                            <td>
-                              {a.latency != null ? (
-                                <span style={{ color: getMetricColor(a.latency), fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>{a.latency}ms</span>
-                              ) : '—'}
-                            </td>
-                            <td>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost"
-                                  style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
-                                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); void testModelAvailability(m.name, a); }}
-                                  disabled={checking}
-                                >
-                                  {checking ? tr('检测中...') : tr('检测')}
-                                </button>
-                                {check && (
-                                  <>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                              <SiteBadgeLink siteId={siteIdByName.get(a.site)} siteName={a.site} badgeClassName="badge badge-info" badgeStyle={{ fontSize: 11 }} />
+                              <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{a.username || `ID:${a.id}`}</span>
+                            </div>
+                            <div style={{ display: 'grid', gap: 6 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12 }}>
+                                <span style={{ color: 'var(--color-text-muted)' }}>{tr('延迟')}</span>
+                                <span style={{ color: getMetricColor(a.latency), fontVariantNumeric: 'tabular-nums' }}>
+                                  {a.latency != null ? `${a.latency}ms` : '—'}
+                                </span>
+                              </div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12 }}>
+                                <span style={{ color: 'var(--color-text-muted)' }}>{tr('余额')}</span>
+                                <span style={{ fontVariantNumeric: 'tabular-nums' }}>${(a.balance || 0).toFixed(2)}</span>
+                              </div>
+                              <div style={{ display: 'grid', gap: 6 }}>
+                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{tr('可用性检测')}</span>
+                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                                  <button
+                                    className="btn btn-ghost"
+                                    style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
+                                    onClick={() => { void testModelAvailability(m.name, a); }}
+                                    disabled={!!availabilityTesting[accountModelKey(m.name, a.id)]}
+                                  >
+                                    {availabilityTesting[accountModelKey(m.name, a.id)] ? tr('检测中...') : tr('检测')}
+                                  </button>
+                                  {availabilityChecks[accountModelKey(m.name, a.id)] ? (
+                                    <span
+                                      className={`badge ${availabilityChecks[accountModelKey(m.name, a.id)]!.status === 'available' ? 'badge-success' : (availabilityChecks[accountModelKey(m.name, a.id)]!.status === 'unavailable' ? 'badge-warning' : 'badge-error')}`}
+                                      style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums' }}
+                                      title={availabilityChecks[accountModelKey(m.name, a.id)]!.message}
+                                    >
+                                      {availabilityChecks[accountModelKey(m.name, a.id)]!.status === 'available'
+                                        ? tr('可用')
+                                        : (availabilityChecks[accountModelKey(m.name, a.id)]!.status === 'unavailable' ? tr('不可用') : tr('失败'))}
+                                      {availabilityChecks[accountModelKey(m.name, a.id)]!.latencyMs != null ? ` ${availabilityChecks[accountModelKey(m.name, a.id)]!.latencyMs}ms` : ''}
+                                    </span>
+                                  ) : null}
+                                </div>
+                                {availabilityChecks[accountModelKey(m.name, a.id)]?.autoKeyCreated ? (
+                                  <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                    {`自动补 Key: ${availabilityChecks[accountModelKey(m.name, a.id)]?.autoKeyGroup || 'default'} / ${availabilityChecks[accountModelKey(m.name, a.id)]?.autoKeyName || '-'}`}
+                                  </span>
+                                ) : null}
+                              </div>
+                              <div style={{ display: 'grid', gap: 6 }}>
+                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{tr('令牌')}</span>
+                                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                                  {a.tokens.length > 0 ? a.tokens.map((t) => (
+                                    <span key={t.id} className={`badge ${t.isDefault ? 'badge-success' : 'badge-muted'}`} style={{ fontSize: 11 }}>{t.name}</span>
+                                  )) : <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>—</span>}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <table className="data-table" style={{ width: '100%' }}>
+                        <thead>
+                          <tr>
+                            <th style={{ fontWeight: 500 }}>{tr('站点')}</th>
+                            <th style={{ fontWeight: 500 }}>{tr('账号')}</th>
+                            <th style={{ fontWeight: 500 }}>{tr('令牌')}</th>
+                            <th style={{ fontWeight: 500 }}>{tr('延迟')}</th>
+                            <th style={{ fontWeight: 500 }}>{tr('可用性检测')}</th>
+                            <th style={{ fontWeight: 500 }}>{tr('余额')}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {m.accounts.map(a => {
+                            const rowKey = accountModelKey(m.name, a.id);
+                            const checking = !!availabilityTesting[rowKey];
+                            const check = availabilityChecks[rowKey];
+                            return (
+                            <tr key={a.id}>
+                              <td><SiteBadgeLink siteId={siteIdByName.get(a.site)} siteName={a.site} badgeClassName="badge badge-info" badgeStyle={{ fontSize: 11 }} /></td>
+                              <td style={{ fontSize: 12 }}>{a.username || `ID:${a.id}`}</td>
+                              <td style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                                {a.tokens.length > 0 ? a.tokens.map(t => (
+                                  <span key={t.id} className={`badge ${t.isDefault ? 'badge-success' : 'badge-muted'}`} style={{ fontSize: 11 }}>{t.name}</span>
+                                )) : <span style={{ color: 'var(--color-text-muted)' }}>—</span>}
+                              </td>
+                              <td>
+                                {a.latency != null ? (
+                                  <span style={{ color: getMetricColor(a.latency), fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>{a.latency}ms</span>
+                                ) : '—'}
+                              </td>
+                              <td>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                  <button
+                                    className="btn btn-ghost"
+                                    style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
+                                    onClick={() => { void testModelAvailability(m.name, a); }}
+                                    disabled={checking}
+                                  >
+                                    {checking ? tr('检测中...') : tr('检测')}
+                                  </button>
+                                  {check ? (
                                     <span
                                       className={`badge ${check.status === 'available' ? 'badge-success' : (check.status === 'unavailable' ? 'badge-warning' : 'badge-error')}`}
                                       style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums' }}
-                                      title={check.message || ''}
+                                      title={check.message}
                                     >
                                       {check.status === 'available' ? tr('可用') : (check.status === 'unavailable' ? tr('不可用') : tr('失败'))}
                                       {check.latencyMs != null ? ` ${check.latencyMs}ms` : ''}
                                     </span>
-                                    {check.status === 'available' && check.usedApiKey && (
-                                      <button
-                                        type="button"
-                                        className="btn btn-ghost"
-                                        style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '2px 8px' }}
-                                        onClick={(e) => {
-                                          e.preventDefault();
-                                          e.stopPropagation();
-                                          copyText(check.usedApiKey!, tr('已复制检测可用Key'));
-                                        }}
-                                        title={check.usedApiKeySource || tr('检测使用的Key')}
-                                      >
-                                        {tr('复制Key')}
-                                      </button>
-                                    )}
-                                  </>
-                                )}
-                              </div>
-                            </td>
-                            <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>${(a.balance || 0).toFixed(2)}</td>
-                          </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                                  ) : null}
+                                  {check?.autoKeyCreated ? (
+                                    <span className="badge badge-info" style={{ fontSize: 11 }}>
+                                      {tr('已自动补 Key')}
+                                    </span>
+                                  ) : null}
+                                </div>
+                              </td>
+                              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>${(a.balance || 0).toFixed(2)}</td>
+                            </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
                     </div>
                   </div>
                 </div>
@@ -1034,7 +1044,7 @@ export default function Models() {
                         </span>
                       </td>
                       <td onClick={e => e.stopPropagation()}>
-                        <button type="button" className="model-card-action-btn" data-tooltip={tr('复制')} aria-label={tr('复制')} onClick={() => copyName(m.name)}>
+                        <button className="model-card-action-btn" data-tooltip={tr('复制')} aria-label={tr('复制')} onClick={() => copyName(m.name)}>
                           {copied === m.name ? (
                             <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="var(--color-success)"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
                           ) : (
@@ -1080,9 +1090,9 @@ export default function Models() {
                                         key={`${source.siteId}-${source.accountId}`}
                                         style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 8 }}
                                       >
-                                         <div style={{ fontSize: 12, marginBottom: 6 }}>
-                                           <SiteBadgeLink siteId={source.siteId} siteName={source.siteName} badgeStyle={{ fontSize: 11 }} /> · {source.username || `ID:${source.accountId}`}
-                                         </div>
+                                        <div style={{ fontSize: 12, marginBottom: 6 }}>
+                                          <SiteBadgeLink siteId={source.siteId} siteName={source.siteName} badgeStyle={{ fontSize: 11 }} /> · {source.username || `ID:${source.accountId}`}
+                                        </div>
                                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                           {Object.entries(source.groupPricing).map(([group, pricing]) => (
                                             <span key={group} className="badge badge-info">
@@ -1101,64 +1111,17 @@ export default function Models() {
 
                             <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                               <thead><tr style={{ color: 'var(--color-text-muted)' }}>
-                                <th
-                                  style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
-                                  onClick={() => toggleModelAccountSort('site')}
-                                >
-                                  {tr('站点')} {modelAccountSortIndicator('site')}
-                                </th>
-                                <th
-                                  style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
-                                  onClick={() => toggleModelAccountSort('username')}
-                                >
-                                  {tr('账号')} {modelAccountSortIndicator('username')}
-                                </th>
-                                <th
-                                  style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
-                                  onClick={() => toggleModelAccountSort('tokenCount')}
-                                >
-                                  {tr('令牌')} {modelAccountSortIndicator('tokenCount')}
-                                </th>
-                                <th
-                                  style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
-                                  onClick={() => toggleModelAccountSort('latency')}
-                                >
-                                  {tr('延迟')} {modelAccountSortIndicator('latency')}
-                                </th>
-                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('可用性检测')}</th>
-                                <th
-                                  style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer', userSelect: 'none' }}
-                                  onClick={() => toggleModelAccountSort('balance')}
-                                >
-                                  {tr('余额')} {modelAccountSortIndicator('balance')}
-                                </th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('站点')}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('账号')}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('令牌')}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('延迟')}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('余额')}</th>
                               </tr></thead>
                               <tbody>
-                                {sortModelAccounts(m.accounts, modelAccountSort.by, modelAccountSort.dir).map((a) => {
-                                  const rowKey = accountModelKey(m.name, a.id);
-                                  const checking = !!availabilityTesting[rowKey];
-                                  const check = availabilityChecks[rowKey];
-                                  const siteHref = resolveSiteHref(a.siteUrl);
-                                  return (
+                                {m.accounts.map(a => (
                                   <tr key={a.id} style={{ borderTop: '1px solid var(--color-border-light)' }}>
-                                    <td style={{ padding: 8 }}>
-                                      {siteHref ? (
-                                        <a href={siteHref} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: 'inherit', textDecoration: 'underline' }}>
-                                          {a.site}
-                                        </a>
-                                      ) : (
-                                        a.site
-                                      )}
-                                    </td>
-                                    <td style={{ padding: 8 }}>
-                                      {siteHref ? (
-                                        <a href={siteHref} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: 'inherit', textDecoration: 'underline' }}>
-                                          {a.username || `ID:${a.id}`}
-                                        </a>
-                                      ) : (
-                                        a.username || `ID:${a.id}`
-                                      )}
-                                    </td>
+                                    <td style={{ padding: 8 }}><SiteBadgeLink siteId={siteIdByName.get(a.site)} siteName={a.site} badgeClassName="badge badge-info" badgeStyle={{ fontSize: 11 }} /></td>
+                                    <td style={{ padding: 8 }}>{a.username || `ID:${a.id}`}</td>
                                     <td style={{ padding: 8, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                                       {a.tokens.length > 0 ? a.tokens.map(t => (
                                         <span key={t.id} className={`badge ${t.isDefault ? 'badge-success' : 'badge-info'}`}>{t.name}</span>
@@ -1167,50 +1130,9 @@ export default function Models() {
                                     <td style={{ padding: 8, color: a.latency != null ? getMetricColor(a.latency) : 'var(--color-text-muted)' }}>
                                       {a.latency != null ? `${a.latency}ms` : '—'}
                                     </td>
-                                    <td style={{ padding: 8 }}>
-                                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                        <button
-                                          type="button"
-                                          className="btn btn-ghost"
-                                          style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
-                                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); void testModelAvailability(m.name, a); }}
-                                          disabled={checking}
-                                        >
-                                          {checking ? tr('检测中...') : tr('检测')}
-                                        </button>
-                                        {check && (
-                                          <>
-                                            <span
-                                              className={`badge ${check.status === 'available' ? 'badge-success' : (check.status === 'unavailable' ? 'badge-warning' : 'badge-error')}`}
-                                              style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums' }}
-                                              title={check.message || ''}
-                                            >
-                                              {check.status === 'available' ? tr('可用') : (check.status === 'unavailable' ? tr('不可用') : tr('失败'))}
-                                              {check.latencyMs != null ? ` ${check.latencyMs}ms` : ''}
-                                            </span>
-                                            {check.status === 'available' && check.usedApiKey && (
-                                              <button
-                                                type="button"
-                                                className="btn btn-ghost"
-                                                style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '2px 8px' }}
-                                                onClick={(e) => {
-                                                  e.preventDefault();
-                                                  e.stopPropagation();
-                                                  copyText(check.usedApiKey!, tr('已复制检测可用Key'));
-                                                }}
-                                                title={check.usedApiKeySource || tr('检测使用的Key')}
-                                              >
-                                                {tr('复制Key')}
-                                              </button>
-                                            )}
-                                          </>
-                                        )}
-                                      </div>
-                                    </td>
                                     <td style={{ padding: 8 }}>${(a.balance || 0).toFixed(2)}</td>
                                   </tr>
-                                  );
-                                })}
+                                ))}
                               </tbody>
                             </table>
                             </div>

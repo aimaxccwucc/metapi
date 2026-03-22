@@ -7,7 +7,7 @@ import { BrandGlyph, getBrand, InlineBrandIcon, type BrandInfo } from '../compon
 import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { MobileCard, MobileField } from '../components/MobileCard.js';
-import { MobileDrawer } from '../components/MobileDrawer.js';
+import MobileFilterSheet from '../components/MobileFilterSheet.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import { tr } from '../i18n.js';
 import {
@@ -30,17 +30,21 @@ import type {
   GroupFilter,
   RouteSummaryRow,
   RouteRoutingStrategy,
+  RouteMode,
   RouteDecision,
   RouteIconOption,
   MissingTokenRouteSiteActionItem,
+  MissingTokenGroupRouteSiteActionItem,
   GroupRouteItem,
 } from './token-routes/types.js';
-import type { ModelHintMap } from './token-routes/ManualRoutePanel.js';
 import {
   AUTO_ROUTE_DECISION_LIMIT,
   ROUTE_RENDER_CHUNK,
   isExactModelPattern,
+  isExplicitGroupRoute,
+  isRouteExactModel,
   matchesModelPattern,
+  normalizeRouteMode,
   resolveRouteTitle,
   resolveRouteBrand,
   resolveRouteIcon,
@@ -48,7 +52,6 @@ import {
   normalizeRouteDisplayIconValue,
   inferEndpointTypesFromPlatform,
   getModelPatternError,
-  matchesRouteSearchTerm,
 } from './token-routes/utils.js';
 import { useRouteChannels } from './token-routes/useRouteChannels.js';
 import RouteFilterBar from './token-routes/RouteFilterBar.js';
@@ -62,18 +65,53 @@ const EMPTY_ROUTE_CANDIDATE_VIEW: RouteCandidateView = {
   tokenOptionsByAccountId: {},
 };
 const EMPTY_MISSING_ITEMS: MissingTokenRouteSiteActionItem[] = [];
+const EMPTY_MISSING_GROUP_ITEMS: MissingTokenGroupRouteSiteActionItem[] = [];
 const ROUTE_ICON_OPTIONS: RouteIconOption[] = [
   { value: '', label: '自动品牌图标', description: '按模型匹配规则自动识别品牌', iconText: '✦' },
 ];
 
+type RouteEditorForm = {
+  routeMode: RouteMode;
+  displayName: string;
+  displayIcon: string;
+  modelPattern: string;
+  sourceRouteIds: number[];
+  advancedOpen: boolean;
+};
+
+const EMPTY_ROUTE_FORM: RouteEditorForm = {
+  routeMode: 'explicit_group',
+  displayName: '',
+  displayIcon: '',
+  modelPattern: '',
+  sourceRouteIds: [],
+  advancedOpen: false,
+};
+
+function normalizeRouteRoutingStrategyValue(value?: RouteRoutingStrategy | null): RouteRoutingStrategy {
+  if (value === 'round_robin' || value === 'stable_first') return value;
+  return 'weighted';
+}
+
+function getRouteRoutingStrategyLabel(value?: RouteRoutingStrategy | null): string {
+  const strategy = normalizeRouteRoutingStrategyValue(value);
+  if (strategy === 'round_robin') return tr('轮询');
+  if (strategy === 'stable_first') return tr('稳定优先');
+  return tr('权重随机');
+}
+
+function getRouteRoutingStrategySuccessMessage(value: RouteRoutingStrategy): string {
+  if (value === 'round_robin') return '已切换为轮询策略';
+  if (value === 'stable_first') return '已切换为稳定优先策略';
+  return '已切换为权重随机策略';
+}
+
 export default function TokenRoutes() {
   const navigate = useNavigate();
   const [routeSummaries, setRouteSummaries] = useState<RouteSummaryRow[]>([]);
-  const [loadingRoutes, setLoadingRoutes] = useState(true);
   const [modelCandidates, setModelCandidates] = useState<RouteModelCandidatesByModelName>({});
   const [missingTokenModelsByName, setMissingTokenModelsByName] = useState<MissingTokenModelsByName>({});
   const [missingTokenGroupModelsByName, setMissingTokenGroupModelsByName] = useState<MissingTokenModelsByName>({});
-  const [showZeroChannelRoutes, setShowZeroChannelRoutes] = useState(false);
   const [endpointTypesByModel, setEndpointTypesByModel] = useState<Record<string, string[]>>({});
 
   const [search, setSearch] = useState('');
@@ -83,11 +121,12 @@ export default function TokenRoutes() {
   const [activeGroupFilter, setActiveGroupFilter] = useState<GroupFilter>(null);
   const [filterCollapsed, setFilterCollapsed] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
+  const [showZeroChannelRoutes, setShowZeroChannelRoutes] = useState(false);
   const [sortBy, setSortBy] = useState<RouteSortBy>('channelCount');
   const [sortDir, setSortDir] = useState<RouteSortDir>('desc');
 
   const [showManual, setShowManual] = useState(false);
-  const [form, setForm] = useState({ modelPattern: '', displayName: '', displayIcon: '' });
+  const [form, setForm] = useState<RouteEditorForm>(EMPTY_ROUTE_FORM);
   const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
@@ -104,7 +143,7 @@ export default function TokenRoutes() {
   const [expandedSourceGroupMap, setExpandedSourceGroupMap] = useState<Record<string, boolean>>({});
   const [expandedRouteIds, setExpandedRouteIds] = useState<number[]>([]);
   const [addChannelModalRouteId, setAddChannelModalRouteId] = useState<number | null>(null);
-  const isMobile = useIsMobile(768);
+  const isMobile = useIsMobile();
 
   const {
     channelsByRouteId,
@@ -121,9 +160,9 @@ export default function TokenRoutes() {
     options?: { force?: boolean; refreshPricingCatalog?: boolean; persistSnapshots?: boolean },
   ) => {
     const rows = routeRows || [];
-    const exactRoutes = rows.filter((route) => isExactModelPattern(route.modelPattern));
+    const exactRoutes = rows.filter((route) => isRouteExactModel(route));
     const wildcardRouteIds = rows
-      .filter((route) => !isExactModelPattern(route.modelPattern))
+      .filter((route) => !isRouteExactModel(route))
       .map((route) => route.id);
 
     const requestedModels = Array.from(new Set<string>(exactRoutes.map((route) => route.modelPattern)));
@@ -184,34 +223,29 @@ export default function TokenRoutes() {
   };
 
   const load = async () => {
-    setLoadingRoutes(true);
-    try {
-      const [summaryRows, candidateRows] = await Promise.all([
-        api.getRoutesSummary(),
-        api.getModelTokenCandidates(),
-      ]);
+    const [summaryRows, candidateRows] = await Promise.all([
+      api.getRoutesSummary(),
+      api.getModelTokenCandidates(),
+    ]);
 
-      const summaries = (summaryRows || []) as RouteSummaryRow[];
-      setRouteSummaries(summaries);
-      setModelCandidates((candidateRows?.models || {}) as RouteModelCandidatesByModelName);
-      setMissingTokenModelsByName(
-        normalizeMissingTokenModels((candidateRows?.modelsWithoutToken || {}) as MissingTokenModelsByName),
-      );
-      setMissingTokenGroupModelsByName(
-        normalizeMissingTokenModels((candidateRows?.modelsMissingTokenGroups || {}) as MissingTokenModelsByName),
-      );
-      setEndpointTypesByModel(candidateRows?.endpointTypesByModel || {});
-      const decisionPlaceholder: Record<number, RouteDecision | null> = {};
-      for (const route of summaries) {
-        decisionPlaceholder[route.id] = route.decisionSnapshot || null;
-      }
-      setDecisionByRoute(decisionPlaceholder);
-      setDecisionAutoSkipped(
-        summaries.some((route) => isExactModelPattern(route.modelPattern) && !route.decisionSnapshot),
-      );
-    } finally {
-      setLoadingRoutes(false);
+    const summaries = (summaryRows || []) as RouteSummaryRow[];
+    setRouteSummaries(summaries);
+    setModelCandidates((candidateRows?.models || {}) as RouteModelCandidatesByModelName);
+    setMissingTokenModelsByName(
+      normalizeMissingTokenModels((candidateRows?.modelsWithoutToken || {}) as MissingTokenModelsByName),
+    );
+    setMissingTokenGroupModelsByName(
+      normalizeMissingTokenModels((candidateRows?.modelsMissingTokenGroups || {}) as MissingTokenModelsByName),
+    );
+    setEndpointTypesByModel(candidateRows?.endpointTypesByModel || {});
+    const decisionPlaceholder: Record<number, RouteDecision | null> = {};
+    for (const route of summaries) {
+      decisionPlaceholder[route.id] = route.decisionSnapshot || null;
     }
+    setDecisionByRoute(decisionPlaceholder);
+    setDecisionAutoSkipped(
+      summaries.some((route) => isRouteExactModel(route) && !route.decisionSnapshot),
+    );
   };
 
   useEffect(() => {
@@ -255,13 +289,9 @@ export default function TokenRoutes() {
 
   const exactRouteCount = useMemo(
     () => buildVisibleRouteList(routeSummaries, isExactModelPattern, matchesModelPattern)
-      .filter((route) => isExactModelPattern(route.modelPattern)).length,
+      .filter((route) => isRouteExactModel(route)).length,
     [routeSummaries],
   );
-
-  const canSaveRoute = !saving
-    && !!form.modelPattern.trim()
-    && !getModelPatternError(form.modelPattern);
 
   const zeroChannelPlaceholderRoutes = useMemo(
     () => buildZeroChannelPlaceholderRoutes(routeSummaries, missingTokenModelsByName, missingTokenGroupModelsByName),
@@ -273,75 +303,82 @@ export default function TokenRoutes() {
     [routeSummaries, showZeroChannelRoutes, zeroChannelPlaceholderRoutes],
   );
 
+  const canSaveRoute = useMemo(() => {
+    if (saving) return false;
+    if (form.routeMode === 'explicit_group') {
+      return !!form.displayName.trim() && form.sourceRouteIds.length > 0;
+    }
+    return !!form.modelPattern.trim() && !getModelPatternError(form.modelPattern);
+  }, [form.displayName, form.modelPattern, form.routeMode, form.sourceRouteIds.length, saving]);
+
   const previewModelSamples = useMemo(() => {
     const names = new Set<string>();
     for (const modelName of Object.keys(modelCandidates || {})) {
       const normalized = modelName.trim();
       if (normalized) names.add(normalized);
     }
-    for (const modelName of Object.keys(missingTokenModelsByName || {})) {
-      const normalized = modelName.trim();
-      if (normalized) names.add(normalized);
-    }
-    for (const modelName of Object.keys(missingTokenGroupModelsByName || {})) {
-      const normalized = modelName.trim();
-      if (normalized) names.add(normalized);
-    }
     for (const route of routeSummaries) {
+      if (!isRouteExactModel(route)) continue;
       const normalized = route.modelPattern.trim();
-      if (normalized && isExactModelPattern(route.modelPattern)) names.add(normalized);
+      if (normalized) names.add(normalized);
     }
     return Array.from(names)
       .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-  }, [modelCandidates, missingTokenModelsByName, missingTokenGroupModelsByName, routeSummaries]);
+  }, [modelCandidates, routeSummaries]);
 
-  const modelHintsByName: ModelHintMap = useMemo(() => {
-    const result: ModelHintMap = {};
-    for (const modelName of Object.keys(missingTokenModelsByName || {})) {
-      const normalized = modelName.trim();
-      if (!normalized) continue;
-      result[normalized] = { ...(result[normalized] || {}), missingToken: true };
-    }
-    for (const modelName of Object.keys(missingTokenGroupModelsByName || {})) {
-      const normalized = modelName.trim();
-      if (!normalized) continue;
-      result[normalized] = { ...(result[normalized] || {}), missingGroup: true };
-    }
-    return result;
-  }, [missingTokenModelsByName, missingTokenGroupModelsByName]);
+  const exactSourceRouteOptions = useMemo(
+    () => routeSummaries.filter((route) => isRouteExactModel(route)),
+    [routeSummaries],
+  );
 
   const resetRouteForm = () => {
-    setForm({ modelPattern: '', displayName: '', displayIcon: '' });
+    setForm(EMPTY_ROUTE_FORM);
     setEditingRouteId(null);
   };
 
   const handleAddRoute = async () => {
-    if (!form.modelPattern.trim()) return;
-    const modelPatternError = getModelPatternError(form.modelPattern);
-    if (modelPatternError) {
-      toast.error(modelPatternError);
-      return;
-    }
-
-    const trimmedModelPattern = form.modelPattern.trim();
     const trimmedDisplayName = form.displayName.trim() ? form.displayName.trim() : undefined;
     const trimmedDisplayIcon = form.displayIcon.trim() ? form.displayIcon.trim() : undefined;
+    const trimmedModelPattern = form.modelPattern.trim();
+    const routeMode = normalizeRouteMode(form.routeMode);
+    if (routeMode === 'explicit_group') {
+      if (!trimmedDisplayName) {
+        toast.error('请填写对外模型名');
+        return;
+      }
+      if (form.sourceRouteIds.length === 0) {
+        toast.error('请至少选择一个来源模型');
+        return;
+      }
+    } else {
+      if (!trimmedModelPattern) return;
+      const modelPatternError = getModelPatternError(form.modelPattern);
+      if (modelPatternError) {
+        toast.error(modelPatternError);
+        return;
+      }
+    }
+
     setSaving(true);
     try {
       if (editingRouteId) {
         const currentRoute = routeSummaries.find((route) => route.id === editingRouteId) || null;
-        const modelPatternChanged = !!currentRoute && currentRoute.modelPattern !== trimmedModelPattern;
+        const modelPatternChanged = routeMode === 'pattern' && !!currentRoute && currentRoute.modelPattern !== trimmedModelPattern;
         await api.updateRoute(editingRouteId, {
-          modelPattern: trimmedModelPattern,
+          routeMode,
+          ...(routeMode === 'pattern' ? { modelPattern: trimmedModelPattern } : {}),
           displayName: trimmedDisplayName,
           displayIcon: trimmedDisplayIcon,
+          ...(routeMode === 'explicit_group' ? { sourceRouteIds: form.sourceRouteIds } : {}),
         });
-        toast.success(modelPatternChanged ? tr('群组已更新并重新匹配通道') : tr('群组已更新'));
+        toast.success(routeMode === 'pattern' && modelPatternChanged ? tr('群组已更新并重新匹配通道') : tr('群组已更新'));
       } else {
         await api.addRoute({
-          modelPattern: trimmedModelPattern,
+          routeMode,
+          ...(routeMode === 'pattern' ? { modelPattern: trimmedModelPattern } : {}),
           displayName: trimmedDisplayName,
           displayIcon: trimmedDisplayIcon,
+          ...(routeMode === 'explicit_group' ? { sourceRouteIds: form.sourceRouteIds } : {}),
         });
         toast.success(tr('群组已创建'));
       }
@@ -357,10 +394,14 @@ export default function TokenRoutes() {
 
   const handleEditRoute = (route: RouteSummaryRow) => {
     setEditingRouteId(route.id);
+    const routeMode = normalizeRouteMode(route.routeMode);
     setForm({
+      routeMode,
       modelPattern: route.modelPattern || '',
       displayName: route.displayName || '',
       displayIcon: normalizeRouteDisplayIconValue(route.displayIcon),
+      sourceRouteIds: routeMode === 'explicit_group' ? [...(route.sourceRouteIds || [])] : [],
+      advancedOpen: routeMode === 'pattern',
     });
     setShowManual(true);
   };
@@ -397,7 +438,7 @@ export default function TokenRoutes() {
   };
 
   const handleRoutingStrategyChange = async (route: RouteSummaryRow, routingStrategy: RouteRoutingStrategy) => {
-    const currentStrategy = route.routingStrategy === 'round_robin' ? 'round_robin' : 'weighted';
+    const currentStrategy = normalizeRouteRoutingStrategyValue(route.routingStrategy);
     if (routingStrategy === currentStrategy) return;
 
     setUpdatingRoutingStrategyByRoute((prev) => ({ ...prev, [route.id]: true }));
@@ -408,7 +449,7 @@ export default function TokenRoutes() {
     )));
     try {
       await api.updateRoute(route.id, { routingStrategy });
-      toast.success(routingStrategy === 'round_robin' ? '已切换为轮询策略' : '已切换为权重随机策略');
+      toast.success(getRouteRoutingStrategySuccessMessage(routingStrategy));
     } catch (e: any) {
       setRouteSummaries((prev) => prev.map((item) => (
         item.id === route.id
@@ -430,9 +471,9 @@ export default function TokenRoutes() {
 
   // Stable derived value: only changes when route patterns change (not on enabled toggle)
   const routePatterns = useMemo(
-    () => visibleRouteRows.map((r) => ({ id: r.id, modelPattern: r.modelPattern })),
+    () => visibleRouteRows.map((r) => ({ id: r.id, modelPattern: r.modelPattern, routeMode: r.routeMode })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [visibleRouteRows.map((r) => `${r.id}:${r.modelPattern}`).join(',')],
+    [visibleRouteRows.map((r) => `${r.id}:${r.modelPattern}:${r.routeMode || 'pattern'}`).join(',')],
   );
 
   const routeBrandById = useMemo(() => {
@@ -539,6 +580,15 @@ export default function TokenRoutes() {
     }) as [string, number][];
   }, [listVisibleRoutes, routeEndpointTypesByRouteId]);
 
+  const sourceEndpointTypesByRouteId = useMemo(() => {
+    const next: Record<number, string[]> = {};
+    for (const route of exactSourceRouteOptions) {
+      next[route.id] = Array.from(routeEndpointTypesByRouteId[route.id] || new Set<string>())
+        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    }
+    return next;
+  }, [exactSourceRouteOptions, routeEndpointTypesByRouteId]);
+
   const routeBrandIconCandidates = useMemo(() => {
     const byIcon = new Map<string, BrandInfo>();
 
@@ -568,7 +618,7 @@ export default function TokenRoutes() {
 
   const groupRouteList = useMemo<GroupRouteItem[]>(() => (
     listVisibleRoutes
-      .filter((route) => !isExactModelPattern(route.modelPattern))
+      .filter((route) => !isRouteExactModel(route))
       .map((route) => ({
         id: route.id,
         title: resolveRouteTitle(route),
@@ -576,6 +626,7 @@ export default function TokenRoutes() {
         brand: routeBrandById.get(route.id) || null,
         modelPattern: route.modelPattern,
         channelCount: route.channelCount,
+        sourceRouteCount: Array.isArray(route.sourceRouteIds) ? route.sourceRouteIds.length : 0,
       }))
       .sort((a, b) => {
         if (a.channelCount === b.channelCount) return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
@@ -604,7 +655,7 @@ export default function TokenRoutes() {
     let list = sortedRoutes;
 
     if (activeGroupFilter === '__all__') {
-      list = list.filter((route) => !isExactModelPattern(route.modelPattern));
+      list = list.filter((route) => !isRouteExactModel(route));
     } else if (typeof activeGroupFilter === 'number') {
       list = list.filter((route) => route.id === activeGroupFilter);
     }
@@ -630,11 +681,13 @@ export default function TokenRoutes() {
     }
 
     if (search.trim()) {
-      const terms = search
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean);
-      list = list.filter((route) => terms.every((term) => matchesRouteSearchTerm(route, term)));
+      const q = search.trim().toLowerCase();
+      list = list.filter((route) => {
+        const modelPattern = route.modelPattern.toLowerCase();
+        const displayName = (route.displayName || '').toLowerCase();
+        const title = resolveRouteTitle(route).toLowerCase();
+        return modelPattern.includes(q) || displayName.includes(q) || title.includes(q);
+      });
     }
 
     return list;
@@ -684,10 +737,19 @@ export default function TokenRoutes() {
     () => buildRouteMissingTokenIndex(routePatterns, missingTokenModelsByName, matchesModelPattern),
     [routePatterns, missingTokenModelsByName],
   );
+  const routeMissingTokenGroupIndex = useMemo(
+    () => buildRouteMissingTokenIndex(routePatterns, missingTokenGroupModelsByName, matchesModelPattern),
+    [routePatterns, missingTokenGroupModelsByName],
+  );
 
   const getRouteCandidateView = (routeId: number): RouteCandidateView => {
     return routeModelCandidateIndex[routeId] || EMPTY_ROUTE_CANDIDATE_VIEW;
   };
+
+  const routeById = useMemo(
+    () => new Map(visibleRouteRows.map((route) => [route.id, route])),
+    [visibleRouteRows],
+  );
 
   const handleCreateTokenForMissingAccount = (accountId: number, modelName: string) => {
     if (!Number.isFinite(accountId) || accountId <= 0) return;
@@ -765,7 +827,7 @@ export default function TokenRoutes() {
       );
 
       const route = routeSummaries.find((r) => r.id === routeId);
-      if (route && isExactModelPattern(route.modelPattern)) {
+      if (route && isRouteExactModel(route)) {
         try {
           const res = await api.getRouteDecision(route.modelPattern);
           setDecisionByRoute((prev) => ({
@@ -791,7 +853,9 @@ export default function TokenRoutes() {
     } else {
       setExpandedRouteIds((prev) => [...prev, routeId]);
       // Load channels on demand
-      if (!channelsByRouteId[routeId]) {
+      const route = routeById.get(routeId) || null;
+      const isReadOnlyRoute = route?.kind === 'zero_channel' || route?.readOnly === true || route?.isVirtual === true;
+      if (!channelsByRouteId[routeId] && !isReadOnlyRoute) {
         try {
           await loadChannels(routeId);
         } catch {
@@ -829,6 +893,56 @@ export default function TokenRoutes() {
     }
     return result;
   }, [routeMissingTokenIndex]);
+
+  const missingTokenGroupItemsByRouteId = useMemo(() => {
+    const result: Record<number, MissingTokenGroupRouteSiteActionItem[]> = {};
+    for (const routeId of Object.keys(routeMissingTokenGroupIndex).map(Number)) {
+      const missingGroupHints = routeMissingTokenGroupIndex[routeId] || [];
+      const siteMap = new Map<string, MissingTokenGroupRouteSiteActionItem>();
+      for (const hint of missingGroupHints) {
+        for (const account of hint.accounts) {
+          if (!Number.isFinite(account.accountId) || account.accountId <= 0) continue;
+          const siteName = (account.siteName || '').trim() || `site-${account.siteId || 'unknown'}`;
+          const key = `${account.siteId || 0}::${siteName.toLowerCase()}`;
+          const accountLabel = account.username || `account-${account.accountId}`;
+          const missingGroups = Array.isArray(account.missingGroups) ? account.missingGroups : [];
+          const requiredGroups = Array.isArray(account.requiredGroups) ? account.requiredGroups : [];
+          const availableGroups = Array.isArray(account.availableGroups) ? account.availableGroups : [];
+          const existing = siteMap.get(key);
+          if (!existing) {
+            siteMap.set(key, {
+              key,
+              siteName,
+              accountId: account.accountId,
+              accountLabel,
+              missingGroups: [...missingGroups],
+              requiredGroups: [...requiredGroups],
+              availableGroups: [...availableGroups],
+              ...(account.groupCoverageUncertain === true ? { groupCoverageUncertain: true } : {}),
+            });
+            continue;
+          }
+          if (account.accountId < existing.accountId) {
+            existing.accountId = account.accountId;
+            existing.accountLabel = accountLabel;
+          }
+          existing.missingGroups = Array.from(new Set([...existing.missingGroups, ...missingGroups]))
+            .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+          existing.requiredGroups = Array.from(new Set([...existing.requiredGroups, ...requiredGroups]))
+            .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+          existing.availableGroups = Array.from(new Set([...existing.availableGroups, ...availableGroups]))
+            .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+          if (account.groupCoverageUncertain === true) {
+            existing.groupCoverageUncertain = true;
+          }
+        }
+      }
+      result[routeId] = Array.from(siteMap.values()).sort((a, b) => (
+        a.siteName.localeCompare(b.siteName, undefined, { sensitivity: 'base' })
+      ));
+    }
+    return result;
+  }, [routeMissingTokenGroupIndex]);
 
   // Stable callbacks for RouteCard memo (use refs to avoid dependency on closure variables)
   const toggleExpandRef = useRef(toggleExpand);
@@ -958,14 +1072,6 @@ export default function TokenRoutes() {
           </button>
 
           <button
-            onClick={() => setShowZeroChannelRoutes((v) => !v)}
-            className={`btn btn-ghost${showZeroChannelRoutes ? ' is-active' : ''}`}
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-          >
-            {showZeroChannelRoutes ? tr('隐藏占位路由') : tr('显示占位路由')}
-          </button>
-
-          <button
             onClick={handleRebuild}
             disabled={rebuilding}
             className="btn btn-ghost"
@@ -980,25 +1086,28 @@ export default function TokenRoutes() {
 
           <button
             onClick={() => {
-              if (showManual) {
-                setShowManual(false);
-                resetRouteForm();
-                return;
-              }
-              setShowManual(true);
               resetRouteForm();
+              setShowManual(true);
             }}
             className="btn btn-ghost"
             style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
           >
-            {editingRouteId
-              ? tr('取消编辑')
-              : (showManual ? tr('收起群组创建') : tr('新建群组'))}
+            {tr('新建群组')}
+          </button>
+
+          <button
+            type="button"
+            aria-pressed={showZeroChannelRoutes}
+            onClick={() => setShowZeroChannelRoutes((prev) => !prev)}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+          >
+            {showZeroChannelRoutes ? tr('隐藏 0 通道路由') : tr('显示 0 通道路由')}
           </button>
         </div>
 
         <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500, marginLeft: 'auto' }}>
-          {loadingRoutes ? tr('路由加载中...') : `${tr('共')} ${filteredRoutes.length} ${tr('条路由')}`}
+          {tr('共')} {filteredRoutes.length} {tr('条路由')}
         </span>
       </div>
 
@@ -1012,27 +1121,25 @@ export default function TokenRoutes() {
           >
             {tr('筛选')}
           </button>
-          <MobileDrawer open={showFilters} onClose={() => setShowFilters(false)}>
-            <div className="mobile-filter-panel">
-              <RouteFilterBar
-                totalRouteCount={listVisibleRoutes.length}
-                activeBrand={activeBrand}
-                setActiveBrand={setActiveBrand}
-                activeSite={activeSite}
-                setActiveSite={setActiveSite}
-                activeEndpointType={activeEndpointType}
-                setActiveEndpointType={setActiveEndpointType}
-                activeGroupFilter={activeGroupFilter}
-                setActiveGroupFilter={setActiveGroupFilter}
-                brandList={brandList}
-                siteList={siteList}
-                endpointTypeList={endpointTypeList}
-                groupRouteList={groupRouteList}
-                collapsed={false}
-                onToggle={() => setShowFilters(false)}
-              />
-            </div>
-          </MobileDrawer>
+          <MobileFilterSheet open={showFilters} onClose={() => setShowFilters(false)} title={tr('筛选路由')}>
+            <RouteFilterBar
+              totalRouteCount={listVisibleRoutes.length}
+              activeBrand={activeBrand}
+              setActiveBrand={setActiveBrand}
+              activeSite={activeSite}
+              setActiveSite={setActiveSite}
+              activeEndpointType={activeEndpointType}
+              setActiveEndpointType={setActiveEndpointType}
+              activeGroupFilter={activeGroupFilter}
+              setActiveGroupFilter={setActiveGroupFilter}
+              brandList={brandList}
+              siteList={siteList}
+              endpointTypeList={endpointTypeList}
+              groupRouteList={groupRouteList}
+              collapsed={false}
+              onToggle={() => setShowFilters(false)}
+            />
+          </MobileFilterSheet>
         </>
       ) : (
         <RouteFilterBar
@@ -1069,7 +1176,8 @@ export default function TokenRoutes() {
         canSave={canSaveRoute}
         routeIconSelectOptions={routeIconSelectOptions}
         previewModelSamples={previewModelSamples}
-        modelHintsByName={modelHintsByName}
+        exactSourceRouteOptions={exactSourceRouteOptions}
+        sourceEndpointTypesByRouteId={sourceEndpointTypesByRouteId}
         onSave={handleAddRoute}
         onCancel={handleCancelEditRoute}
       />
@@ -1078,32 +1186,104 @@ export default function TokenRoutes() {
       <div className={isMobile ? 'mobile-card-list' : 'route-card-grid'}>
         {visibleRoutes.map((route) => {
           const isExpanded = expandedRouteIds.includes(route.id);
+          const isReadOnlyRoute = route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true;
+          const exactRoute = isRouteExactModel(route);
+          const explicitGroupRoute = isExplicitGroupRoute(route);
+          const channelManagementDisabled = explicitGroupRoute;
 
           if (isMobile) {
             return (
-              <MobileCard
-                key={route.id}
-                title={resolveRouteTitle(route)}
-                actions={(
-                  <span className={`badge ${route.enabled ? 'badge-success' : 'badge-muted'}`} style={{ fontSize: 10 }}>
-                    {route.enabled ? tr('启用') : tr('禁用')}
-                  </span>
+              <div key={route.id} style={{ display: 'grid', gap: 8 }}>
+                <MobileCard
+                  title={resolveRouteTitle(route)}
+                  headerActions={(
+                    <span className={`badge ${isReadOnlyRoute ? 'badge-muted' : (route.enabled ? 'badge-success' : 'badge-muted')}`} style={{ fontSize: 10 }}>
+                      {isReadOnlyRoute ? tr('未生成') : (route.enabled ? tr('启用') : tr('禁用'))}
+                    </span>
+                  )}
+                  footerActions={(
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-link"
+                        onClick={() => toggleExpand(route.id)}
+                      >
+                        {isExpanded ? tr('收起') : tr('详情')}
+                      </button>
+                      {!isReadOnlyRoute && (
+                        <button
+                          type="button"
+                          className="btn btn-link"
+                          onClick={() => handleEditRoute(route)}
+                        >
+                          {tr('编辑')}
+                        </button>
+                      )}
+                      {!isReadOnlyRoute && (
+                        <button
+                          type="button"
+                          className="btn btn-link"
+                          onClick={() => handleToggleRouteEnabled(route)}
+                        >
+                          {route.enabled ? tr('禁用') : tr('启用')}
+                        </button>
+                      )}
+                      {!isReadOnlyRoute && !channelManagementDisabled && (
+                        <button
+                          type="button"
+                          className="btn btn-link"
+                          onClick={() => setAddChannelModalRouteId(route.id)}
+                        >
+                          {tr('添加通道')}
+                        </button>
+                      )}
+                    </>
+                  )}
+                >
+                  <MobileField label="模型" value={route.modelPattern} stacked />
+                  <MobileField label="通道" value={route.channelCount} />
+                  <MobileField label="策略" value={isReadOnlyRoute ? tr('未生成') : getRouteRoutingStrategyLabel(route.routingStrategy)} />
+                  <MobileField label="状态" value={isReadOnlyRoute ? tr('未生成') : (route.enabled ? tr('启用') : tr('禁用'))} />
+                  {explicitGroupRoute && (
+                    <MobileField label="模式" value={tr('群组聚合')} />
+                  )}
+                  {!exactRoute && !explicitGroupRoute && (
+                    <MobileField label="模式" value={tr('通配符路由')} />
+                  )}
+                </MobileCard>
+                {isExpanded && (
+                  <RouteCard
+                    route={route}
+                    brand={routeBrandById.get(route.id) || null}
+                    expanded
+                    compact
+                    onToggleExpand={stableToggleExpand}
+                    onEdit={stableEditRoute}
+                    onDelete={stableDeleteRoute}
+                    onToggleEnabled={stableToggleEnabled}
+                    onRoutingStrategyChange={stableRoutingStrategyChange}
+                    updatingRoutingStrategy={!!updatingRoutingStrategyByRoute[route.id]}
+                    channels={channelsByRouteId[route.id]}
+                    loadingChannels={!!loadingChannelsByRouteId[route.id]}
+                    routeDecision={decisionByRoute[route.id] || null}
+                    loadingDecision={loadingDecision}
+                    candidateView={getRouteCandidateView(route.id)}
+                    channelTokenDraft={channelTokenDraft}
+                    updatingChannel={updatingChannel}
+                    savingPriority={!!savingPriorityByRoute[route.id]}
+                    onTokenDraftChange={stableTokenDraftChange}
+                    onSaveToken={stableChannelTokenSave}
+                    onDeleteChannel={stableDeleteChannel}
+                    onChannelDragEnd={stableChannelDragEnd}
+                    missingTokenSiteItems={missingTokenSiteItemsByRouteId[route.id] || EMPTY_MISSING_ITEMS}
+                    missingTokenGroupItems={missingTokenGroupItemsByRouteId[route.id] || EMPTY_MISSING_GROUP_ITEMS}
+                    onCreateTokenForMissing={stableCreateTokenForMissing}
+                    onAddChannel={stableAddChannel}
+                    expandedSourceGroupMap={expandedSourceGroupMap}
+                    onToggleSourceGroup={stableToggleSourceGroup}
+                  />
                 )}
-              >
-                <MobileField label="模型" value={route.modelPattern} />
-                <MobileField label="通道" value={route.channelCount} />
-                <MobileField label="策略" value={route.routingStrategy === 'round_robin' ? tr('轮询') : tr('权重随机')} />
-                <MobileField label="状态" value={route.enabled ? tr('启用') : tr('禁用')} />
-                <div className="mobile-card-actions">
-                  <button
-                    type="button"
-                    className="btn btn-link"
-                    onClick={() => toggleExpand(route.id)}
-                  >
-                    {isExpanded ? '收起' : '详情'}
-                  </button>
-                </div>
-              </MobileCard>
+              </div>
             );
           }
 
@@ -1132,6 +1312,7 @@ export default function TokenRoutes() {
               onDeleteChannel={stableDeleteChannel}
               onChannelDragEnd={stableChannelDragEnd}
               missingTokenSiteItems={missingTokenSiteItemsByRouteId[route.id] || EMPTY_MISSING_ITEMS}
+              missingTokenGroupItems={missingTokenGroupItemsByRouteId[route.id] || EMPTY_MISSING_GROUP_ITEMS}
               onCreateTokenForMissing={stableCreateTokenForMissing}
               onAddChannel={stableAddChannel}
               expandedSourceGroupMap={expandedSourceGroupMap}
@@ -1150,14 +1331,7 @@ export default function TokenRoutes() {
         </div>
       )}
 
-      {loadingRoutes ? (
-        <div className="card">
-          <div className="empty-state">
-            <div className="empty-state-title">{tr('正在加载路由...')}</div>
-            <div className="empty-state-desc">{tr('正在同步路由、候选模型和缺失令牌信息。')}</div>
-          </div>
-        </div>
-      ) : filteredRoutes.length === 0 && (
+      {filteredRoutes.length === 0 && (
         <div className="card">
           <div className="empty-state">
             <svg className="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">

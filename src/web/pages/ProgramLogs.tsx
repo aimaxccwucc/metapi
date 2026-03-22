@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
+import { MobileCard, MobileField } from '../components/MobileCard.js';
+import MobileFilterSheet from '../components/MobileFilterSheet.js';
 import { useToast } from '../components/Toast.js';
+import { useIsMobile } from '../components/useIsMobile.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import ModernSelect from '../components/ModernSelect.js';
 import TaskDetailModal, { type BackgroundTaskDetail } from '../components/TaskDetailModal.js';
@@ -198,6 +201,7 @@ function resolveEventTask(row: ProgramEvent, tasks: BackgroundTask[]) {
 }
 
 export default function ProgramLogs() {
+  const isMobile = useIsMobile();
   const [events, setEvents] = useState<ProgramEvent[]>([]);
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(true);
@@ -208,6 +212,7 @@ export default function ProgramLogs() {
   const [onlyUnread, setOnlyUnread] = useState(false);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(true);
+  const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [markingAll, setMarkingAll] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -537,37 +542,85 @@ export default function ProgramLogs() {
         )}
       </div>
 
-      <div className="card" style={{ padding: 14, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
-        <div style={{ minWidth: 170 }}>
-          <ModernSelect
-            size="sm"
-            value={filterType}
-            onChange={(nextValue) => setFilterType(nextValue)}
-            options={TYPE_OPTIONS.map((item) => ({
-              value: item.value,
-              label: item.label,
-            }))}
-            placeholder="全部类型"
-          />
-        </div>
+      {isMobile ? (
+        <>
+          <div className="mobile-filter-row" style={{ marginBottom: 12 }}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={() => setShowMobileFilters(true)}
+            >
+              筛选
+            </button>
+          </div>
+          <MobileFilterSheet
+            open={showMobileFilters}
+            onClose={() => setShowMobileFilters(false)}
+            title={tr('筛选程序日志')}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <ModernSelect
+                size="sm"
+                value={filterType}
+                onChange={(nextValue) => setFilterType(nextValue)}
+                options={TYPE_OPTIONS.map((item) => ({
+                  value: item.value,
+                  label: item.label,
+                }))}
+                placeholder="全部类型"
+              />
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                <input
+                  type="checkbox"
+                  checked={onlyUnread}
+                  onChange={(e) => {
+                    setOffset(0);
+                    setHasMore(true);
+                    setOnlyUnread(e.target.checked);
+                  }}
+                />
+                仅看未读
+              </label>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                共 {visibleRows.length} 条
+              </div>
+            </div>
+          </MobileFilterSheet>
+        </>
+      ) : (
+        <div className="card" style={{ padding: 14, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
+          <div style={{ minWidth: 170 }}>
+            <ModernSelect
+              size="sm"
+              value={filterType}
+              onChange={(nextValue) => setFilterType(nextValue)}
+              options={TYPE_OPTIONS.map((item) => ({
+                value: item.value,
+                label: item.label,
+              }))}
+              placeholder="全部类型"
+            />
+          </div>
 
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-text-secondary)' }}>
-          <input
-            type="checkbox"
-            checked={onlyUnread}
-            onChange={(e) => {
-              setOffset(0);
-              setHasMore(true);
-              setOnlyUnread(e.target.checked);
-            }}
-          />
-          仅看未读
-        </label>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-text-secondary)' }}>
+            <input
+              type="checkbox"
+              checked={onlyUnread}
+              onChange={(e) => {
+                setOffset(0);
+                setHasMore(true);
+                setOnlyUnread(e.target.checked);
+              }}
+            />
+            仅看未读
+          </label>
 
-        <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-muted)' }}>
-          共 {visibleRows.length} 条
+          <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-muted)' }}>
+            共 {visibleRows.length} 条
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="card" style={{ overflowX: 'auto' }}>
         {loading ? (
@@ -577,89 +630,150 @@ export default function ProgramLogs() {
             <div className="skeleton" style={{ width: '100%', height: 34 }} />
           </div>
         ) : visibleRows.length > 0 ? (
-          <table className="data-table program-logs-table">
-            <colgroup>
-              <col style={{ width: 170 }} />
-              <col style={{ width: 90 }} />
-              <col style={{ width: 90 }} />
-              <col style={{ width: 260 }} />
-              <col />
-              <col style={{ width: 110 }} />
-              <col style={{ width: 140 }} />
-            </colgroup>
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>类型</th>
-                <th>级别</th>
-                <th>标题</th>
-                <th>内容</th>
-                <th>状态</th>
-                <th style={{ textAlign: 'right' }}>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleRows.map((row, idx) => {
+          isMobile ? (
+            <div className="mobile-card-list">
+              {visibleRows.map((row) => {
                 const level = levelLabel(row.level || 'info');
                 const eventStatus = eventStatusLabel(row);
                 const eventTask = resolveEventTask(row, tasks);
                 return (
-                  <tr key={row.id} className={`animate-slide-up stagger-${Math.min(idx + 1, 5)}`}>
-                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                      {formatDateTimeLocal(row.createdAt)}
-                    </td>
-                    <td>
-                      <span className="badge badge-muted" style={{ fontSize: 11 }}>
-                        {row.type || '-'}
-                      </span>
-                    </td>
-                    <td>
-                      <span className={`badge ${level.cls}`} style={{ fontSize: 11 }}>
+                  <MobileCard
+                    key={row.id}
+                    title={row.title || '-'}
+                    subtitle={formatDateTimeLocal(row.createdAt)}
+                    headerActions={(
+                      <span className={`badge ${level.cls}`} style={{ fontSize: 10 }}>
                         {level.label}
                       </span>
-                    </td>
-                    <td className="program-logs-title-cell">
-                      {row.title || '-'}
-                    </td>
-                    <td className="program-logs-content-cell">
-                      {row.message || '-'}
-                    </td>
-                    <td>
-                      <span className={`badge ${eventStatus.cls}`} style={{ fontSize: 11 }}>
-                        {eventStatus.label}
-                      </span>
-                    </td>
-                    <td style={{ textAlign: 'right' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+                    )}
+                    footerActions={(
+                      <>
                         {eventTask ? (
                           <button
+                            type="button"
+                            className="btn btn-link"
                             onClick={() => { void openTaskDetail(eventTask.task, eventTask.taskId); }}
-                            className="btn btn-link btn-link-primary"
                           >
-                            {tr('详情')}
+                            详情
                           </button>
                         ) : null}
-                        {row.read ? (
-                          <span className="badge badge-muted" style={{ fontSize: 11 }}>已读</span>
-                        ) : (
-                          <span className="badge badge-warning" style={{ fontSize: 11 }}>未读</span>
-                        )}
-                        {!row.read && (
+                        {!row.read ? (
                           <button
-                            onClick={() => markOneRead(row.id)}
+                            type="button"
+                            className="btn btn-link"
+                            onClick={() => { void markOneRead(row.id); }}
                             disabled={!!rowLoading[row.id]}
-                            className="btn btn-link btn-link-primary"
                           >
                             {rowLoading[row.id] ? <span className="spinner spinner-sm" /> : '标记已读'}
                           </button>
+                        ) : (
+                          <span className="badge badge-muted" style={{ fontSize: 11 }}>已读</span>
                         )}
-                      </div>
-                    </td>
-                  </tr>
+                      </>
+                    )}
+                  >
+                    <MobileField
+                      label="类型"
+                      value={<span className="badge badge-muted" style={{ fontSize: 11 }}>{row.type || '-'}</span>}
+                    />
+                    <MobileField
+                      label="状态"
+                      value={<span className={`badge ${eventStatus.cls}`} style={{ fontSize: 11 }}>{eventStatus.label}</span>}
+                    />
+                    <MobileField
+                      label="内容"
+                      stacked
+                      value={row.message || '-'}
+                    />
+                  </MobileCard>
                 );
               })}
-            </tbody>
-          </table>
+            </div>
+          ) : (
+            <table className="data-table program-logs-table">
+              <colgroup>
+                <col style={{ width: 170 }} />
+                <col style={{ width: 90 }} />
+                <col style={{ width: 90 }} />
+                <col style={{ width: 260 }} />
+                <col />
+                <col style={{ width: 110 }} />
+                <col style={{ width: 140 }} />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>类型</th>
+                  <th>级别</th>
+                  <th>标题</th>
+                  <th>内容</th>
+                  <th>状态</th>
+                  <th style={{ textAlign: 'right' }}>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRows.map((row, idx) => {
+                  const level = levelLabel(row.level || 'info');
+                  const eventStatus = eventStatusLabel(row);
+                  const eventTask = resolveEventTask(row, tasks);
+                  return (
+                    <tr key={row.id} className={`animate-slide-up stagger-${Math.min(idx + 1, 5)}`}>
+                      <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        {formatDateTimeLocal(row.createdAt)}
+                      </td>
+                      <td>
+                        <span className="badge badge-muted" style={{ fontSize: 11 }}>
+                          {row.type || '-'}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={`badge ${level.cls}`} style={{ fontSize: 11 }}>
+                          {level.label}
+                        </span>
+                      </td>
+                      <td className="program-logs-title-cell">
+                        {row.title || '-'}
+                      </td>
+                      <td className="program-logs-content-cell">
+                        {row.message || '-'}
+                      </td>
+                      <td>
+                        <span className={`badge ${eventStatus.cls}`} style={{ fontSize: 11 }}>
+                          {eventStatus.label}
+                        </span>
+                      </td>
+                      <td style={{ textAlign: 'right' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+                          {eventTask ? (
+                            <button
+                              onClick={() => { void openTaskDetail(eventTask.task, eventTask.taskId); }}
+                              className="btn btn-link btn-link-primary"
+                            >
+                              {tr('详情')}
+                            </button>
+                          ) : null}
+                          {row.read ? (
+                            <span className="badge badge-muted" style={{ fontSize: 11 }}>已读</span>
+                          ) : (
+                            <span className="badge badge-warning" style={{ fontSize: 11 }}>未读</span>
+                          )}
+                          {!row.read && (
+                            <button
+                              onClick={() => markOneRead(row.id)}
+                              disabled={!!rowLoading[row.id]}
+                              className="btn btn-link btn-link-primary"
+                            >
+                              {rowLoading[row.id] ? <span className="spinner spinner-sm" /> : '标记已读'}
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )
         ) : (
           <div className="empty-state">
             <svg className="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">

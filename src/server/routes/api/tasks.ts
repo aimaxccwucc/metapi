@@ -82,13 +82,13 @@ async function enrichTask(task: BackgroundTask): Promise<BackgroundTask> {
 export async function taskRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { limit?: string } }>('/api/tasks', async (request) => {
     const limit = Number.parseInt(request.query.limit || '50', 10);
-    const rows = await listBackgroundTasks(limit);
+    const rows = listBackgroundTasks(limit);
     const tasks = await Promise.all(rows.map((task) => enrichTask(task)));
     return { tasks };
   });
 
   app.get<{ Params: { id: string } }>('/api/tasks/:id', async (request, reply) => {
-    const task = await getBackgroundTask(request.params.id);
+    const task = getBackgroundTask(request.params.id);
     if (!task) {
       return reply.code(404).send({ success: false, message: 'task not found' });
     }

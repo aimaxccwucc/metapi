@@ -47,6 +47,7 @@ describe('Settings log cleanup schedule', () => {
     apiMock.getRuntimeSettings.mockResolvedValue({
       checkinCron: '0 8 * * *',
       balanceRefreshCron: '0 * * * *',
+      siteHealthRefreshCron: '*/15 * * * *',
       logCleanupCron: '15 4 * * *',
       logCleanupUsageLogsEnabled: true,
       logCleanupProgramLogsEnabled: true,
@@ -98,6 +99,7 @@ describe('Settings log cleanup schedule', () => {
       expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith({
         checkinCron: '0 8 * * *',
         balanceRefreshCron: '0 * * * *',
+        siteHealthRefreshCron: '*/15 * * * *',
         logCleanupCron: '15 4 * * *',
         logCleanupUsageLogsEnabled: true,
         logCleanupProgramLogsEnabled: true,

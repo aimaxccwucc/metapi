@@ -4,6 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { eq } from 'drizzle-orm';
+import { resetRequestRateLimitStore } from '../../middleware/requestRateLimit.js';
 
 type DbModule = typeof import('../../db/index.js');
 type ConfigModule = typeof import('../../config.js');
@@ -35,6 +36,7 @@ describe('settings and auth events', () => {
   });
 
   beforeEach(async () => {
+    resetRequestRateLimitStore();
     await db.delete(schema.events).run();
     await db.delete(schema.settings).run();
 
@@ -42,7 +44,10 @@ describe('settings and auth events', () => {
     config.proxyToken = 'sk-old-proxy-token-123';
     config.systemProxyUrl = '';
     config.checkinCron = '0 8 * * *';
+    (config as any).checkinScheduleMode = 'cron';
+    (config as any).checkinIntervalHours = 6;
     config.balanceRefreshCron = '0 * * * *';
+    (config as any).siteHealthRefreshCron = '*/15 * * * *';
     config.logCleanupConfigured = false;
     config.logCleanupCron = '0 6 * * *';
     config.logCleanupUsageLogsEnabled = false;
@@ -53,6 +58,8 @@ describe('settings and auth events', () => {
     (config as any).telegramApiBaseUrl = 'https://api.telegram.org';
     (config as any).telegramBotToken = '';
     (config as any).telegramChatId = '';
+    (config as any).telegramUseSystemProxy = false;
+    (config as any).telegramMessageThreadId = '';
   });
 
   afterAll(async () => {
@@ -83,6 +90,68 @@ describe('settings and auth events', () => {
     expect(events[0].message || '').toContain('签到 Cron');
   });
 
+  it('persists and returns checkin interval mode from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        checkinScheduleMode: 'interval',
+        checkinIntervalHours: 8,
+        checkinCron: '0 8 * * *',
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { checkinScheduleMode?: string; checkinIntervalHours?: number };
+    expect(updated.checkinScheduleMode).toBe('interval');
+    expect(updated.checkinIntervalHours).toBe(8);
+
+    const savedMode = await db.select().from(schema.settings).where(eq(schema.settings.key, 'checkin_schedule_mode')).get();
+    const savedInterval = await db.select().from(schema.settings).where(eq(schema.settings.key, 'checkin_interval_hours')).get();
+    expect(savedMode?.value).toBe(JSON.stringify('interval'));
+    expect(savedInterval?.value).toBe(JSON.stringify(8));
+  });
+
+  it('persists and returns site health refresh cron from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        siteHealthRefreshCron: '*/30 * * * *',
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { siteHealthRefreshCron?: string };
+    expect(updated.siteHealthRefreshCron).toBe('*/30 * * * *');
+    expect((config as any).siteHealthRefreshCron).toBe('*/30 * * * *');
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'site_health_refresh_cron')).get();
+    expect(saved?.value).toBe(JSON.stringify('*/30 * * * *'));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as { siteHealthRefreshCron?: string };
+    expect(runtime.siteHealthRefreshCron).toBe('*/30 * * * *');
+  });
+
+  it('rejects invalid site health refresh cron expression', async () => {
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        siteHealthRefreshCron: 'invalid-cron',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json() as { message?: string };
+    expect(body.message).toContain('站点健康检测 Cron');
+  });
+
   it('returns current recognized admin IP in runtime settings response', async () => {
     const response = await app.inject({
       method: 'GET',
@@ -94,8 +163,10 @@ describe('settings and auth events', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    const body = response.json() as { currentAdminIp?: string };
+    const body = response.json() as { currentAdminIp?: string; serverTimeZone?: string };
     expect(body.currentAdminIp).toBe('203.0.113.5');
+    expect(typeof body.serverTimeZone).toBe('string');
+    expect((body.serverTimeZone || '').length).toBeGreaterThan(0);
   });
 
   it('rejects proxy token that does not start with sk-', async () => {
@@ -200,6 +271,32 @@ describe('settings and auth events', () => {
     expect(runtime.telegramApiBaseUrl).toBe('https://tg-proxy.example.com/custom');
   });
 
+  it('persists and returns telegram message thread id from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        telegramMessageThreadId: '77',
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { telegramMessageThreadId?: string };
+    expect(updated.telegramMessageThreadId).toBe('77');
+    expect((config as any).telegramMessageThreadId).toBe('77');
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'telegram_message_thread_id')).get();
+    expect(saved?.value).toBe(JSON.stringify('77'));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as { telegramMessageThreadId?: string };
+    expect(runtime.telegramMessageThreadId).toBe('77');
+  });
+
   it('rejects invalid telegram api base url when telegram is enabled', async () => {
     const response = await app.inject({
       method: 'PUT',
@@ -215,6 +312,32 @@ describe('settings and auth events', () => {
     expect(response.statusCode).toBe(400);
     const body = response.json() as { message?: string };
     expect(body.message).toContain('Telegram API Base URL');
+  });
+
+  it('persists and returns telegram use system proxy from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        telegramUseSystemProxy: true,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { telegramUseSystemProxy?: boolean };
+    expect(updated.telegramUseSystemProxy).toBe(true);
+    expect((config as any).telegramUseSystemProxy).toBe(true);
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'telegram_use_system_proxy')).get();
+    expect(saved?.value).toBe(JSON.stringify(true));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as { telegramUseSystemProxy?: boolean };
+    expect(runtime.telegramUseSystemProxy).toBe(true);
   });
 
   it('persists and returns routing fallback unit cost from runtime settings', async () => {
@@ -269,6 +392,60 @@ describe('settings and auth events', () => {
     expect(getResponse.statusCode).toBe(200);
     const runtime = getResponse.json() as { systemProxyUrl?: string };
     expect(runtime.systemProxyUrl).toBe('http://127.0.0.1:7890');
+  });
+
+  it('splits proxy error keywords on newlines and commas when saving runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        proxyErrorKeywords: 'quota exceeded\nbad gateway,too many requests',
+        proxyEmptyContentFailEnabled: true,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as {
+      proxyErrorKeywords?: string[];
+      proxyEmptyContentFailEnabled?: boolean;
+    };
+    expect(updated.proxyErrorKeywords).toEqual([
+      'quota exceeded',
+      'bad gateway',
+      'too many requests',
+    ]);
+    expect(updated.proxyEmptyContentFailEnabled).toBe(true);
+    expect(config.proxyErrorKeywords).toEqual([
+      'quota exceeded',
+      'bad gateway',
+      'too many requests',
+    ]);
+    expect(config.proxyEmptyContentFailEnabled).toBe(true);
+
+    const rows = await db.select().from(schema.settings).all();
+    const settingsMap = new Map(rows.map((row) => [row.key, row.value]));
+    expect(settingsMap.get('proxy_error_keywords')).toBe(JSON.stringify([
+      'quota exceeded',
+      'bad gateway',
+      'too many requests',
+    ]));
+    expect(settingsMap.get('proxy_empty_content_fail_enabled')).toBe(JSON.stringify(true));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as {
+      proxyErrorKeywords?: string[];
+      proxyEmptyContentFailEnabled?: boolean;
+    };
+    expect(runtime.proxyErrorKeywords).toEqual([
+      'quota exceeded',
+      'bad gateway',
+      'too many requests',
+    ]);
+    expect(runtime.proxyEmptyContentFailEnabled).toBe(true);
   });
 
   it('persists and returns log cleanup settings from runtime settings', async () => {
@@ -431,6 +608,38 @@ describe('settings and auth events', () => {
       type: 'token',
       title: '管理员登录令牌已更新',
       relatedType: 'settings',
+    });
+  });
+
+  it('rate limits repeated admin auth token changes from the same client ip', async () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/settings/auth/change',
+        remoteAddress: '198.51.100.12',
+        payload: {
+          oldToken: config.authToken,
+          newToken: `new-admin-token-${attempt}-456`,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+    }
+
+    const limited = await app.inject({
+      method: 'POST',
+      url: '/api/settings/auth/change',
+      remoteAddress: '198.51.100.12',
+      payload: {
+        oldToken: config.authToken,
+        newToken: 'new-admin-token-rate-limit',
+      },
+    });
+
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json()).toMatchObject({
+      success: false,
+      message: '请求过于频繁，请稍后再试',
     });
   });
 });

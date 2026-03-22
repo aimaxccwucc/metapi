@@ -1,11 +1,25 @@
-﻿import { FastifyInstance } from 'fastify';
+import { FastifyInstance } from 'fastify';
 import cron from 'node-cron';
+import { fetch } from 'undici';
 import { config } from '../../config.js';
 import { db, runtimeDbDialect, schema } from '../../db/index.js';
-import { upsertSetting as saveSetting } from '../../db/upsertSetting.js';
-import { updateBalanceRefreshCron, updateCheckinCron, updateSiteHealthRefreshCron } from '../../services/checkinScheduler.js';
-import { sendNotification } from '../../services/notifyService.js';
-import { exportBackup, importBackup, type BackupExportType } from '../../services/backupService.js';
+import { upsertSetting } from '../../db/upsertSetting.js';
+import {
+  updateBalanceRefreshCron,
+  updateCheckinSchedule,
+  updateLogCleanupSettings,
+  updateSiteHealthRefreshCron,
+} from '../../services/checkinScheduler.js';
+import {
+  exportBackup,
+  exportBackupToWebdav,
+  getBackupWebdavConfig,
+  importBackup,
+  importBackupFromWebdav,
+  reloadBackupWebdavScheduler,
+  saveBackupWebdavConfig,
+  type BackupExportType,
+} from '../../services/backupService.js';
 import {
   maskConnectionString,
   migrateCurrentDatabase,
@@ -13,9 +27,11 @@ import {
   testDatabaseConnection,
   type MigrationDialect,
 } from '../../services/databaseMigrationService.js';
-import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
+import { formatUtcSqlDateTime, getResolvedTimeZone } from '../../services/localTimeService.js';
 import { extractClientIp, isIpAllowed } from '../../middleware/auth.js';
-import { invalidateSiteProxyCache, normalizeSiteProxyUrl } from '../../services/siteProxy.js';
+import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyRequestInit } from '../../services/siteProxy.js';
+import { normalizeLogCleanupRetentionDays } from '../../services/logCleanupService.js';
+import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -23,8 +39,14 @@ interface RuntimeSettingsBody {
   proxyToken?: string;
   systemProxyUrl?: string;
   checkinCron?: string;
+  checkinScheduleMode?: 'cron' | 'interval';
+  checkinIntervalHours?: number;
   balanceRefreshCron?: string;
   siteHealthRefreshCron?: string;
+  logCleanupCron?: string;
+  logCleanupUsageLogsEnabled?: boolean;
+  logCleanupProgramLogsEnabled?: boolean;
+  logCleanupRetentionDays?: number;
   webhookUrl?: string;
   barkUrl?: string;
   webhookEnabled?: boolean;
@@ -35,6 +57,8 @@ interface RuntimeSettingsBody {
   telegramApiBaseUrl?: string;
   telegramBotToken?: string;
   telegramChatId?: string;
+  telegramUseSystemProxy?: boolean;
+  telegramMessageThreadId?: string;
   smtpEnabled?: boolean;
   smtpHost?: string;
   smtpPort?: number;
@@ -47,6 +71,8 @@ interface RuntimeSettingsBody {
   adminIpAllowlist?: string[] | string;
   routingFallbackUnitCost?: number;
   routingWeights?: Partial<RoutingWeights>;
+  proxyErrorKeywords?: string[] | string;
+  proxyEmptyContentFailEnabled?: boolean;
 }
 
 interface DatabaseMigrationBody {
@@ -54,6 +80,21 @@ interface DatabaseMigrationBody {
   connectionString?: unknown;
   overwrite?: unknown;
   ssl?: unknown;
+}
+
+interface SystemProxyTestBody {
+  proxyUrl?: unknown;
+}
+
+interface BackupWebdavConfigBody {
+  enabled?: unknown;
+  fileUrl?: unknown;
+  username?: unknown;
+  password?: unknown;
+  clearPassword?: unknown;
+  exportType?: unknown;
+  autoSyncEnabled?: unknown;
+  autoSyncCron?: unknown;
 }
 
 type RuntimeDatabaseConfig = {
@@ -66,6 +107,8 @@ const PROXY_TOKEN_PREFIX = 'sk-';
 const DB_TYPE_SETTING_KEY = 'db_type';
 const DB_URL_SETTING_KEY = 'db_url';
 const DB_SSL_SETTING_KEY = 'db_ssl';
+const SYSTEM_PROXY_TEST_PROBE_URL = 'https://www.gstatic.com/generate_204';
+const SYSTEM_PROXY_TEST_TIMEOUT_MS = 15_000;
 
 function isValidProxyToken(value: string): boolean {
   return value.startsWith(PROXY_TOKEN_PREFIX) && value.length >= 6;
@@ -77,9 +120,7 @@ function maskSecret(value: string): string {
   return `${value.slice(0, 4)}****${value.slice(-4)}`;
 }
 
-async function upsertSetting(key: string, value: unknown) {
-  await saveSetting(key, value);
-}
+
 
 async function appendSettingsEvent(input: {
   type: 'checkin' | 'balance' | 'proxy' | 'status' | 'token';
@@ -97,13 +138,101 @@ async function appendSettingsEvent(input: {
       relatedType: 'settings',
       createdAt,
     }).run();
-  } catch {}
+  } catch { }
 }
 
 function toPositiveNumberOrFallback(value: unknown, fallback: number) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return fallback;
   return n;
+}
+
+function extractNestedErrorMessages(error: unknown): string[] {
+  const messages: string[] = [];
+  const visited = new Set<unknown>();
+  let current: any = error;
+
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const message = typeof current?.message === 'string' ? current.message.trim() : '';
+    if (message) {
+      messages.push(message);
+    }
+    current = current?.cause;
+  }
+
+  return messages;
+}
+
+function describeSystemProxyTestFailure(error: unknown): string {
+  const messages = extractNestedErrorMessages(error);
+  const detail = messages.find((message) => message && message !== 'fetch failed')
+    || messages[0]
+    || '未知错误';
+
+  if (/ECONNREFUSED/i.test(detail)) {
+    return '系统代理测试失败：连接被拒绝，请检查代理地址、端口和本地代理程序是否已启动';
+  }
+
+  if (/ETIMEDOUT|timed out|timeout/i.test(detail)) {
+    return '系统代理测试失败：连接超时，请检查代理服务或当前网络是否可用';
+  }
+
+  if (/ENOTFOUND|EAI_AGAIN/i.test(detail)) {
+    return '系统代理测试失败：域名解析失败，请检查网络或代理的 DNS 配置';
+  }
+
+  if (/ECONNRESET/i.test(detail)) {
+    return '系统代理测试失败：连接被对端重置，请检查代理链路是否稳定';
+  }
+
+  if (/407/.test(detail) || /proxy authentication/i.test(detail)) {
+    return '系统代理测试失败：代理要求认证，请检查用户名、密码或代理配置';
+  }
+
+  return `系统代理测试失败：${detail}`;
+}
+
+async function testSystemProxyConnectivity(proxyUrl: string) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SYSTEM_PROXY_TEST_TIMEOUT_MS);
+  const startedAt = Date.now();
+
+  try {
+    const response = await fetch(
+      SYSTEM_PROXY_TEST_PROBE_URL,
+      withExplicitProxyRequestInit(proxyUrl, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: {
+          'cache-control': 'no-cache',
+          'user-agent': 'metapi-system-proxy-tester/1.0',
+        },
+      }),
+    );
+
+    try {
+      await response.arrayBuffer();
+    } catch {
+      // Ignore body drain failures; reachability is determined by receiving a response.
+    }
+
+    return {
+      reachable: true,
+      ok: response.ok,
+      statusCode: response.status,
+      latencyMs: Math.max(1, Date.now() - startedAt),
+      probeUrl: SYSTEM_PROXY_TEST_PROBE_URL,
+      finalUrl: response.url || SYSTEM_PROXY_TEST_PROBE_URL,
+    };
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`系统代理测试超时（${Math.round(SYSTEM_PROXY_TEST_TIMEOUT_MS / 1000)}s）`);
+    }
+    throw new Error(describeSystemProxyTestFailure(error));
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function toStringList(value: unknown): string[] {
@@ -121,6 +250,33 @@ function toStringList(value: unknown): string[] {
   return [];
 }
 
+function parseProxyErrorKeywords(value: unknown): string[] {
+  const splitKeywords = (input: string): string[] => input
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+
+  if (Array.isArray(value)) {
+    const keywords = value.flatMap((item) => {
+      if (typeof item !== 'string') return [];
+      return splitKeywords(item);
+    });
+    return keywords;
+  }
+
+  if (typeof value === 'string') {
+    const keywords = splitKeywords(value);
+    return keywords;
+  }
+
+  throw new Error('上游错误关键词格式无效：需要 string 或 string[]');
+}
+
+function parseBooleanFlag(value: unknown, label: string): boolean {
+  if (typeof value === 'boolean') return value;
+  throw new Error(`${label}格式无效：需要 boolean`);
+}
+
 function isValidHttpUrl(raw: string): boolean {
   const value = String(raw || '').trim();
   if (!value) return false;
@@ -136,12 +292,46 @@ function normalizeTelegramApiBaseUrl(raw: string): string {
   return String(raw || '').trim().replace(/\/+$/, '');
 }
 
+function normalizeTelegramMessageThreadId(raw: unknown): string {
+  return String(raw || '').trim();
+}
+
+function isValidTelegramMessageThreadId(raw: string): boolean {
+  return /^[1-9]\d*$/.test(raw);
+}
+
 function applyImportedSettingToRuntime(key: string, value: unknown) {
   switch (key) {
     case 'checkin_cron': {
       if (typeof value !== 'string' || !value || !cron.validate(value)) return;
       config.checkinCron = value;
-      updateCheckinCron(value);
+      updateCheckinSchedule({
+        mode: config.checkinScheduleMode,
+        cronExpr: config.checkinCron,
+        intervalHours: config.checkinIntervalHours,
+      });
+      return;
+    }
+    case 'checkin_schedule_mode': {
+      if (value !== 'cron' && value !== 'interval') return;
+      const nextMode: 'cron' | 'interval' = value;
+      config.checkinScheduleMode = nextMode;
+      updateCheckinSchedule({
+        mode: config.checkinScheduleMode,
+        cronExpr: config.checkinCron,
+        intervalHours: config.checkinIntervalHours,
+      });
+      return;
+    }
+    case 'checkin_interval_hours': {
+      const intervalHours = Number(value);
+      if (!Number.isFinite(intervalHours) || intervalHours < 1 || intervalHours > 24) return;
+      config.checkinIntervalHours = Math.trunc(intervalHours);
+      updateCheckinSchedule({
+        mode: config.checkinScheduleMode,
+        cronExpr: config.checkinCron,
+        intervalHours: config.checkinIntervalHours,
+      });
       return;
     }
     case 'balance_refresh_cron': {
@@ -156,6 +346,35 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       updateSiteHealthRefreshCron(value);
       return;
     }
+    case 'log_cleanup_cron': {
+      if (typeof value !== 'string' || !value || !cron.validate(value)) return;
+      config.logCleanupConfigured = true;
+      updateLogCleanupSettings({ cronExpr: value });
+      stopProxyLogRetentionService();
+      return;
+    }
+    case 'log_cleanup_usage_logs_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.logCleanupConfigured = true;
+      updateLogCleanupSettings({ usageLogsEnabled: value });
+      stopProxyLogRetentionService();
+      return;
+    }
+    case 'log_cleanup_program_logs_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.logCleanupConfigured = true;
+      updateLogCleanupSettings({ programLogsEnabled: value });
+      stopProxyLogRetentionService();
+      return;
+    }
+    case 'log_cleanup_retention_days': {
+      const retentionDays = Number(value);
+      if (!Number.isFinite(retentionDays) || retentionDays < 1) return;
+      config.logCleanupConfigured = true;
+      updateLogCleanupSettings({ retentionDays: Math.trunc(retentionDays) });
+      stopProxyLogRetentionService();
+      return;
+    }
     case 'proxy_token': {
       if (typeof value !== 'string') return;
       const nextToken = value.trim();
@@ -166,6 +385,22 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
     case 'system_proxy_url': {
       if (typeof value !== 'string') return;
       config.systemProxyUrl = normalizeSiteProxyUrl(value) || '';
+      return;
+    }
+    case 'proxy_error_keywords': {
+      try {
+        config.proxyErrorKeywords = parseProxyErrorKeywords(value);
+      } catch {
+        return;
+      }
+      return;
+    }
+    case 'proxy_empty_content_fail_enabled': {
+      try {
+        config.proxyEmptyContentFailEnabled = parseBooleanFlag(value, '空内容判定失败开关');
+      } catch {
+        return;
+      }
       return;
     }
     case 'webhook_url': {
@@ -212,6 +447,15 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
     case 'telegram_chat_id': {
       if (typeof value !== 'string') return;
       config.telegramChatId = value.trim();
+      return;
+    }
+    case 'telegram_use_system_proxy': {
+      config.telegramUseSystemProxy = !!value;
+      return;
+    }
+    case 'telegram_message_thread_id': {
+      if (typeof value !== 'string') return;
+      config.telegramMessageThreadId = value.trim();
       return;
     }
     case 'smtp_enabled': {
@@ -289,8 +533,14 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
 function getRuntimeSettingsResponse(currentAdminIp = '') {
   return {
     checkinCron: config.checkinCron,
+    checkinScheduleMode: config.checkinScheduleMode,
+    checkinIntervalHours: config.checkinIntervalHours,
     balanceRefreshCron: config.balanceRefreshCron,
     siteHealthRefreshCron: config.siteHealthRefreshCron,
+    logCleanupCron: config.logCleanupCron,
+    logCleanupUsageLogsEnabled: config.logCleanupUsageLogsEnabled,
+    logCleanupProgramLogsEnabled: config.logCleanupProgramLogsEnabled,
+    logCleanupRetentionDays: config.logCleanupRetentionDays,
     routingFallbackUnitCost: config.routingFallbackUnitCost,
     routingWeights: config.routingWeights,
     webhookUrl: config.webhookUrl,
@@ -303,6 +553,8 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     telegramApiBaseUrl: config.telegramApiBaseUrl,
     telegramBotTokenMasked: maskSecret(config.telegramBotToken),
     telegramChatId: config.telegramChatId,
+    telegramUseSystemProxy: config.telegramUseSystemProxy,
+    telegramMessageThreadId: config.telegramMessageThreadId,
     smtpEnabled: config.smtpEnabled,
     smtpHost: config.smtpHost,
     smtpPort: config.smtpPort,
@@ -314,7 +566,10 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     notifyCooldownSec: config.notifyCooldownSec,
     adminIpAllowlist: config.adminIpAllowlist,
     currentAdminIp,
+    serverTimeZone: getResolvedTimeZone(),
     systemProxyUrl: config.systemProxyUrl,
+    proxyErrorKeywords: config.proxyErrorKeywords,
+    proxyEmptyContentFailEnabled: config.proxyEmptyContentFailEnabled,
     proxyTokenMasked: maskSecret(config.proxyToken),
   };
 }
@@ -393,6 +648,43 @@ export async function settingsRoutes(app: FastifyInstance) {
     return getRuntimeSettingsResponse(currentAdminIp);
   });
 
+  app.post<{ Body: SystemProxyTestBody }>('/api/settings/system-proxy/test', async (request, reply) => {
+    const rawProxyUrl = request.body?.proxyUrl === undefined
+      ? config.systemProxyUrl
+      : String(request.body.proxyUrl || '').trim();
+    const normalizedProxyUrl = rawProxyUrl
+      ? normalizeSiteProxyUrl(rawProxyUrl)
+      : '';
+
+    if (!rawProxyUrl) {
+      return reply.code(400).send({
+        success: false,
+        message: '请先填写系统代理地址',
+      });
+    }
+
+    if (!normalizedProxyUrl) {
+      return reply.code(400).send({
+        success: false,
+        message: '系统代理地址无效，请填写合法的 http(s)/socks 代理 URL',
+      });
+    }
+
+    try {
+      const result = await testSystemProxyConnectivity(normalizedProxyUrl);
+      return {
+        success: true,
+        proxyUrl: normalizedProxyUrl,
+        ...result,
+      };
+    } catch (error: any) {
+      return reply.code(502).send({
+        success: false,
+        message: error?.message || '系统代理测试失败',
+      });
+    }
+  });
+
   app.put<{ Body: RuntimeSettingsBody }>('/api/settings/runtime', async (request, reply) => {
     const body = request.body || {};
     const changedLabels: string[] = [];
@@ -433,7 +725,9 @@ export async function settingsRoutes(app: FastifyInstance) {
     const telegramTouched = body.telegramEnabled !== undefined
       || body.telegramApiBaseUrl !== undefined
       || body.telegramBotToken !== undefined
-      || body.telegramChatId !== undefined;
+      || body.telegramChatId !== undefined
+      || body.telegramUseSystemProxy !== undefined
+      || body.telegramMessageThreadId !== undefined;
     const nextTelegramEnabled = body.telegramEnabled !== undefined
       ? !!body.telegramEnabled
       : config.telegramEnabled;
@@ -446,6 +740,9 @@ export async function settingsRoutes(app: FastifyInstance) {
     const nextTelegramChatId = body.telegramChatId !== undefined
       ? String(body.telegramChatId || '').trim()
       : config.telegramChatId;
+    const nextTelegramMessageThreadId = body.telegramMessageThreadId !== undefined
+      ? normalizeTelegramMessageThreadId(body.telegramMessageThreadId)
+      : config.telegramMessageThreadId;
     if (telegramTouched && nextTelegramEnabled) {
       if (!nextTelegramBotToken) {
         return reply.code(400).send({ success: false, message: 'Telegram Bot Token 不能为空（启用 Telegram 时）' });
@@ -456,12 +753,21 @@ export async function settingsRoutes(app: FastifyInstance) {
       if (!nextTelegramChatId) {
         return reply.code(400).send({ success: false, message: 'Telegram Chat ID 不能为空（启用 Telegram 时）' });
       }
+      if (nextTelegramMessageThreadId && !isValidTelegramMessageThreadId(nextTelegramMessageThreadId)) {
+        return reply.code(400).send({ success: false, message: 'Telegram Topic ID 格式无效，需要正整数' });
+      }
       if (nextTelegramApiBaseUrl && !isValidHttpUrl(nextTelegramApiBaseUrl)) {
         return reply.code(400).send({ success: false, message: 'Telegram API Base URL 无效，请填写 http/https 地址' });
       }
     } else if (body.telegramApiBaseUrl !== undefined && nextTelegramApiBaseUrl && !isValidHttpUrl(nextTelegramApiBaseUrl)) {
       return reply.code(400).send({ success: false, message: 'Telegram API Base URL 无效，请填写 http/https 地址' });
+    } else if (body.telegramMessageThreadId !== undefined && nextTelegramMessageThreadId && !isValidTelegramMessageThreadId(nextTelegramMessageThreadId)) {
+      return reply.code(400).send({ success: false, message: 'Telegram Topic ID 格式无效，需要正整数' });
     }
+
+    const checkinScheduleTouched = body.checkinCron !== undefined
+      || body.checkinScheduleMode !== undefined
+      || body.checkinIntervalHours !== undefined;
 
     if (body.checkinCron !== undefined) {
       if (!cron.validate(body.checkinCron)) {
@@ -470,8 +776,50 @@ export async function settingsRoutes(app: FastifyInstance) {
       if (body.checkinCron !== config.checkinCron) {
         changedLabels.push(`签到 Cron（${config.checkinCron} -> ${body.checkinCron}）`);
       }
-      updateCheckinCron(body.checkinCron);
-      upsertSetting('checkin_cron', body.checkinCron);
+    }
+
+    if (body.checkinScheduleMode !== undefined) {
+      if (body.checkinScheduleMode !== 'cron' && body.checkinScheduleMode !== 'interval') {
+        return reply.code(400).send({ success: false, message: '签到方式无效：仅支持 cron 或 interval' });
+      }
+      if (body.checkinScheduleMode !== config.checkinScheduleMode) {
+        changedLabels.push('签到方式');
+      }
+      config.checkinScheduleMode = body.checkinScheduleMode;
+    }
+
+    if (body.checkinIntervalHours !== undefined) {
+      const intervalHours = Number(body.checkinIntervalHours);
+      if (!Number.isFinite(intervalHours) || intervalHours < 1 || intervalHours > 24) {
+        return reply.code(400).send({ success: false, message: '签到间隔必须是 1 到 24 的整数小时' });
+      }
+      const nextIntervalHours = Math.trunc(intervalHours);
+      if (nextIntervalHours !== config.checkinIntervalHours) {
+        changedLabels.push(`签到间隔（${config.checkinIntervalHours}h -> ${nextIntervalHours}h）`);
+      }
+      config.checkinIntervalHours = nextIntervalHours;
+    }
+
+    if (checkinScheduleTouched) {
+      const nextCheckinCron = body.checkinCron !== undefined ? body.checkinCron : config.checkinCron;
+      const nextCheckinScheduleMode: 'cron' | 'interval' = body.checkinScheduleMode !== undefined
+        ? body.checkinScheduleMode
+        : config.checkinScheduleMode;
+      const nextCheckinIntervalHours = body.checkinIntervalHours !== undefined
+        ? Math.trunc(Number(body.checkinIntervalHours))
+        : config.checkinIntervalHours;
+
+      updateCheckinSchedule({
+        mode: nextCheckinScheduleMode,
+        cronExpr: nextCheckinCron,
+        intervalHours: nextCheckinIntervalHours,
+      });
+      config.checkinCron = nextCheckinCron;
+      config.checkinScheduleMode = nextCheckinScheduleMode;
+      config.checkinIntervalHours = nextCheckinIntervalHours;
+      upsertSetting('checkin_cron', config.checkinCron);
+      upsertSetting('checkin_schedule_mode', config.checkinScheduleMode);
+      upsertSetting('checkin_interval_hours', config.checkinIntervalHours);
     }
 
     if (body.balanceRefreshCron !== undefined) {
@@ -494,6 +842,61 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       updateSiteHealthRefreshCron(body.siteHealthRefreshCron);
       upsertSetting('site_health_refresh_cron', body.siteHealthRefreshCron);
+    }
+
+    const logCleanupTouched =
+      body.logCleanupCron !== undefined
+      || body.logCleanupUsageLogsEnabled !== undefined
+      || body.logCleanupProgramLogsEnabled !== undefined
+      || body.logCleanupRetentionDays !== undefined;
+
+    if (logCleanupTouched) {
+      const nextLogCleanupCron = body.logCleanupCron !== undefined
+        ? String(body.logCleanupCron || '').trim()
+        : config.logCleanupCron;
+      if (!cron.validate(nextLogCleanupCron)) {
+        return reply.code(400).send({ success: false, message: '日志清理 Cron 表达式无效' });
+      }
+
+      const rawRetentionDays = body.logCleanupRetentionDays !== undefined
+        ? Number(body.logCleanupRetentionDays)
+        : config.logCleanupRetentionDays;
+      if (!Number.isFinite(rawRetentionDays) || rawRetentionDays < 1) {
+        return reply.code(400).send({ success: false, message: '日志清理保留天数必须是大于等于 1 的整数' });
+      }
+      const nextLogCleanupRetentionDays = normalizeLogCleanupRetentionDays(rawRetentionDays);
+      const nextUsageLogsEnabled = body.logCleanupUsageLogsEnabled !== undefined
+        ? !!body.logCleanupUsageLogsEnabled
+        : config.logCleanupUsageLogsEnabled;
+      const nextProgramLogsEnabled = body.logCleanupProgramLogsEnabled !== undefined
+        ? !!body.logCleanupProgramLogsEnabled
+        : config.logCleanupProgramLogsEnabled;
+
+      if (nextLogCleanupCron !== config.logCleanupCron) {
+        changedLabels.push(`日志清理 Cron（${config.logCleanupCron} -> ${nextLogCleanupCron}）`);
+      }
+      if (nextUsageLogsEnabled !== config.logCleanupUsageLogsEnabled) {
+        changedLabels.push(`自动清理使用日志（${config.logCleanupUsageLogsEnabled ? '开启' : '关闭'} -> ${nextUsageLogsEnabled ? '开启' : '关闭'}）`);
+      }
+      if (nextProgramLogsEnabled !== config.logCleanupProgramLogsEnabled) {
+        changedLabels.push(`自动清理程序日志（${config.logCleanupProgramLogsEnabled ? '开启' : '关闭'} -> ${nextProgramLogsEnabled ? '开启' : '关闭'}）`);
+      }
+      if (nextLogCleanupRetentionDays !== config.logCleanupRetentionDays) {
+        changedLabels.push(`日志清理保留天数（${config.logCleanupRetentionDays} -> ${nextLogCleanupRetentionDays}）`);
+      }
+
+      config.logCleanupConfigured = true;
+      updateLogCleanupSettings({
+        cronExpr: nextLogCleanupCron,
+        usageLogsEnabled: nextUsageLogsEnabled,
+        programLogsEnabled: nextProgramLogsEnabled,
+        retentionDays: nextLogCleanupRetentionDays,
+      });
+      stopProxyLogRetentionService();
+      upsertSetting('log_cleanup_cron', nextLogCleanupCron);
+      upsertSetting('log_cleanup_usage_logs_enabled', nextUsageLogsEnabled);
+      upsertSetting('log_cleanup_program_logs_enabled', nextProgramLogsEnabled);
+      upsertSetting('log_cleanup_retention_days', nextLogCleanupRetentionDays);
     }
 
     if (body.proxyToken !== undefined) {
@@ -525,6 +928,42 @@ export async function settingsRoutes(app: FastifyInstance) {
       config.systemProxyUrl = normalizedSystemProxyUrl || '';
       upsertSetting('system_proxy_url', config.systemProxyUrl);
       invalidateSiteProxyCache();
+    }
+
+    if (body.proxyErrorKeywords !== undefined) {
+      let nextKeywords: string[] = [];
+      try {
+        nextKeywords = parseProxyErrorKeywords(body.proxyErrorKeywords);
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '上游错误关键词格式无效',
+        });
+      }
+
+      if (JSON.stringify(nextKeywords) !== JSON.stringify(config.proxyErrorKeywords || [])) {
+        changedLabels.push('上游错误关键词');
+      }
+      config.proxyErrorKeywords = nextKeywords;
+      upsertSetting('proxy_error_keywords', config.proxyErrorKeywords);
+    }
+
+    if (body.proxyEmptyContentFailEnabled !== undefined) {
+      let nextValue = false;
+      try {
+        nextValue = parseBooleanFlag(body.proxyEmptyContentFailEnabled, '空内容判定失败开关');
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '空内容判定失败开关格式无效',
+        });
+      }
+
+      if (nextValue !== config.proxyEmptyContentFailEnabled) {
+        changedLabels.push('空内容判定失败');
+      }
+      config.proxyEmptyContentFailEnabled = nextValue;
+      upsertSetting('proxy_empty_content_fail_enabled', config.proxyEmptyContentFailEnabled);
     }
 
     if (body.webhookUrl !== undefined) {
@@ -607,6 +1046,23 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.telegramChatId = String(body.telegramChatId || '').trim();
       upsertSetting('telegram_chat_id', config.telegramChatId);
+    }
+
+    if (body.telegramUseSystemProxy !== undefined) {
+      if (!!body.telegramUseSystemProxy !== config.telegramUseSystemProxy) {
+        changedLabels.push('Telegram 使用系统代理');
+      }
+      config.telegramUseSystemProxy = !!body.telegramUseSystemProxy;
+      upsertSetting('telegram_use_system_proxy', config.telegramUseSystemProxy);
+    }
+
+    if (body.telegramMessageThreadId !== undefined) {
+      const nextTelegramMessageThreadId = normalizeTelegramMessageThreadId(body.telegramMessageThreadId);
+      if (nextTelegramMessageThreadId !== config.telegramMessageThreadId) {
+        changedLabels.push('Telegram Topic ID');
+      }
+      config.telegramMessageThreadId = nextTelegramMessageThreadId;
+      upsertSetting('telegram_message_thread_id', config.telegramMessageThreadId);
     }
 
     if (body.smtpEnabled !== undefined) {
@@ -851,6 +1307,9 @@ export async function settingsRoutes(app: FastifyInstance) {
       for (const item of result.appliedSettings) {
         applyImportedSettingToRuntime(item.key, item.value);
       }
+      if (result.appliedSettings.some((item) => item.key === 'backup_webdav_config_v1')) {
+        await reloadBackupWebdavScheduler();
+      }
       return {
         success: true,
         message: '导入完成',
@@ -864,26 +1323,61 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/api/settings/notify/test', async (_, reply) => {
+  app.get('/api/settings/backup/webdav', async () => {
+    return getBackupWebdavConfig();
+  });
+
+  app.put<{ Body: BackupWebdavConfigBody }>('/api/settings/backup/webdav', async (request, reply) => {
     try {
-      const result = await sendNotification(
-        '测试通知',
-        '您好，这是一条来自系统设置的连通性测试通知，您的通知相关配置目前工作正常！',
-        'info',
-        {
-          bypassThrottle: true,
-          requireChannel: true,
-          throwOnFailure: true,
-        },
-      );
-      return {
-        success: true,
-        message: `测试通知已发送（成功 ${result.succeeded}/${result.attempted}）`,
-      };
+      const body = request.body || {};
+      const result = await saveBackupWebdavConfig({
+        enabled: body.enabled === undefined ? undefined : body.enabled === true,
+        fileUrl: body.fileUrl === undefined ? undefined : String(body.fileUrl || ''),
+        username: body.username === undefined ? undefined : String(body.username || ''),
+        password: body.password === undefined ? undefined : String(body.password),
+        clearPassword: body.clearPassword === true,
+        exportType: body.exportType === undefined ? undefined : String(body.exportType || '') as BackupExportType,
+        autoSyncEnabled: body.autoSyncEnabled === undefined ? undefined : body.autoSyncEnabled === true,
+        autoSyncCron: body.autoSyncCron === undefined ? undefined : String(body.autoSyncCron || ''),
+      });
+      return result;
     } catch (err: any) {
       return reply.code(400).send({
         success: false,
-        message: err?.message || '测试通知发送失败',
+        message: err?.message || 'WebDAV 配置保存失败',
+      });
+    }
+  });
+
+  app.post<{ Body: { type?: string } }>('/api/settings/backup/webdav/export', async (request, reply) => {
+    try {
+      const rawType = typeof request.body?.type === 'string' ? request.body.type.trim().toLowerCase() : '';
+      const type: BackupExportType | undefined = rawType === 'all' || rawType === 'accounts' || rawType === 'preferences'
+        ? rawType
+        : undefined;
+      return await exportBackupToWebdav(type);
+    } catch (err: any) {
+      return reply.code(400).send({
+        success: false,
+        message: err?.message || 'WebDAV 导出失败',
+      });
+    }
+  });
+
+  app.post('/api/settings/backup/webdav/import', async (_, reply) => {
+    try {
+      const result = await importBackupFromWebdav();
+      for (const item of result.appliedSettings) {
+        applyImportedSettingToRuntime(item.key, item.value);
+      }
+      if (result.appliedSettings.some((item) => item.key === 'backup_webdav_config_v1')) {
+        await reloadBackupWebdavScheduler();
+      }
+      return result;
+    } catch (err: any) {
+      return reply.code(400).send({
+        success: false,
+        message: err?.message || 'WebDAV 导入失败',
       });
     }
   });

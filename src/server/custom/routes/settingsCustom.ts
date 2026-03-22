@@ -1,10 +1,10 @@
 import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
-import { importAllApiHubAccountsMerge } from '../../services/backupService.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { performFactoryReset } from '../../services/factoryResetService.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
+import { sendNotification } from '../../services/notifyService.js';
 
 async function appendSettingsEvent(input: {
   type: 'checkin' | 'balance' | 'proxy' | 'status' | 'token';
@@ -26,44 +26,8 @@ async function appendSettingsEvent(input: {
 }
 
 export async function registerSettingsCustomRoutes(app: FastifyInstance) {
-  app.post<{ Body: { data?: Record<string, unknown> } }>('/api/settings/backup/import-all-api-hub-merge', async (request, reply) => {
-    const payload = request.body?.data;
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return reply.code(400).send({ success: false, message: '导入数据格式错误：需要 JSON 对象' });
-    }
-
-    try {
-      const result = await importAllApiHubAccountsMerge(payload);
-      return {
-        success: true,
-        message: 'all-api-hub 账号已合并导入',
-        ...result,
-      };
-    } catch (err: any) {
-      return reply.code(400).send({
-        success: false,
-        message: err?.message || '导入失败',
-      });
-    }
-  });
-
-  app.post('/api/settings/maintenance/factory-reset', async (_, reply) => {
-    try {
-      await performFactoryReset();
-      return {
-        success: true,
-      };
-    } catch (err: any) {
-      return reply.code(500).send({
-        success: false,
-        message: err?.message || '重新初始化系统失败',
-      });
-    }
-  });
-
   app.post('/api/settings/maintenance/clear-cache', async (_, reply) => {
     const deletedModelAvailability = (await db.delete(schema.modelAvailability).run()).changes;
-    const deletedTokenModelAvailability = (await db.delete(schema.tokenModelAvailability).run()).changes;
     const deletedRouteChannels = (await db.delete(schema.routeChannels).run()).changes;
     const deletedTokenRoutes = (await db.delete(schema.tokenRoutes).run()).changes;
 
@@ -90,7 +54,6 @@ export async function registerSettingsCustomRoutes(app: FastifyInstance) {
       jobId: task.id,
       message: '缓存已清理，重建路由已开始执行',
       deletedModelAvailability,
-      deletedTokenModelAvailability,
       deletedRouteChannels,
       deletedTokenRoutes,
     });
@@ -105,7 +68,10 @@ export async function registerSettingsCustomRoutes(app: FastifyInstance) {
       totalLatencyMs: 0,
       totalCost: 0,
       lastUsedAt: null,
+      lastSelectedAt: null,
       lastFailAt: null,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
       cooldownUntil: null,
     }).run();
 
@@ -126,5 +92,43 @@ export async function registerSettingsCustomRoutes(app: FastifyInstance) {
       message: '占用统计已清理',
       deletedProxyLogs,
     };
+  });
+
+  app.post('/api/settings/maintenance/factory-reset', async (_, reply) => {
+    try {
+      await performFactoryReset();
+      return {
+        success: true,
+      };
+    } catch (err: any) {
+      return reply.code(500).send({
+        success: false,
+        message: err?.message || '重新初始化系统失败',
+      });
+    }
+  });
+
+  app.post('/api/settings/notify/test', async (_, reply) => {
+    try {
+      const result = await sendNotification(
+        '测试通知',
+        '您好，这是一条来自系统设置的连通性测试通知，您的通知相关配置目前工作正常！',
+        'info',
+        {
+          bypassThrottle: true,
+          requireChannel: true,
+          throwOnFailure: true,
+        },
+      );
+      return {
+        success: true,
+        message: `测试通知已发送（成功 ${result.succeeded}/${result.attempted}）`,
+      };
+    } catch (err: any) {
+      return reply.code(400).send({
+        success: false,
+        message: err?.message || '测试通知发送失败',
+      });
+    }
   });
 }

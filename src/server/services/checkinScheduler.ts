@@ -3,44 +3,38 @@ import { eq } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { refreshAllBalances } from './balanceService.js';
-import { checkinAccount, checkinAll } from './checkinService.js';
+import { checkinAll } from './checkinService.js';
 import { refreshModelsAndRebuildRoutes } from './modelService.js';
 import { sendNotification } from './notifyService.js';
 import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dailySummaryService.js';
-import {
-  getRunningTaskByDedupeKey,
-  startBackgroundTask,
-  summarizeCheckinResults,
-} from './backgroundTaskService.js';
-import { upsertSetting } from '../db/upsertSetting.js';
-import { formatLocalDate } from './localTimeService.js';
+import { cleanupConfiguredLogs, normalizeLogCleanupRetentionDays } from './logCleanupService.js';
 import { executeRefreshSiteReachability } from './siteHealthService.js';
 
+export type CheckinScheduleMode = 'cron' | 'interval';
+
 let checkinTask: cron.ScheduledTask | null = null;
-let checkinRetryTask: cron.ScheduledTask | null = null;
+let checkinIntervalTimer: ReturnType<typeof setInterval> | null = null;
 let balanceTask: cron.ScheduledTask | null = null;
 let dailySummaryTask: cron.ScheduledTask | null = null;
+let logCleanupTask: cron.ScheduledTask | null = null;
 let siteHealthTask: cron.ScheduledTask | null = null;
 let siteHealthRefreshRunning = false;
+const intervalAttemptByAccount = new Map<number, number>();
 
 const DAILY_SUMMARY_DEFAULT_CRON = '58 23 * * *';
-const CHECKIN_RETRY_DEFAULT_CRON = '30 9,12,15,18,21 * * *';
-const CHECKIN_RETRY_STATE_KEY = 'checkin_retry_state';
-const CHECKIN_RETRY_MAX_ATTEMPTS = 3;
+const LOG_CLEANUP_DEFAULT_CRON = '0 6 * * *';
+const CHECKIN_INTERVAL_POLL_MS = 60_000;
 
-type CheckinRetryState = {
-  day: string;
-  failedAccountIds: number[];
-  retryAttempts: number;
-  updatedAt: string;
-};
-
-async function resolveCronSetting(settingKey: string, fallback: string): Promise<string> {
+async function resolveJsonSetting<T>(
+  settingKey: string,
+  isValid: (value: unknown) => value is T,
+  fallback: T,
+): Promise<T> {
   try {
     const row = await db.select().from(schema.settings).where(eq(schema.settings.key, settingKey)).get();
     if (row?.value) {
       const parsed = JSON.parse(row.value);
-      if (typeof parsed === 'string' && cron.validate(parsed)) {
+      if (isValid(parsed)) {
         return parsed;
       }
     }
@@ -48,212 +42,122 @@ async function resolveCronSetting(settingKey: string, fallback: string): Promise
   return fallback;
 }
 
+async function resolveCronSetting(settingKey: string, fallback: string): Promise<string> {
+  return resolveJsonSetting(settingKey, (value): value is string => typeof value === 'string' && cron.validate(value), fallback);
+}
+
+async function resolveBooleanSetting(settingKey: string, fallback: boolean): Promise<boolean> {
+  return resolveJsonSetting(settingKey, (value): value is boolean => typeof value === 'boolean', fallback);
+}
+
+async function resolvePositiveIntegerSetting(settingKey: string, fallback: number): Promise<number> {
+  return resolveJsonSetting(
+    settingKey,
+    (value): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 1,
+    fallback,
+  );
+}
+
 function createCheckinTask(cronExpr: string) {
   return cron.schedule(cronExpr, async () => {
     console.log(`[Scheduler] Running check-in at ${new Date().toISOString()}`);
     try {
-      if (getRunningTaskByDedupeKey('checkin-all')) {
-        console.log('[Scheduler] Check-in skipped: existing check-in task is running');
-        return;
-      }
-      const today = formatLocalDate(new Date());
-      const { reused } = startBackgroundTask(
-        {
-          type: 'checkin',
-          title: `每日签到主任务 (${today})`,
-          dedupeKey: 'checkin-all',
-          notifyOnFailure: true,
-          successTitle: (currentTask) => {
-            const summary = (currentTask.result as any)?.summary;
-            if (!summary) return `每日签到主任务 (${today}) 已完成`;
-            return `每日签到主任务 (${today}) 已完成（成功${summary.success}/跳过${summary.skipped}/失败${summary.failed}）`;
-          },
-          failureTitle: () => `每日签到主任务 (${today}) 失败`,
-          successMessage: (currentTask) => {
-            const payload = (currentTask.result as any) || {};
-            const summary = payload.summary;
-            if (!summary) return `每日签到主任务 (${today}) 已完成`;
-            return `每日签到主任务完成：成功 ${summary.success}，跳过 ${summary.skipped}，失败 ${summary.failed}`;
-          },
-          failureMessage: (currentTask) => `每日签到主任务失败：${currentTask.error || 'unknown error'}`,
-        },
-        async () => {
-          const results = await checkinAll();
-          const summary = summarizeCheckinResults(results);
-          const failedAccountIds = results
-            .filter((item) => {
-              const status = item?.result?.status;
-              if (status === 'skipped' || item?.result?.skipped) return false;
-              return !item?.result?.success;
-            })
-            .map((item) => item.accountId);
-          await persistCheckinRetryState({
-            day: today,
-            failedAccountIds,
-            retryAttempts: 0,
-            updatedAt: new Date().toISOString(),
-          });
-          return { summary, total: results.length, failedAccountIds, results };
-        },
-      );
-      console.log(
-        reused
-          ? '[Scheduler] Check-in reused running task'
-          : '[Scheduler] Check-in main task queued',
-      );
+      const results = await checkinAll({ scheduleMode: 'cron' });
+      const success = results.filter((r) => r.result.success).length;
+      const failed = results.length - success;
+      console.log(`[Scheduler] Check-in complete: ${success} success, ${failed} failed`);
     } catch (err) {
       console.error('[Scheduler] Check-in error:', err);
     }
   });
 }
 
-function normalizeRetryState(raw: unknown): CheckinRetryState | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const record = raw as Record<string, unknown>;
-  const day = typeof record.day === 'string' ? record.day.trim() : '';
-  if (!day) return null;
-  const failedAccountIds = Array.isArray(record.failedAccountIds)
-    ? record.failedAccountIds
-      .map((item) => Number.parseInt(String(item), 10))
-      .filter((item) => Number.isFinite(item) && item > 0)
-    : [];
-  const retryAttempts = Number.parseInt(String(record.retryAttempts ?? 0), 10);
-  return {
-    day,
-    failedAccountIds: Array.from(new Set(failedAccountIds)),
-    retryAttempts: Number.isFinite(retryAttempts) && retryAttempts >= 0 ? retryAttempts : 0,
-    updatedAt: typeof record.updatedAt === 'string' && record.updatedAt.trim()
-      ? record.updatedAt.trim()
-      : new Date().toISOString(),
-  };
+type IntervalCheckinCandidate = {
+  id: number;
+  lastCheckinAt?: string | null;
+};
+
+export function selectDueIntervalCheckinAccountIds(
+  rows: IntervalCheckinCandidate[],
+  intervalHours: number,
+  now = new Date(),
+  attemptState = intervalAttemptByAccount,
+) {
+  const nowMs = now.getTime();
+  const intervalMs = Math.max(1, intervalHours) * 60 * 60 * 1000;
+
+  return rows
+    .filter((row) => {
+      const lastCheckinMs = row.lastCheckinAt ? Date.parse(row.lastCheckinAt) : Number.NaN;
+      const lastAttemptMs = attemptState.get(row.id);
+      if (Number.isFinite(lastCheckinMs)) {
+        if (nowMs - lastCheckinMs < intervalMs) return false;
+        if (typeof lastAttemptMs === 'number' && lastAttemptMs >= lastCheckinMs && nowMs - lastAttemptMs < intervalMs) {
+          return false;
+        }
+        return true;
+      }
+      if (typeof lastAttemptMs === 'number' && nowMs - lastAttemptMs < intervalMs) return false;
+      return true;
+    })
+    .map((row) => row.id);
 }
 
-async function readCheckinRetryState(): Promise<CheckinRetryState | null> {
+async function runIntervalCheckinPass(now = new Date()) {
+  const rows = await db
+    .select()
+    .from(schema.accounts)
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .all();
+
+  const dueAccountIds = selectDueIntervalCheckinAccountIds(
+    rows
+      .filter((row: any) => row.accounts?.checkinEnabled === true && row.accounts?.status === 'active' && row.sites?.status !== 'disabled')
+      .map((row: any) => ({
+        id: row.accounts.id,
+        lastCheckinAt: row.accounts.lastCheckinAt,
+      })),
+    config.checkinIntervalHours,
+    now,
+  );
+
+  if (dueAccountIds.length === 0) return;
+
   try {
-    const row = await db.select().from(schema.settings).where(eq(schema.settings.key, CHECKIN_RETRY_STATE_KEY)).get();
-    if (!row?.value) return null;
-    return normalizeRetryState(JSON.parse(row.value));
-  } catch {
-    return null;
+    const results = await checkinAll({
+      accountIds: dueAccountIds,
+      scheduleMode: 'interval',
+    });
+    const nowMs = now.getTime();
+    for (const item of results) {
+      intervalAttemptByAccount.set(item.accountId, nowMs);
+    }
+    const success = results.filter((r) => r.result.success).length;
+    const failed = results.length - success;
+    console.log(`[Scheduler] Interval check-in complete: ${success} success, ${failed} failed`);
+  } catch (err) {
+    console.error('[Scheduler] Interval check-in error:', err);
   }
 }
 
-async function persistCheckinRetryState(state: CheckinRetryState): Promise<void> {
-  await upsertSetting(CHECKIN_RETRY_STATE_KEY, state);
+function stopCheckinSchedule() {
+  checkinTask?.stop();
+  checkinTask = null;
+  if (checkinIntervalTimer) {
+    clearInterval(checkinIntervalTimer);
+    checkinIntervalTimer = null;
+  }
 }
 
-async function clearCheckinRetryState(): Promise<void> {
-  await db.delete(schema.settings).where(eq(schema.settings.key, CHECKIN_RETRY_STATE_KEY)).run();
-}
-
-function createCheckinRetryTask(cronExpr: string) {
-  return cron.schedule(cronExpr, async () => {
-    const now = new Date();
-    const today = formatLocalDate(now);
-    const retryState = await readCheckinRetryState();
-
-    if (!retryState || retryState.day !== today || retryState.failedAccountIds.length === 0) {
-      return;
-    }
-
-    if (retryState.retryAttempts >= CHECKIN_RETRY_MAX_ATTEMPTS) {
-      console.log(`[Scheduler] Check-in retry skipped: reached max attempts (${CHECKIN_RETRY_MAX_ATTEMPTS})`);
-      await clearCheckinRetryState();
-      return;
-    }
-
-    if (getRunningTaskByDedupeKey('checkin-all')) {
-      console.log('[Scheduler] Check-in retry skipped: existing check-in task is running');
-      return;
-    }
-
-    const attempt = retryState.retryAttempts + 1;
-    const taskLabel = `签到失败账号重试（第${attempt}/${CHECKIN_RETRY_MAX_ATTEMPTS}轮）`;
-    try {
-      const { reused } = startBackgroundTask(
-        {
-          type: 'checkin',
-          title: taskLabel,
-          dedupeKey: `checkin-retry:${today}`,
-          notifyOnFailure: true,
-          successTitle: (currentTask) => {
-            const summary = (currentTask.result as any)?.summary;
-            if (!summary) return `${taskLabel} 已完成`;
-            return `${taskLabel} 已完成（成功${summary.success}/跳过${summary.skipped}/失败${summary.failed}）`;
-          },
-          failureTitle: () => `${taskLabel} 失败`,
-          successMessage: (currentTask) => {
-            const payload = (currentTask.result as any) || {};
-            const summary = payload.summary;
-            const remaining = Array.isArray(payload.remainingFailedAccountIds)
-              ? payload.remainingFailedAccountIds.length
-              : 0;
-            if (!summary) return `${taskLabel} 已完成`;
-            return `${taskLabel}完成：成功 ${summary.success}，跳过 ${summary.skipped}，失败 ${summary.failed}，剩余待重试 ${remaining}`;
-          },
-          failureMessage: (currentTask) => `${taskLabel}失败：${currentTask.error || 'unknown error'}`,
-        },
-        async () => {
-          const latestState = await readCheckinRetryState();
-          if (!latestState || latestState.day !== today || latestState.failedAccountIds.length === 0) {
-            return {
-              summary: { total: 0, success: 0, skipped: 0, failed: 0 },
-              total: 0,
-              remainingFailedAccountIds: [],
-              skipped: true,
-            };
-          }
-
-          const retryResults: Array<{ accountId: number; username: null; site: string; result: any }> = [];
-          for (const accountId of latestState.failedAccountIds) {
-            const result = await checkinAccount(accountId, { skipEvent: true });
-            retryResults.push({
-              accountId,
-              username: null,
-              site: '',
-              result,
-            });
-          }
-
-          const summary = summarizeCheckinResults(retryResults);
-          const remainingFailedAccountIds = retryResults
-            .filter((item) => {
-              const status = item?.result?.status;
-              if (status === 'skipped' || item?.result?.skipped) return false;
-              return !item?.result?.success;
-            })
-            .map((item) => item.accountId);
-
-          if (remainingFailedAccountIds.length > 0 && attempt < CHECKIN_RETRY_MAX_ATTEMPTS) {
-            await persistCheckinRetryState({
-              day: today,
-              failedAccountIds: remainingFailedAccountIds,
-              retryAttempts: attempt,
-              updatedAt: new Date().toISOString(),
-            });
-          } else {
-            await clearCheckinRetryState();
-          }
-
-          return {
-            summary,
-            total: retryResults.length,
-            attempt,
-            remainingFailedAccountIds,
-            results: retryResults,
-          };
-        },
-      );
-
-      console.log(
-        reused
-          ? `[Scheduler] ${taskLabel} reused running task`
-          : `[Scheduler] ${taskLabel} queued`,
-      );
-    } catch (err) {
-      console.error('[Scheduler] Check-in retry error:', err);
-    }
-  });
+function startCheckinSchedule() {
+  stopCheckinSchedule();
+  if (config.checkinScheduleMode === 'interval') {
+    checkinIntervalTimer = setInterval(() => {
+      void runIntervalCheckinPass();
+    }, CHECKIN_INTERVAL_POLL_MS);
+    return;
+  }
+  checkinTask = createCheckinTask(config.checkinCron);
 }
 
 function createBalanceTask(cronExpr: string) {
@@ -287,6 +191,28 @@ function createDailySummaryTask(cronExpr: string) {
   });
 }
 
+function createLogCleanupTask(cronExpr: string) {
+  return cron.schedule(cronExpr, async () => {
+    if (!config.logCleanupConfigured) {
+      console.log('[Scheduler] Log cleanup skipped: legacy fallback mode is active');
+      return;
+    }
+    console.log(`[Scheduler] Running log cleanup at ${new Date().toISOString()}`);
+    try {
+      const result = await cleanupConfiguredLogs();
+      if (!result.enabled) {
+        console.log('[Scheduler] Log cleanup skipped: no log target enabled');
+        return;
+      }
+      console.log(
+        `[Scheduler] Log cleanup complete: usage=${result.usageLogsDeleted}, program=${result.programLogsDeleted}, cutoff=${result.cutoffUtc}`,
+      );
+    } catch (err) {
+      console.error('[Scheduler] Log cleanup error:', err);
+    }
+  });
+}
+
 function createSiteHealthTask(cronExpr: string) {
   return cron.schedule(cronExpr, async () => {
     if (siteHealthRefreshRunning) {
@@ -309,32 +235,91 @@ function createSiteHealthTask(cronExpr: string) {
 
 export async function startScheduler() {
   const activeCheckinCron = await resolveCronSetting('checkin_cron', config.checkinCron);
-  const activeCheckinRetryCron = await resolveCronSetting('checkin_retry_cron', CHECKIN_RETRY_DEFAULT_CRON);
+  const activeCheckinScheduleMode = await resolveJsonSetting<CheckinScheduleMode>(
+    'checkin_schedule_mode',
+    (value): value is CheckinScheduleMode => value === 'cron' || value === 'interval',
+    config.checkinScheduleMode as CheckinScheduleMode,
+  );
+  const activeCheckinIntervalHours = await resolvePositiveIntegerSetting(
+    'checkin_interval_hours',
+    config.checkinIntervalHours,
+  );
   const activeBalanceCron = await resolveCronSetting('balance_refresh_cron', config.balanceRefreshCron);
-  const activeDailySummaryCron = await resolveCronSetting('daily_summary_cron', DAILY_SUMMARY_DEFAULT_CRON);
   const activeSiteHealthCron = await resolveCronSetting('site_health_refresh_cron', config.siteHealthRefreshCron);
+  const activeDailySummaryCron = await resolveCronSetting('daily_summary_cron', DAILY_SUMMARY_DEFAULT_CRON);
+  const activeLogCleanupCron = await resolveCronSetting('log_cleanup_cron', config.logCleanupCron || LOG_CLEANUP_DEFAULT_CRON);
+  const activeLogCleanupUsageLogsEnabled = await resolveBooleanSetting(
+    'log_cleanup_usage_logs_enabled',
+    config.logCleanupUsageLogsEnabled,
+  );
+  const activeLogCleanupProgramLogsEnabled = await resolveBooleanSetting(
+    'log_cleanup_program_logs_enabled',
+    config.logCleanupProgramLogsEnabled,
+  );
+  const activeLogCleanupRetentionDays = await resolvePositiveIntegerSetting(
+    'log_cleanup_retention_days',
+    normalizeLogCleanupRetentionDays(config.logCleanupRetentionDays),
+  );
   config.checkinCron = activeCheckinCron;
+  config.checkinScheduleMode = activeCheckinScheduleMode;
+  config.checkinIntervalHours = Math.min(24, Math.max(1, activeCheckinIntervalHours));
   config.balanceRefreshCron = activeBalanceCron;
   config.siteHealthRefreshCron = activeSiteHealthCron;
+  config.logCleanupCron = activeLogCleanupCron;
+  config.logCleanupUsageLogsEnabled = activeLogCleanupUsageLogsEnabled;
+  config.logCleanupProgramLogsEnabled = activeLogCleanupProgramLogsEnabled;
+  config.logCleanupRetentionDays = activeLogCleanupRetentionDays;
 
-  checkinTask = createCheckinTask(activeCheckinCron);
-  checkinRetryTask = createCheckinRetryTask(activeCheckinRetryCron);
+  stopCheckinSchedule();
+  balanceTask?.stop();
+  dailySummaryTask?.stop();
+  logCleanupTask?.stop();
+  siteHealthTask?.stop();
+  startCheckinSchedule();
   balanceTask = createBalanceTask(activeBalanceCron);
-  dailySummaryTask = createDailySummaryTask(activeDailySummaryCron);
   siteHealthTask = createSiteHealthTask(activeSiteHealthCron);
+  dailySummaryTask = createDailySummaryTask(activeDailySummaryCron);
+  logCleanupTask = createLogCleanupTask(activeLogCleanupCron);
 
-  console.log(`[Scheduler] Check-in cron: ${activeCheckinCron}`);
-  console.log(`[Scheduler] Check-in retry cron: ${activeCheckinRetryCron}`);
+  console.log(`[Scheduler] Check-in schedule: ${config.checkinScheduleMode} (${config.checkinScheduleMode === 'cron' ? activeCheckinCron : `${config.checkinIntervalHours}h`})`);
   console.log(`[Scheduler] Balance refresh cron: ${activeBalanceCron}`);
-  console.log(`[Scheduler] Daily summary cron: ${activeDailySummaryCron}`);
   console.log(`[Scheduler] Site health refresh cron: ${activeSiteHealthCron}`);
+  console.log(`[Scheduler] Daily summary cron: ${activeDailySummaryCron}`);
+  console.log(
+    `[Scheduler] Log cleanup cron: ${activeLogCleanupCron} (configured=${config.logCleanupConfigured}, usage=${activeLogCleanupUsageLogsEnabled}, program=${activeLogCleanupProgramLogsEnabled}, retentionDays=${activeLogCleanupRetentionDays})`,
+  );
 }
 
 export function updateCheckinCron(cronExpr: string) {
-  if (!cron.validate(cronExpr)) throw new Error(`Invalid cron: ${cronExpr}`);
-  config.checkinCron = cronExpr;
-  checkinTask?.stop();
-  checkinTask = createCheckinTask(cronExpr);
+  updateCheckinSchedule({
+    mode: 'cron',
+    cronExpr,
+    intervalHours: config.checkinIntervalHours,
+  });
+}
+
+export function updateCheckinSchedule(input: {
+  mode: CheckinScheduleMode;
+  cronExpr?: string;
+  intervalHours?: number;
+}) {
+  const nextMode = input.mode;
+  if (nextMode !== 'cron' && nextMode !== 'interval') {
+    throw new Error(`Invalid checkin schedule mode: ${String(nextMode)}`);
+  }
+
+  const nextCronExpr = input.cronExpr ?? config.checkinCron;
+  if (!cron.validate(nextCronExpr)) throw new Error(`Invalid cron: ${nextCronExpr}`);
+
+  const nextIntervalHours = input.intervalHours ?? config.checkinIntervalHours;
+  if (!Number.isFinite(nextIntervalHours) || nextIntervalHours < 1 || nextIntervalHours > 24) {
+    throw new Error(`Invalid interval hours: ${String(nextIntervalHours)}`);
+  }
+
+  config.checkinScheduleMode = nextMode;
+  config.checkinCron = nextCronExpr;
+  config.checkinIntervalHours = Math.trunc(nextIntervalHours);
+  startCheckinSchedule();
 }
 
 export function updateBalanceRefreshCron(cronExpr: string) {
@@ -349,4 +334,38 @@ export function updateSiteHealthRefreshCron(cronExpr: string) {
   config.siteHealthRefreshCron = cronExpr;
   siteHealthTask?.stop();
   siteHealthTask = createSiteHealthTask(cronExpr);
+}
+
+export function updateLogCleanupSettings(input: {
+  cronExpr?: string;
+  usageLogsEnabled?: boolean;
+  programLogsEnabled?: boolean;
+  retentionDays?: number;
+}) {
+  const cronExpr = input.cronExpr ?? config.logCleanupCron;
+  if (!cron.validate(cronExpr)) throw new Error(`Invalid cron: ${cronExpr}`);
+
+  const retentionDays = normalizeLogCleanupRetentionDays(input.retentionDays ?? config.logCleanupRetentionDays);
+
+  config.logCleanupCron = cronExpr;
+  if (input.usageLogsEnabled !== undefined) config.logCleanupUsageLogsEnabled = !!input.usageLogsEnabled;
+  if (input.programLogsEnabled !== undefined) config.logCleanupProgramLogsEnabled = !!input.programLogsEnabled;
+  config.logCleanupRetentionDays = retentionDays;
+
+  logCleanupTask?.stop();
+  logCleanupTask = createLogCleanupTask(cronExpr);
+}
+
+export function __resetCheckinSchedulerForTests() {
+  stopCheckinSchedule();
+  balanceTask?.stop();
+  dailySummaryTask?.stop();
+  logCleanupTask?.stop();
+  siteHealthTask?.stop();
+  balanceTask = null;
+  dailySummaryTask = null;
+  logCleanupTask = null;
+  siteHealthTask = null;
+  siteHealthRefreshRunning = false;
+  intervalAttemptByAccount.clear();
 }
