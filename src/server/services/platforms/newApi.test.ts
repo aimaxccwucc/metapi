@@ -550,6 +550,45 @@ describe('NewApiAdapter', () => {
     ).toBe(true);
   });
 
+  it('limits shield challenge retries to one extra attempt during login', async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((err?: Error) => (err ? reject(err) : resolve()));
+    });
+
+    let loginAttempts = 0;
+    server = createServer((req, res) => {
+      requests.push({
+        method: req.method || 'GET',
+        url: req.url || '/',
+        headers: req.headers,
+      });
+
+      if (req.url === '/api/user/login' && req.method === 'POST') {
+        loginAttempts += 1;
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Set-Cookie': `cdn_sec_tc=${SHIELD_LOGIN_COOKIE}; Path=/; HttpOnly`,
+        });
+        res.end(ANYROUTER_CHALLENGE_HTML);
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const adapter = new NewApiAdapter();
+    const result = await adapter.login(baseUrl, SHIELD_LOGIN_USERNAME, SHIELD_LOGIN_PASSWORD);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBe('shield challenge blocked login');
+    expect(loginAttempts).toBe(2);
+  });
+
   it('preserves upstream balance failure message for UI feedback', async () => {
     const adapter = new NewApiAdapter();
 

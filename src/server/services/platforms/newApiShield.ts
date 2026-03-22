@@ -3,6 +3,7 @@ import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
 
 const SHIELD_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36';
+const SHIELD_CHALLENGE_MAX_ATTEMPTS = 2;
 
 export function buildNewApiCookieCandidates(token: string): string[] {
   const trimmed = (token || '').trim();
@@ -221,7 +222,7 @@ export async function fetchJsonWithShieldCookieRetry<T>(
     delete headers.cookie;
   }
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < SHIELD_CHALLENGE_MAX_ATTEMPTS; attempt += 1) {
     const requestOptions: UndiciRequestInit = {
       ...options,
       body: options?.body ?? undefined,

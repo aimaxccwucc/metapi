@@ -5,6 +5,7 @@ import { withSiteProxyRequestInit } from '../siteProxy.js';
 
 export class NewApiAdapter extends BasePlatformAdapter {
   readonly platformName: string = 'new-api';
+  private static readonly SHIELD_CHALLENGE_MAX_ATTEMPTS = 2;
 
   async detect(url: string): Promise<boolean> {
     try {
@@ -645,7 +646,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
       delete headers['cookie'];
     }
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < NewApiAdapter.SHIELD_CHALLENGE_MAX_ATTEMPTS; attempt += 1) {
       const requestOptions: UndiciRequestInit = {
         ...options,
         body: options?.body ?? undefined,

@@ -56,12 +56,12 @@ describe('modelPricingService anyrouter pricing', () => {
 
     const catalog = await fetchModelPricingCatalog({
       site: {
-        id: 902,
+        id: 903,
         url: 'https://anyrouter.example.com',
         platform: 'anyrouter',
       },
       account: {
-        id: 77,
+        id: 78,
         accessToken: 'challenge-seed',
       },
       modelName: 'claude-haiku-4-5-20251001',
@@ -78,5 +78,45 @@ describe('modelPricingService anyrouter pricing', () => {
     expect(fetchMock.mock.calls[1][1]?.headers?.Cookie || '').toContain('session=challenge-seed');
     expect(fetchMock.mock.calls[1][1]?.headers?.Cookie || '').toContain('cdn_sec_tc=challenge-seed');
     expect(fetchMock.mock.calls[1][1]?.headers?.Cookie || '').toContain(`acw_sc__v2=${ANYROUTER_CHALLENGE_ACW}`);
+  });
+
+  it('limits anyrouter shield retries to one extra attempt', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(ANYROUTER_CHALLENGE_HTML, {
+        status: 200,
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          'set-cookie': 'cdn_sec_tc=challenge-seed; Path=/; HttpOnly',
+        },
+      }))
+      .mockResolvedValueOnce(new Response(ANYROUTER_CHALLENGE_HTML, {
+        status: 200,
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          'set-cookie': 'cdn_sec_tc=challenge-seed; Path=/; HttpOnly',
+        },
+      }));
+
+    const catalog = await fetchModelPricingCatalog({
+      site: {
+        id: 902,
+        url: 'https://anyrouter.example.com',
+        platform: 'anyrouter',
+      },
+      account: {
+        id: 77,
+        accessToken: 'challenge-seed',
+      },
+      modelName: 'claude-haiku-4-5-20251001',
+      totalTokens: 0,
+    });
+
+    expect(catalog).toBeNull();
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => {
+        const cookie = String(init?.headers?.Cookie || init?.headers?.cookie || '');
+        return cookie.includes('session=challenge-seed');
+      }),
+    ).toHaveLength(2);
   });
 });
