@@ -3,12 +3,13 @@ import {
   buildDesktopServerEnv,
   createDesktopServerUrl,
   isFatalServerExit,
+  resolveDesktopServerPort,
   resolveDesktopServerWorkingDir,
   waitForServerReady,
 } from './runtime.js';
 
 describe('desktop runtime helpers', () => {
-  it('builds desktop server env with loopback host and app directories', () => {
+  it('builds desktop server env with external listen host and app directories', () => {
     const env = buildDesktopServerEnv({
       inheritedEnv: {
         AUTH_TOKEN: 'admin-token',
@@ -19,7 +20,7 @@ describe('desktop runtime helpers', () => {
       port: 4312,
     });
 
-    expect(env.HOST).toBe('127.0.0.1');
+    expect(env.HOST).toBe('0.0.0.0');
     expect(env.PORT).toBe('4312');
     expect(env.DATA_DIR).toBe('/tmp/metapi-data');
     expect(env.METAPI_LOG_DIR).toBe('/tmp/metapi-logs');
@@ -29,6 +30,16 @@ describe('desktop runtime helpers', () => {
 
   it('creates the browser URL from the local desktop port', () => {
     expect(createDesktopServerUrl(4312)).toBe('http://127.0.0.1:4312');
+  });
+
+  it('defaults desktop backend port to 4000', () => {
+    expect(resolveDesktopServerPort({})).toBe(4000);
+  });
+
+  it('honors explicit desktop backend port override', () => {
+    expect(resolveDesktopServerPort({
+      METAPI_DESKTOP_SERVER_PORT: '4312',
+    })).toBe(4312);
   });
 
   it('uses resources path as backend cwd for packaged desktop builds', () => {

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { generateDialectArtifacts, type GeneratedDialectArtifacts } from './schemaArtifactGenerator.js';
+import { generateDialectArtifacts, generateUpgradeSql, type GeneratedDialectArtifacts } from './schemaArtifactGenerator.js';
 import type { SchemaContract, SchemaContractColumn } from './schemaContract.js';
 
 const dbDir = dirname(fileURLToPath(import.meta.url));
@@ -103,8 +103,8 @@ describe('schema artifact generator', () => {
     ).toBeLessThan(
       artifacts.postgresBootstrap.indexOf('CREATE TABLE IF NOT EXISTS "account_tokens"'),
     );
-    expect(artifacts.mysqlBootstrap).toContain('`created_at` DATETIME DEFAULT CURRENT_TIMESTAMP');
-    expect(artifacts.postgresBootstrap).toContain('"created_at" TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+    expect(artifacts.mysqlBootstrap).toContain("`created_at` VARCHAR(191) DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s'))");
+    expect(artifacts.postgresBootstrap).toContain(`"created_at" TEXT DEFAULT to_char(timezone('UTC', CURRENT_TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS')`);
   });
 
   it('uses varchar for mysql text primary keys so bootstrap ddl stays executable', () => {
@@ -114,11 +114,52 @@ describe('schema artifact generator', () => {
     expect(artifacts.mysqlBootstrap).not.toContain('CREATE TABLE IF NOT EXISTS `settings` (`key` TEXT NOT NULL PRIMARY KEY, `value` TEXT)');
   });
 
-  it('does not add mysql text prefixes to varchar-backed indexes', () => {
+  it('does not add mysql text prefixes to non-text index columns', () => {
     const artifacts = generateDialectArtifacts(readSchemaContract());
 
-    expect(artifacts.mysqlBootstrap).toContain('CREATE INDEX `accounts_site_status_idx` ON `accounts` (`site_id`, `status`)');
-    expect(artifacts.mysqlBootstrap).not.toContain('CREATE INDEX `accounts_site_status_idx` ON `accounts` (`site_id`, `status`(191))');
+    expect(artifacts.mysqlBootstrap).toContain('CREATE INDEX `checkin_logs_account_created_at_idx` ON `checkin_logs` (`account_id`, `created_at`)');
+    expect(artifacts.mysqlBootstrap).toContain('CREATE INDEX `events_read_created_at_idx` ON `events` (`read`, `created_at`)');
+    expect(artifacts.mysqlBootstrap).not.toContain('`created_at`(191)');
+    expect(artifacts.mysqlBootstrap).not.toContain('`read`(191)');
+  });
+
+  it('allows mysql upgrade generation to force prefix lengths for live text-backed columns', () => {
+    const previousContract: SchemaContract = {
+      tables: {
+        proxy_logs: {
+          columns: {
+            downstream_api_key_id: makeColumn({ logicalType: 'integer' }),
+            created_at: makeColumn({ logicalType: 'datetime', defaultValue: "datetime('now')" }),
+          },
+        },
+      },
+      indexes: [],
+      uniques: [],
+      foreignKeys: [],
+    };
+    const currentContract: SchemaContract = {
+      ...previousContract,
+      indexes: [
+        {
+          name: 'proxy_logs_downstream_api_key_created_at_idx',
+          table: 'proxy_logs',
+          columns: ['downstream_api_key_id', 'created_at'],
+          unique: false,
+        },
+      ],
+    };
+
+    const mysqlUpgrade = generateUpgradeSql('mysql', currentContract, previousContract, {
+      mysqlIndexPrefixRequirements: {
+        proxy_logs: {
+          created_at: true,
+        },
+      },
+    });
+
+    expect(mysqlUpgrade).toContain(
+      'CREATE INDEX `proxy_logs_downstream_api_key_created_at_idx` ON `proxy_logs` (`downstream_api_key_id`, `created_at`(191))',
+    );
   });
 
   it('rejects destructive diffs when generating additive upgrades', () => {

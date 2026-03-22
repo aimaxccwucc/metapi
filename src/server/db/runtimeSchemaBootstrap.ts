@@ -8,16 +8,19 @@ import {
   type LegacySchemaCompatInspector,
 } from './legacySchemaCompat.js';
 import {
-  ensureSharedIndexSchemaCompatibility,
-  type SharedIndexSchemaInspector,
-} from './sharedIndexSchemaCompatibility.js';
-import { generateBootstrapSql, resolveGeneratedArtifactPath } from './schemaArtifactGenerator.js';
-import type { SchemaContract } from './schemaContract.js';
+  generateBootstrapSql,
+  generateUpgradeSql,
+  type MysqlIndexPrefixRequirementMap,
+} from './schemaArtifactGenerator.js';
+import { introspectLiveSchema } from './schemaIntrospection.js';
+import { resolveGeneratedSchemaContractPath, type SchemaContract } from './schemaContract.js';
 
 export type RuntimeSchemaDialect = 'sqlite' | 'mysql' | 'postgres';
 
 export interface RuntimeSchemaClient {
   dialect: RuntimeSchemaDialect;
+  connectionString: string;
+  ssl: boolean;
   begin(): Promise<void>;
   commit(): Promise<void>;
   rollback(): Promise<void>;
@@ -46,10 +49,13 @@ function isExistingSchemaObjectError(error: unknown): boolean {
     : '';
 
   return code === 'ER_DUP_KEYNAME'
+    || code === 'ER_DUP_FIELDNAME'
     || code === 'ER_TABLE_EXISTS_ERROR'
     || code === '42P07'
+    || code === '42701'
     || code === '42710'
     || lowered.includes('already exists')
+    || lowered.includes('duplicate column')
     || lowered.includes('duplicate key name')
     || lowered.includes('relation') && lowered.includes('already exists');
 }
@@ -109,34 +115,6 @@ function createLegacySchemaInspector(client: RuntimeSchemaClient): LegacySchemaC
           [table, column],
         )) > 0;
       },
-      getColumnType: async (table, column) => {
-        const result = await client.execute(
-          'SELECT column_type AS columnType FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1',
-          [table, column],
-        );
-        const rows = Array.isArray(result)
-          ? (Array.isArray(result[0]) ? result[0] : result)
-          : (result && typeof result === 'object' && 'rows' in result && Array.isArray((result as { rows?: unknown[] }).rows)
-            ? (result as { rows: Array<Record<string, unknown>> }).rows
-            : []);
-        const first = rows[0] as Record<string, unknown> | undefined;
-        return typeof first?.columnType === 'string' ? first.columnType : null;
-      },
-      getIndexColumns: async (table, indexName) => {
-        const result = await client.execute(
-          'SELECT column_name AS columnName FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? ORDER BY seq_in_index ASC',
-          [table, indexName],
-        );
-        const rows = Array.isArray(result)
-          ? (Array.isArray(result[0]) ? result[0] : result)
-          : (result && typeof result === 'object' && 'rows' in result && Array.isArray((result as { rows?: unknown[] }).rows)
-            ? (result as { rows: Array<Record<string, unknown>> }).rows
-            : []);
-        if (rows.length === 0) return null;
-        return (rows as Array<Record<string, unknown>>)
-          .map((row) => (typeof row.columnName === 'string' ? row.columnName : ''))
-          .filter((columnName) => columnName.length > 0);
-      },
       execute: async (sqlText) => {
         await client.execute(sqlText);
       },
@@ -163,60 +141,6 @@ function createLegacySchemaInspector(client: RuntimeSchemaClient): LegacySchemaC
   };
 }
 
-function createSharedIndexSchemaInspector(client: RuntimeSchemaClient): SharedIndexSchemaInspector {
-  if (client.dialect === 'sqlite') {
-    return {
-      dialect: 'sqlite',
-      tableExists: async (table) => {
-        const normalizedTable = validateIdentifier(table);
-        return (await client.queryScalar(
-          `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '${normalizedTable}'`,
-        )) > 0;
-      },
-      execute: async (sqlText) => {
-        await client.execute(sqlText);
-      },
-    };
-  }
-
-  if (client.dialect === 'mysql') {
-    return {
-      dialect: 'mysql',
-      tableExists: async (table) => {
-        return (await client.queryScalar(
-          'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?',
-          [table],
-        )) > 0;
-      },
-      execute: async (sqlText) => {
-        await client.execute(sqlText);
-      },
-      dedupeForUniqueIndex: async (table, indexName) => {
-        if (table === 'model_availability' && indexName === 'model_availability_account_model_unique') {
-          await dedupeMySqlModelAvailabilityForUniqueIndex(client);
-          return;
-        }
-        if (table === 'token_model_availability' && indexName === 'token_model_availability_token_model_unique') {
-          await dedupeMySqlTokenModelAvailabilityForUniqueIndex(client);
-        }
-      },
-    };
-  }
-
-  return {
-    dialect: 'postgres',
-    tableExists: async (table) => {
-      return (await client.queryScalar(
-        'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1',
-        [table],
-      )) > 0;
-    },
-    execute: async (sqlText) => {
-      await client.execute(sqlText);
-    },
-  };
-}
-
 function splitSqlStatements(sqlText: string): string[] {
   const withoutCommentLines = sqlText
     .split(/\r?\n/g)
@@ -229,36 +153,170 @@ function splitSqlStatements(sqlText: string): string[] {
     .filter((statement) => statement.length > 0);
 }
 
-async function dedupeMySqlDuplicateAvailabilityRows(
-  client: RuntimeSchemaClient,
-  tableName: 'model_availability' | 'token_model_availability',
-  ownerColumn: 'account_id' | 'token_id',
-): Promise<void> {
-  await client.execute(`
-    DELETE duplicate_rows
-    FROM ${tableName} AS duplicate_rows
-    INNER JOIN ${tableName} AS kept_rows
-      ON duplicate_rows.${ownerColumn} = kept_rows.${ownerColumn}
-      AND COALESCE(duplicate_rows.model_name, '') = COALESCE(kept_rows.model_name, '')
-      AND duplicate_rows.id < kept_rows.id
-  `);
-}
-
-async function dedupeMySqlModelAvailabilityForUniqueIndex(client: RuntimeSchemaClient): Promise<void> {
-  await dedupeMySqlDuplicateAvailabilityRows(client, 'model_availability', 'account_id');
-}
-
-async function dedupeMySqlTokenModelAvailabilityForUniqueIndex(client: RuntimeSchemaClient): Promise<void> {
-  await dedupeMySqlDuplicateAvailabilityRows(client, 'token_model_availability', 'token_id');
-}
-
 function readSchemaContract(): SchemaContract {
-  return JSON.parse(readFileSync(resolveGeneratedArtifactPath('schemaContract.json'), 'utf8')) as SchemaContract;
+  return JSON.parse(readFileSync(resolveGeneratedSchemaContractPath(), 'utf8')) as SchemaContract;
 }
 
-function readGeneratedBootstrapStatements(dialect: Exclude<RuntimeSchemaDialect, 'sqlite'>): string[] {
-  const filename = dialect === 'mysql' ? 'mysql.bootstrap.sql' : 'postgres.bootstrap.sql';
-  return splitSqlStatements(readFileSync(resolveGeneratedArtifactPath(filename), 'utf8'));
+function cloneContract(contract: SchemaContract): SchemaContract {
+  return JSON.parse(JSON.stringify(contract)) as SchemaContract;
+}
+
+function serializeColumn(column: SchemaContract['tables'][string]['columns'][string]): string {
+  return [
+    column.logicalType,
+    column.notNull ? 'not-null' : 'nullable',
+    column.defaultValue ?? 'default:null',
+    column.primaryKey ? 'pk' : 'non-pk',
+  ].join('|');
+}
+
+function serializeIndex(index: SchemaContract['indexes'][number]): string {
+  return [index.table, index.columns.join(','), index.unique ? 'unique' : 'non-unique'].join('|');
+}
+
+function serializeUnique(unique: SchemaContract['uniques'][number]): string {
+  return [unique.table, unique.columns.join(',')].join('|');
+}
+
+function serializeForeignKey(foreignKey: SchemaContract['foreignKeys'][number]): string {
+  return [
+    foreignKey.table,
+    foreignKey.columns.join(','),
+    foreignKey.referencedTable,
+    foreignKey.referencedColumns.join(','),
+    foreignKey.onDelete ?? 'null',
+  ].join('|');
+}
+
+function buildCompatibleRuntimeBaseline(
+  currentContract: SchemaContract,
+  liveContract: SchemaContract,
+): SchemaContract {
+  const baseline: SchemaContract = {
+    tables: {},
+    indexes: [],
+    uniques: [],
+    foreignKeys: [],
+  };
+
+  for (const [tableName, liveTable] of Object.entries(liveContract.tables)) {
+    const currentTable = currentContract.tables[tableName];
+    if (!currentTable) {
+      continue;
+    }
+
+    const compatibleColumns = Object.fromEntries(
+      Object.entries(liveTable.columns)
+        .filter(([columnName, liveColumn]) => {
+          const currentColumn = currentTable.columns[columnName];
+          return currentColumn && serializeColumn(currentColumn) === serializeColumn(liveColumn);
+        }),
+    );
+
+    baseline.tables[tableName] = { columns: compatibleColumns };
+  }
+
+  const currentIndexes = new Map(currentContract.indexes.map((index) => [index.name, index]));
+  baseline.indexes = liveContract.indexes
+    .filter((index) => {
+      const currentIndex = currentIndexes.get(index.name);
+      return currentIndex && serializeIndex(currentIndex) === serializeIndex(index);
+    });
+
+  const currentUniques = new Map(currentContract.uniques.map((unique) => [unique.name, unique]));
+  baseline.uniques = liveContract.uniques
+    .filter((unique) => {
+      const currentUnique = currentUniques.get(unique.name);
+      return currentUnique && serializeUnique(currentUnique) === serializeUnique(unique);
+    });
+
+  const currentForeignKeys = new Set(currentContract.foreignKeys.map(serializeForeignKey));
+  baseline.foreignKeys = liveContract.foreignKeys
+    .filter((foreignKey) => currentForeignKeys.has(serializeForeignKey(foreignKey)));
+
+  return baseline;
+}
+
+function collectIndexedColumns(contract: SchemaContract): Map<string, Set<string>> {
+  const indexedColumns = new Map<string, Set<string>>();
+
+  for (const index of [...contract.indexes, ...contract.uniques]) {
+    let columns = indexedColumns.get(index.table);
+    if (!columns) {
+      columns = new Set<string>();
+      indexedColumns.set(index.table, columns);
+    }
+
+    for (const columnName of index.columns) {
+      columns.add(columnName);
+    }
+  }
+
+  return indexedColumns;
+}
+
+function requiresMysqlIndexPrefixForColumnType(columnType: string): boolean {
+  const normalizedType = columnType.trim().toLowerCase();
+  return normalizedType.includes('text') || normalizedType.includes('blob');
+}
+
+async function queryRuntimeRows(
+  client: RuntimeSchemaClient,
+  sqlText: string,
+  params: unknown[] = [],
+): Promise<Array<Record<string, unknown>>> {
+  const result = await client.execute(sqlText, params);
+
+  if (!Array.isArray(result)) {
+    return [];
+  }
+
+  const [first] = result;
+  if (Array.isArray(first)) {
+    return first as Array<Record<string, unknown>>;
+  }
+
+  if (result.every((item) => typeof item === 'object' && item !== null && !Array.isArray(item))) {
+    return result as Array<Record<string, unknown>>;
+  }
+
+  return [];
+}
+
+async function resolveMySqlIndexPrefixRequirements(
+  client: RuntimeSchemaClient,
+  currentContract: SchemaContract,
+): Promise<MysqlIndexPrefixRequirementMap> {
+  const indexedColumns = collectIndexedColumns(currentContract);
+  if (indexedColumns.size === 0) {
+    return {};
+  }
+
+  const rows = await queryRuntimeRows(client, `
+    SELECT
+      table_name AS table_name,
+      column_name AS column_name,
+      data_type AS data_type,
+      column_type AS column_type
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+  `);
+
+  const requirements: MysqlIndexPrefixRequirementMap = {};
+  for (const row of rows) {
+    const tableName = String(row.table_name || '');
+    const columnName = String(row.column_name || '');
+    const trackedColumns = indexedColumns.get(tableName);
+    if (!trackedColumns || !trackedColumns.has(columnName)) {
+      continue;
+    }
+
+    const declaredType = String(row.column_type || row.data_type || '');
+    requirements[tableName] ??= {};
+    requirements[tableName][columnName] = requiresMysqlIndexPrefixForColumnType(declaredType);
+  }
+
+  return requirements;
 }
 
 async function createPostgresClient(connectionString: string, ssl: boolean): Promise<RuntimeSchemaClient> {
@@ -271,6 +329,8 @@ async function createPostgresClient(connectionString: string, ssl: boolean): Pro
 
   return {
     dialect: 'postgres',
+    connectionString,
+    ssl,
     begin: async () => { await client.query('BEGIN'); },
     commit: async () => { await client.query('COMMIT'); },
     rollback: async () => { await client.query('ROLLBACK'); },
@@ -294,6 +354,8 @@ async function createMySqlClient(connectionString: string, ssl: boolean): Promis
 
   return {
     dialect: 'mysql',
+    connectionString,
+    ssl,
     begin: async () => { await connection.beginTransaction(); },
     commit: async () => { await connection.commit(); },
     rollback: async () => { await connection.rollback(); },
@@ -319,6 +381,8 @@ async function createSqliteClient(connectionString: string): Promise<RuntimeSche
 
   return {
     dialect: 'sqlite',
+    connectionString,
+    ssl: false,
     begin: async () => { sqlite.exec('BEGIN'); },
     commit: async () => { sqlite.exec('COMMIT'); },
     rollback: async () => { sqlite.exec('ROLLBACK'); },
@@ -347,14 +411,56 @@ export async function createRuntimeSchemaClient(input: RuntimeSchemaConnectionIn
   return createSqliteClient(input.connectionString);
 }
 
-export async function ensureRuntimeDatabaseSchema(client: RuntimeSchemaClient): Promise<void> {
-  const statements = client.dialect === 'sqlite'
-    ? splitSqlStatements(generateBootstrapSql('sqlite', readSchemaContract()))
-    : readGeneratedBootstrapStatements(client.dialect);
+type EnsureRuntimeDatabaseSchemaOptions = {
+  currentContract?: SchemaContract;
+  liveContract?: SchemaContract;
+};
 
-  if (client.dialect === 'mysql') {
-    await dedupeMySqlModelAvailabilityForUniqueIndex(client);
-    await dedupeMySqlTokenModelAvailabilityForUniqueIndex(client);
+async function resolveLiveContract(client: RuntimeSchemaClient, liveContract?: SchemaContract): Promise<SchemaContract> {
+  if (liveContract) {
+    return liveContract;
+  }
+
+  return introspectLiveSchema({
+    dialect: client.dialect,
+    connectionString: client.connectionString,
+    ssl: client.ssl,
+  });
+}
+
+function buildExternalUpgradeStatements(
+  dialect: Exclude<RuntimeSchemaDialect, 'sqlite'>,
+  currentContract: SchemaContract,
+  liveContract: SchemaContract,
+  mysqlIndexPrefixRequirements?: MysqlIndexPrefixRequirementMap,
+): string[] {
+  const compatibleBaseline = buildCompatibleRuntimeBaseline(currentContract, liveContract);
+  return splitSqlStatements(generateUpgradeSql(dialect, currentContract, compatibleBaseline, {
+    mysqlIndexPrefixRequirements,
+  }));
+}
+
+export async function ensureRuntimeDatabaseSchema(
+  client: RuntimeSchemaClient,
+  options: EnsureRuntimeDatabaseSchemaOptions = {},
+): Promise<void> {
+  const currentContract = options.currentContract ?? readSchemaContract();
+  let statements: string[];
+
+  if (client.dialect === 'sqlite') {
+    statements = splitSqlStatements(generateBootstrapSql('sqlite', currentContract));
+  } else {
+    const liveContract = await resolveLiveContract(client, options.liveContract);
+    const mysqlIndexPrefixRequirements = client.dialect === 'mysql'
+      ? await resolveMySqlIndexPrefixRequirements(client, currentContract)
+      : undefined;
+
+    statements = buildExternalUpgradeStatements(
+      client.dialect,
+      currentContract,
+      liveContract,
+      mysqlIndexPrefixRequirements,
+    );
   }
 
   for (const sqlText of statements) {
@@ -362,7 +468,6 @@ export async function ensureRuntimeDatabaseSchema(client: RuntimeSchemaClient): 
   }
 
   await ensureLegacySchemaCompatibility(createLegacySchemaInspector(client));
-  await ensureSharedIndexSchemaCompatibility(createSharedIndexSchemaInspector(client));
 }
 
 export async function bootstrapRuntimeDatabaseSchema(input: RuntimeSchemaConnectionInput): Promise<void> {
@@ -375,5 +480,8 @@ export async function bootstrapRuntimeDatabaseSchema(input: RuntimeSchemaConnect
 }
 
 export const __runtimeSchemaBootstrapTestUtils = {
-  readGeneratedBootstrapStatements,
+  buildCompatibleRuntimeBaseline,
+  cloneContract,
+  splitSqlStatements,
+  buildExternalUpgradeStatements,
 };

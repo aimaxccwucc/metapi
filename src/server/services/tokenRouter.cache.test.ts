@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,24 +8,12 @@ type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
 type ConfigModule = typeof import('../config.js');
 
-const getApiTokensMock = vi.fn();
-const getApiTokenMock = vi.fn();
-const createApiTokenMock = vi.fn();
-
-vi.mock('./platforms/index.js', () => ({
-  getAdapter: () => ({
-    getApiTokens: (...args: unknown[]) => getApiTokensMock(...args),
-    getApiToken: (...args: unknown[]) => getApiTokenMock(...args),
-    createApiToken: (...args: unknown[]) => createApiTokenMock(...args),
-  }),
-}));
-
-
 describe('TokenRouter runtime cache', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let TokenRouter: TokenRouterModule['TokenRouter'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
+  let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
   let config: ConfigModule['config'];
   let dataDir = '';
   let originalCacheTtlMs = 0;
@@ -42,29 +30,27 @@ describe('TokenRouter runtime cache', () => {
     schema = dbModule.schema;
     TokenRouter = tokenRouterModule.TokenRouter;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
+    resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
     config = configModule.config;
     originalCacheTtlMs = config.tokenRouterCacheTtlMs;
   });
 
   beforeEach(async () => {
-    getApiTokensMock.mockReset();
-    getApiTokenMock.mockReset();
-    createApiTokenMock.mockReset();
-    getApiTokensMock.mockResolvedValue([]);
-    getApiTokenMock.mockResolvedValue(null);
-    createApiTokenMock.mockResolvedValue(false);
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
+    await db.delete(schema.settings).run();
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
     config.tokenRouterCacheTtlMs = 60_000;
     invalidateTokenRouterCache();
+    resetSiteRuntimeHealthState();
   });
 
   afterAll(() => {
     config.tokenRouterCacheTtlMs = originalCacheTtlMs;
     invalidateTokenRouterCache();
+    resetSiteRuntimeHealthState();
     delete process.env.DATA_DIR;
   });
 

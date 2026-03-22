@@ -7,19 +7,34 @@ async function withHttpServer(
   handler: (req: IncomingMessage, res: ServerResponse) => void,
   run: (baseUrl: string) => Promise<void>,
 ) {
-  const server = createServer(handler);
-  await new Promise<void>((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve());
-  });
-  const { port } = server.address() as AddressInfo;
-  const baseUrl = `http://127.0.0.1:${port}`;
-  try {
-    await run(baseUrl);
-  } finally {
-    await new Promise<void>((resolve, reject) => {
-      server.close((err?: Error) => (err ? reject(err) : resolve()));
+  // Avoid flakiness: CPA uses port 8317 by convention, and our platform detection
+  // includes a fast-path for localhost:8317. Random ephemeral ports can collide.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const server = createServer(handler);
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve());
     });
+
+    const { port } = server.address() as AddressInfo;
+    if (port === 8317) {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err?: Error) => (err ? reject(err) : resolve()));
+      });
+      continue;
+    }
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+    try {
+      await run(baseUrl);
+      return;
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err?: Error) => (err ? reject(err) : resolve()));
+      });
+    }
   }
+
+  throw new Error('withHttpServer: unable to allocate a test port that avoids 8317');
 }
 
 describe('getAdapter platform aliases', () => {
@@ -43,6 +58,16 @@ describe('getAdapter platform aliases', () => {
     expect(getAdapter('gemini')?.platformName).toBe('gemini');
   });
 
+  it('supports antigravity adapter aliases', () => {
+    expect(getAdapter('antigravity')?.platformName).toBe('antigravity');
+    expect(getAdapter('anti-gravity')?.platformName).toBe('antigravity');
+  });
+
+  it('supports dedicated codex adapter and aliases', () => {
+    expect(getAdapter('codex')?.platformName).toBe('codex');
+    expect(getAdapter('chatgpt-codex')?.platformName).toBe('codex');
+  });
+
   it('detects anyrouter URL before generic new-api adapter', async () => {
     const adapter = await detectPlatform('https://anyrouter.top');
     expect(adapter?.platformName).toBe('anyrouter');
@@ -61,7 +86,7 @@ describe('getAdapter platform aliases', () => {
     expect(openai?.platformName).toBe('openai');
     expect(claude?.platformName).toBe('claude');
     expect(gemini?.platformName).toBe('gemini');
-  }, 20_000);
+  });
 
   it('detects one-hub by title under custom domain before generic new-api', async () => {
     await withHttpServer((req, res) => {

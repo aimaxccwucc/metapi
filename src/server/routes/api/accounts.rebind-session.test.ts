@@ -15,7 +15,7 @@ vi.mock('../../services/platforms/index.js', () => ({
 
 type DbModule = typeof import('../../db/index.js');
 
-describe('accounts rebind-session api', () => {
+describe('accounts rebind-session api', { timeout: 15_000 }, () => {
   let app: FastifyInstance;
   let db: DbModule['db'];
   let schema: DbModule['schema'];

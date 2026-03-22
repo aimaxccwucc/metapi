@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildStoredSub2ApiSubscriptionSummary,
   getCredentialModeFromExtraConfig,
   getPlatformUserIdFromExtraConfig,
+  getProxyUrlFromExtraConfig,
   getSub2ApiAuthFromExtraConfig,
+  getSub2ApiSubscriptionFromExtraConfig,
   guessPlatformUserIdFromUsername,
   mergeAccountExtraConfig,
   normalizeCredentialMode,
   resolvePlatformUserId,
+  requiresManagedAccountTokens,
+  supportsDirectAccountRoutingConnection,
 } from './accountExtraConfig.js';
 
 describe('accountExtraConfig', () => {
@@ -66,5 +71,88 @@ describe('accountExtraConfig', () => {
     expect(getSub2ApiAuthFromExtraConfig(JSON.stringify({
       sub2apiAuth: { refreshToken: '  ' },
     }))).toBeNull();
+  });
+
+  it('reads proxyUrl from extra config', () => {
+    expect(getProxyUrlFromExtraConfig(JSON.stringify({ proxyUrl: 'http://127.0.0.1:7890' }))).toBe('http://127.0.0.1:7890');
+    expect(getProxyUrlFromExtraConfig(JSON.stringify({ proxyUrl: '  socks5://proxy.local:1080  ' }))).toBe('socks5://proxy.local:1080');
+  });
+
+  it('returns null for missing or empty proxyUrl', () => {
+    expect(getProxyUrlFromExtraConfig(JSON.stringify({}))).toBeNull();
+    expect(getProxyUrlFromExtraConfig(JSON.stringify({ proxyUrl: '' }))).toBeNull();
+    expect(getProxyUrlFromExtraConfig(JSON.stringify({ proxyUrl: '   ' }))).toBeNull();
+    expect(getProxyUrlFromExtraConfig(null)).toBeNull();
+    expect(getProxyUrlFromExtraConfig(undefined)).toBeNull();
+    expect(getProxyUrlFromExtraConfig('invalid-json')).toBeNull();
+  });
+
+  it('treats auto-mode api token connections as direct-account routable', () => {
+    expect(supportsDirectAccountRoutingConnection({
+      accessToken: '',
+      apiToken: 'sk-demo',
+      extraConfig: null,
+    })).toBe(true);
+    expect(requiresManagedAccountTokens({
+      accessToken: '',
+      apiToken: 'sk-demo',
+      extraConfig: null,
+    })).toBe(false);
+  });
+
+  it('treats oauth and session connections as non-managed-token direct routes only when intended', () => {
+    expect(supportsDirectAccountRoutingConnection({
+      accessToken: 'oauth-access-token',
+      apiToken: null,
+      extraConfig: JSON.stringify({ credentialMode: 'session', oauth: { provider: 'codex' } }),
+    })).toBe(true);
+    expect(requiresManagedAccountTokens({
+      accessToken: 'oauth-access-token',
+      apiToken: null,
+      extraConfig: JSON.stringify({ credentialMode: 'session', oauth: { provider: 'codex' } }),
+    })).toBe(false);
+    expect(supportsDirectAccountRoutingConnection({
+      accessToken: 'session-token',
+      apiToken: 'sk-default',
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    })).toBe(false);
+    expect(requiresManagedAccountTokens({
+      accessToken: 'session-token',
+      apiToken: 'sk-default',
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    })).toBe(true);
+  });
+
+  it('parses stored sub2api subscription summary from extra config', () => {
+    const extraConfig = mergeAccountExtraConfig(null, {
+      sub2apiSubscription: buildStoredSub2ApiSubscriptionSummary({
+        activeCount: 1,
+        totalUsedUsd: 3.5,
+        subscriptions: [
+          {
+            id: 7,
+            groupName: 'Pro',
+            expiresAt: '2026-04-01T00:00:00.000Z',
+            monthlyUsedUsd: 3.5,
+            monthlyLimitUsd: 20,
+          },
+        ],
+      }, 1760000000000),
+    });
+
+    expect(getSub2ApiSubscriptionFromExtraConfig(extraConfig)).toEqual({
+      activeCount: 1,
+      totalUsedUsd: 3.5,
+      subscriptions: [
+        {
+          id: 7,
+          groupName: 'Pro',
+          expiresAt: '2026-04-01T00:00:00.000Z',
+          monthlyUsedUsd: 3.5,
+          monthlyLimitUsd: 20,
+        },
+      ],
+      updatedAt: 1760000000000,
+    });
   });
 });

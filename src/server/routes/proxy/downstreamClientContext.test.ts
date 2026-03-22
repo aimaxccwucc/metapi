@@ -19,13 +19,27 @@ describe('extractClaudeCodeSessionId', () => {
 });
 
 describe('isCodexResponsesSurface', () => {
-  it('detects Codex responses surface from originator and stainless headers', () => {
+  it('detects Codex responses surface from originator, stainless, and turn-state headers', () => {
     expect(isCodexResponsesSurface({
       originator: 'codex_cli_rs',
     })).toBe(true);
 
     expect(isCodexResponsesSurface({
       'x-stainless-lang': 'typescript',
+    })).toBe(true);
+
+    expect(isCodexResponsesSurface({
+      'x-codex-turn-state': 'turn-state-123',
+    })).toBe(true);
+  });
+
+  it('detects broader Codex official-client family headers from user-agent and originator prefixes', () => {
+    expect(isCodexResponsesSurface({
+      'user-agent': 'Mozilla/5.0 codex_chatgpt_desktop/1.2.3',
+    })).toBe(true);
+
+    expect(isCodexResponsesSurface({
+      originator: 'codex_vscode',
     })).toBe(true);
   });
 
@@ -46,6 +60,9 @@ describe('detectDownstreamClientContext', () => {
       },
     })).toEqual({
       clientKind: 'codex',
+      clientAppId: 'codex_cli_rs',
+      clientAppName: 'Codex CLI',
+      clientConfidence: 'exact',
       sessionId: 'codex-session-123',
       traceHint: 'codex-session-123',
     });
@@ -59,6 +76,67 @@ describe('detectDownstreamClientContext', () => {
       },
     })).toEqual({
       clientKind: 'codex',
+      clientAppId: 'codex',
+      clientAppName: 'Codex',
+      clientConfidence: 'heuristic',
+    });
+  });
+
+  it('recognizes broader Codex official-client user-agent families without requiring stainless headers', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/responses',
+      headers: {
+        'user-agent': 'Mozilla/5.0 codex_chatgpt_desktop/1.2.3',
+      },
+    })).toEqual({
+      clientKind: 'codex',
+      clientAppId: 'codex_chatgpt_desktop',
+      clientAppName: 'Codex Desktop',
+      clientConfidence: 'exact',
+    });
+  });
+
+  it('recognizes broader Codex official-client originator prefixes', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/responses',
+      headers: {
+        originator: 'codex_exec',
+      },
+    })).toEqual({
+      clientKind: 'codex',
+      clientAppId: 'codex_exec',
+      clientAppName: 'Codex Exec',
+      clientConfidence: 'exact',
+    });
+  });
+
+  it('prefers explicit self-reported client names before protocol-family fallbacks', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/responses',
+      headers: {
+        'openai-beta': 'responses-2025-03-11',
+        'x-openai-client-user-agent': '{"client":"openclaw"}',
+      },
+    })).toEqual({
+      clientKind: 'codex',
+      clientAppId: 'openclaw',
+      clientAppName: 'openclaw',
+      clientConfidence: 'exact',
+    });
+  });
+
+  it('treats explicit OpenClaw user-agent headers as self-reported app names', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/responses',
+      headers: {
+        'openai-beta': 'responses-2025-03-11',
+        'user-agent': 'OpenClaw/1.0',
+      },
+    })).toEqual({
+      clientKind: 'codex',
+      clientAppId: 'openclaw',
+      clientAppName: 'OpenClaw',
+      clientConfidence: 'exact',
     });
   });
 
@@ -75,6 +153,9 @@ describe('detectDownstreamClientContext', () => {
       body,
     })).toEqual({
       clientKind: 'claude_code',
+      clientAppId: 'claude_code',
+      clientAppName: 'Claude Code',
+      clientConfidence: 'exact',
       sessionId: 'f25958b8-e75c-455d-8b40-f006d87cc2a4',
       traceHint: 'f25958b8-e75c-455d-8b40-f006d87cc2a4',
     });
@@ -107,6 +188,71 @@ describe('detectDownstreamClientContext', () => {
       },
     })).toEqual({
       clientKind: 'generic',
+    });
+  });
+
+  it('recognizes Gemini CLI internal routes as a first-class downstream client kind', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1internal:generateContent',
+      body: {
+        model: 'gpt-4.1',
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: 'hello' }],
+          },
+        ],
+      },
+    })).toEqual({
+      clientKind: 'gemini_cli',
+      clientAppId: 'gemini_cli',
+      clientAppName: 'Gemini CLI',
+      clientConfidence: 'exact',
+    });
+  });
+
+  it('recognizes app fingerprints alongside a generic protocol family', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/chat/completions',
+      headers: {
+        'x-title': 'Cherry Studio',
+        'http-referer': 'https://cherry-ai.com',
+      },
+    })).toEqual({
+      clientKind: 'generic',
+      clientAppId: 'cherry_studio',
+      clientAppName: 'Cherry Studio',
+      clientConfidence: 'exact',
+    });
+  });
+
+  it('keeps protocol family detection when an app fingerprint also matches', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/responses',
+      headers: {
+        originator: 'codex_cli_rs',
+        'x-title': 'Cherry Studio',
+        'http-referer': 'https://cherry-ai.com',
+      },
+    })).toEqual({
+      clientKind: 'codex',
+      clientAppId: 'cherry_studio',
+      clientAppName: 'Cherry Studio',
+      clientConfidence: 'exact',
+    });
+  });
+
+  it('marks weak app-only matches as heuristic instead of upgrading protocol behavior', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/chat/completions',
+      headers: {
+        'user-agent': 'CherryStudio/1.2.3',
+      },
+    })).toEqual({
+      clientKind: 'generic',
+      clientAppId: 'cherry_studio',
+      clientAppName: 'Cherry Studio',
+      clientConfidence: 'heuristic',
     });
   });
 });

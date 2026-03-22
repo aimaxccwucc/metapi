@@ -17,8 +17,13 @@ export interface GeneratedDialectArtifacts {
   postgresUpgrade: string;
 }
 
+export type MysqlIndexPrefixRequirementMap = Record<string, Record<string, boolean>>;
+
 type Dialect = 'mysql' | 'postgres';
 type SqlDialect = 'sqlite' | Dialect;
+type SqlGenerationOptions = {
+  mysqlIndexPrefixRequirements?: MysqlIndexPrefixRequirementMap;
+};
 
 function resolveDbDir(): string {
   return dirname(fileURLToPath(import.meta.url));
@@ -32,10 +37,23 @@ function quoteIdentifier(dialect: SqlDialect, identifier: string): string {
   return dialect === 'mysql' ? `\`${identifier}\`` : `"${identifier}"`;
 }
 
-function escapeMysqlIndexPrefix(columnType: LogicalColumnType, sqlType: string): string {
-  if (columnType === 'json') return '(191)';
-  if (columnType === 'text' && !/^varchar\(/i.test(sqlType)) return '(191)';
-  return '';
+function escapeMysqlTextPrefix(columnType: LogicalColumnType): string {
+  return columnType === 'text' ? '(191)' : '';
+}
+
+function resolveMysqlIndexPrefix(
+  tableName: string,
+  columnName: string,
+  contract: SchemaContract,
+  options?: SqlGenerationOptions,
+): string {
+  const override = options?.mysqlIndexPrefixRequirements?.[tableName]?.[columnName];
+  if (override !== undefined) {
+    return override ? '(191)' : '';
+  }
+
+  const column = contract.tables[tableName]?.columns[columnName];
+  return column ? escapeMysqlTextPrefix(column.logicalType) : '';
 }
 
 function mapColumnType(dialect: SqlDialect, columnName: string, column: SchemaContractColumn): string {
@@ -63,7 +81,7 @@ function mapColumnType(dialect: SqlDialect, columnName: string, column: SchemaCo
       case 'real':
         return 'DOUBLE';
       case 'datetime':
-        return 'DATETIME';
+        return 'VARCHAR(191)';
       case 'json':
         return 'JSON';
       case 'text':
@@ -81,7 +99,7 @@ function mapColumnType(dialect: SqlDialect, columnName: string, column: SchemaCo
     case 'real':
       return 'DOUBLE PRECISION';
     case 'datetime':
-      return 'TIMESTAMP';
+      return 'TEXT';
     case 'json':
       return 'JSONB';
     case 'text':
@@ -99,7 +117,10 @@ function formatDefaultValue(dialect: SqlDialect, column: SchemaContractColumn): 
     if (dialect === 'sqlite') {
       return " DEFAULT (datetime('now'))";
     }
-    return ' DEFAULT CURRENT_TIMESTAMP';
+    if (dialect === 'mysql') {
+      return " DEFAULT (DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s'))";
+    }
+    return " DEFAULT to_char(timezone('UTC', CURRENT_TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS')";
   }
 
   if (column.logicalType === 'boolean') {
@@ -179,24 +200,34 @@ function buildCreateTableStatement(
   return `CREATE TABLE IF NOT EXISTS ${quoteIdentifier(dialect, tableName)} (${parts.join(', ')})`;
 }
 
-function buildUniqueIndexStatement(dialect: SqlDialect, uniqueIndex: SchemaContractUnique, contract: SchemaContract): string {
+function buildUniqueIndexStatement(
+  dialect: SqlDialect,
+  uniqueIndex: SchemaContractUnique,
+  contract: SchemaContract,
+  options?: SqlGenerationOptions,
+): string {
   const columns = uniqueIndex.columns
     .map((columnName) => {
-      const column = contract.tables[uniqueIndex.table]?.columns[columnName];
-      const sqlType = dialect === 'mysql' && column ? mapColumnType(dialect, columnName, column) : '';
-      const suffix = dialect === 'mysql' && column ? escapeMysqlIndexPrefix(column.logicalType, sqlType) : '';
+      const suffix = dialect === 'mysql'
+        ? resolveMysqlIndexPrefix(uniqueIndex.table, columnName, contract, options)
+        : '';
       return `${quoteIdentifier(dialect, columnName)}${suffix}`;
     })
     .join(', ');
   return `CREATE UNIQUE INDEX ${quoteIdentifier(dialect, uniqueIndex.name)} ON ${quoteIdentifier(dialect, uniqueIndex.table)} (${columns})`;
 }
 
-function buildIndexStatement(dialect: SqlDialect, index: SchemaContractIndex, contract: SchemaContract): string {
+function buildIndexStatement(
+  dialect: SqlDialect,
+  index: SchemaContractIndex,
+  contract: SchemaContract,
+  options?: SqlGenerationOptions,
+): string {
   const columns = index.columns
     .map((columnName) => {
-      const column = contract.tables[index.table]?.columns[columnName];
-      const sqlType = dialect === 'mysql' && column ? mapColumnType(dialect, columnName, column) : '';
-      const suffix = dialect === 'mysql' && column ? escapeMysqlIndexPrefix(column.logicalType, sqlType) : '';
+      const suffix = dialect === 'mysql'
+        ? resolveMysqlIndexPrefix(index.table, columnName, contract, options)
+        : '';
       return `${quoteIdentifier(dialect, columnName)}${suffix}`;
     })
     .join(', ');
@@ -321,6 +352,7 @@ export function generateUpgradeSql(
   dialect: SqlDialect,
   currentContract: SchemaContract,
   previousContract?: SchemaContract | null,
+  options?: SqlGenerationOptions,
 ): string {
   if (!previousContract) {
     return `-- no previous schema contract available for ${dialect} additive upgrade generation\n`;
@@ -361,7 +393,7 @@ export function generateUpgradeSql(
     .filter((unique) => !previousUniqueNames.has(unique.name))
     .slice()
     .sort((left, right) => left.name.localeCompare(right.name, 'en'))
-    .map((unique) => buildUniqueIndexStatement(dialect, unique, currentContract));
+    .map((unique) => buildUniqueIndexStatement(dialect, unique, currentContract, options));
 
   const currentUniqueNames = new Set(currentContract.uniques.map((unique) => unique.name));
   const previousIndexNames = new Set(previousContract.indexes.map((index) => index.name));
@@ -370,7 +402,7 @@ export function generateUpgradeSql(
     .filter((index) => !previousIndexNames.has(index.name))
     .slice()
     .sort((left, right) => left.name.localeCompare(right.name, 'en'))
-    .map((index) => buildIndexStatement(dialect, index, currentContract));
+    .map((index) => buildIndexStatement(dialect, index, currentContract, options));
 
   const statements = [...addedTableStatements, ...addColumnStatements, ...uniqueStatements, ...indexStatements];
   if (statements.length === 0) {

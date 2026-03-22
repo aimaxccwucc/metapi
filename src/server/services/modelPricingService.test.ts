@@ -3,7 +3,6 @@ import {
   calculateModelUsageBreakdown,
   calculateModelUsageCost,
   fallbackTokenCost,
-  selectPreferredTokenGroup,
   type PricingModel,
 } from './modelPricingService.js';
 
@@ -183,62 +182,5 @@ describe('modelPricingService', () => {
   it('uses platform-specific fallback token divisor', () => {
     expect(fallbackTokenCost(1500, 'new-api')).toBe(0.003);
     expect(fallbackTokenCost(1500, 'veloera')).toBe(0.0015);
-  });
-
-  it('prefers the lowest-ratio group that covers all requested models', () => {
-    const resolution = selectPreferredTokenGroup({
-      availableGroups: ['default', 'vip', 'cheap'],
-      modelNames: ['gpt-4o', 'gpt-4.1'],
-      catalog: {
-        groupRatio: { default: 1, vip: 3, cheap: 0.4 },
-        models: [
-          {
-            modelName: 'gpt-4o',
-            quotaType: 0,
-            modelDescription: null,
-            tags: [],
-            supportedEndpointTypes: [],
-            ownerBy: null,
-            enableGroups: ['default', 'vip', 'cheap'],
-            groupPricing: {
-              default: { quotaType: 0, inputPerMillion: 2, outputPerMillion: 4 },
-              vip: { quotaType: 0, inputPerMillion: 6, outputPerMillion: 12 },
-              cheap: { quotaType: 0, inputPerMillion: 0.8, outputPerMillion: 1.6 },
-            },
-          },
-          {
-            modelName: 'gpt-4.1',
-            quotaType: 0,
-            modelDescription: null,
-            tags: [],
-            supportedEndpointTypes: [],
-            ownerBy: null,
-            enableGroups: ['default', 'cheap'],
-            groupPricing: {
-              default: { quotaType: 0, inputPerMillion: 2, outputPerMillion: 4 },
-              cheap: { quotaType: 0, inputPerMillion: 0.8, outputPerMillion: 1.6 },
-            },
-          },
-        ],
-      },
-    });
-
-    expect(resolution.candidateGroups).toEqual(['default', 'cheap']);
-    expect(resolution.group).toBe('cheap');
-    expect(resolution.groupRatios).toMatchObject({ default: 1, vip: 3, cheap: 0.4 });
-  });
-
-  it('falls back to the lowest-ratio available group when model coverage is unknown', () => {
-    const resolution = selectPreferredTokenGroup({
-      availableGroups: ['vip', 'default', 'cheap'],
-      modelNames: ['unknown-model'],
-      catalog: {
-        groupRatio: { default: 1, vip: 2, cheap: 0.5 },
-        models: [],
-      },
-    });
-
-    expect(resolution.candidateGroups).toEqual(['vip', 'default', 'cheap']);
-    expect(resolution.group).toBe('cheap');
   });
 });

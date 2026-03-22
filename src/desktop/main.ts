@@ -9,7 +9,6 @@ import {
 } from 'electron';
 import log from 'electron-log';
 import electronUpdater from 'electron-updater';
-import getPort, { portNumbers } from 'get-port';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,9 +17,11 @@ import {
   createDesktopHealthUrl,
   createDesktopServerUrl,
   isFatalServerExit,
+  resolveDesktopServerPort,
   resolveDesktopServerWorkingDir,
   waitForServerReady,
 } from './runtime.js';
+import { getDesktopRuntimeIconPath, getDesktopTrayIconPath } from './iconAssets.js';
 
 const { autoUpdater } = electronUpdater;
 
@@ -51,7 +52,7 @@ function getServerEntryPath() {
 }
 
 function getTrayIconPath() {
-  return join(app.getAppPath(), 'dist', 'web', 'logo.png');
+  return getDesktopTrayIconPath(app.getAppPath(), process.platform);
 }
 
 function getWindowIconPath() {
@@ -66,12 +67,6 @@ function resolveFrontendUrl() {
 
 function resolveExternalServerUrl() {
   return (process.env.METAPI_DESKTOP_EXTERNAL_SERVER_URL || '').trim();
-}
-
-async function resolveServerPort() {
-  const forcedPort = Number.parseInt(process.env.METAPI_DESKTOP_SERVER_PORT || '', 10);
-  if (Number.isFinite(forcedPort) && forcedPort > 0) return forcedPort;
-  return getPort({ port: portNumbers(4310, 4399) });
 }
 
 function showMainWindow() {
@@ -126,7 +121,15 @@ function buildTrayMenu() {
 
 function setupTray() {
   if (tray) return;
-  const trayImage = nativeImage.createFromPath(getTrayIconPath());
+  let trayImage = nativeImage.createFromPath(getTrayIconPath());
+  if (process.platform === 'darwin' && !trayImage.isEmpty()) {
+    trayImage = trayImage.resize({
+      width: 18,
+      height: 18,
+      quality: 'best',
+    });
+    trayImage.setTemplateImage(true);
+  }
   tray = new Tray(trayImage);
   tray.setToolTip('Metapi');
   tray.setContextMenu(buildTrayMenu());
@@ -185,7 +188,7 @@ async function waitForManagedServerReady(url: string) {
 async function startManagedBackend() {
   ensureDesktopDirs();
   const serverEntryPath = getServerEntryPath();
-  const port = await resolveServerPort();
+  const port = resolveDesktopServerPort(process.env);
   serverUrl = createDesktopServerUrl(port);
 
   const env = buildDesktopServerEnv({

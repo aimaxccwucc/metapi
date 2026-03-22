@@ -7,12 +7,16 @@ import { join } from 'node:path';
 type DbModule = typeof import('../../db/index.js');
 type ProxyRouterModule = typeof import('./router.js');
 type TokenRouterModule = typeof import('../../services/tokenRouter.js');
+type TokensRoutesModule = typeof import('../api/tokens.js');
+type ConfigModule = typeof import('../../config.js');
 
 describe('/v1/models route', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let proxyRoutes: ProxyRouterModule['proxyRoutes'];
+  let tokensRoutes: TokensRoutesModule['tokensRoutes'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
+  let config: ConfigModule['config'];
   let app: FastifyInstance;
   let dataDir = '';
 
@@ -24,13 +28,19 @@ describe('/v1/models route', () => {
     const dbModule = await import('../../db/index.js');
     const proxyRouterModule = await import('./router.js');
     const tokenRouterModule = await import('../../services/tokenRouter.js');
+    const tokensRoutesModule = await import('../api/tokens.js');
+    const configModule = await import('../../config.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
     proxyRoutes = proxyRouterModule.proxyRoutes;
+    tokensRoutes = tokensRoutesModule.tokensRoutes;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
+    config = configModule.config;
+    config.proxyToken = 'sk-global-proxy-token';
 
     app = Fastify();
+    await app.register(tokensRoutes);
     await app.register(proxyRoutes);
   });
 
@@ -103,6 +113,7 @@ describe('/v1/models route', () => {
       name: 'managed-key',
       key: 'sk-managed-models',
       enabled: true,
+      supportedModels: JSON.stringify(['routable-model']),
     }).run();
 
     const response = await app.inject({
@@ -122,6 +133,64 @@ describe('/v1/models route', () => {
     const ids = body.data.map((item) => item.id);
     expect(ids).toContain('routable-model');
     expect(ids).not.toContain('orphan-model');
+  });
+
+  it('keeps global proxy token unrestricted when no managed key matches', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'global-site',
+      url: 'https://global.example.com',
+      platform: 'openai',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'global-access-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'global-api-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'global-routable-model',
+      available: true,
+    }).run();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'global-routable-model',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'global-routable-model',
+      enabled: true,
+    }).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        authorization: 'Bearer sk-global-proxy-token',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      object: 'list';
+      data: Array<{ id: string }>;
+    };
+
+    expect(body.data.map((item) => item.id)).toContain('global-routable-model');
   });
 
   it('returns only whitelist models for managed key with supportedModels policy', async () => {
@@ -285,6 +354,158 @@ describe('/v1/models route', () => {
     expect(ids).not.toContain('claude-sonnet-4-5');
   });
 
+  it('returns no models for managed key with empty model and group selections', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'deny-all-site',
+      url: 'https://deny-all.example.com',
+      platform: 'openai',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'deny-all-access-token',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: account.id,
+        modelName: 'gpt-4o-mini',
+        available: true,
+      },
+      {
+        accountId: account.id,
+        modelName: 'claude-opus-4-6',
+        available: true,
+      },
+    ]).run();
+
+    await db.insert(schema.downstreamApiKeys).values({
+      name: 'managed-key-deny-all',
+      key: 'sk-managed-deny-all',
+      enabled: true,
+      supportedModels: JSON.stringify([]),
+      allowedRouteIds: JSON.stringify([]),
+    }).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        authorization: 'Bearer sk-managed-deny-all',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      object: 'list';
+      data: Array<{ id: string }>;
+    };
+
+    expect(body.data).toEqual([]);
+  });
+
+  it('returns only explicit-group public name while hiding source exact routes', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'explicit-group-site',
+      url: 'https://explicit-group.example.com',
+      platform: 'openai',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'explicit-group-access-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'explicit-group-api-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: account.id,
+        modelName: 'claude-opus-4-5',
+        available: true,
+      },
+      {
+        accountId: account.id,
+        modelName: 'claude-sonnet-4-5',
+        available: true,
+      },
+    ]).run();
+
+    const sourceRouteA = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-opus-4-5',
+      enabled: true,
+    }).returning().get();
+    const sourceRouteB = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-sonnet-4-5',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values([
+      {
+        routeId: sourceRouteA.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: 'claude-opus-4-5',
+        enabled: true,
+      },
+      {
+        routeId: sourceRouteB.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: 'claude-sonnet-4-5',
+        enabled: true,
+      },
+    ]).run();
+
+    const groupResponse = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        routeMode: 'explicit_group',
+        displayName: 'claude-opus-4-6',
+        sourceRouteIds: [sourceRouteA.id, sourceRouteB.id],
+      },
+    });
+    expect(groupResponse.statusCode).toBe(200);
+    const groupId = (groupResponse.json() as { id: number }).id;
+
+    await db.insert(schema.downstreamApiKeys).values({
+      name: 'managed-explicit-group-key',
+      key: 'sk-managed-explicit-group',
+      enabled: true,
+      allowedRouteIds: JSON.stringify([groupId]),
+    }).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        authorization: 'Bearer sk-managed-explicit-group',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      object: 'list';
+      data: Array<{ id: string }>;
+    };
+
+    const ids = body.data.map((item) => item.id);
+    expect(ids).toContain('claude-opus-4-6');
+    expect(ids).not.toContain('claude-opus-4-5');
+    expect(ids).not.toContain('claude-sonnet-4-5');
+  });
+
   it('filters search pseudo models out of /v1/models', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'search-site',
@@ -356,6 +577,7 @@ describe('/v1/models route', () => {
       name: 'search-key',
       key: 'sk-search-key',
       enabled: true,
+      supportedModels: JSON.stringify(['gpt-4.1']),
     }).run();
 
     const response = await app.inject({

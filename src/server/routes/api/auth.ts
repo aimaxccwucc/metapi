@@ -5,7 +5,11 @@ import { eq } from 'drizzle-orm';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 
-const limitAdminTokenChange = createRateLimitGuard({ bucket: 'auth-change', max: 3, windowMs: 60_000 });
+const limitAdminTokenChange = createRateLimitGuard({
+  bucket: 'auth-change',
+  max: 3,
+  windowMs: 60_000,
+});
 
 export async function authRoutes(app: FastifyInstance) {
   // Change admin auth token (requires old token verification)
@@ -13,44 +17,44 @@ export async function authRoutes(app: FastifyInstance) {
     '/api/settings/auth/change',
     { preHandler: [limitAdminTokenChange] },
     async (request, reply) => {
-      const { oldToken, newToken } = request.body;
+    const { oldToken, newToken } = request.body;
 
-      if (!oldToken || !newToken) {
-        return reply.code(400).send({ success: false, message: '请填写所有字段' });
-      }
+    if (!oldToken || !newToken) {
+      return reply.code(400).send({ success: false, message: '请填写所有字段' });
+    }
 
-      if (newToken.length < 6) {
-        return reply.code(400).send({ success: false, message: '新 Token 至少 6 个字符' });
-      }
+    if (newToken.length < 6) {
+      return reply.code(400).send({ success: false, message: '新 Token 至少 6 个字符' });
+    }
 
-      if (oldToken !== config.authToken) {
-        return reply.code(403).send({ success: false, message: '旧 Token 验证失败' });
-      }
+    if (oldToken !== config.authToken) {
+      return reply.code(403).send({ success: false, message: '旧 Token 验证失败' });
+    }
 
-      // Save to settings table
-      const existing = await db.select().from(schema.settings).where(eq(schema.settings.key, 'auth_token')).get();
-      if (existing) {
-        await db.update(schema.settings).set({ value: JSON.stringify(newToken) }).where(eq(schema.settings.key, 'auth_token')).run();
-      } else {
-        await db.insert(schema.settings).values({ key: 'auth_token', value: JSON.stringify(newToken) }).run();
-      }
+    // Save to settings table
+    const existing = await db.select().from(schema.settings).where(eq(schema.settings.key, 'auth_token')).get();
+    if (existing) {
+      await db.update(schema.settings).set({ value: JSON.stringify(newToken) }).where(eq(schema.settings.key, 'auth_token')).run();
+    } else {
+      await db.insert(schema.settings).values({ key: 'auth_token', value: JSON.stringify(newToken) }).run();
+    }
 
-      // Update runtime config
-      config.authToken = newToken;
+    // Update runtime config
+    config.authToken = newToken;
 
-      try {
-        const createdAt = formatUtcSqlDateTime(new Date());
-        await db.insert(schema.events).values({
-          type: 'token',
-          title: '管理员登录令牌已更新',
-          message: '管理员登录 Token 已被修改，请使用新 Token 登录。',
-          level: 'warning',
-          relatedType: 'settings',
-          createdAt,
-        }).run();
-      } catch {}
+    try {
+      const createdAt = formatUtcSqlDateTime(new Date());
+      await db.insert(schema.events).values({
+        type: 'token',
+        title: '管理员登录令牌已更新',
+        message: '管理员登录 Token 已被修改，请使用新 Token 登录。',
+        level: 'warning',
+        relatedType: 'settings',
+        createdAt,
+      }).run();
+    } catch {}
 
-      return { success: true, message: 'Token 已更新' };
+    return { success: true, message: 'Token 已更新' };
     },
   );
 

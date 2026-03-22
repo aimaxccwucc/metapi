@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { SchemaContract } from './schemaContract.js';
+import { SHARED_INDEX_COMPATIBILITY_SPECS } from './sharedIndexSchemaCompatibility.js';
 
 const dbDir = dirname(fileURLToPath(import.meta.url));
 const generatedDir = resolve(dbDir, 'generated');
@@ -62,5 +63,40 @@ describe('database schema parity', () => {
 
     expect(unknownTables).toEqual([]);
     expect(unknownIndexes).toEqual([]);
+  });
+
+  it('does not duplicate contract-defined indexes inside shared index compatibility specs', () => {
+    const contract = JSON.parse(readFileSync(schemaContractPath, 'utf8')) as SchemaContract;
+    const contractIndexNames = new Set([
+      ...contract.indexes.map((index) => index.name),
+      ...contract.uniques.map((unique) => unique.name),
+    ]);
+
+    const duplicatedSpecs = SHARED_INDEX_COMPATIBILITY_SPECS
+      .map((spec) => spec.indexName)
+      .filter((indexName) => contractIndexNames.has(indexName));
+
+    expect(duplicatedSpecs).toEqual([]);
+  });
+
+  it('keeps proxy_logs downstream api key schema in the generated contract artifacts', () => {
+    const contract = JSON.parse(readFileSync(schemaContractPath, 'utf8')) as SchemaContract;
+    const mysqlBootstrap = readFileSync(resolve(generatedDir, 'mysql.bootstrap.sql'), 'utf8');
+    const postgresBootstrap = readFileSync(resolve(generatedDir, 'postgres.bootstrap.sql'), 'utf8');
+
+    expect(contract.tables.proxy_logs?.columns.downstream_api_key_id?.logicalType).toBe('integer');
+    expect(contract.tables.proxy_logs?.columns.client_app_id?.logicalType).toBe('text');
+    expect(contract.tables.proxy_logs?.columns.client_family?.logicalType).toBe('text');
+    expect(contract.indexes.some((index) => index.name === 'proxy_logs_downstream_api_key_created_at_idx')).toBe(true);
+    expect(contract.indexes.some((index) => index.name === 'proxy_logs_client_app_id_created_at_idx')).toBe(true);
+    expect(contract.indexes.some((index) => index.name === 'proxy_logs_client_family_created_at_idx')).toBe(true);
+    expect(mysqlBootstrap).toContain('`downstream_api_key_id`');
+    expect(mysqlBootstrap).toContain('`proxy_logs_downstream_api_key_created_at_idx`');
+    expect(mysqlBootstrap).toContain('`client_app_id`');
+    expect(mysqlBootstrap).toContain('`proxy_logs_client_app_id_created_at_idx`');
+    expect(postgresBootstrap).toContain('"downstream_api_key_id"');
+    expect(postgresBootstrap).toContain('"proxy_logs_downstream_api_key_created_at_idx"');
+    expect(postgresBootstrap).toContain('"client_app_id"');
+    expect(postgresBootstrap).toContain('"proxy_logs_client_app_id_created_at_idx"');
   });
 });

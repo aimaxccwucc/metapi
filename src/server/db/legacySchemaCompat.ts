@@ -3,10 +3,6 @@ import {
   type AccountTokenSchemaInspector,
 } from './accountTokenSchemaCompatibility.js';
 import {
-  ensureModelAvailabilitySchemaCompatibility,
-  type ModelAvailabilitySchemaInspector,
-} from './modelAvailabilitySchemaCompatibility.js';
-import {
   ensureProxyFileSchemaCompatibility,
   type ProxyFileSchemaInspector,
 } from './proxyFileSchemaCompatibility.js';
@@ -31,12 +27,12 @@ export interface LegacySchemaCompatInspector extends
   RouteGroupingSchemaInspector,
   ProxyFileSchemaInspector,
   AccountTokenSchemaInspector,
-  ModelAvailabilitySchemaInspector,
   SharedIndexSchemaInspector {}
 
 const LEGACY_COMPAT_TABLES = new Set([
   'account_tokens',
   'token_model_availability',
+  'route_group_sources',
   'proxy_video_tasks',
   'proxy_files',
   'downstream_api_keys',
@@ -50,10 +46,14 @@ const LEGACY_COMPAT_COLUMNS = new Set([
   'sites.custom_headers',
   'sites.external_checkin_url',
   'sites.global_weight',
+  'sites.health_status',
+  'sites.health_reason',
+  'sites.health_checked_at',
   'account_tokens.token_group',
-  'model_availability.is_manual',
+  'account_tokens.value_status',
   'token_routes.display_name',
   'token_routes.display_icon',
+  'token_routes.route_mode',
   'token_routes.decision_snapshot',
   'token_routes.decision_refreshed_at',
   'token_routes.routing_strategy',
@@ -66,7 +66,14 @@ const LEGACY_COMPAT_COLUMNS = new Set([
   'proxy_video_tasks.upstream_response_meta',
   'proxy_video_tasks.last_upstream_status',
   'proxy_video_tasks.last_polled_at',
+  'downstream_api_keys.group_name',
+  'downstream_api_keys.tags',
   'proxy_logs.billing_details',
+  'proxy_logs.client_family',
+  'proxy_logs.client_app_id',
+  'proxy_logs.client_app_name',
+  'proxy_logs.client_confidence',
+  'proxy_logs.downstream_api_key_id',
 ]);
 
 const LEGACY_COMPAT_INDEXES = new Set([
@@ -81,11 +88,13 @@ const LEGACY_COMPAT_INDEXES = new Set([
   'downstream_api_keys_name_idx',
   'downstream_api_keys_enabled_idx',
   'downstream_api_keys_expires_at_idx',
+  'proxy_logs_client_app_id_created_at_idx',
+  'proxy_logs_client_family_created_at_idx',
+  'proxy_logs_downstream_api_key_created_at_idx',
+  'sites_health_status_idx',
+  'route_group_sources_group_source_unique',
+  'route_group_sources_source_route_id_idx',
   ...SHARED_INDEX_COMPATIBILITY_SPECS.map((spec) => spec.indexName),
-]);
-
-const LEGACY_COMPAT_DROP_INDEXES = new Set([
-  'proxy_files_owner_lookup_idx',
 ]);
 
 function normalizeSqlText(sqlText: string): string {
@@ -99,9 +108,9 @@ const LEGACY_COMPAT_UPDATES = new Set([
   'UPDATE sites SET global_weight = 1 WHERE global_weight IS NULL OR global_weight <= 0;',
   'UPDATE `sites` SET `global_weight` = 1 WHERE `global_weight` IS NULL OR `global_weight` <= 0',
   'UPDATE "sites" SET "global_weight" = 1 WHERE "global_weight" IS NULL OR "global_weight" <= 0',
-  'UPDATE model_availability SET is_manual = 0 WHERE is_manual IS NULL;',
-  'UPDATE `model_availability` SET `is_manual` = FALSE WHERE `is_manual` IS NULL',
-  'UPDATE "model_availability" SET "is_manual" = FALSE WHERE "is_manual" IS NULL',
+  "UPDATE sites SET health_status = 'unknown' WHERE health_status IS NULL OR trim(health_status) = '';",
+  "UPDATE `sites` SET `health_status` = 'unknown' WHERE `health_status` IS NULL OR TRIM(`health_status`) = ''",
+  "UPDATE \"sites\" SET \"health_status\" = 'unknown' WHERE \"health_status\" IS NULL OR btrim(\"health_status\") = ''",
 ].map((sqlText) => normalizeSqlText(sqlText)));
 
 export function classifyLegacyCompatMutation(sqlText: string): LegacySchemaCompatClassification {
@@ -129,13 +138,6 @@ export function classifyLegacyCompatMutation(sqlText: string): LegacySchemaCompa
   );
   if (createIndexMatch) {
     return LEGACY_COMPAT_INDEXES.has(createIndexMatch[1]) ? 'legacy' : 'forbidden';
-  }
-
-  const dropIndexMatch = normalized.match(
-    /^drop index [`"]?([a-z0-9_]+)[`"]? on [`"]?([a-z0-9_]+)[`"]?/i,
-  );
-  if (dropIndexMatch) {
-    return LEGACY_COMPAT_DROP_INDEXES.has(dropIndexMatch[1]) ? 'legacy' : 'forbidden';
   }
 
   return 'forbidden';
@@ -178,6 +180,5 @@ export async function ensureLegacySchemaCompatibility(inspector: LegacySchemaCom
   await ensureRouteGroupingSchemaCompatibility(wrappedInspector);
   await ensureProxyFileSchemaCompatibility(wrappedInspector);
   await ensureAccountTokenSchemaCompatibility(wrappedInspector);
-  await ensureModelAvailabilitySchemaCompatibility(wrappedInspector);
   await ensureSharedIndexSchemaCompatibility(wrappedInspector);
 }

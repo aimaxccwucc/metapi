@@ -1,5 +1,4 @@
 ﻿import { FastifyInstance } from 'fastify';
-import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import { db, schema } from '../../db/index.js';
 import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
 import {
@@ -7,16 +6,8 @@ import {
   refreshModelsAndRebuildRoutes,
   rebuildTokenRoutesFromAvailability,
 } from '../../services/modelService.js';
-import { getAdapter } from '../../services/platforms/index.js';
-import { getPreferredAccountToken, syncTokensFromUpstream } from '../../services/accountTokenService.js';
-import { resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { buildModelAnalysis } from '../../services/modelAnalysisService.js';
-import {
-  fallbackTokenCost,
-  fetchModelPricingCatalog,
-  resolvePreferredTokenGroup,
-} from '../../services/modelPricingService.js';
-import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
+import { fallbackTokenCost, fetchModelPricingCatalog } from '../../services/modelPricingService.js';
 import { getUpstreamModelDescriptionsCached } from '../../services/upstreamModelDescriptionService.js';
 import { getRunningTaskByDedupeKey, startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { parseCheckinRewardAmount } from '../../services/checkinRewardParser.js';
@@ -26,15 +17,19 @@ import {
   parseProxyLogBillingDetails,
   withProxyLogSelectFields,
 } from '../../services/proxyLogStore.js';
-import { getCredentialModeFromExtraConfig } from '../../services/accountExtraConfig.js';
+import { parseProxyLogMessageMeta } from '../proxy/logPathMeta.js';
+import { requiresManagedAccountTokens } from '../../services/accountExtraConfig.js';
+import { ACCOUNT_TOKEN_VALUE_STATUS_READY } from '../../services/accountTokenService.js';
 import {
   formatLocalDateTime,
   formatUtcSqlDateTime,
   getLocalDayRangeUtc,
   getLocalRangeStartUtc,
   parseStoredUtcDateTime,
+  type StoredUtcDateTimeInput,
   toLocalDayKeyFromStoredUtc,
 } from '../../services/localTimeService.js';
+import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 
 function parseBooleanFlag(raw?: string): boolean {
   if (!raw) return false;
@@ -42,18 +37,13 @@ function parseBooleanFlag(raw?: string): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 }
 
-function isApiKeyConnection(account: { accessToken?: string | null; extraConfig?: string | null }): boolean {
-  const explicit = getCredentialModeFromExtraConfig(account.extraConfig);
-  if (explicit && explicit !== 'auto') return explicit === 'apikey';
-  return !(account.accessToken || '').trim();
-}
-
 const MODELS_MARKETPLACE_BASE_TTL_MS = 15_000;
 const MODELS_MARKETPLACE_PRICING_TTL_MS = 90_000;
-const MARKETPLACE_MODEL_TEST_TIMEOUT_MS = 15_000;
-const MARKETPLACE_AUTO_KEY_TIMEOUT_MS = 8_000;
-const MARKETPLACE_MODEL_PROBE_TIMEOUT_MS = 10_000;
-const MARKETPLACE_MODEL_TEST_KEY_SCAN_LIMIT = 8;
+const limitModelTokenCandidatesRead = createRateLimitGuard({
+  bucket: 'models-token-candidates-read',
+  max: 30,
+  windowMs: 60_000,
+});
 
 type ModelsMarketplaceCacheEntry = {
   expiresAt: number;
@@ -82,634 +72,6 @@ function writeModelsMarketplaceCache(includePricing: boolean, models: any[]): vo
   });
 }
 
-async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      fn(),
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-type MarketplaceProbeResult = {
-  available: boolean | null;
-  reason: string;
-  checkedUrl: string | null;
-  statusCode: number | null;
-};
-
-type MarketplaceProbeKind = 'text' | 'embeddings' | 'image' | 'video';
-
-type MarketplaceProbeAttempt = {
-  kind: MarketplaceProbeKind;
-  label: string;
-  responseType:
-    | 'text-openai'
-    | 'text-gemini'
-    | 'embeddings-openai'
-    | 'embeddings-gemini'
-    | 'image-openai'
-    | 'video-openai';
-  url: string;
-  headers: Record<string, string>;
-  body: Record<string, unknown>;
-};
-
-const EMBEDDING_MODEL_PATTERNS = [
-  /(?:^|[-_/])text-embedding/i,
-  /embedding/i,
-  /(?:^|[-_/])bge(?:$|[-_/])/i,
-  /(?:^|[-_/])e5(?:$|[-_/])/i,
-  /(?:^|[-_/])gte(?:$|[-_/])/i,
-  /voyage/i,
-  /jina[-_/]?embeddings?/i,
-];
-
-const IMAGE_MODEL_PATTERNS = [
-  /imagen/i,
-  /image-preview/i,
-  /gpt-4o-image/i,
-  /gpt-image/i,
-  /flux/i,
-  /midjourney/i,
-  /qwen[-/.]?image/i,
-  /z-image/i,
-  /imagine/i,
-  /cogview/i,
-];
-
-const IMAGE_NEGATIVE_PATTERNS = [
-  /video/i,
-  /veo/i,
-  /sora/i,
-  /cogvideo/i,
-];
-
-const VIDEO_MODEL_PATTERNS = [
-  /video/i,
-  /veo/i,
-  /sora/i,
-  /kling/i,
-  /wan/i,
-  /runway/i,
-  /cogvideo/i,
-];
-
-const VIDEO_NEGATIVE_PATTERNS = [
-  /image/i,
-  /imagen/i,
-  /flux/i,
-  /midjourney/i,
-  /cogview/i,
-];
-
-function summarizeProbeError(rawText: string): string {
-  const text = String(rawText || '').trim();
-  if (!text) return '';
-  try {
-    const parsed = JSON.parse(text) as Record<string, any>;
-    const nestedMessage = parsed?.error?.message || parsed?.message || parsed?.error || parsed?.detail;
-    if (typeof nestedMessage === 'string' && nestedMessage.trim()) return nestedMessage.trim();
-  } catch {}
-  return text.slice(0, 320);
-}
-
-function parseProbeJson(rawText: string): any | null {
-  const text = String(rawText || '').trim();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function extractProbeErrorMessage(payload: any): string {
-  if (!payload || typeof payload !== 'object') return '';
-  const errorValue = payload.error;
-  if (typeof errorValue === 'string' && errorValue.trim()) {
-    return errorValue.trim().slice(0, 320);
-  }
-  if (errorValue && typeof errorValue === 'object') {
-    const nested = errorValue.message || errorValue.msg || errorValue.detail || errorValue.error;
-    if (typeof nested === 'string' && nested.trim()) {
-      return nested.trim().slice(0, 320);
-    }
-  }
-  const topLevel = payload.message || payload.detail;
-  if (typeof topLevel === 'string' && topLevel.trim()) {
-    return topLevel.trim().slice(0, 320);
-  }
-  return '';
-}
-
-function extractProbeModelName(payload: any): string | null {
-  if (!payload || typeof payload !== 'object') return null;
-  const candidates = [
-    payload.model,
-    payload.response?.model,
-    payload.data?.model,
-    payload.meta?.model,
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate !== 'string') continue;
-    const normalized = candidate.trim();
-    if (normalized) return normalized;
-  }
-  return null;
-}
-
-function classifyProbeFailureMessage(message: string): 'model_unavailable' | 'credential' | 'inconclusive' {
-  const text = String(message || '').toLowerCase();
-  if (!text) return 'inconclusive';
-  if (
-    /model.*(not found|does not exist|unsupported|invalid)/i.test(text)
-    || /unknown model|no such model|unsupported model/i.test(text)
-    || /模型.*(不存在|未找到|不支持|不可用)/i.test(text)
-    || /当前分组不支持|未开通.*模型|not available for your/i.test(text)
-    || /no available channel|under group|group .*distributor/i.test(text)
-  ) {
-    return 'model_unavailable';
-  }
-  if (
-    /unauthorized|forbidden|invalid api key|authentication|auth|token|apikey/i.test(text)
-    || /未授权|鉴权|权限|密钥|key 无效|token 无效/i.test(text)
-  ) {
-    return 'credential';
-  }
-  return 'inconclusive';
-}
-
-function normalizeProbeBaseUrl(baseUrl: string): string {
-  return String(baseUrl || '').trim().replace(/\/+$/, '');
-}
-
-function isVersionedBase(baseUrl: string): boolean {
-  return /\/v\d+(?:beta)?(?:\.\d+)?(?:\/|$)/i.test(baseUrl);
-}
-
-function isOpenAiCompatGeminiBase(baseUrl: string): boolean {
-  return /\/openai(?:\/|$)/i.test(baseUrl);
-}
-
-function buildOpenAiCompatibleUrl(baseUrl: string, path: string): string {
-  const normalized = normalizeProbeBaseUrl(baseUrl);
-  if (
-    /(?:\/v\d+(?:beta)?(?:\.\d+)?(?:\/openai)?)$/i.test(normalized)
-    || isOpenAiCompatGeminiBase(normalized)
-  ) {
-    return `${normalized}/${path}`;
-  }
-  return `${normalized}/v1/${path}`;
-}
-
-function buildAnthropicUrl(baseUrl: string, path: string): string {
-  const normalized = normalizeProbeBaseUrl(baseUrl);
-  if (/(?:\/v\d+(?:beta)?(?:\.\d+)?)$/i.test(normalized)) {
-    return `${normalized}/${path}`;
-  }
-  return `${normalized}/v1/${path}`;
-}
-
-function buildGeminiNativeUrl(
-  baseUrl: string,
-  modelName: string,
-  action: 'generateContent' | 'embedContent',
-  credential: string,
-): string {
-  const normalized = normalizeProbeBaseUrl(baseUrl);
-  const versionedBase = isVersionedBase(normalized) ? normalized : `${normalized}/v1beta`;
-  return `${versionedBase}/models/${encodeURIComponent(modelName)}:${action}?key=${encodeURIComponent(credential)}`;
-}
-
-function normalizeProbeModelCandidates(modelName: string): string[] {
-  const normalized = String(modelName || '').trim().toLowerCase();
-  if (!normalized) return [];
-  const slashIndex = normalized.lastIndexOf('/');
-  if (slashIndex >= 0 && slashIndex < normalized.length - 1) {
-    return Array.from(new Set([normalized, normalized.slice(slashIndex + 1)]));
-  }
-  return [normalized];
-}
-
-function matchesProbePattern(modelName: string, patterns: RegExp[]): boolean {
-  return normalizeProbeModelCandidates(modelName)
-    .some((candidate) => patterns.some((pattern) => pattern.test(candidate)));
-}
-
-function inferProbeKindFromModelName(modelName: string): MarketplaceProbeKind | null {
-  if (!modelName.trim()) return null;
-
-  const isVideo = matchesProbePattern(modelName, VIDEO_MODEL_PATTERNS)
-    && !matchesProbePattern(modelName, VIDEO_NEGATIVE_PATTERNS);
-  if (isVideo) return 'video';
-
-  const isImage = matchesProbePattern(modelName, IMAGE_MODEL_PATTERNS)
-    && !matchesProbePattern(modelName, IMAGE_NEGATIVE_PATTERNS);
-  if (isImage) return 'image';
-
-  if (matchesProbePattern(modelName, EMBEDDING_MODEL_PATTERNS)) return 'embeddings';
-  return null;
-}
-
-function inferProbeKindFromEndpointTypes(endpointTypes: string[]): MarketplaceProbeKind | null {
-  const normalized = endpointTypes
-    .map((item) => String(item || '').trim().toLowerCase())
-    .filter(Boolean);
-
-  if (normalized.some((item) => item.includes('/v1/embeddings') || item === 'embeddings')) {
-    return 'embeddings';
-  }
-  if (normalized.some((item) => item.includes('/v1/videos') || item === 'videos' || item === 'video')) {
-    return 'video';
-  }
-  if (
-    normalized.some((item) =>
-      item.includes('/v1/images')
-      || item === 'images'
-      || item === 'image_generation'
-      || item === 'image-generation')
-  ) {
-    return 'image';
-  }
-  return null;
-}
-
-function getCachedMarketplaceEndpointTypes(modelName: string): string[] {
-  const normalized = modelName.trim().toLowerCase();
-  if (!normalized) return [];
-
-  const pricingCache = readModelsMarketplaceCache(true);
-  const matchedModel = Array.isArray(pricingCache)
-    ? pricingCache.find((item) => String(item?.name || '').trim().toLowerCase() === normalized)
-    : null;
-
-  if (matchedModel && Array.isArray((matchedModel as any).supportedEndpointTypes)) {
-    return (matchedModel as any).supportedEndpointTypes
-      .map((item: unknown) => String(item || '').trim())
-      .filter(Boolean);
-  }
-
-  return [];
-}
-
-function resolveMarketplaceProbeKind(modelName: string): MarketplaceProbeKind {
-  const heuristicKind = inferProbeKindFromModelName(modelName);
-  if (heuristicKind) return heuristicKind;
-
-  const metadataKind = inferProbeKindFromEndpointTypes(getCachedMarketplaceEndpointTypes(modelName));
-  if (metadataKind) return metadataKind;
-
-  return 'text';
-}
-
-function buildTextProbeEndpoints(platform: string): Array<'chat' | 'responses' | 'messages'> {
-  const normalized = String(platform || '').trim().toLowerCase();
-  if (normalized === 'claude') return ['messages', 'chat', 'responses'];
-  return ['chat', 'responses', 'messages'];
-}
-
-function buildTextProbeRequest(baseUrl: string, platform: string, modelName: string, endpoint: 'chat' | 'responses' | 'messages') {
-  const normalizedBase = normalizeProbeBaseUrl(baseUrl);
-  if (endpoint === 'responses') {
-    return {
-      url: buildOpenAiCompatibleUrl(normalizedBase, 'responses'),
-      body: {
-        model: modelName,
-        input: 'ping',
-        max_output_tokens: 1,
-        temperature: 0,
-      },
-    };
-  }
-  if (endpoint === 'messages') {
-    return {
-      url: platform === 'claude'
-        ? buildAnthropicUrl(normalizedBase, 'messages')
-        : buildOpenAiCompatibleUrl(normalizedBase, 'messages'),
-      body: {
-        model: modelName,
-        max_tokens: 1,
-        messages: [{ role: 'user', content: 'ping' }],
-      },
-    };
-  }
-  return {
-    url: buildOpenAiCompatibleUrl(normalizedBase, 'chat/completions'),
-    body: {
-      model: modelName,
-      messages: [{ role: 'user', content: 'ping' }],
-      max_tokens: 1,
-      temperature: 0,
-      stream: false,
-    },
-  };
-}
-
-function buildProbeAttempts(input: {
-  baseUrl: string;
-  platform: string;
-  credential: string;
-  modelName: string;
-  kind: MarketplaceProbeKind;
-}): MarketplaceProbeAttempt[] {
-  const normalizedPlatform = String(input.platform || '').trim().toLowerCase();
-  const normalizedBase = normalizeProbeBaseUrl(input.baseUrl);
-
-  if (normalizedPlatform === 'gemini' && !isOpenAiCompatGeminiBase(normalizedBase)) {
-    if (input.kind === 'embeddings') {
-      return [{
-        kind: input.kind,
-        label: 'gemini.embedContent',
-        responseType: 'embeddings-gemini',
-        url: buildGeminiNativeUrl(normalizedBase, input.modelName, 'embedContent', input.credential),
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: {
-          model: `models/${input.modelName}`,
-          content: {
-            parts: [{ text: 'ping' }],
-          },
-        },
-      }];
-    }
-
-    return [{
-      kind: input.kind,
-      label: 'gemini.generateContent',
-      responseType: 'text-gemini',
-      url: buildGeminiNativeUrl(normalizedBase, input.modelName, 'generateContent', input.credential),
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: {
-        contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
-        generationConfig: {
-          maxOutputTokens: 1,
-          temperature: 0,
-        },
-      },
-    }];
-  }
-
-  if (input.kind === 'embeddings') {
-    return [{
-      kind: input.kind,
-      label: 'embeddings',
-      responseType: 'embeddings-openai',
-      url: buildOpenAiCompatibleUrl(normalizedBase, 'embeddings'),
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: `Bearer ${input.credential}`,
-      },
-      body: {
-        model: input.modelName,
-        input: 'ping',
-      },
-    }];
-  }
-
-  if (input.kind === 'image') {
-    return [{
-      kind: input.kind,
-      label: 'images',
-      responseType: 'image-openai',
-      url: buildOpenAiCompatibleUrl(normalizedBase, 'images/generations'),
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: `Bearer ${input.credential}`,
-      },
-      body: {
-        model: input.modelName,
-        prompt: 'ping',
-        n: 1,
-      },
-    }];
-  }
-
-  if (input.kind === 'video') {
-    return [{
-      kind: input.kind,
-      label: 'videos',
-      responseType: 'video-openai',
-      url: buildOpenAiCompatibleUrl(normalizedBase, 'videos'),
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: `Bearer ${input.credential}`,
-      },
-      body: {
-        model: input.modelName,
-        prompt: 'ping',
-      },
-    }];
-  }
-
-  return buildTextProbeEndpoints(input.platform).map((endpoint) => {
-    const probe = buildTextProbeRequest(normalizedBase, normalizedPlatform, input.modelName, endpoint);
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Accept: 'application/json,text/event-stream,text/plain,*/*',
-    };
-    if (endpoint === 'messages') {
-      headers['x-api-key'] = input.credential;
-      headers['anthropic-version'] = '2023-06-01';
-    } else {
-      headers.Authorization = `Bearer ${input.credential}`;
-    }
-
-    return {
-      kind: input.kind,
-      label: endpoint,
-      responseType: 'text-openai' as const,
-      url: probe.url,
-      headers,
-      body: probe.body,
-    };
-  });
-}
-
-function evaluateSuccessfulProbePayload(
-  attempt: MarketplaceProbeAttempt,
-  payload: any,
-  modelName: string,
-): { available: boolean | null; reason?: string } {
-  if (attempt.responseType === 'text-openai') {
-    const returnedModel = extractProbeModelName(payload);
-    if (!returnedModel) {
-      return { available: null, reason: 'missing model in successful probe response' };
-    }
-    if (returnedModel !== modelName) {
-      return {
-        available: false,
-        reason: `probe returned mismatched model via ${attempt.label}: expected ${modelName}, got ${returnedModel}`,
-      };
-    }
-    return { available: true, reason: `probe succeeded via ${attempt.label}` };
-  }
-
-  if (attempt.responseType === 'text-gemini') {
-    if (Array.isArray(payload?.candidates) && payload.candidates.length > 0) {
-      return { available: true, reason: `probe succeeded via ${attempt.label}` };
-    }
-    if (payload?.promptFeedback || payload?.usageMetadata) {
-      return { available: true, reason: `probe succeeded via ${attempt.label}` };
-    }
-    return { available: null, reason: 'missing candidates in successful Gemini probe response' };
-  }
-
-  if (attempt.responseType === 'embeddings-openai') {
-    const returnedModel = extractProbeModelName(payload);
-    if (returnedModel && returnedModel !== modelName) {
-      return {
-        available: false,
-        reason: `probe returned mismatched model via ${attempt.label}: expected ${modelName}, got ${returnedModel}`,
-      };
-    }
-    if (Array.isArray(payload?.data) && payload.data.length > 0) {
-      return { available: true, reason: `probe succeeded via ${attempt.label}` };
-    }
-    return { available: null, reason: 'missing embeddings data in successful probe response' };
-  }
-
-  if (attempt.responseType === 'embeddings-gemini') {
-    if (Array.isArray(payload?.embedding?.values) && payload.embedding.values.length > 0) {
-      return { available: true, reason: `probe succeeded via ${attempt.label}` };
-    }
-    return { available: null, reason: 'missing embedding values in successful Gemini probe response' };
-  }
-
-  if (attempt.responseType === 'image-openai') {
-    if (Array.isArray(payload?.data) && payload.data.length > 0) {
-      return { available: true, reason: `probe succeeded via ${attempt.label}` };
-    }
-    if ((typeof payload?.id === 'string' && payload.id.trim()) || typeof payload?.created === 'number') {
-      return { available: true, reason: `probe succeeded via ${attempt.label}` };
-    }
-    return { available: null, reason: 'missing generated image payload in successful probe response' };
-  }
-
-  if (
-    (typeof payload?.id === 'string' && payload.id.trim())
-    || (typeof payload?.status === 'string' && payload.status.trim())
-    || payload?.object === 'video'
-  ) {
-    return { available: true, reason: `probe succeeded via ${attempt.label}` };
-  }
-
-  return { available: null, reason: 'missing video task payload in successful probe response' };
-}
-
-async function probeModelAvailabilityViaRealtimeCall(input: {
-  baseUrl: string;
-  platform: string;
-  credential: string;
-  modelName: string;
-  kind: MarketplaceProbeKind;
-}): Promise<MarketplaceProbeResult> {
-  const { fetch } = await import('undici');
-  const attempts = buildProbeAttempts(input);
-  const attemptMessages: string[] = [];
-
-  for (const attempt of attempts) {
-    try {
-      const response = await withTimeout(
-        async () => {
-          return await fetch(
-            attempt.url,
-            await withSiteProxyRequestInit(attempt.url, {
-              method: 'POST',
-              headers: attempt.headers,
-              body: JSON.stringify(attempt.body),
-              signal: AbortSignal.timeout(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS),
-            }),
-          );
-        },
-        MARKETPLACE_MODEL_PROBE_TIMEOUT_MS + 500,
-        `model probe timeout (${Math.round(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS / 1000)}s)`,
-      );
-
-      if (response.ok) {
-        const responseText = await response.text();
-        const payload = parseProbeJson(responseText);
-        if (!payload || typeof payload !== 'object') {
-          attemptMessages.push(`${attempt.label}:${response.status} probe returned non-json success response`);
-          continue;
-        }
-
-        const embeddedError = extractProbeErrorMessage(payload);
-        if (embeddedError) {
-          const classification = classifyProbeFailureMessage(embeddedError);
-          if (classification === 'model_unavailable') {
-            return {
-              available: false,
-              reason: `probe rejected model via ${attempt.label}: ${embeddedError}`,
-              checkedUrl: attempt.url,
-              statusCode: response.status,
-            };
-          }
-          attemptMessages.push(`${attempt.label}:${response.status} ${embeddedError}`);
-          continue;
-        }
-
-        const evaluated = evaluateSuccessfulProbePayload(attempt, payload, input.modelName);
-        if (evaluated.available === false) {
-          return {
-            available: false,
-            reason: evaluated.reason || `probe rejected model via ${attempt.label}`,
-            checkedUrl: attempt.url,
-            statusCode: response.status,
-          };
-        }
-        if (evaluated.available === true) {
-          return {
-            available: true,
-            reason: `${evaluated.reason || `probe succeeded via ${attempt.label}`} (HTTP ${response.status})`,
-            checkedUrl: attempt.url,
-            statusCode: response.status,
-          };
-        }
-        attemptMessages.push(`${attempt.label}:${response.status} ${evaluated.reason || 'probe returned inconclusive success payload'}`);
-        continue;
-      }
-
-      const responseText = await response.text();
-      const summarized = summarizeProbeError(responseText) || `HTTP ${response.status}`;
-      const classification = classifyProbeFailureMessage(summarized);
-      if (classification === 'model_unavailable') {
-        return {
-          available: false,
-          reason: `probe rejected model via ${attempt.label}: ${summarized}`,
-          checkedUrl: attempt.url,
-          statusCode: response.status,
-        };
-      }
-
-      attemptMessages.push(`${attempt.label}:${response.status} ${summarized}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error || 'unknown error');
-      attemptMessages.push(`${attempt.label}: ${message}`);
-    }
-  }
-
-  return {
-    available: null,
-    reason: attemptMessages[0] || 'probe inconclusive',
-    checkedUrl: null,
-    statusCode: null,
-  };
-}
-
 function proxyCostSqlExpression() {
   return sql<number>`
     coalesce(
@@ -724,6 +86,22 @@ function proxyCostSqlExpression() {
 }
 
 type ProxyLogStatusFilter = 'all' | 'success' | 'failed';
+type ProxyLogClientFilter = {
+  kind: 'app' | 'family';
+  value: string;
+} | null;
+
+type ProxyLogClientOption = {
+  value: string;
+  label: string;
+};
+
+const PROXY_LOG_CLIENT_FAMILY_LABELS: Record<string, string> = {
+  codex: 'Codex',
+  claude_code: 'Claude Code',
+  gemini_cli: 'Gemini CLI',
+  generic: '通用',
+};
 
 function normalizeProxyLogPageSize(raw?: string): number {
   const parsed = Number.parseInt(raw || '50', 10);
@@ -754,6 +132,20 @@ function normalizeProxyLogSiteId(raw?: string): number | null {
   return parsed;
 }
 
+function normalizeProxyLogClientFilter(raw?: string): ProxyLogClientFilter {
+  const text = (raw || '').trim();
+  if (!text) return null;
+  const separatorIndex = text.indexOf(':');
+  if (separatorIndex <= 0) return null;
+  const kind = text.slice(0, separatorIndex).trim().toLowerCase();
+  const value = text.slice(separatorIndex + 1).trim().toLowerCase();
+  if (!value) return null;
+  if (kind === 'app' || kind === 'family') {
+    return { kind, value };
+  }
+  return null;
+}
+
 function normalizeProxyLogTimeBoundary(raw?: string): string | null {
   const text = (raw || '').trim();
   if (!text) return null;
@@ -762,12 +154,36 @@ function normalizeProxyLogTimeBoundary(raw?: string): string | null {
   return formatUtcSqlDateTime(parsed);
 }
 
+function parseDownstreamKeyTags(raw: unknown): string[] {
+  if (typeof raw !== 'string' || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const value of parsed) {
+      const text = String(value || '').trim();
+      if (!text) continue;
+      const dedupeKey = text.toLowerCase();
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      result.push(text);
+    }
+    return result;
+  } catch {
+    return [];
+  }
+}
+
 function buildProxyLogSearchCondition(search: string) {
   if (!search) return null;
   const likeTerm = `%${search}%`;
   return sql<boolean>`(
     lower(coalesce(${schema.proxyLogs.modelRequested}, '')) like ${likeTerm}
     or lower(coalesce(${schema.proxyLogs.modelActual}, '')) like ${likeTerm}
+    or lower(coalesce(${schema.downstreamApiKeys.name}, '')) like ${likeTerm}
+    or lower(coalesce(${schema.downstreamApiKeys.groupName}, '')) like ${likeTerm}
+    or lower(coalesce(${schema.downstreamApiKeys.tags}, '')) like ${likeTerm}
   )`;
 }
 
@@ -781,9 +197,18 @@ function buildProxyLogStatusCondition(status: ProxyLogStatusFilter) {
   return null;
 }
 
+function buildProxyLogClientCondition(client: ProxyLogClientFilter) {
+  if (!client) return null;
+  if (client.kind === 'app') {
+    return eq(schema.proxyLogs.clientAppId, client.value);
+  }
+  return eq(schema.proxyLogs.clientFamily, client.value);
+}
+
 function buildProxyLogWhereClause(params: {
   status?: ProxyLogStatusFilter;
   search?: string;
+  client?: ProxyLogClientFilter;
   siteId?: number | null;
   fromUtc?: string | null;
   toUtc?: string | null;
@@ -791,6 +216,7 @@ function buildProxyLogWhereClause(params: {
   const conditions = [
     params.status ? buildProxyLogStatusCondition(params.status) : null,
     params.search ? buildProxyLogSearchCondition(params.search) : null,
+    params.client ? buildProxyLogClientCondition(params.client) : null,
     params.siteId ? eq(schema.sites.id, params.siteId) : null,
     params.fromUtc ? gte(schema.proxyLogs.createdAt, params.fromUtc) : null,
     params.toUtc ? lt(schema.proxyLogs.createdAt, params.toUtc) : null,
@@ -802,6 +228,83 @@ function buildProxyLogWhereClause(params: {
 
 function toRoundedMicroNumber(value: number | null | undefined): number {
   return Math.round(Number(value || 0) * 1_000_000) / 1_000_000;
+}
+
+function normalizeNullableText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function normalizeClientConfidence(value: unknown): string | null {
+  const normalized = normalizeNullableText(value)?.toLowerCase() || null;
+  if (normalized === 'exact' || normalized === 'heuristic' || normalized === 'unknown') {
+    return normalized;
+  }
+  return null;
+}
+
+function displayProxyLogClientFamily(value: string | null): string | null {
+  if (!value) return null;
+  return PROXY_LOG_CLIENT_FAMILY_LABELS[value] || value;
+}
+
+function resolveProxyLogClientMeta(proxyLog: Record<string, unknown>) {
+  const clientFamily = normalizeNullableText(proxyLog.clientFamily)?.toLowerCase() || null;
+  const clientAppId = normalizeNullableText(proxyLog.clientAppId)?.toLowerCase() || null;
+  const clientAppName = normalizeNullableText(proxyLog.clientAppName) || null;
+  const clientConfidence = normalizeClientConfidence(proxyLog.clientConfidence);
+
+  if (clientFamily || clientAppId || clientAppName || clientConfidence) {
+    return {
+      clientFamily,
+      clientAppId,
+      clientAppName,
+      clientConfidence,
+    };
+  }
+
+  const legacyMeta = parseProxyLogMessageMeta(typeof proxyLog.errorMessage === 'string' ? proxyLog.errorMessage : '');
+  return {
+    clientFamily: normalizeNullableText(legacyMeta.clientKind)?.toLowerCase() || null,
+    clientAppId: null,
+    clientAppName: null,
+    clientConfidence: null,
+  };
+}
+
+function buildProxyLogClientOptions(rows: Array<{
+  clientFamily?: string | null;
+  clientAppId?: string | null;
+  clientAppName?: string | null;
+}>): ProxyLogClientOption[] {
+  const appOptions = new Map<string, ProxyLogClientOption>();
+  const familyOptions = new Map<string, ProxyLogClientOption>();
+
+  for (const row of rows) {
+    const clientAppId = normalizeNullableText(row.clientAppId)?.toLowerCase() || null;
+    const clientAppName = normalizeNullableText(row.clientAppName) || null;
+    const clientFamily = normalizeNullableText(row.clientFamily)?.toLowerCase() || null;
+
+    if (clientAppId && clientAppName && !appOptions.has(clientAppId)) {
+      appOptions.set(clientAppId, {
+        value: `app:${clientAppId}`,
+        label: `应用 · ${clientAppName}`,
+      });
+    }
+
+    if (clientFamily && clientFamily !== 'generic' && !familyOptions.has(clientFamily)) {
+      familyOptions.set(clientFamily, {
+        value: `family:${clientFamily}`,
+        label: `协议 · ${displayProxyLogClientFamily(clientFamily) || clientFamily}`,
+      });
+    }
+  }
+
+  return [
+    ...Array.from(appOptions.values()).sort((left, right) => left.label.localeCompare(right.label, 'zh-CN')),
+    ...Array.from(familyOptions.values()).sort((left, right) => left.label.localeCompare(right.label, 'zh-CN')),
+  ];
 }
 
 const SITE_AVAILABILITY_BUCKET_COUNT = 24;
@@ -818,7 +321,7 @@ type SiteAvailabilitySiteRow = {
 
 type SiteAvailabilityLogRow = {
   siteId: number | null;
-  createdAt: string | null;
+  createdAt: StoredUtcDateTimeInput;
   status: string | null;
   latencyMs: number | null;
 };
@@ -957,25 +460,35 @@ function mapProxyLogRow(
     proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
     accounts: { username?: string | null } | null;
     sites: { id?: number | null; name?: string | null; url?: string | null } | null;
+    downstream_api_keys: {
+      id?: number | null;
+      name?: string | null;
+      groupName?: string | null;
+      tags?: string | null;
+    } | null;
   },
   options?: { includeBillingDetails?: boolean },
 ) {
+  const clientMeta = resolveProxyLogClientMeta(row.proxy_logs);
   return {
     ...row.proxy_logs,
-    routeId: row.proxy_logs.routeId ?? null,
-    channelId: row.proxy_logs.channelId ?? null,
-    accountId: row.proxy_logs.accountId ?? null,
     ...(options?.includeBillingDetails
       ? { billingDetails: parseProxyLogBillingDetails(row.proxy_logs.billingDetails) }
       : {}),
+    clientFamily: clientMeta.clientFamily,
+    clientAppId: clientMeta.clientAppId,
+    clientAppName: clientMeta.clientAppName,
+    clientConfidence: clientMeta.clientConfidence,
     username: row.accounts?.username || null,
     siteId: row.sites?.id || null,
     siteName: row.sites?.name || null,
     siteUrl: row.sites?.url || null,
+    downstreamKeyId: row.downstream_api_keys?.id || null,
+    downstreamKeyName: row.downstream_api_keys?.name || null,
+    downstreamKeyGroupName: row.downstream_api_keys?.groupName || null,
+    downstreamKeyTags: parseDownstreamKeyTags(row.downstream_api_keys?.tags),
   };
 }
-
-const limitModelTokenCandidatesRead = createRateLimitGuard({ bucket: 'models-token-candidates-read', max: 30, windowMs: 60_000 });
 
 export async function statsRoutes(app: FastifyInstance) {
   const proxyLogBaseFields = getProxyLogBaseSelectFields();
@@ -1157,6 +670,7 @@ export async function statsRoutes(app: FastifyInstance) {
     offset?: string;
     status?: string;
     search?: string;
+    client?: string;
     siteId?: string;
     from?: string;
     to?: string;
@@ -1165,20 +679,29 @@ export async function statsRoutes(app: FastifyInstance) {
     const offset = normalizeProxyLogOffset(request.query.offset);
     const status = normalizeProxyLogStatusFilter(request.query.status);
     const search = normalizeProxyLogSearch(request.query.search);
+    const client = normalizeProxyLogClientFilter(request.query.client);
     const siteId = normalizeProxyLogSiteId(request.query.siteId);
     const fromUtc = normalizeProxyLogTimeBoundary(request.query.from);
     const toUtc = normalizeProxyLogTimeBoundary(request.query.to);
-    const listWhere = buildProxyLogWhereClause({ status, search, siteId, fromUtc, toUtc });
-    const summaryWhere = buildProxyLogWhereClause({ search, siteId, fromUtc, toUtc });
+    const listWhere = buildProxyLogWhereClause({ status, search, client, siteId, fromUtc, toUtc });
+    const summaryWhere = buildProxyLogWhereClause({ search, client, siteId, fromUtc, toUtc });
+    const clientOptionsWhere = buildProxyLogWhereClause({ status, search, siteId, fromUtc, toUtc });
 
     const listRows = await withProxyLogSelectFields(({ fields }) => {
       let query = db.select({
         proxy_logs: fields,
         accounts: schema.accounts,
         sites: schema.sites,
+        downstream_api_keys: {
+          id: schema.downstreamApiKeys.id,
+          name: schema.downstreamApiKeys.name,
+          groupName: schema.downstreamApiKeys.groupName,
+          tags: schema.downstreamApiKeys.tags,
+        },
       }).from(schema.proxyLogs)
         .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
-        .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id));
+        .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+        .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
 
       if (listWhere) {
         query = query.where(listWhere) as typeof query;
@@ -1193,17 +716,44 @@ export async function statsRoutes(app: FastifyInstance) {
       proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
       accounts: { username?: string | null } | null;
       sites: { id?: number | null; name?: string | null; url?: string | null } | null;
+      downstream_api_keys: { id?: number | null; name?: string | null; groupName?: string | null; tags?: string | null } | null;
     }>;
 
     let totalQuery = db.select({
       total: sql<number>`count(*)`,
     }).from(schema.proxyLogs)
       .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
-      .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id));
+      .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
     if (listWhere) {
       totalQuery = totalQuery.where(listWhere) as typeof totalQuery;
     }
     const totalRow = await totalQuery.get();
+
+    const clientOptionRows = await withProxyLogSelectFields(({ fields, includeClientFields }) => {
+      if (!includeClientFields) {
+        return Promise.resolve([]);
+      }
+
+      let query = db.select({
+        clientFamily: fields.clientFamily!,
+        clientAppId: fields.clientAppId!,
+        clientAppName: fields.clientAppName!,
+      }).from(schema.proxyLogs)
+        .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+        .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+        .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
+
+      if (clientOptionsWhere) {
+        query = query.where(clientOptionsWhere) as typeof query;
+      }
+
+      return query.all();
+    }, { includeBillingDetails: false, includeClientFields: true }) as Array<{
+      clientFamily?: string | null;
+      clientAppId?: string | null;
+      clientAppName?: string | null;
+    }>;
 
     let summaryQuery = db.select({
       totalCount: sql<number>`count(*)`,
@@ -1213,7 +763,8 @@ export async function statsRoutes(app: FastifyInstance) {
       totalTokensAll: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.totalTokens}, 0)), 0)`,
     }).from(schema.proxyLogs)
       .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
-      .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id));
+      .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
     if (summaryWhere) {
       summaryQuery = summaryQuery.where(summaryWhere) as typeof summaryQuery;
     }
@@ -1224,6 +775,7 @@ export async function statsRoutes(app: FastifyInstance) {
       total: Number(totalRow?.total || 0),
       page: Math.floor(offset / limit) + 1,
       pageSize: limit,
+      clientOptions: buildProxyLogClientOptions(clientOptionRows),
       summary: {
         totalCount: Number(summaryRow?.totalCount || 0),
         successCount: Number(summaryRow?.successCount || 0),
@@ -1245,15 +797,23 @@ export async function statsRoutes(app: FastifyInstance) {
         proxy_logs: fields,
         accounts: schema.accounts,
         sites: schema.sites,
+        downstream_api_keys: {
+          id: schema.downstreamApiKeys.id,
+          name: schema.downstreamApiKeys.name,
+          groupName: schema.downstreamApiKeys.groupName,
+          tags: schema.downstreamApiKeys.tags,
+        },
       }).from(schema.proxyLogs)
         .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
         .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+        .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id))
         .where(eq(schema.proxyLogs.id, id))
         .get()
     ), { includeBillingDetails: true }) as {
       proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
       accounts: { username?: string | null } | null;
       sites: { id?: number | null; name?: string | null; url?: string | null } | null;
+      downstream_api_keys: { id?: number | null; name?: string | null; groupName?: string | null; tags?: string | null } | null;
     } | undefined;
 
     if (!row) {
@@ -1359,6 +919,15 @@ export async function statsRoutes(app: FastifyInstance) {
       .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
       .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .where(
+        and(
+          eq(schema.tokenModelAvailability.available, true),
+          eq(schema.accountTokens.enabled, true),
+          eq(schema.accountTokens.valueStatus, ACCOUNT_TOKEN_VALUE_STATUS_READY),
+          eq(schema.accounts.status, 'active'),
+          eq(schema.sites.status, 'active'),
+        ),
+      )
       .all();
     const accountAvailability = await db.select().from(schema.modelAvailability)
       .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
@@ -1480,7 +1049,6 @@ export async function statsRoutes(app: FastifyInstance) {
       accountsById: Map<number, {
         id: number;
         site: string;
-        siteUrl: string | null;
         username: string | null;
         latency: number | null;
         unitCost: number | null;
@@ -1505,7 +1073,6 @@ export async function statsRoutes(app: FastifyInstance) {
         modelMap[m.modelName].accountsById.set(a.id, {
           id: a.id,
           site: s.name,
-          siteUrl: s.url,
           username: a.username,
           latency: m.latencyMs,
           unitCost: a.unitCost,
@@ -1540,7 +1107,6 @@ export async function statsRoutes(app: FastifyInstance) {
         modelMap[m.modelName].accountsById.set(a.id, {
           id: a.id,
           site: s.name,
-          siteUrl: s.url,
           username: a.username,
           latency: m.latencyMs,
           unitCost: a.unitCost,
@@ -1627,6 +1193,7 @@ export async function statsRoutes(app: FastifyInstance) {
         and(
           eq(schema.tokenModelAvailability.available, true),
           eq(schema.accountTokens.enabled, true),
+          eq(schema.accountTokens.valueStatus, ACCOUNT_TOKEN_VALUE_STATUS_READY),
           eq(schema.accounts.status, 'active'),
           eq(schema.sites.status, 'active'),
         ),
@@ -1639,6 +1206,7 @@ export async function statsRoutes(app: FastifyInstance) {
       siteId: schema.sites.id,
       siteName: schema.sites.name,
       accessToken: schema.accounts.accessToken,
+      apiToken: schema.accounts.apiToken,
       extraConfig: schema.accounts.extraConfig,
     })
       .from(schema.modelAvailability)
@@ -1717,7 +1285,7 @@ export async function statsRoutes(app: FastifyInstance) {
     }
 
     for (const row of availableModelRows) {
-      if (isApiKeyConnection(row)) continue;
+      if (!requiresManagedAccountTokens(row)) continue;
       const modelName = (row.modelName || '').trim();
       if (!modelName) continue;
       const coverageKey = `${row.accountId}::${modelName.toLowerCase()}`;
@@ -1734,7 +1302,7 @@ export async function statsRoutes(app: FastifyInstance) {
 
     const accountIdsForGroupHints = new Set(
       availableModelRows
-        .filter((row) => !isApiKeyConnection(row))
+        .filter((row) => requiresManagedAccountTokens(row))
         .map((row) => row.accountId),
     );
     const requiredGroupsByAccountModel = new Map<string, Map<string, string>>();
@@ -1796,7 +1364,7 @@ export async function statsRoutes(app: FastifyInstance) {
     }
 
     for (const row of availableModelRows) {
-      if (isApiKeyConnection(row)) continue;
+      if (!requiresManagedAccountTokens(row)) continue;
       const modelName = (row.modelName || '').trim();
       if (!modelName) continue;
       const accountModelKey = `${row.accountId}::${modelName.toLowerCase()}`;
@@ -1865,300 +1433,6 @@ export async function statsRoutes(app: FastifyInstance) {
     const refresh = await refreshModelsForAccount(accountId);
     const rebuild = rebuildTokenRoutesFromAvailability();
     return { success: true, refresh, rebuild };
-  });
-
-  app.post<{ Body?: { modelName?: string; accountId?: number; siteName?: string } }>('/api/models/marketplace/test', async (request, reply) => {
-    const modelName = String(request.body?.modelName || '').trim();
-    if (!modelName) {
-      return reply.code(400).send({ success: false, error: 'modelName is required' });
-    }
-
-    const accountIdInput = request.body?.accountId;
-    const accountId = Number.isFinite(accountIdInput) ? Number(accountIdInput) : null;
-    const siteName = String(request.body?.siteName || '').trim();
-
-    const modelRows = await db.select()
-      .from(schema.modelAvailability)
-      .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
-      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-      .where(
-        and(
-          eq(schema.modelAvailability.modelName, modelName),
-          eq(schema.modelAvailability.available, true),
-          eq(schema.accounts.status, 'active'),
-          eq(schema.sites.status, 'active'),
-        ),
-      )
-      .all();
-
-    const candidateRows = modelRows
-      .filter((row) => (accountId == null ? true : row.accounts.id === accountId))
-      .filter((row) => (siteName ? row.sites.name === siteName : true));
-
-    if (candidateRows.length === 0) {
-      return reply.code(404).send({
-        success: false,
-        error: 'no available account for this model',
-      });
-    }
-
-    const targetRow = candidateRows[0];
-    const account = targetRow.accounts;
-    const site = targetRow.sites;
-    const adapter = getAdapter(site.platform);
-    if (!adapter) {
-      return reply.code(400).send({
-        success: false,
-        error: `unsupported platform: ${site.platform}`,
-      });
-    }
-
-    const enabledTokens = await db.select()
-      .from(schema.accountTokens)
-      .where(and(eq(schema.accountTokens.accountId, account.id), eq(schema.accountTokens.enabled, true)))
-      .all();
-
-    let preferredToken = await getPreferredAccountToken(account.id);
-    const fallbackSiteApiKey = (site.apiKey || '').trim();
-    const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
-    const accountAccessToken = (account.accessToken || '').trim();
-    let autoKeyCreated = false;
-    let autoKeyName: string | null = null;
-    let autoKeyGroup: string | null = null;
-    let autoCreateAttempted = false;
-
-    const credentialCandidates: Array<{ credential: string; source: string }> = [];
-    const pushCredentialCandidate = (credentialRaw: string | null | undefined, source: string) => {
-      const credential = String(credentialRaw || '').trim();
-      if (!credential) return;
-      if (credentialCandidates.some((item) => item.credential === credential)) return;
-      credentialCandidates.push({ credential, source });
-    };
-
-    pushCredentialCandidate(preferredToken?.token, `default:${preferredToken?.name || preferredToken?.id || 'token'}`);
-    pushCredentialCandidate(account.apiToken, 'account_api_token');
-    for (const token of enabledTokens) {
-      pushCredentialCandidate(token.token, `token:${token.name || token.id}`);
-    }
-    pushCredentialCandidate(fallbackSiteApiKey, 'site_api_key');
-
-    const tryCreateModelScopedKey = async (): Promise<string | null> => {
-      if (!accountAccessToken) return null;
-      autoCreateAttempted = true;
-      try {
-        const groups = await withTimeout(
-          () => adapter.getUserGroups(site.url, accountAccessToken, platformUserId),
-          MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
-          `list groups timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
-        );
-        const preferredGroup = await resolvePreferredTokenGroup({
-          site: {
-            id: site.id,
-            url: site.url,
-            platform: site.platform,
-            apiKey: site.apiKey,
-          },
-          account: {
-            id: account.id,
-            accessToken: account.accessToken,
-            apiToken: account.apiToken,
-          },
-          modelName,
-          totalTokens: 0,
-          availableGroups: groups,
-          modelNames: [modelName],
-        });
-        const targetGroup = preferredGroup.group;
-        const safeModelPart = modelName.replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 32) || 'model';
-        const generatedName = `metapi-auto-${safeModelPart}-${Date.now().toString().slice(-6)}`;
-        const created = await withTimeout(
-          () => adapter.createApiToken(site.url, accountAccessToken, platformUserId, {
-            name: generatedName,
-            group: targetGroup,
-            modelLimitsEnabled: true,
-            modelLimits: modelName,
-          }),
-          MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
-          `create api key timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
-        );
-        if (created) {
-          const upstreamTokens = await withTimeout(
-            () => adapter.getApiTokens(site.url, accountAccessToken, platformUserId),
-            MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
-            `list api keys timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
-          );
-          await syncTokensFromUpstream(account.id, upstreamTokens);
-          preferredToken = await getPreferredAccountToken(account.id);
-          const createdToken = upstreamTokens.find((token) => String(token.name || '').trim() === generatedName);
-          const createdCredential = (
-            (createdToken?.key || '').trim()
-            || (preferredToken?.token || '').trim()
-          );
-          if (createdCredential) {
-            autoKeyCreated = true;
-            autoKeyName = generatedName;
-            autoKeyGroup = targetGroup;
-            pushCredentialCandidate(createdCredential, `auto:${generatedName}`);
-            return createdCredential;
-          }
-        }
-      } catch {
-        // Keep conservative behavior: fall through to explicit hint below.
-      }
-      return null;
-    };
-
-    if (credentialCandidates.length === 0) {
-      await tryCreateModelScopedKey();
-    }
-
-    if (credentialCandidates.length === 0) {
-      return reply.code(400).send({
-        success: false,
-        error: 'site_missing_api_key',
-        message: '站点未配置可用 API Key，请先创建 Key',
-        accountId: account.id,
-        siteId: site.id,
-        siteName: site.name,
-        autoCreateAttempted,
-        autoCreateSupported: !!accountAccessToken,
-      });
-    }
-
-    const startedAt = Date.now();
-    try {
-      const probeKind = resolveMarketplaceProbeKind(modelName);
-
-      const checkCredentialAvailability = async (credential: string): Promise<{
-        available: boolean;
-        reason: string;
-        probeCheckedUrl: string | null;
-        probeStatusCode: number | null;
-      }> => {
-        const discoveredModels = await withTimeout(
-          () => adapter.getModels(site.url, credential, platformUserId),
-          MARKETPLACE_MODEL_TEST_TIMEOUT_MS,
-          `model test timeout (${Math.round(MARKETPLACE_MODEL_TEST_TIMEOUT_MS / 1000)}s)`,
-        );
-        const normalizedSet = new Set(
-          (Array.isArray(discoveredModels) ? discoveredModels : [])
-            .map((item) => String(item || '').trim())
-            .filter((item) => item.length > 0),
-        );
-        const listedInUpstream = normalizedSet.has(modelName);
-        const listReason = listedInUpstream ? 'model found in upstream list' : 'model not found in upstream list';
-
-        const probe = await probeModelAvailabilityViaRealtimeCall({
-          baseUrl: site.url,
-          platform: site.platform,
-          credential,
-          modelName,
-          kind: probeKind,
-        });
-        const probeCheckedUrl = probe.checkedUrl;
-        const probeStatusCode = probe.statusCode;
-        if (probe.available === true) {
-          return {
-            available: true,
-            reason: `${listReason}; model accepted by realtime probe: ${probe.reason}`,
-            probeCheckedUrl,
-            probeStatusCode,
-          };
-        }
-        if (probe.available === false) {
-          return {
-            available: false,
-            reason: `${listReason}; ${probe.reason}`,
-            probeCheckedUrl,
-            probeStatusCode,
-          };
-        }
-
-        return {
-          available: false,
-          reason: `${listReason}; probe inconclusive: ${probe.reason}`,
-          probeCheckedUrl,
-          probeStatusCode,
-        };
-      };
-
-      let available = false;
-      let reason = 'model not found in upstream list';
-      let probeCheckedUrl: string | null = null;
-      let probeStatusCode: number | null = null;
-      let usedApiKey: string | null = null;
-      let usedApiKeySource: string | null = null;
-      let checkedCredentialCount = 0;
-      const checkedCredentialSet = new Set<string>();
-
-      for (const candidate of credentialCandidates.slice(0, MARKETPLACE_MODEL_TEST_KEY_SCAN_LIMIT)) {
-        checkedCredentialSet.add(candidate.credential);
-        checkedCredentialCount++;
-        const result = await checkCredentialAvailability(candidate.credential);
-        usedApiKey = candidate.credential;
-        usedApiKeySource = candidate.source;
-        reason = result.reason;
-        probeCheckedUrl = result.probeCheckedUrl;
-        probeStatusCode = result.probeStatusCode;
-        if (result.available) {
-          available = true;
-          break;
-        }
-      }
-
-      if (!available && accountAccessToken && !autoKeyCreated) {
-        const createdCredential = await tryCreateModelScopedKey();
-        if (createdCredential && !checkedCredentialSet.has(createdCredential)) {
-          checkedCredentialCount++;
-          const result = await checkCredentialAvailability(createdCredential);
-          usedApiKey = createdCredential;
-          usedApiKeySource = autoKeyName ? `auto:${autoKeyName}` : 'auto_created';
-          reason = result.reason;
-          probeCheckedUrl = result.probeCheckedUrl;
-          probeStatusCode = result.probeStatusCode;
-          available = result.available;
-        }
-      }
-
-      if (!available && credentialCandidates.length > MARKETPLACE_MODEL_TEST_KEY_SCAN_LIMIT) {
-        reason = `${reason}; scanned ${MARKETPLACE_MODEL_TEST_KEY_SCAN_LIMIT}/${credentialCandidates.length} keys`;
-      }
-
-      return {
-        success: true,
-        available,
-        modelName,
-        accountId: account.id,
-        accountName: account.username || null,
-        siteId: site.id,
-        siteName: site.name,
-        latencyMs: Date.now() - startedAt,
-        reason,
-        probeCheckedUrl,
-        probeStatusCode,
-        usedApiKey,
-        usedApiKeySource,
-        checkedCredentialCount,
-        autoKeyCreated,
-        autoKeyName,
-        autoKeyGroup,
-      };
-    } catch (error) {
-      return reply.code(502).send({
-        success: false,
-        available: false,
-        modelName,
-        accountId: account.id,
-        accountName: account.username || null,
-        siteId: site.id,
-        siteName: site.name,
-        latencyMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error || 'unknown error'),
-        autoKeyCreated,
-        autoKeyName,
-        autoKeyGroup,
-      });
-    }
   });
 
   // Site distribution – per-site aggregate data

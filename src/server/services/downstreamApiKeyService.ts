@@ -12,6 +12,8 @@ export type DownstreamApiKeyPolicyView = {
   key: string;
   keyMasked: string;
   description: string | null;
+  groupName: string | null;
+  tags: string[];
   enabled: boolean;
   expiresAt: string | null;
   maxCost: number | null;
@@ -88,29 +90,67 @@ function normalizePositiveIntegerOrNull(value: unknown): number | null {
   return normalized;
 }
 
-function parseJson(value: string | null | undefined): unknown {
-  if (!value) return null;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
+function parseJson(value: unknown): unknown {
+  if (value === null || value === undefined) return null;
+
+  // PostgreSQL JSONB columns are returned as parsed objects/arrays by the pg driver
+  if (typeof value === 'object') {
+    return value;
   }
+
+  // SQLite TEXT columns store JSON as strings that need parsing
+  if (typeof value === 'string') {
+    if (value === '') return null;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+export function normalizeGroupNameInput(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const value = input.trim();
+  if (!value) return null;
+  return value.slice(0, 64);
+}
+
+export function normalizeTagsInput(input: unknown): string[] {
+  const rawValues = Array.isArray(input)
+    ? input
+    : (typeof input === 'string' ? input.split(/[\r\n,，]+/g) : []);
+
+  const tags: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawValues) {
+    const value = String(raw || '').trim();
+    if (!value) continue;
+    const normalized = value.slice(0, 32);
+    const dedupeKey = normalized.toLowerCase();
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    tags.push(normalized);
+    if (tags.length >= 20) break;
+  }
+
+  return tags;
 }
 
 export function normalizeSupportedModelsInput(input: unknown): string[] {
   if (Array.isArray(input)) {
     return input
       .map((item) => (typeof item === 'string' ? item.trim() : ''))
-      .filter((item, index, arr) => item.length > 0 && arr.indexOf(item) === index)
-      .slice(0, 200);
+      .filter((item, index, arr) => item.length > 0 && arr.indexOf(item) === index);
   }
 
   if (typeof input === 'string') {
     return input
       .split(/\r?\n|,/g)
       .map((item) => item.trim())
-      .filter((item, index, arr) => item.length > 0 && arr.indexOf(item) === index)
-      .slice(0, 200);
+      .filter((item, index, arr) => item.length > 0 && arr.indexOf(item) === index);
   }
 
   return [];
@@ -204,7 +244,7 @@ export async function isModelAllowedByPolicyOrAllowedRoutes(model: string, polic
   const hasPatternRules = patterns.length > 0;
   const hasRouteRules = allowedRouteIds.length > 0;
 
-  if (!hasPatternRules && !hasRouteRules) return true;
+  if (!hasPatternRules && !hasRouteRules) return policy.denyAllWhenEmpty === true ? false : true;
 
   if (hasPatternRules && patterns.some((pattern) => matchesDownstreamModelPattern(model, pattern))) {
     return true;
@@ -226,6 +266,8 @@ export function toDownstreamApiKeyPolicyView(row: DownstreamApiKeyRow): Downstre
     key: row.key,
     keyMasked: maskSecret(row.key),
     description: row.description || null,
+    groupName: normalizeGroupNameInput(row.groupName),
+    tags: normalizeTagsInput(parseJson(row.tags)),
     enabled: !!row.enabled,
     expiresAt: row.expiresAt || null,
     maxCost: row.maxCost ?? null,
@@ -246,6 +288,7 @@ export function toPolicyFromView(view: Pick<DownstreamApiKeyPolicyView, 'support
     supportedModels: normalizeSupportedModelsInput(view.supportedModels),
     allowedRouteIds: normalizeAllowedRouteIdsInput(view.allowedRouteIds),
     siteWeightMultipliers: normalizeSiteWeightMultipliersInput(view.siteWeightMultipliers),
+    denyAllWhenEmpty: true,
   };
 }
 
@@ -385,6 +428,8 @@ export function normalizeDownstreamApiKeyPayload(input: {
   name?: unknown;
   key?: unknown;
   description?: unknown;
+  groupName?: unknown;
+  tags?: unknown;
   enabled?: unknown;
   expiresAt?: unknown;
   maxCost?: unknown;
@@ -398,6 +443,8 @@ export function normalizeDownstreamApiKeyPayload(input: {
   const description = typeof input.description === 'string'
     ? input.description.trim()
     : '';
+  const groupName = normalizeGroupNameInput(input.groupName);
+  const tags = normalizeTagsInput(input.tags);
   const enabled = input.enabled === undefined ? true : !!input.enabled;
 
   const expiresAtRaw = typeof input.expiresAt === 'string'
@@ -422,6 +469,8 @@ export function normalizeDownstreamApiKeyPayload(input: {
     name,
     key,
     description: description || null,
+    groupName,
+    tags,
     enabled,
     expiresAt,
     maxCost,

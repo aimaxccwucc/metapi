@@ -1,9 +1,50 @@
-import { describe, expect, it } from 'vitest';
+import currentContract from '../db/generated/schemaContract.json' with { type: 'json' };
+import { describe, expect, it, vi } from 'vitest';
 import {
   __databaseMigrationServiceTestUtils,
   maskConnectionString,
   normalizeMigrationInput,
 } from './databaseMigrationService.js';
+
+function cloneContract<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function createDbSchemaMock() {
+  return {
+    settings: { __table: 'settings' },
+    sites: { __table: 'sites' },
+    siteAnnouncements: { __table: 'siteAnnouncements' },
+    siteDisabledModels: { __table: 'siteDisabledModels' },
+    accounts: { __table: 'accounts' },
+    accountTokens: { __table: 'accountTokens' },
+    checkinLogs: { __table: 'checkinLogs' },
+    modelAvailability: { __table: 'modelAvailability' },
+    tokenModelAvailability: { __table: 'tokenModelAvailability' },
+    tokenRoutes: { __table: 'tokenRoutes' },
+    routeChannels: { __table: 'routeChannels' },
+    routeGroupSources: { __table: 'routeGroupSources' },
+    proxyLogs: { __table: 'proxyLogs' },
+    proxyVideoTasks: { __table: 'proxyVideoTasks' },
+    proxyFiles: { __table: 'proxyFiles' },
+    downstreamApiKeys: { __table: 'downstreamApiKeys' },
+    events: { __table: 'events' },
+  };
+}
+
+function createDbMock(rowsByTable: Record<string, unknown[]>) {
+  return {
+    select() {
+      return {
+        from(table: { __table: string }) {
+          return {
+            all: async () => rowsByTable[table.__table] ?? [],
+          };
+        },
+      };
+    },
+  };
+}
 
 describe('databaseMigrationService', () => {
   it('accepts postgres migration input with normalized url', () => {
@@ -103,8 +144,14 @@ describe('databaseMigrationService', () => {
 
   it.each(['postgres', 'mysql', 'sqlite'] as const)('creates or patches sites schema with use_system_proxy and custom_headers for %s', async (dialect) => {
     const executedSql: string[] = [];
+    const liveContract = cloneContract(currentContract);
+    delete liveContract.tables.sites.columns.use_system_proxy;
+    delete liveContract.tables.sites.columns.custom_headers;
+
     await __databaseMigrationServiceTestUtils.ensureSchema({
       dialect,
+      connectionString: dialect === 'sqlite' ? ':memory:' : `${dialect}://example.invalid/metapi`,
+      ssl: false,
       begin: async () => {},
       commit: async () => {},
       rollback: async () => {},
@@ -112,17 +159,11 @@ describe('databaseMigrationService', () => {
         executedSql.push(sqlText);
         return [];
       },
-      queryScalar: async (sqlText, params = []) => {
-        if (sqlText.includes('sqlite_master') || sqlText.includes('information_schema.tables')) {
-          return 1;
-        }
-        if (sqlText.includes('pragma_table_info') || sqlText.includes('information_schema.columns')) {
-          const columnName = String(params[1] ?? sqlText.match(/name = '([^']+)'/)?.[1] ?? '');
-          return columnName === 'use_system_proxy' || columnName === 'custom_headers' ? 0 : 1;
-        }
-        return 0;
-      },
+      queryScalar: async () => 1,
       close: async () => {},
+    }, {
+      currentContract,
+      liveContract,
     });
 
     const useSystemProxySql = executedSql.find((sqlText) => sqlText.includes('use_system_proxy'));
@@ -134,8 +175,13 @@ describe('databaseMigrationService', () => {
 
   it.each(['postgres', 'mysql'] as const)('patches token_routes decision snapshot columns for %s', async (dialect) => {
     const executedSql: string[] = [];
+    const liveContract = cloneContract(currentContract);
+    delete liveContract.tables.token_routes.columns.decision_snapshot;
+
     await __databaseMigrationServiceTestUtils.ensureSchema({
       dialect,
+      connectionString: `${dialect}://example.invalid/metapi`,
+      ssl: false,
       begin: async () => {},
       commit: async () => {},
       rollback: async () => {},
@@ -143,17 +189,11 @@ describe('databaseMigrationService', () => {
         executedSql.push(sqlText);
         return [];
       },
-      queryScalar: async (sqlText, params = []) => {
-        if (sqlText.includes('information_schema.tables')) {
-          return 1;
-        }
-        if (sqlText.includes('information_schema.columns')) {
-          const columnName = String(params[1] ?? '');
-          return columnName === 'decision_snapshot' ? 0 : 1;
-        }
-        return 0;
-      },
+      queryScalar: async () => 1,
       close: async () => {},
+    }, {
+      currentContract,
+      liveContract,
     });
 
     expect(
@@ -175,6 +215,7 @@ describe('databaseMigrationService', () => {
           customHeaders: '{"x-site-scope":"internal"}',
           status: 'active',
         }],
+        siteAnnouncements: [],
         siteDisabledModels: [],
         accounts: [],
         accountTokens: [],
@@ -210,6 +251,7 @@ describe('databaseMigrationService', () => {
       timestamp: Date.now(),
       accounts: {
         sites: [],
+        siteAnnouncements: [],
         siteDisabledModels: [{
           id: 3,
           siteId: 12,
@@ -221,7 +263,20 @@ describe('databaseMigrationService', () => {
         checkinLogs: [],
         modelAvailability: [],
         tokenModelAvailability: [],
-        tokenRoutes: [],
+        tokenRoutes: [{
+          id: 10,
+          modelPattern: 'claude-opus-4-6',
+          displayName: 'claude-opus-4-6',
+          displayIcon: 'icon-claude',
+          modelMapping: null,
+          routeMode: 'explicit_group',
+          decisionSnapshot: '{"channels":[1]}',
+          decisionRefreshedAt: '2026-03-14T01:30:00.000Z',
+          routingStrategy: 'round_robin',
+          enabled: true,
+          createdAt: '2026-03-14T00:00:00.000Z',
+          updatedAt: '2026-03-14T01:00:00.000Z',
+        }],
         routeChannels: [],
         proxyLogs: [],
         proxyVideoTasks: [{
@@ -256,6 +311,11 @@ describe('databaseMigrationService', () => {
           updatedAt: '2026-03-14T01:00:00.000Z',
           deletedAt: null,
         }],
+        routeGroupSources: [{
+          id: 9,
+          groupRouteId: 12,
+          sourceRouteId: 13,
+        }],
         downstreamApiKeys: [],
         events: [],
       },
@@ -267,5 +327,142 @@ describe('databaseMigrationService', () => {
     expect(statements.some((statement) => statement.table === 'site_disabled_models')).toBe(true);
     expect(statements.some((statement) => statement.table === 'proxy_video_tasks')).toBe(true);
     expect(statements.some((statement) => statement.table === 'proxy_files')).toBe(true);
+    expect(statements.some((statement) => statement.table === 'route_group_sources')).toBe(true);
+    const tokenRouteStatement = statements.find((statement) => statement.table === 'token_routes');
+    const routeModeIndex = tokenRouteStatement?.columns.indexOf('route_mode') ?? -1;
+    expect(routeModeIndex).toBeGreaterThanOrEqual(0);
+    expect(tokenRouteStatement?.values[routeModeIndex]).toBe('explicit_group');
+  });
+
+  it('includes site announcements in migration statements', () => {
+    const statements = __databaseMigrationServiceTestUtils.buildStatements({
+      version: 'test',
+      timestamp: Date.now(),
+      accounts: {
+        sites: [],
+        siteDisabledModels: [],
+        accounts: [],
+        accountTokens: [],
+        checkinLogs: [],
+        modelAvailability: [],
+        tokenModelAvailability: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        proxyLogs: [],
+        proxyVideoTasks: [],
+        proxyFiles: [],
+        downstreamApiKeys: [],
+        events: [],
+        siteAnnouncements: [{
+          id: 11,
+          siteId: 3,
+          platform: 'openai',
+          sourceKey: 'notice-1',
+          title: '????',
+          content: '????',
+          level: 'warning',
+          sourceUrl: 'https://example.com/notice',
+          startsAt: '2026-03-20T00:00:00.000Z',
+          endsAt: '2026-03-21T00:00:00.000Z',
+          upstreamCreatedAt: '2026-03-19T00:00:00.000Z',
+          upstreamUpdatedAt: '2026-03-20T00:00:00.000Z',
+          firstSeenAt: '2026-03-20T00:00:00.000Z',
+          lastSeenAt: '2026-03-20T01:00:00.000Z',
+          readAt: null,
+          dismissedAt: null,
+          rawPayload: '{"id":"notice-1"}',
+        }],
+      },
+      preferences: {
+        settings: [],
+      },
+    } as any);
+
+    const statement = statements.find((item) => item.table === 'site_announcements');
+    expect(statement).toBeDefined();
+    expect(statement?.columns).toContain('source_key');
+    expect(statement?.values[statement?.columns.indexOf('title') ?? -1]).toBe('????');
+  });
+
+  it('includes site announcements in migration summary', async () => {
+    vi.resetModules();
+
+    const rowsByTable = {
+      settings: [],
+      sites: [],
+      siteAnnouncements: [{
+        id: 11,
+        siteId: 3,
+        platform: 'openai',
+        sourceKey: 'notice-1',
+        title: '????',
+        content: '????',
+        level: 'warning',
+        sourceUrl: 'https://example.com/notice',
+        startsAt: '2026-03-20T00:00:00.000Z',
+        endsAt: '2026-03-21T00:00:00.000Z',
+        upstreamCreatedAt: '2026-03-19T00:00:00.000Z',
+        upstreamUpdatedAt: '2026-03-20T00:00:00.000Z',
+        firstSeenAt: '2026-03-20T00:00:00.000Z',
+        lastSeenAt: '2026-03-20T01:00:00.000Z',
+        readAt: null,
+        dismissedAt: null,
+        rawPayload: '{"id":"notice-1"}',
+      }],
+      siteDisabledModels: [],
+      accounts: [],
+      accountTokens: [],
+      checkinLogs: [],
+      modelAvailability: [],
+      tokenModelAvailability: [],
+      tokenRoutes: [],
+      routeChannels: [],
+      routeGroupSources: [],
+      proxyLogs: [],
+      proxyVideoTasks: [],
+      proxyFiles: [],
+      downstreamApiKeys: [],
+      events: [],
+    };
+
+    const client = {
+      dialect: 'sqlite',
+      connectionString: ':memory:',
+      ssl: false,
+      begin: vi.fn(async () => {}),
+      commit: vi.fn(async () => {}),
+      rollback: vi.fn(async () => {}),
+      execute: vi.fn(async () => []),
+      queryScalar: vi.fn(async () => 0),
+      close: vi.fn(async () => {}),
+    };
+
+    vi.doMock('../db/index.js', () => ({
+      db: createDbMock(rowsByTable),
+      schema: createDbSchemaMock(),
+    }));
+    vi.doMock('../db/runtimeSchemaBootstrap.js', () => ({
+      createRuntimeSchemaClient: async () => client,
+      ensureRuntimeDatabaseSchema: async () => {},
+    }));
+
+    try {
+      const { migrateCurrentDatabase } = await import('./databaseMigrationService.js');
+      const summary = await migrateCurrentDatabase({
+        dialect: 'sqlite',
+        connectionString: ':memory:',
+        overwrite: true,
+      });
+
+      expect(summary.rows.siteAnnouncements).toBe(1);
+      expect(client.begin).toHaveBeenCalledTimes(1);
+      expect(client.commit).toHaveBeenCalledTimes(1);
+      expect(client.close).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.doUnmock('../db/index.js');
+      vi.doUnmock('../db/runtimeSchemaBootstrap.js');
+      vi.resetModules();
+    }
   });
 });

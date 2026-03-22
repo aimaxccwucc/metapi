@@ -80,18 +80,22 @@ docker compose up -d
 | 项目 | 说明 |
 |------|------|
 | 管理界面 | 应用启动后会直接打开桌面窗口，不需要假设固定的 `http://localhost:4000` |
-| 本地后端地址 | 桌面版把内置服务绑定到 `127.0.0.1`，默认会在 `4310..4399` 中挑选空闲端口；只有显式设置 `METAPI_DESKTOP_SERVER_PORT` 时才会固定 |
+| 本地后端地址 | 桌面版内置服务默认监听 `0.0.0.0:4000`；桌面窗口和本机 curl 可继续使用 `http://127.0.0.1:4000`，局域网其他设备请使用当前机器的实际 IP + `4000`；如需改端口，可显式设置 `METAPI_DESKTOP_SERVER_PORT` |
 | 数据目录 | 保存在 `app.getPath('userData')/data`，不是仓库里的 `./data` |
 | 日志目录 | 保存在 `app.getPath('userData')/logs`；托盘菜单提供 `Open Logs Folder` |
 
+> [!IMPORTANT]
+> 桌面版首次启动时，如果你没有额外注入 `AUTH_TOKEN`，默认管理员令牌就是 `change-me-admin-token`。
+> 首次登录后建议立即到「设置」里改成你自己的强密码令牌。
+
 > [!TIP]
 > - Windows 下常见路径是 `%APPDATA%\Metapi\data` 和 `%APPDATA%\Metapi\logs`。
-> - 如果你要把本机其他客户端接到桌面版内置后端，先到日志里查当前端口，不要写死 `4000`。
+> - 如果没有额外覆盖端口，本机其他客户端可以直接连接 `http://127.0.0.1:4000`。
 
 > [!WARNING]
-> **端口冲突排障：** 如果桌面版启动后报端口被占用，可能是 `4310..4399` 范围内的端口全被其他应用占用了。
-> - 设置环境变量 `METAPI_DESKTOP_SERVER_PORT=<指定端口>` 固定到一个空闲端口
-> - 或关闭占用这些端口的应用后重启 Metapi Desktop
+> **端口冲突排障：** 桌面版默认使用 `4000` 端口；如果该端口被其他应用占用：
+> - 设置环境变量 `METAPI_DESKTOP_SERVER_PORT=<指定端口>` 改到一个空闲端口
+> - 或关闭占用 `4000` 的应用后重启 Metapi Desktop
 
 > [!NOTE]
 > 服务器部署统一推荐 Docker / Docker Compose，不再提供裸 Node.js 的 Release 压缩包。
@@ -196,7 +200,7 @@ npm run dev
 |----------|----------|----------------|
 | Docker / Docker Compose | `http://localhost:4000` | `http://localhost:4000` |
 | 本地开发 | `http://localhost:5173` | `http://localhost:4000` |
-| 桌面版 | 直接使用桌面窗口 | 通常是4312，先从日志里的 `Proxy API:` 行确认当前 `http://127.0.0.1:<port>` |
+| 桌面版 | 直接使用桌面窗口 | 默认 `http://127.0.0.1:4000`；如果设置了 `METAPI_DESKTOP_SERVER_PORT`，则按日志里的实际端口访问，局域网其他设备改用当前机器 IP + 同一端口 |
 
 ### Docker / 本地开发：直接用 curl 验证
 
@@ -212,23 +216,25 @@ curl -sS http://localhost:4000/v1/chat/completions \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### 桌面版：先确认当前端口再验证
+### 桌面版：默认直接用 4000 验证
 
 打开托盘菜单的 `Open Logs Folder`，在最新日志里查找类似下面的启动信息：
 
 ```text
-Dashboard: http://127.0.0.1:4312
-Proxy API: http://127.0.0.1:4312/v1/chat/completions
+Dashboard: http://127.0.0.1:4000
+Proxy API: http://127.0.0.1:4000/v1/chat/completions
 ```
 
-然后把日志里的实际端口替换进 curl：
+如果你没有覆盖端口，可直接执行：
 
 ```bash
-curl -sS http://127.0.0.1:4312/v1/models \
+curl -sS http://127.0.0.1:4000/v1/models \
   -H "Authorization: Bearer your-proxy-sk-token"
 ```
 
-返回正常响应，说明代理链路已经可用。
+如果你显式设置了 `METAPI_DESKTOP_SERVER_PORT`，再把上面的 `4000` 替换成日志里的实际端口。返回正常响应，说明代理链路已经可用。
+
+如果你要从同一局域网的其他设备访问桌面版，把上面的 `127.0.0.1` 替换成这台电脑的实际局域网 IP，并确认系统防火墙已放行对应端口。
 
 ## 下一步
 

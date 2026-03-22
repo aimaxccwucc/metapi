@@ -4,36 +4,21 @@ import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
-import { buildUpstreamUrl } from './upstreamUrl.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
 import { withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
 import { cloneFormDataWithOverrides, ensureMultipartBufferParser, parseMultipartFormData } from './multipart.js';
+import { buildUpstreamUrl } from './upstreamUrl.js';
 import {
   deleteProxyVideoTaskByPublicId,
   getProxyVideoTaskByPublicId,
   refreshProxyVideoTaskSnapshot,
   saveProxyVideoTask,
 } from '../../services/proxyVideoTaskStore.js';
-import { filterCandidatesByTokenModelAvailability, markTokenModelUnavailable } from '../../services/mediaRoutingSupport.js';
 
 const MAX_RETRIES = 2;
-
-const selectCompatibleVideoChannel = (
-  requestedModel: string,
-  downstreamPolicy: ReturnType<typeof getDownstreamRoutingPolicy>,
-  excludeChannelIds?: number[],
-) => {
-  const candidateFilter = (candidates: Parameters<typeof filterCandidatesByTokenModelAvailability>[0]) =>
-    filterCandidatesByTokenModelAvailability(candidates, requestedModel, 'video');
-
-  if (excludeChannelIds && excludeChannelIds.length > 0) {
-    return tokenRouter.selectNextChannelWithOptions(requestedModel, excludeChannelIds, { downstreamPolicy, candidateFilter });
-  }
-
-  return tokenRouter.selectChannelWithOptions(requestedModel, { downstreamPolicy, candidateFilter });
-};
 
 function rewriteVideoResponsePublicId(payload: unknown, publicId: string): unknown {
   if (!payload || typeof payload !== 'object') return payload;
@@ -68,12 +53,12 @@ export async function videosProxyRoute(app: FastifyInstance) {
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
-        ? await selectCompatibleVideoChannel(requestedModel, downstreamPolicy)
-        : await selectCompatibleVideoChannel(requestedModel, downstreamPolicy, excludeChannelIds);
+        ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
+        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
-        selected = await selectCompatibleVideoChannel(requestedModel, downstreamPolicy);
+        selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
       }
 
       if (!selected) {
@@ -91,6 +76,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
       const startTime = Date.now();
 
       try {
+        const accountProxy = getProxyUrlFromExtraConfig(selected.account.extraConfig);
         const requestInit = multipartForm
           ? withSiteRecordProxyRequestInit(selected.site, {
             method: 'POST',
@@ -100,7 +86,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
             body: cloneFormDataWithOverrides(multipartForm, {
               model: selected.actualModel || requestedModel,
             }) as any,
-          })
+          }, accountProxy)
           : withSiteRecordProxyRequestInit(selected.site, {
             method: 'POST',
             headers: {
@@ -111,15 +97,12 @@ export async function videosProxyRoute(app: FastifyInstance) {
               ...(jsonBody || {}),
               model: selected.actualModel || requestedModel,
             }),
-          });
+          }, accountProxy);
 
         const upstream = await fetch(targetUrl, requestInit);
         const text = await upstream.text();
         if (!upstream.ok) {
-          tokenRouter.recordFailure(selected.channel.id, { status: upstream.status, upstreamErrorText: text, modelName: selected.actualModel || requestedModel });
-          if ((text || '').match(/unsupported\s+model|model\s+not\s+supported|does\s+not\s+support(?:\s+the)?\s+model/i)) {
-            await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
-          }
+          tokenRouter.recordFailure(selected.channel.id, selected.actualModel);
           if (isTokenExpiredError({ status: upstream.status, message: text })) {
             await reportTokenExpired({
               accountId: selected.account.id,
@@ -172,11 +155,11 @@ export async function videosProxyRoute(app: FastifyInstance) {
           completionTokens: 0,
           totalTokens: 0,
         });
-        tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel || requestedModel);
+        tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
         recordDownstreamCostUsage(request, estimatedCost);
         return reply.code(upstream.status).send(rewriteVideoResponsePublicId(data, mapping.publicId));
       } catch (error: any) {
-        tokenRouter.recordFailure(selected.channel.id, { status: 0, upstreamErrorText: error?.message || 'network failure', modelName: selected.actualModel || requestedModel });
+        tokenRouter.recordFailure(selected.channel.id, selected.actualModel);
         if (retryCount < MAX_RETRIES) {
           retryCount += 1;
           continue;
@@ -200,7 +183,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
       });
     }
 
-    const targetUrl = `${mapping.siteUrl}/v1/videos/${encodeURIComponent(mapping.upstreamVideoId)}`;
+    const targetUrl = buildUpstreamUrl(mapping.siteUrl, `/v1/videos/${encodeURIComponent(mapping.upstreamVideoId)}`);
     const upstream = await fetch(targetUrl, await withSiteProxyRequestInit(targetUrl, {
       method: 'GET',
       headers: {
@@ -231,7 +214,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
       });
     }
 
-    const targetUrl = `${mapping.siteUrl}/v1/videos/${encodeURIComponent(mapping.upstreamVideoId)}`;
+    const targetUrl = buildUpstreamUrl(mapping.siteUrl, `/v1/videos/${encodeURIComponent(mapping.upstreamVideoId)}`);
     const upstream = await fetch(targetUrl, await withSiteProxyRequestInit(targetUrl, {
       method: 'DELETE',
       headers: {

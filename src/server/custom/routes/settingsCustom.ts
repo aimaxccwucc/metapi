@@ -28,6 +28,7 @@ async function appendSettingsEvent(input: {
 export async function registerSettingsCustomRoutes(app: FastifyInstance) {
   app.post('/api/settings/maintenance/clear-cache', async (_, reply) => {
     const deletedModelAvailability = (await db.delete(schema.modelAvailability).run()).changes;
+    const deletedTokenModelAvailability = (await db.delete(schema.tokenModelAvailability).run()).changes;
     const deletedRouteChannels = (await db.delete(schema.routeChannels).run()).changes;
     const deletedTokenRoutes = (await db.delete(schema.tokenRoutes).run()).changes;
 
@@ -54,6 +55,7 @@ export async function registerSettingsCustomRoutes(app: FastifyInstance) {
       jobId: task.id,
       message: '缓存已清理，重建路由已开始执行',
       deletedModelAvailability,
+      deletedTokenModelAvailability,
       deletedRouteChannels,
       deletedTokenRoutes,
     });

@@ -1,9 +1,16 @@
-import { db, schema, hasProxyLogBillingDetailsColumn } from '../db/index.js';
+import {
+  db,
+  schema,
+  hasProxyLogBillingDetailsColumn,
+  hasProxyLogClientColumns,
+  hasProxyLogDownstreamApiKeyIdColumn,
+} from '../db/index.js';
 
 export type ProxyLogInsertInput = {
   routeId?: number | null;
   channelId?: number | null;
   accountId?: number | null;
+  downstreamApiKeyId?: number | null;
   modelRequested?: string | null;
   modelActual?: string | null;
   status?: string | null;
@@ -14,17 +21,22 @@ export type ProxyLogInsertInput = {
   totalTokens?: number | null;
   estimatedCost?: number | null;
   billingDetails?: unknown;
+  clientFamily?: string | null;
+  clientAppId?: string | null;
+  clientAppName?: string | null;
+  clientConfidence?: string | null;
   errorMessage?: string | null;
   retryCount?: number | null;
   createdAt?: string | null;
 };
 
-function buildProxyLogBaseSelectFields() {
+function buildProxyLogCoreSelectFields() {
   return {
     id: schema.proxyLogs.id,
     routeId: schema.proxyLogs.routeId,
     channelId: schema.proxyLogs.channelId,
     accountId: schema.proxyLogs.accountId,
+    downstreamApiKeyId: schema.proxyLogs.downstreamApiKeyId,
     modelRequested: schema.proxyLogs.modelRequested,
     modelActual: schema.proxyLogs.modelActual,
     status: schema.proxyLogs.status,
@@ -40,47 +52,93 @@ function buildProxyLogBaseSelectFields() {
   };
 }
 
-export function getProxyLogBaseSelectFields() {
-  return buildProxyLogBaseSelectFields();
+function buildProxyLogClientSelectFields() {
+  return {
+    clientFamily: schema.proxyLogs.clientFamily,
+    clientAppId: schema.proxyLogs.clientAppId,
+    clientAppName: schema.proxyLogs.clientAppName,
+    clientConfidence: schema.proxyLogs.clientConfidence,
+  };
 }
 
-export type ProxyLogSelectFields = ReturnType<typeof buildProxyLogBaseSelectFields> & {
-  billingDetails?: typeof schema.proxyLogs.billingDetails;
-};
+function buildProxyLogSelectFields(options?: {
+  includeBillingDetails?: boolean;
+  includeClientFields?: boolean;
+}) {
+  return {
+    ...buildProxyLogCoreSelectFields(),
+    ...(options?.includeClientFields ? buildProxyLogClientSelectFields() : {}),
+    ...(options?.includeBillingDetails ? { billingDetails: schema.proxyLogs.billingDetails } : {}),
+  };
+}
+
+export function getProxyLogBaseSelectFields() {
+  return buildProxyLogCoreSelectFields();
+}
+
+export type ProxyLogSelectFields = ReturnType<typeof buildProxyLogSelectFields>;
 
 export type ResolvedProxyLogSelectFields = {
   includeBillingDetails: boolean;
+  includeClientFields: boolean;
   fields: ProxyLogSelectFields;
 };
 
-export async function resolveProxyLogSelectFields(options?: { includeBillingDetails?: boolean }) {
+export async function resolveProxyLogSelectFields(options?: {
+  includeBillingDetails?: boolean;
+  includeClientFields?: boolean;
+}) {
   const includeBillingDetails = options?.includeBillingDetails === true
     && await hasProxyLogBillingDetailsColumn();
+  const includeClientFields = options?.includeClientFields !== false
+    && await hasProxyLogClientColumns();
 
   return {
     includeBillingDetails,
-    fields: includeBillingDetails
-      ? { ...buildProxyLogBaseSelectFields(), billingDetails: schema.proxyLogs.billingDetails }
-      : buildProxyLogBaseSelectFields(),
+    includeClientFields,
+    fields: buildProxyLogSelectFields({
+      includeBillingDetails,
+      includeClientFields,
+    }),
   };
 }
 
 export async function withProxyLogSelectFields<T>(
   runner: (selection: ResolvedProxyLogSelectFields) => Promise<T>,
-  options?: { includeBillingDetails?: boolean },
+  options?: { includeBillingDetails?: boolean; includeClientFields?: boolean },
 ): Promise<T> {
-  const selection = await resolveProxyLogSelectFields(options);
+  let selection = await resolveProxyLogSelectFields(options);
 
-  try {
-    return await runner(selection);
-  } catch (error) {
-    if (selection.includeBillingDetails && isMissingBillingDetailsColumnError(error)) {
-      return await runner({
-        includeBillingDetails: false,
-        fields: buildProxyLogBaseSelectFields(),
-      });
+  while (true) {
+    try {
+      return await runner(selection);
+    } catch (error) {
+      if (selection.includeBillingDetails && isMissingBillingDetailsColumnError(error)) {
+        selection = {
+          includeBillingDetails: false,
+          includeClientFields: selection.includeClientFields,
+          fields: buildProxyLogSelectFields({
+            includeBillingDetails: false,
+            includeClientFields: selection.includeClientFields,
+          }),
+        };
+        continue;
+      }
+
+      if (selection.includeClientFields && isMissingProxyLogClientColumnsError(error)) {
+        selection = {
+          includeBillingDetails: selection.includeBillingDetails,
+          includeClientFields: false,
+          fields: buildProxyLogSelectFields({
+            includeBillingDetails: selection.includeBillingDetails,
+            includeClientFields: false,
+          }),
+        };
+        continue;
+      }
+
+      throw error;
     }
-    throw error;
   }
 }
 
@@ -94,12 +152,45 @@ export function parseProxyLogBillingDetails(value: unknown): Record<string, unkn
   }
 }
 
-export function isMissingBillingDetailsColumnError(error: unknown): boolean {
+function normalizeProxyLogStoreErrorMessage(error: unknown): string {
   const message = typeof error === 'object' && error && 'message' in error
     ? String((error as { message?: unknown }).message || '')
     : String(error || '');
-  const lowered = message.toLowerCase();
+  return message.toLowerCase();
+}
+
+export function isMissingBillingDetailsColumnError(error: unknown): boolean {
+  const lowered = normalizeProxyLogStoreErrorMessage(error);
   return lowered.includes('billing_details')
+    && (
+      lowered.includes('does not exist')
+      || lowered.includes('unknown column')
+      || lowered.includes('no such column')
+      || lowered.includes('has no column named')
+    );
+}
+
+export function isMissingDownstreamApiKeyIdColumnError(error: unknown): boolean {
+  const lowered = normalizeProxyLogStoreErrorMessage(error);
+  return lowered.includes('downstream_api_key_id')
+    && (
+      lowered.includes('does not exist')
+      || lowered.includes('unknown column')
+      || lowered.includes('no such column')
+      || lowered.includes('has no column named')
+    );
+}
+
+export function isMissingProxyLogClientColumnsError(error: unknown): boolean {
+  const lowered = normalizeProxyLogStoreErrorMessage(error);
+  const hasClientColumnReference = [
+    'client_family',
+    'client_app_id',
+    'client_app_name',
+    'client_confidence',
+  ].some((columnName) => lowered.includes(columnName));
+
+  return hasClientColumnReference
     && (
       lowered.includes('does not exist')
       || lowered.includes('unknown column')
@@ -131,18 +222,56 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
     : JSON.stringify(input.billingDetails);
   const includeBillingDetails = serializedBillingDetails !== null
     && await hasProxyLogBillingDetailsColumn();
+  const includeDownstreamApiKeyId = input.downstreamApiKeyId != null
+    && await hasProxyLogDownstreamApiKeyIdColumn();
+  const requestedClientFields = [
+    input.clientFamily,
+    input.clientAppId,
+    input.clientAppName,
+    input.clientConfidence,
+  ].some((value) => value != null && String(value).trim().length > 0);
+  const includeClientFields = requestedClientFields
+    && await hasProxyLogClientColumns();
 
-  try {
-    await db.insert(schema.proxyLogs).values(
-      includeBillingDetails
-        ? { ...baseValues, billingDetails: serializedBillingDetails }
-        : baseValues,
-    ).run();
-  } catch (error) {
-    if (includeBillingDetails && isMissingBillingDetailsColumnError(error)) {
-      await db.insert(schema.proxyLogs).values(baseValues).run();
+  let allowBillingDetails = includeBillingDetails;
+  let allowDownstreamApiKeyId = includeDownstreamApiKeyId;
+  let allowClientFields = includeClientFields;
+
+  while (true) {
+    const values = {
+      ...baseValues,
+      ...(allowBillingDetails ? { billingDetails: serializedBillingDetails } : {}),
+      ...(allowDownstreamApiKeyId ? { downstreamApiKeyId: input.downstreamApiKeyId } : {}),
+      ...(allowClientFields
+        ? {
+          clientFamily: input.clientFamily ?? null,
+          clientAppId: input.clientAppId ?? null,
+          clientAppName: input.clientAppName ?? null,
+          clientConfidence: input.clientConfidence ?? null,
+        }
+        : {}),
+    };
+
+    try {
+      await db.insert(schema.proxyLogs).values(values).run();
       return;
+    } catch (error) {
+      if (allowBillingDetails && isMissingBillingDetailsColumnError(error)) {
+        allowBillingDetails = false;
+        continue;
+      }
+
+      if (allowDownstreamApiKeyId && isMissingDownstreamApiKeyIdColumnError(error)) {
+        allowDownstreamApiKeyId = false;
+        continue;
+      }
+
+      if (allowClientFields && isMissingProxyLogClientColumnsError(error)) {
+        allowClientFields = false;
+        continue;
+      }
+
+      throw error;
     }
-    throw error;
   }
 }

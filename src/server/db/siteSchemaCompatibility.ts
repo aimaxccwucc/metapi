@@ -70,6 +70,35 @@ const SITE_COLUMN_COMPATIBILITY_SPECS: SiteColumnCompatibilitySpec[] = [
       postgres: 'UPDATE "sites" SET "global_weight" = 1 WHERE "global_weight" IS NULL OR "global_weight" <= 0',
     },
   },
+  {
+    column: 'health_status',
+    addSql: {
+      sqlite: "ALTER TABLE sites ADD COLUMN health_status text NOT NULL DEFAULT 'unknown';",
+      mysql: "ALTER TABLE `sites` ADD COLUMN `health_status` TEXT NOT NULL DEFAULT 'unknown'",
+      postgres: "ALTER TABLE \"sites\" ADD COLUMN \"health_status\" TEXT NOT NULL DEFAULT 'unknown'",
+    },
+    normalizeSql: {
+      sqlite: "UPDATE sites SET health_status = 'unknown' WHERE health_status IS NULL OR trim(health_status) = '';",
+      mysql: "UPDATE `sites` SET `health_status` = 'unknown' WHERE `health_status` IS NULL OR TRIM(`health_status`) = ''",
+      postgres: "UPDATE \"sites\" SET \"health_status\" = 'unknown' WHERE \"health_status\" IS NULL OR btrim(\"health_status\") = ''",
+    },
+  },
+  {
+    column: 'health_reason',
+    addSql: {
+      sqlite: 'ALTER TABLE sites ADD COLUMN health_reason text;',
+      mysql: 'ALTER TABLE `sites` ADD COLUMN `health_reason` TEXT NULL',
+      postgres: 'ALTER TABLE "sites" ADD COLUMN "health_reason" TEXT',
+    },
+  },
+  {
+    column: 'health_checked_at',
+    addSql: {
+      sqlite: 'ALTER TABLE sites ADD COLUMN health_checked_at text;',
+      mysql: 'ALTER TABLE `sites` ADD COLUMN `health_checked_at` DATETIME NULL',
+      postgres: 'ALTER TABLE "sites" ADD COLUMN "health_checked_at" TIMESTAMP',
+    },
+  },
 ];
 
 const SITE_TABLE_COMPATIBILITY_SPECS: SiteTableCompatibilitySpec[] = [
@@ -92,6 +121,25 @@ const SITE_TABLE_COMPATIBILITY_SPECS: SiteTableCompatibilitySpec[] = [
       postgres: [
         'CREATE UNIQUE INDEX IF NOT EXISTS "site_disabled_models_site_model_unique" ON "site_disabled_models" ("site_id", "model_name")',
         'CREATE INDEX IF NOT EXISTS "site_disabled_models_site_id_idx" ON "site_disabled_models" ("site_id")',
+      ],
+    },
+  },
+  {
+    table: 'sites_health_status_index_marker',
+    createSql: {
+      sqlite: 'SELECT 1;',
+      mysql: 'SELECT 1',
+      postgres: 'SELECT 1',
+    },
+    postCreateSql: {
+      sqlite: [
+        'CREATE INDEX IF NOT EXISTS sites_health_status_idx ON sites (health_status);',
+      ],
+      mysql: [
+        'CREATE INDEX `sites_health_status_idx` ON `sites` (`health_status`(191))',
+      ],
+      postgres: [
+        'CREATE INDEX IF NOT EXISTS "sites_health_status_idx" ON "sites" ("health_status")',
       ],
     },
   },
@@ -158,6 +206,12 @@ export async function ensureSiteSchemaCompatibility(inspector: SiteSchemaInspect
   }
 
   for (const spec of SITE_TABLE_COMPATIBILITY_SPECS) {
+    if (spec.table === 'sites_health_status_index_marker') {
+      for (const sqlText of spec.postCreateSql?.[inspector.dialect] ?? []) {
+        await executeCreateSchemaObject(inspector, sqlText);
+      }
+      continue;
+    }
     const hasTable = await inspector.tableExists(spec.table);
     if (!hasTable) {
       await executeCreateSchemaObject(inspector, spec.createSql[inspector.dialect]);

@@ -154,7 +154,7 @@ curl -sS http://localhost:4000/v1/chat/completions \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'
 ```
 
-以上示例默认服务端部署监听 `localhost:4000`。Desktop 内置后端运行在 `127.0.0.1` 的动态端口，优先通过应用界面、托盘日志或健康检查日志排查，不要假定固定端口。
+以上示例默认服务端部署监听 `localhost:4000`。Desktop 内置后端默认监听 `0.0.0.0:4000`；本机排查通常可直接使用 `127.0.0.1:4000`，如果显式设置了 `METAPI_DESKTOP_SERVER_PORT`，则按日志里的实际端口访问；局域网排查改用当前机器的实际 IP。
 
 ### 自动化监控建议
 

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as modelTesterSessionModule from './modelTesterSession.js';
 import {
   DEBUG_TABS,
   DEFAULT_INPUTS,
@@ -9,13 +10,14 @@ import {
   buildApiPayload,
   buildEmbeddingsRequestEnvelope,
   buildFileUploadRequestEnvelope,
+  buildGeminiNativeConversationProxyEnvelope,
   buildRawProxyRequestEnvelope,
   buildSearchRequestEnvelope,
   collectModelTesterModelNames,
   countConversationTurns,
   createConversationUserMessage,
+  extractConversationUploadedFilesFromMessage,
   filterModelTesterModelNames,
-  getPreferredModelTesterModel,
   parseCustomRequestBody,
   parseModelTesterSession,
   serializeModelTesterSession,
@@ -79,6 +81,17 @@ describe('modelTesterSession', () => {
       customRequestBody: '{"model":"gemini-2.5-pro","contents":[]}',
       showDebugPanel: true,
       activeDebugTab: DEBUG_TABS.REQUEST,
+      conversationFiles: [
+        {
+          localId: 'draft-file-1',
+          name: 'draft.pdf',
+          mimeType: 'application/pdf',
+          dataUrl: 'data:application/pdf;base64,JVBERi0x',
+          fileId: 'file-metapi-draft',
+          status: 'uploaded',
+          errorMessage: null,
+        },
+      ],
       modeState: {
         ...DEFAULT_MODE_STATE,
         searchQuery: 'hello',
@@ -222,6 +235,87 @@ describe('modelTesterSession', () => {
     ]);
   });
 
+  it('extracts inline conversation file data for retry flows', () => {
+    const files = extractConversationUploadedFilesFromMessage({
+      id: 'u1',
+      role: 'user',
+      content: '请总结附件',
+      createAt: 1,
+      parts: [
+        {
+          type: 'input_file',
+          filename: 'brief.pdf',
+          mimeType: 'application/pdf',
+          data: 'data:application/pdf;base64,JVBERi0xLjQK',
+        },
+      ],
+    });
+
+    expect(files).toEqual([
+      {
+        filename: 'brief.pdf',
+        mimeType: 'application/pdf',
+        data: 'data:application/pdf;base64,JVBERi0xLjQK',
+      },
+    ]);
+  });
+
+  it('extracts uploaded file references for retry flows', () => {
+    const files = extractConversationUploadedFilesFromMessage({
+      id: 'u2',
+      role: 'user',
+      content: '请继续分析',
+      createAt: 2,
+      parts: [
+        {
+          type: 'input_file',
+          fileId: 'file-metapi-456',
+          filename: 'appendix.txt',
+          mimeType: 'text/plain',
+        },
+      ],
+    });
+
+    expect(files).toEqual([
+      {
+        fileId: 'file-metapi-456',
+        filename: 'appendix.txt',
+        mimeType: 'text/plain',
+      },
+    ]);
+  });
+
+  it('hydrates local file ids into inline replay files for claude', async () => {
+    const resolveConversationReplayFiles = (modelTesterSessionModule as Record<string, any>).resolveConversationReplayFiles;
+    const loader = vi.fn(async () => ({
+      filename: 'brief.pdf',
+      mimeType: 'application/pdf',
+      data: 'data:application/pdf;base64,JVBERi0x',
+    }));
+
+    const files = await resolveConversationReplayFiles?.(
+      [
+        {
+          fileId: 'file-metapi-123',
+          filename: 'brief.pdf',
+          mimeType: 'application/pdf',
+        },
+      ],
+      'claude',
+      loader,
+    );
+
+    expect(loader).toHaveBeenCalledWith('file-metapi-123');
+    expect(files).toEqual([
+      {
+        fileId: 'file-metapi-123',
+        filename: 'brief.pdf',
+        mimeType: 'application/pdf',
+        data: 'data:application/pdf;base64,JVBERi0x',
+      },
+    ]);
+  });
+
   it('preserves file reference parts when building responses conversation payloads', () => {
     const payload = buildApiPayload(
       [{
@@ -322,6 +416,39 @@ describe('modelTesterSession', () => {
     });
   });
 
+  it('builds gemini native proxy envelope without loading assistant placeholders', () => {
+    const payload = buildGeminiNativeConversationProxyEnvelope(
+      [
+        { id: 'u1', role: 'user', content: 'hello', createAt: 1 },
+        { id: 'a1', role: 'assistant', content: '', createAt: 2, status: MESSAGE_STATUS.LOADING },
+        { id: 'a2', role: 'assistant', content: 'partial', createAt: 3, status: MESSAGE_STATUS.INCOMPLETE },
+        { id: 'a3', role: 'assistant', content: 'done', createAt: 4, status: MESSAGE_STATUS.COMPLETE },
+      ],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'gemini-2.5-pro',
+        protocol: 'gemini',
+        systemPrompt: 'system text',
+        stream: true,
+      },
+      {
+        ...DEFAULT_PARAMETER_ENABLED,
+        max_tokens: true,
+      },
+    );
+
+    expect(payload.path).toBe('/gemini/v1beta/models/gemini-2.5-pro:generateContent?alt=sse');
+    expect(payload.jobMode).toBe(false);
+    expect(payload.jsonBody).toEqual({
+      systemInstruction: { parts: [{ text: 'system text' }] },
+      contents: [
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'done' }] },
+      ],
+      generationConfig: { temperature: 0.7, maxOutputTokens: 4096 },
+    });
+  });
+
   it('serializes conversation file parts into openai and responses payloads', () => {
     const message = {
       id: 'u1',
@@ -399,6 +526,276 @@ describe('modelTesterSession', () => {
       ],
       stream: false,
       temperature: 0.7,
+    });
+  });
+
+  it('prefers native file ids over inline backups for OpenAI and Responses payloads', () => {
+    const message = {
+      id: 'u1',
+      role: 'user' as const,
+      content: 'reuse native file id',
+      createAt: 1,
+      parts: [
+        {
+          type: 'input_file' as const,
+          fileId: 'file-metapi-123',
+          filename: 'brief.pdf',
+          mimeType: 'application/pdf',
+          data: 'data:application/pdf;base64,JVBERi0x',
+        },
+      ],
+    };
+
+    const openAiPayload = buildApiPayload(
+      [message],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'gpt-4.1',
+        protocol: 'openai',
+      },
+      DEFAULT_PARAMETER_ENABLED,
+    );
+
+    expect(openAiPayload.jsonBody).toEqual({
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'reuse native file id' },
+            {
+              type: 'file',
+              file: {
+                file_id: 'file-metapi-123',
+                filename: 'brief.pdf',
+                mime_type: 'application/pdf',
+              },
+            },
+          ],
+        },
+      ],
+      stream: false,
+      temperature: 0.7,
+      frequency_penalty: 0,
+      presence_penalty: 0,
+    });
+
+    const responsesPayload = buildApiPayload(
+      [message],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'gpt-4.1',
+        protocol: 'responses',
+      },
+      DEFAULT_PARAMETER_ENABLED,
+    );
+
+    expect(responsesPayload.jsonBody).toEqual({
+      model: 'gpt-4.1',
+      input: [
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'reuse native file id' },
+            {
+              type: 'input_file',
+              file_id: 'file-metapi-123',
+              filename: 'brief.pdf',
+            },
+          ],
+        },
+      ],
+      stream: false,
+      temperature: 0.7,
+    });
+  });
+
+  it('strips data URL wrappers when replaying inline files into OpenAI chat payloads', () => {
+    const payload = buildApiPayload(
+      [{
+        id: 'u1',
+        role: 'user',
+        content: 'summarize this inline file',
+        createAt: 1,
+        parts: [
+          {
+            type: 'input_file',
+            filename: 'brief.pdf',
+            mimeType: 'application/pdf',
+            data: 'data:application/pdf;base64,JVBERi0x',
+          },
+        ],
+      } as ChatMessage],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'gpt-4.1',
+        protocol: 'openai',
+      },
+      DEFAULT_PARAMETER_ENABLED,
+    );
+
+    expect(payload.jsonBody).toEqual({
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'summarize this inline file' },
+            {
+              type: 'file',
+              file: {
+                file_data: 'JVBERi0x',
+                filename: 'brief.pdf',
+                mime_type: 'application/pdf',
+              },
+            },
+          ],
+        },
+      ],
+      stream: false,
+      temperature: 0.7,
+      frequency_penalty: 0,
+      presence_penalty: 0,
+    });
+  });
+
+  it('builds Claude conversation payloads with inline document blocks for conversation files', () => {
+    const payload = buildApiPayload(
+      [{
+        id: 'u1',
+        role: 'user',
+        content: 'summarize this',
+        createAt: 1,
+        parts: [
+          {
+            type: 'input_file',
+            filename: 'brief.pdf',
+            mimeType: 'application/pdf',
+            data: 'data:application/pdf;base64,JVBERi0xLjc=',
+          },
+        ],
+      } as ChatMessage],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'claude-opus-4-6',
+        protocol: 'claude',
+      },
+      DEFAULT_PARAMETER_ENABLED,
+    );
+
+    expect(payload.jsonBody).toEqual({
+      model: 'claude-opus-4-6',
+      stream: false,
+      max_tokens: 4096,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'summarize this' },
+            {
+              type: 'document',
+              source: {
+                type: 'base64',
+                media_type: 'application/pdf',
+                data: 'JVBERi0xLjc=',
+              },
+              title: 'brief.pdf',
+            },
+          ],
+        },
+      ],
+      temperature: 0.7,
+    });
+  });
+
+  it('builds Claude conversation payloads with image blocks for inline image attachments', () => {
+    const payload = buildApiPayload(
+      [{
+        id: 'u1',
+        role: 'user',
+        content: 'describe this image',
+        createAt: 1,
+        parts: [
+          {
+            type: 'input_file',
+            filename: 'chart.png',
+            mimeType: 'image/png',
+            data: 'data:image/png;base64,QUFBQQ==',
+          },
+        ],
+      } as ChatMessage],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'claude-opus-4-6',
+        protocol: 'claude',
+      },
+      DEFAULT_PARAMETER_ENABLED,
+    );
+
+    expect(payload.jsonBody).toEqual({
+      model: 'claude-opus-4-6',
+      stream: false,
+      max_tokens: 4096,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'describe this image' },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/png',
+                data: 'QUFBQQ==',
+              },
+            },
+          ],
+        },
+      ],
+      temperature: 0.7,
+    });
+  });
+
+  it('builds Gemini conversation payloads with inlineData document parts for conversation files', () => {
+    const payload = buildApiPayload(
+      [{
+        id: 'u1',
+        role: 'user',
+        content: 'summarize this',
+        createAt: 1,
+        parts: [
+          {
+            type: 'input_file',
+            filename: 'brief.pdf',
+            mimeType: 'application/pdf',
+            data: 'data:application/pdf;base64,JVBERi0xLjc=',
+          },
+        ],
+      } as ChatMessage],
+      {
+        ...DEFAULT_INPUTS,
+        model: 'gemini-2.5-pro',
+        protocol: 'gemini',
+      },
+      DEFAULT_PARAMETER_ENABLED,
+    );
+
+    expect(payload.jsonBody).toEqual({
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: 'summarize this' },
+            {
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: 'JVBERi0xLjc=',
+              },
+            },
+          ],
+        },
+      ],
+      generationConfig: { temperature: 0.7 },
     });
   });
 
@@ -510,19 +907,5 @@ describe('modelTesterSession', () => {
       'bge-m3',
       'BAAI/bge-large-en-v1.5',
     ]);
-  });
-
-  it('prefers media-friendly models for image and video modes', () => {
-    expect(getPreferredModelTesterModel([
-      'claude-sonnet-4',
-      'gpt-4o-image',
-      'imagen-4',
-    ], 'images.generate')).toBe('imagen-4');
-
-    expect(getPreferredModelTesterModel([
-      'gpt-4o-mini',
-      'veo3-fast',
-      'sora_video2',
-    ], 'videos.create')).toBe('sora_video2');
   });
 });

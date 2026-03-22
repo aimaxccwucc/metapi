@@ -1,7 +1,12 @@
 import 'dotenv/config';
 import type { FastifyServerOptions } from 'fastify';
+import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 
 const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
+const DEFAULT_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+const DEFAULT_CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const DEFAULT_GEMINI_CLI_CLIENT_ID = '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
+const DEFAULT_GEMINI_CLI_CLIENT_SECRET = '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';
 
 function parseBoolean(value: string | undefined, fallback = false): boolean {
   if (value === undefined) return fallback;
@@ -24,6 +29,19 @@ function parseCsvList(value: string | undefined): string[] {
     .filter((item) => item.length > 0);
 }
 
+function parseOptionalSecret(value: string | undefined): string {
+  return (value || '').trim();
+}
+
+function parseJsonValue(value: string | undefined): unknown {
+  if (!value) return undefined;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
 function parseDbType(value: string | undefined): 'sqlite' | 'mysql' | 'postgres' {
   const normalized = (value || 'sqlite').trim().toLowerCase();
   if (normalized === 'mysql') return 'mysql';
@@ -32,11 +50,7 @@ function parseDbType(value: string | undefined): 'sqlite' | 'mysql' | 'postgres'
 }
 
 function parseListenHost(env: NodeJS.ProcessEnv): string {
-  const requestedHost = (env.HOST || '0.0.0.0').trim() || '0.0.0.0';
-  if (parseBoolean(env.METAPI_DESKTOP, false)) {
-    return '127.0.0.1';
-  }
-  return requestedHost;
+  return (env.HOST || '0.0.0.0').trim() || '0.0.0.0';
 }
 
 export function buildConfig(env: NodeJS.ProcessEnv) {
@@ -45,9 +59,18 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
   return {
     authToken: env.AUTH_TOKEN || 'change-me-admin-token',
     proxyToken: env.PROXY_TOKEN || 'change-me-proxy-sk-token',
+    codexClientId: parseOptionalSecret(env.CODEX_CLIENT_ID) || DEFAULT_CODEX_CLIENT_ID,
+    claudeClientId: parseOptionalSecret(env.CLAUDE_CLIENT_ID) || DEFAULT_CLAUDE_CLIENT_ID,
+    claudeClientSecret: parseOptionalSecret(env.CLAUDE_CLIENT_SECRET),
+    geminiCliClientId: parseOptionalSecret(env.GEMINI_CLI_CLIENT_ID) || DEFAULT_GEMINI_CLI_CLIENT_ID,
+    geminiCliClientSecret: parseOptionalSecret(env.GEMINI_CLI_CLIENT_SECRET) || DEFAULT_GEMINI_CLI_CLIENT_SECRET,
     systemProxyUrl: env.SYSTEM_PROXY_URL || '',
     accountCredentialSecret: env.ACCOUNT_CREDENTIAL_SECRET || env.AUTH_TOKEN || 'change-me-admin-token',
     checkinCron: env.CHECKIN_CRON || '0 8 * * *',
+    checkinScheduleMode: (env.CHECKIN_SCHEDULE_MODE || 'cron').trim().toLowerCase() === 'interval'
+      ? 'interval' as const
+      : 'cron' as const,
+    checkinIntervalHours: Math.min(24, Math.max(1, Math.trunc(parseNumber(env.CHECKIN_INTERVAL_HOURS, 6)))),
     balanceRefreshCron: env.BALANCE_REFRESH_CRON || '0 * * * *',
     siteHealthRefreshCron: env.SITE_HEALTH_REFRESH_CRON || '*/15 * * * *',
     logCleanupCron: env.LOG_CLEANUP_CRON || '0 6 * * *',
@@ -65,6 +88,8 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     telegramApiBaseUrl: 'https://api.telegram.org',
     telegramBotToken: env.TELEGRAM_BOT_TOKEN || '',
     telegramChatId: env.TELEGRAM_CHAT_ID || '',
+    telegramUseSystemProxy: parseBoolean(env.TELEGRAM_USE_SYSTEM_PROXY, false),
+    telegramMessageThreadId: (env.TELEGRAM_MESSAGE_THREAD_ID || '').trim(),
     smtpEnabled: parseBoolean(env.SMTP_ENABLED, false),
     smtpHost: env.SMTP_HOST || '',
     smtpPort: parseInt(env.SMTP_PORT || '587'),
@@ -86,6 +111,16 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
     proxyLogRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_DAYS, 30))),
     proxyLogRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_PRUNE_INTERVAL_MINUTES, 30))),
+    proxyFileRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_FILE_RETENTION_DAYS, 30))),
+    proxyFileRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(env.PROXY_FILE_RETENTION_PRUNE_INTERVAL_MINUTES, 60))),
+    proxyErrorKeywords: parseCsvList(env.PROXY_ERROR_KEYWORDS),
+    proxyEmptyContentFailEnabled: parseBoolean(env.PROXY_EMPTY_CONTENT_FAIL, false),
+    codexResponsesWebsocketBeta: parseOptionalSecret(env.CODEX_RESPONSES_WEBSOCKET_BETA) || 'responses_websockets=2026-02-06',
+    codexHeaderDefaults: {
+      userAgent: parseOptionalSecret(env.CODEX_HEADER_DEFAULTS_USER_AGENT),
+      betaFeatures: parseOptionalSecret(env.CODEX_HEADER_DEFAULTS_BETA_FEATURES),
+    },
+    payloadRules: normalizePayloadRulesConfig(parseJsonValue(env.PAYLOAD_RULES_JSON || env.PAYLOAD_RULES)),
     routingWeights: {
       baseWeightFactor: parseNumber(env.BASE_WEIGHT_FACTOR, 0.5),
       valueScoreFactor: parseNumber(env.VALUE_SCORE_FACTOR, 0.5),

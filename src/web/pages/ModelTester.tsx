@@ -11,6 +11,7 @@ import {
   buildApiPayload,
   buildEmbeddingsRequestEnvelope,
   buildFileUploadRequestEnvelope,
+  buildGeminiNativeConversationProxyEnvelope,
   buildImagesEditRequestEnvelope,
   buildImagesGenerationsRequestEnvelope,
   buildRawProxyRequestEnvelope,
@@ -22,16 +23,19 @@ import {
   createLoadingAssistantMessage,
   createMessage,
   createConversationUserMessage,
+  extractConversationUploadedFilesFromMessage,
   filterModelTesterModelNames,
   finalizeIncompleteMessage,
   findLastLoadingAssistantIndex,
   parseCustomRequestBody,
   parseModelTesterSession,
   processThinkTags,
+  resolveConversationReplayFiles,
   serializeModelTesterSession,
   syncCustomRequestBodyToMessages,
   syncMessagesToCustomRequestBody,
   type ChatMessage,
+  type ConversationDraftFile,
   type ConversationContentPart,
   type ConversationUploadedFile,
   type DebugTab,
@@ -43,8 +47,15 @@ import {
   type TestTargetFormat,
   type TestChatPayload,
 } from './helpers/modelTesterSession.js';
+import {
+  buildConversationFileAccept,
+  buildConversationFileHint,
+  isConversationUploadedFileSupported,
+  resolveConversationFileCapability,
+} from './helpers/conversationFileCapabilities.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
+import { useIsMobile } from '../components/useIsMobile.js';
 import { tr } from '../i18n.js';
 
 type ChatJobResponse = {
@@ -66,15 +77,9 @@ type UploadState = {
   dataUrl: string;
 };
 
-type ConversationFileState = UploadState & {
-  localId: string;
-  fileId?: string | null;
-  status: 'pending' | 'uploading' | 'uploaded' | 'error';
-  errorMessage?: string | null;
-};
+type ConversationFileState = ConversationDraftFile;
 
 const POLL_INTERVAL_MS = 1200;
-const CONVERSATION_FILE_ACCEPT = '.pdf,.txt,.md,.markdown,.json,image/*,audio/*';
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const createConversationFileLocalId = () =>
@@ -642,6 +647,7 @@ function ParameterRow(props: {
 }
 
 export default function ModelTester() {
+  const isMobile = useIsMobile();
   const [models, setModels] = useState<string[]>([]);
   const [modelSearch, setModelSearch] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -687,6 +693,19 @@ export default function ModelTester() {
   const restoredSessionRef = useRef<ReturnType<typeof parseModelTesterSession>>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamStopRequestedRef = useRef(false);
+  const conversationFileCapability = useMemo(
+    () => resolveConversationFileCapability(inputs.protocol),
+    [inputs.protocol],
+  );
+  const conversationFileSupported = conversationFileCapability.supported;
+  const conversationFileAccept = useMemo(
+    () => buildConversationFileAccept(conversationFileCapability),
+    [conversationFileCapability],
+  );
+  const conversationFileHint = useMemo(
+    () => buildConversationFileHint(conversationFileCapability),
+    [conversationFileCapability],
+  );
 
   const pushDebug = useCallback((level: DebugTimelineEntry['level'], text: string) => {
     const now = new Date().toISOString();
@@ -747,6 +766,7 @@ export default function ModelTester() {
     setAssetPrompt(restored.modeState.imagesPrompt || restored.modeState.videosPrompt);
     setVideoInspectId(restored.modeState.videosInspectId);
     setVideoInspectAction(restored.inputs.videoInspectAction === 'delete' ? 'DELETE' : 'GET');
+    setConversationFiles(restored.conversationFiles);
 
     if (restored.pendingJobId) {
       setSending(true);
@@ -807,6 +827,7 @@ export default function ModelTester() {
       inputs,
       parameterEnabled,
       messages,
+      conversationFiles,
       modeState: {
         embeddingsInput: embeddingInputText,
         searchQuery: searchQueryValue,
@@ -832,6 +853,7 @@ export default function ModelTester() {
     input,
     inputs,
     messages,
+    conversationFiles,
     assetPrompt,
     customRequestBody,
     embeddingInputText,
@@ -878,37 +900,40 @@ export default function ModelTester() {
         name: file.name,
         mimeType: file.type || 'application/octet-stream',
         dataUrl: await readFileAsDataUrl(file),
-        fileId: null,
-        status: 'pending' as const,
-        errorMessage: null,
-      })));
-      setConversationFiles((prev) => [...prev, ...nextFiles]);
-      pushDebug('info', `已添加 ${nextFiles.length} 个会话附件。`);
+          fileId: null,
+          status: 'pending' as const,
+          errorMessage: null,
+        })));
+      const acceptedFiles = nextFiles.filter((file) => isConversationUploadedFileSupported(
+        conversationFileCapability,
+        { filename: file.name, mimeType: file.mimeType },
+      ));
+      const rejectedFiles = nextFiles.filter((file) => !isConversationUploadedFileSupported(
+        conversationFileCapability,
+        { filename: file.name, mimeType: file.mimeType },
+      ));
+
+      if (acceptedFiles.length > 0) {
+        setConversationFiles((prev) => [...prev, ...acceptedFiles]);
+        pushDebug('info', `已添加 ${acceptedFiles.length} 个会话附件。`);
+      }
+
+      if (rejectedFiles.length > 0) {
+        const message = `当前协议不支持这些会话附件：${rejectedFiles.map((file) => file.name).join('、')}。${conversationFileHint}`;
+        setError(message);
+        pushDebug('warn', message);
+      }
     } catch (readError: any) {
       const message = readError?.message || '读取附件失败';
       setError(message);
       pushDebug('error', message);
     }
-  }, [pushDebug]);
+  }, [conversationFileCapability, conversationFileHint, pushDebug]);
 
   const removeConversationFile = useCallback((localId: string) => {
     if (sending) return;
     setConversationFiles((prev) => prev.filter((item) => item.localId !== localId));
   }, [sending]);
-
-  const extractUploadedFilesFromMessage = useCallback((message: ChatMessage): ConversationUploadedFile[] => {
-    const parts = Array.isArray(message.parts) ? message.parts : [];
-    return parts.flatMap((part) => {
-      if (part.type !== 'input_file') return [];
-      const fileId = typeof part.fileId === 'string' ? part.fileId.trim() : '';
-      if (!fileId) return [];
-      return [{
-        fileId,
-        filename: typeof part.filename === 'string' && part.filename.trim() ? part.filename.trim() : null,
-        mimeType: typeof part.mimeType === 'string' && part.mimeType.trim() ? part.mimeType.trim() : null,
-      }];
-    });
-  }, []);
 
   const uploadConversationFiles = useCallback(async (): Promise<ConversationUploadedFile[]> => {
     if (conversationFiles.length <= 0) return [];
@@ -969,6 +994,41 @@ export default function ModelTester() {
     return uploaded;
   }, [conversationFiles, pushDebug]);
 
+  const inlineConversationFiles = useCallback((): ConversationUploadedFile[] =>
+    conversationFiles.map((item) => ({
+      fileId: item.fileId,
+      filename: item.name,
+      mimeType: item.mimeType,
+      data: item.dataUrl,
+    })), [conversationFiles]);
+
+  const ensureSupportedConversationFiles = useCallback((files: ConversationUploadedFile[]): boolean => {
+    const unsupported = files.filter((file) => !isConversationUploadedFileSupported(conversationFileCapability, file));
+    if (unsupported.length <= 0) return true;
+
+    const names = unsupported.map((file, index) => {
+      const filename = typeof file.filename === 'string' ? file.filename.trim() : '';
+      return filename || `附件${index + 1}`;
+    });
+    const message = `当前协议不支持这些会话附件：${names.join('、')}。${conversationFileHint}`;
+    setError(message);
+    pushDebug('warn', message);
+    return false;
+  }, [conversationFileCapability, conversationFileHint, pushDebug]);
+
+  const loadLocalConversationFile = useCallback(async (fileId: string) => {
+    const resolved = await api.getProxyFileContentDataUrl(fileId) as {
+      filename?: string | null;
+      mimeType?: string | null;
+      data: string;
+    };
+    return {
+      filename: resolved.filename || null,
+      mimeType: resolved.mimeType || null,
+      data: resolved.data,
+    };
+  }, []);
+
   const buildConversationMessagesWithSystem = useCallback((baseMessages: ChatMessage[]) => {
     if (!inputs.systemPrompt.trim()) return baseMessages;
     return [
@@ -1027,30 +1087,6 @@ export default function ModelTester() {
     };
   }, [buildConversationMessagesWithSystem, inputs.max_tokens, inputs.model, inputs.stream, inputs.temperature, inputs.top_p, parameterEnabled.max_tokens, parameterEnabled.temperature, parameterEnabled.top_p]);
 
-  const buildGeminiBodyFromMessages = useCallback((baseMessages: ChatMessage[]) => {
-    const effectiveMessages = buildConversationMessagesWithSystem(baseMessages);
-    const systemContents = effectiveMessages
-      .filter((message) => message.role === 'system' || message.role === 'developer')
-      .map((message) => message.content.trim())
-      .filter(Boolean);
-    const contents = effectiveMessages
-      .filter((message) => message.role !== 'system' && message.role !== 'developer')
-      .map((message) => ({
-        role: message.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: message.content }],
-      }));
-
-    return {
-      ...(systemContents.length > 0 ? { systemInstruction: { parts: [{ text: systemContents.join('\n\n') }] } } : {}),
-      contents,
-      generationConfig: {
-        ...(parameterEnabled.temperature ? { temperature: inputs.temperature } : {}),
-        ...(parameterEnabled.top_p ? { topP: inputs.top_p } : {}),
-        ...(parameterEnabled.max_tokens ? { maxOutputTokens: inputs.max_tokens } : {}),
-      },
-    };
-  }, [buildConversationMessagesWithSystem, inputs.max_tokens, inputs.temperature, inputs.top_p, parameterEnabled.max_tokens, parameterEnabled.temperature, parameterEnabled.top_p]);
-
   const buildConversationProxyEnvelope = useCallback((baseMessages: ChatMessage[]): ProxyTestEnvelope => {
     const normalizedMessages = buildConversationMessagesWithSystem(baseMessages);
 
@@ -1099,15 +1135,7 @@ export default function ModelTester() {
     }
 
     if (inputs.protocol === 'gemini') {
-      return {
-        method: 'POST',
-        path: `/gemini/v1beta/models/${encodeURIComponent(inputs.model)}:generateContent${inputs.stream ? '?alt=sse' : ''}`,
-        requestKind: 'json',
-        stream: inputs.stream,
-        jobMode: false,
-        rawMode: false,
-        jsonBody: buildGeminiBodyFromMessages(baseMessages),
-      };
+      return buildGeminiNativeConversationProxyEnvelope(baseMessages, inputs, parameterEnabled);
     }
 
     const openAiEnvelope = buildApiPayload(normalizedMessages, { ...inputs, protocol: 'openai' }, parameterEnabled);
@@ -1124,7 +1152,7 @@ export default function ModelTester() {
       rawMode: false,
       jsonBody: openAiPayload,
     };
-  }, [buildApiPayload, buildClaudeBodyFromMessages, buildConversationMessagesWithSystem, buildGeminiBodyFromMessages, buildResponsesBodyFromMessages, customRequestBody, customRequestMode, inputs, parameterEnabled]);
+  }, [buildApiPayload, buildClaudeBodyFromMessages, buildConversationMessagesWithSystem, buildResponsesBodyFromMessages, customRequestBody, customRequestMode, inputs, parameterEnabled]);
 
   const buildModeProxyEnvelope = useCallback((): ProxyTestEnvelope | null => {
     if (inputs.mode === 'embeddings') {
@@ -1370,7 +1398,6 @@ export default function ModelTester() {
     () => filteredModels.map((item) => ({ value: item, label: item })),
     [filteredModels],
   );
-  const conversationFileSupported = inputs.protocol === 'openai' || inputs.protocol === 'responses';
   const canSend = useMemo(() => {
     if (sending || pendingJobId || !inputs.model) return false;
     if (inputs.mode !== 'conversation') {
@@ -1444,6 +1471,8 @@ export default function ModelTester() {
       setActiveDebugTab(DEBUG_TABS.RESPONSE);
       const reader = response.body.getReader();
       let doneReceived = false;
+      let hasAnyContent = false;
+      let hasAnyReasoning = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1478,6 +1507,12 @@ export default function ModelTester() {
           }
 
           const delta = parseAnyStreamDelta(eventPayload);
+          if (typeof delta.reasoningDelta === 'string' && delta.reasoningDelta.trim().length > 0) {
+            hasAnyReasoning = true;
+          }
+          if (typeof delta.contentDelta === 'string' && delta.contentDelta.trim().length > 0) {
+            hasAnyContent = true;
+          }
           if (delta.reasoningDelta || delta.contentDelta) {
             setMessages((prev) => applyAssistantDelta(prev, {
               reasoningDelta: delta.reasoningDelta,
@@ -1488,21 +1523,38 @@ export default function ModelTester() {
         }
       }
 
+      const emptyOutput = !hasAnyContent && !hasAnyReasoning;
+
       setMessages((prev) => {
         const idx = findLastLoadingAssistantIndex(prev);
         if (idx === -1) return prev;
+        const finalized = finalizeIncompleteMessage(prev[idx]);
+        if (emptyOutput && !(finalized.content || '').trim() && !(finalized.reasoningContent || '').trim()) {
+          return replaceMessageAt(prev, idx, {
+            ...finalized,
+            content: '空回复（上游未返回任何内容）',
+            status: MESSAGE_STATUS.ERROR,
+            isThinkingComplete: true,
+          });
+        }
         return replaceMessageAt(prev, idx, {
-          ...finalizeIncompleteMessage(prev[idx]),
+          ...finalized,
           status: MESSAGE_STATUS.COMPLETE,
           isThinkingComplete: true,
         });
       });
 
       setPendingPayload(null);
-      setError('');
-      pushDebug(doneReceived ? 'info' : 'warn', doneReceived
-        ? '流式传输已成功完成。'
-        : '流式传输未收到 [DONE] 信号，已在本地完成。');
+      if (emptyOutput) {
+        const message = '上游返回空内容';
+        setError(message);
+        pushDebug('error', '流式传输完成但内容为空。');
+      } else {
+        setError('');
+        pushDebug(doneReceived ? 'info' : 'warn', doneReceived
+          ? '流式传输已成功完成。'
+          : '流式传输未收到 [DONE] 信号，已在本地完成。');
+      }
     } catch (streamError: any) {
       const abortedByUser = controller.signal.aborted && streamStopRequestedRef.current;
       const abortedUnexpectedly = controller.signal.aborted
@@ -1570,6 +1622,8 @@ export default function ModelTester() {
 
       const reader = response.body.getReader();
       let doneReceived = false;
+      let hasAnyContent = false;
+      let hasAnyReasoning = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1602,6 +1656,12 @@ export default function ModelTester() {
           }
 
           const delta = parseAnyStreamDelta(eventPayload);
+          if (typeof delta.reasoningDelta === 'string' && delta.reasoningDelta.trim().length > 0) {
+            hasAnyReasoning = true;
+          }
+          if (typeof delta.contentDelta === 'string' && delta.contentDelta.trim().length > 0) {
+            hasAnyContent = true;
+          }
           if (delta.reasoningDelta || delta.contentDelta) {
             setMessages((prev) => applyAssistantDelta(prev, {
               reasoningDelta: delta.reasoningDelta,
@@ -1612,20 +1672,37 @@ export default function ModelTester() {
         }
       }
 
+      const emptyOutput = !hasAnyContent && !hasAnyReasoning;
+
       setMessages((prev) => {
         const idx = findLastLoadingAssistantIndex(prev);
         if (idx === -1) return prev;
+        const finalized = finalizeIncompleteMessage(prev[idx]);
+        if (emptyOutput && !(finalized.content || '').trim() && !(finalized.reasoningContent || '').trim()) {
+          return replaceMessageAt(prev, idx, {
+            ...finalized,
+            content: '空回复（上游未返回任何内容）',
+            status: MESSAGE_STATUS.ERROR,
+            isThinkingComplete: true,
+          });
+        }
         return replaceMessageAt(prev, idx, {
-          ...finalizeIncompleteMessage(prev[idx]),
+          ...finalized,
           status: MESSAGE_STATUS.COMPLETE,
           isThinkingComplete: true,
         });
       });
 
-      setError('');
-      pushDebug(doneReceived ? 'info' : 'warn', doneReceived
-        ? '代理流式传输已成功完成。'
-        : '代理流式传输未收到 [DONE] 信号，已在本地完成。');
+      if (emptyOutput) {
+        const message = '上游返回空内容';
+        setError(message);
+        pushDebug('error', '代理流式传输完成但内容为空。');
+      } else {
+        setError('');
+        pushDebug(doneReceived ? 'info' : 'warn', doneReceived
+          ? '代理流式传输已成功完成。'
+          : '代理流式传输未收到 [DONE] 信号，已在本地完成。');
+      }
     } catch (streamError: any) {
       const abortedByUser = controller.signal.aborted && streamStopRequestedRef.current;
       const abortedUnexpectedly = controller.signal.aborted
@@ -1743,7 +1820,19 @@ export default function ModelTester() {
     baseMessages: ChatMessage[],
     files: ConversationUploadedFile[] = [],
   ) => {
-    const userMessage = createConversationUserMessage(prompt, files);
+    let resolvedFiles = files;
+    try {
+      resolvedFiles = await resolveConversationReplayFiles(files, inputs.protocol, loadLocalConversationFile);
+    } catch (resolveError: any) {
+      const message = resolveError?.message || '读取会话附件失败';
+      setError(message);
+      pushDebug('error', message);
+      return;
+    }
+    if (!ensureSupportedConversationFiles(resolvedFiles)) {
+      return;
+    }
+    const userMessage = createConversationUserMessage(prompt, resolvedFiles);
     const loadingAssistant = createLoadingAssistantMessage();
     const nextMessages = [...baseMessages, userMessage, loadingAssistant];
     const useProxyTransport = inputs.protocol === 'gemini' || customRequestMode;
@@ -1761,7 +1850,7 @@ export default function ModelTester() {
     }
 
     await dispatchPayload(nextMessages, payload, { syncedCustomBody });
-  }, [buildConversationProxyEnvelope, buildPayloadWithMessages, createConversationUserMessage, customRequestMode, dispatchPayload, dispatchProxyEnvelope, inputs.protocol, pushDebug]);
+  }, [buildConversationProxyEnvelope, buildPayloadWithMessages, createConversationUserMessage, customRequestMode, dispatchPayload, dispatchProxyEnvelope, ensureSupportedConversationFiles, inputs.protocol, loadLocalConversationFile, pushDebug]);
 
   const sendModeRequest = useCallback(async () => {
     const envelope = buildModeProxyEnvelope();
@@ -1789,7 +1878,7 @@ export default function ModelTester() {
     }
 
     if (conversationFiles.length > 0 && !conversationFileSupported) {
-      const message = '当前协议的会话附件仅支持 OpenAI / Responses；请切换协议或移除附件。';
+      const message = conversationFileCapability.reason || '当前协议暂不支持会话附件。';
       setError(message);
       pushDebug('warn', message);
       return;
@@ -1798,7 +1887,14 @@ export default function ModelTester() {
     if (!customRequestMode && conversationFileSupported && conversationFiles.length > 0) {
       setSending(true);
       try {
-        const uploadedFiles = await uploadConversationFiles();
+        const draftFiles = inlineConversationFiles();
+        if (!ensureSupportedConversationFiles(draftFiles)) {
+          setSending(false);
+          return;
+        }
+        const uploadedFiles = conversationFileCapability.documentMode === 'inline_only'
+          ? draftFiles
+          : await uploadConversationFiles();
         setInput('');
         setConversationFiles([]);
         await sendWithPrompt(trimmed, messages, uploadedFiles);
@@ -1836,7 +1932,7 @@ export default function ModelTester() {
         { stream: inputs.stream, jobMode: !inputs.stream },
       ),
     );
-  }, [canSend, conversationFileSupported, conversationFiles.length, customRequestBody, customRequestMode, dispatchPayload, input, inputs.mode, messages, pushDebug, sendModeRequest, sendWithPrompt, uploadConversationFiles]);
+  }, [canSend, conversationFileCapability, conversationFileSupported, conversationFiles.length, customRequestBody, customRequestMode, dispatchPayload, ensureSupportedConversationFiles, inlineConversationFiles, input, inputs.mode, messages, pushDebug, sendModeRequest, sendWithPrompt, uploadConversationFiles]);
 
   const retryPending = useCallback(async () => {
     if (sending || pendingJobId || !pendingPayload) return;
@@ -2013,11 +2109,11 @@ export default function ModelTester() {
 
     const base = messages.slice(0, userIndex);
     const prompt = messages[userIndex].content;
-    const files = extractUploadedFilesFromMessage(messages[userIndex]);
+    const files = extractConversationUploadedFilesFromMessage(messages[userIndex]);
     setEditingMessageId(null);
     setEditValue('');
     void sendWithPrompt(prompt, base, files);
-  }, [extractUploadedFilesFromMessage, messages, pendingJobId, sendWithPrompt, sending]);
+  }, [messages, pendingJobId, sendWithPrompt, sending]);
 
   const startEditMessage = useCallback((target: ChatMessage) => {
     if (sending) return;
@@ -2051,9 +2147,9 @@ export default function ModelTester() {
 
     if (retry && target.role === 'user') {
       const base = updated.slice(0, targetIndex);
-      void sendWithPrompt(nextContent, base, extractUploadedFilesFromMessage(target));
+      void sendWithPrompt(nextContent, base, extractConversationUploadedFilesFromMessage(target));
     }
-  }, [cancelEditMessage, editValue, editingMessageId, extractUploadedFilesFromMessage, messages, sendWithPrompt]);
+  }, [cancelEditMessage, editValue, editingMessageId, messages, sendWithPrompt]);
 
   const syncMessageToBody = useCallback(() => {
     const nextBody = syncMessagesToCustomRequestBody(customRequestBody, messages, inputs);
@@ -2087,7 +2183,9 @@ export default function ModelTester() {
     return debugResponse;
   }, [activeDebugTab, debugPreview, debugRequest, debugResponse]);
 
-  const layoutColumns = debugPanelPresence.shouldRender
+  const layoutColumns = isMobile
+    ? '1fr'
+    : debugPanelPresence.shouldRender
     ? '340px minmax(0, 1fr) 360px'
     : '340px minmax(0, 1fr)';
 
@@ -2145,7 +2243,7 @@ export default function ModelTester() {
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }} className="animate-slide-up stagger-1">
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }} className="animate-slide-up stagger-1">
         <div className="stat-summary-card stat-summary-purple">
           <div className="stat-summary-card-label">模型数量</div>
           <div className="stat-summary-card-value">{models.length}</div>
@@ -2185,7 +2283,7 @@ export default function ModelTester() {
           alignItems: 'stretch',
         }}
       >
-        <div className="card" style={{ padding: 16, minHeight: 680, maxHeight: 740, overflowY: 'auto' }}>
+        <div className="card" style={{ padding: 16, minHeight: isMobile ? 'auto' : 680, maxHeight: isMobile ? 'none' : 740, overflowY: isMobile ? 'visible' : 'auto', order: isMobile ? 2 : 0 }}>
           <h3 style={{ margin: '0 0 12px', fontSize: 15 }}>设置</h3>
 
           <div style={{ marginBottom: 14 }}>
@@ -2205,7 +2303,7 @@ export default function ModelTester() {
 
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6, fontWeight: 600 }}>模型</div>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 6, flexDirection: isMobile ? 'column' : 'row' }}>
               <input
                 value={modelSearch}
                 onChange={(event) => setModelSearch(event.target.value)}
@@ -2481,7 +2579,7 @@ export default function ModelTester() {
           </ParameterRow>
         </div>
 
-        <div className="card" style={{ padding: 0, overflow: 'hidden', minHeight: 680, maxHeight: 740, display: 'flex', flexDirection: 'column' }}>
+        <div className="card" style={{ padding: 0, overflow: 'hidden', minHeight: isMobile ? 'auto' : 680, maxHeight: isMobile ? 'none' : 740, display: 'flex', flexDirection: 'column', order: isMobile ? 1 : 0 }}>
           <div style={{
             padding: '14px 16px',
             borderBottom: '1px solid var(--color-border-light)',
@@ -2605,7 +2703,7 @@ export default function ModelTester() {
                         {isUser ? 'U' : (isSystem ? 'SYS' : 'AI')}
                       </div>
 
-                      <div style={{ maxWidth: '78%', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <div style={{ maxWidth: isMobile ? '100%' : '78%', display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0, flex: isMobile ? 1 : 'initial' }}>
                         {showReasoning && (
                           <div style={{
                             border: '1px solid color-mix(in srgb, var(--color-primary) 28%, transparent)',
@@ -2760,7 +2858,7 @@ export default function ModelTester() {
             )}
 
             {inputs.mode === 'conversation' ? (
-              <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+              <div style={{ display: 'flex', gap: 10, alignItems: isMobile ? 'stretch' : 'flex-end', flexDirection: isMobile ? 'column' : 'row' }}>
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div style={{
                     padding: '10px 12px',
@@ -2772,7 +2870,7 @@ export default function ModelTester() {
                       ref={conversationFileInputRef}
                       type="file"
                       multiple
-                      accept={CONVERSATION_FILE_ACCEPT}
+                      accept={conversationFileAccept}
                       style={{ display: 'none' }}
                       onChange={(event) => {
                         void handleConversationFilesChange(event.target.files);
@@ -2793,8 +2891,8 @@ export default function ModelTester() {
                         {customRequestMode
                           ? '自定义请求模式不会自动上传这些附件；关闭自定义模式后可走标准 /v1/files 链路。'
                           : !conversationFileSupported
-                            ? '当前协议暂不支持会话附件注入；请切换到 OpenAI 或 Responses。'
-                            : '支持 PDF / TXT / Markdown / JSON / 图片 / 音频；发送前会先上传到 /v1/files。'}
+                            ? (conversationFileCapability.reason || '当前协议暂不支持会话附件注入。')
+                            : conversationFileHint}
                       </span>
                     </div>
                     {conversationFiles.length > 0 && (
@@ -2889,16 +2987,17 @@ export default function ModelTester() {
                   disabled={sending ? false : !canSend}
                   className="btn btn-primary"
                   style={{
-                    height: 78,
-                    padding: '0 20px',
+                    height: isMobile ? 50 : 78,
+                    padding: isMobile ? '0 16px' : '0 20px',
                     fontSize: 14,
                     fontWeight: 600,
                     display: 'flex',
-                    flexDirection: 'column',
+                    flexDirection: isMobile ? 'row' : 'column',
                     alignItems: 'center',
                     justifyContent: 'center',
                     gap: 4,
-                    minWidth: 88,
+                    minWidth: isMobile ? '100%' : 88,
+                    width: isMobile ? '100%' : 'auto',
                   }}
                 >
                   {sending ? (
@@ -2936,7 +3035,7 @@ export default function ModelTester() {
                       placeholder="输入搜索查询"
                       style={{ ...inputBaseStyle, resize: 'vertical' }}
                     />
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 120px', gap: 10 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 120px', gap: 10 }}>
                       <input value={searchAllowedDomains} onChange={(event) => setSearchAllowedDomains(event.target.value)} placeholder="allowed_domains (逗号分隔)" style={inputBaseStyle} />
                       <input value={searchBlockedDomains} onChange={(event) => setSearchBlockedDomains(event.target.value)} placeholder="blocked_domains (逗号分隔)" style={inputBaseStyle} />
                       <input value={searchMaxResults} onChange={(event) => setSearchMaxResults(toNumber(event.target.value, 10))} type="number" min={1} max={20} style={inputBaseStyle} />
@@ -2953,7 +3052,7 @@ export default function ModelTester() {
                       style={{ ...inputBaseStyle, resize: 'vertical' }}
                     />
                     {(inputs.mode === 'images.edit' || inputs.mode === 'videos.create') && (
-                      <div style={{ display: 'grid', gridTemplateColumns: inputs.mode === 'images.edit' ? '1fr 1fr' : '1fr', gap: 10 }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : (inputs.mode === 'images.edit' ? '1fr 1fr' : '1fr'), gap: 10 }}>
                         <label style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
                           <div style={{ marginBottom: 6 }}>{inputs.mode === 'images.edit' ? '原图' : '参考图'}</div>
                           <input type="file" accept="image/*" onChange={(event) => { void handleUploadChange(event.target.files, setImageSourceFile); }} />
@@ -2969,7 +3068,7 @@ export default function ModelTester() {
                   </>
                 )}
                 {inputs.mode === 'videos.inspect' && (
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 160px', gap: 10 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 160px', gap: 10 }}>
                     <input
                       value={videoInspectId}
                       onChange={(event) => setVideoInspectId(event.target.value)}
@@ -3006,7 +3105,7 @@ export default function ModelTester() {
         </div>
 
         {debugPanelPresence.shouldRender && (
-          <div className={`card panel-presence ${debugPanelPresence.isVisible ? '' : 'is-closing'}`.trim()} style={{ padding: 14, minHeight: 680, maxHeight: 740, display: 'flex', flexDirection: 'column' }}>
+          <div className={`card panel-presence ${debugPanelPresence.isVisible ? '' : 'is-closing'}`.trim()} style={{ padding: 14, minHeight: isMobile ? 'auto' : 680, maxHeight: isMobile ? 'none' : 740, display: 'flex', flexDirection: 'column', order: isMobile ? 3 : 0 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
               <h3 style={{ margin: 0, fontSize: 15 }}>调试</h3>
               <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
@@ -3014,7 +3113,7 @@ export default function ModelTester() {
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
               <button
                 className="btn btn-ghost"
                 style={{

@@ -6,16 +6,13 @@ import { mkdtempSync } from 'node:fs';
 import { and, eq, sql } from 'drizzle-orm';
 import { mergeAccountExtraConfig } from '../../services/accountExtraConfig.js';
 
-const undiciFetchMock = vi.fn();
 const getApiTokensMock = vi.fn();
 const getApiTokenMock = vi.fn();
 const createApiTokenMock = vi.fn();
 const getUserGroupsMock = vi.fn();
 const deleteApiTokenMock = vi.fn();
 
-vi.mock('undici', () => ({
-  fetch: (...args: unknown[]) => undiciFetchMock(...args),
-}));
+type AccountTokenServiceModule = typeof import('../../services/accountTokenService.js');
 
 vi.mock('../../services/platforms/index.js', () => ({
   getAdapter: () => ({
@@ -33,6 +30,7 @@ describe('account tokens sync routes with site status', () => {
   let app: FastifyInstance;
   let db: DbModule['db'];
   let schema: DbModule['schema'];
+  let maskToken: AccountTokenServiceModule['maskToken'];
   let dataDir = '';
   let seedId = 0;
 
@@ -68,16 +66,17 @@ describe('account tokens sync routes with site status', () => {
 
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');
+    const accountTokenServiceModule = await import('../../services/accountTokenService.js');
     const routesModule = await import('./accountTokens.js');
     db = dbModule.db;
     schema = dbModule.schema;
+    maskToken = accountTokenServiceModule.maskToken;
 
     app = Fastify();
     await app.register(routesModule.accountTokensRoutes);
   });
 
   beforeEach(async () => {
-    undiciFetchMock.mockReset();
     getApiTokensMock.mockReset();
     getApiTokenMock.mockReset();
     createApiTokenMock.mockReset();
@@ -144,7 +143,7 @@ describe('account tokens sync routes with site status', () => {
     expect(tokenRows.length).toBe(0);
   });
 
-  it('skips masked upstream token values and does not store them', async () => {
+  it('stores masked upstream token values as masked_pending placeholders', async () => {
     const { account } = await seedAccount({ siteStatus: 'active' });
     getApiTokensMock.mockResolvedValue([
       { name: 'masked-only', key: 'sk-abc***xyz', enabled: true },
@@ -159,12 +158,13 @@ describe('account tokens sync routes with site status', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       success: true,
-      synced: false,
-      status: 'skipped',
+      synced: true,
+      status: 'synced',
       reason: 'upstream_masked_tokens',
-      maskedSkipped: 1,
-      total: 0,
-      created: 0,
+      maskedPending: 1,
+      pendingTokenIds: [expect.any(Number)],
+      total: 1,
+      created: 1,
       updated: 0,
     });
 
@@ -172,7 +172,274 @@ describe('account tokens sync routes with site status', () => {
       .from(schema.accountTokens)
       .where(eq(schema.accountTokens.accountId, account.id))
       .all();
-    expect(tokenRows.length).toBe(0);
+    expect(tokenRows).toHaveLength(1);
+    expect(tokenRows[0]).toMatchObject({
+      name: 'masked-only',
+      token: 'sk-abc***xyz',
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+    });
+    expect((tokenRows[0] as any).valueStatus).toBe('masked_pending');
+
+    const owner = await db.select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, account.id))
+      .get();
+    expect(owner?.apiToken ?? null).toBeNull();
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: '/api/account-tokens',
+    });
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json()).toMatchObject([
+      expect.objectContaining({
+        id: tokenRows[0].id,
+        valueStatus: 'masked_pending',
+      }),
+    ]);
+  });
+
+  it('reuses an existing ready token when upstream only returns the matching masked token', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const fullToken = 'sk-real-token-1234';
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'masked-only',
+      token: fullToken,
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'masked-only', key: maskToken(fullToken), enabled: true, tokenGroup: 'default' },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      synced: true,
+      status: 'synced',
+      created: 0,
+      updated: 1,
+      maskedPending: 0,
+      total: 1,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(1);
+    expect(tokenRows[0]).toMatchObject({
+      name: 'masked-only',
+      token: fullToken,
+      source: 'sync',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+    });
+    expect((tokenRows[0] as any).valueStatus).toBe('ready');
+  });
+
+  it('removes matching masked_pending placeholders after reusing a ready token', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const fullToken = 'sk-real-token-1234';
+    const maskedToken = maskToken(fullToken);
+
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'masked-only',
+      token: fullToken,
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'masked-only',
+      token: maskedToken,
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      tokenGroup: 'default',
+      valueStatus: 'masked_pending' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'masked-only', key: maskedToken, enabled: true, tokenGroup: 'default' },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      synced: true,
+      status: 'synced',
+      created: 0,
+      updated: 1,
+      maskedPending: 0,
+      total: 1,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(1);
+    expect(tokenRows[0]).toMatchObject({
+      name: 'masked-only',
+      token: fullToken,
+      source: 'sync',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+    });
+    expect((tokenRows[0] as any).valueStatus).toBe('ready');
+  });
+
+  it('does not reuse a different ready token when another logical token shares the same masked value', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const firstFullToken = 'sk-real-token-1234';
+    const secondFullToken = 'sk-real-zzzzz-1234';
+    const sharedMaskedToken = maskToken(firstFullToken);
+
+    expect(maskToken(secondFullToken)).toBe(sharedMaskedToken);
+
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'first-token',
+      token: firstFullToken,
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'second-token',
+      token: sharedMaskedToken,
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      tokenGroup: 'default',
+      valueStatus: 'masked_pending' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'second-token', key: sharedMaskedToken, enabled: true, tokenGroup: 'default' },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      synced: true,
+      status: 'synced',
+      created: 0,
+      updated: 1,
+      maskedPending: 1,
+      total: 2,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(2);
+    expect(tokenRows.find((row) => row.token === firstFullToken)).toMatchObject({
+      name: 'first-token',
+      token: firstFullToken,
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+    });
+    const maskedRow = tokenRows.find((row) => row.name === 'second-token');
+    expect(maskedRow).toMatchObject({
+      token: sharedMaskedToken,
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      tokenGroup: 'default',
+    });
+    expect((maskedRow as any)?.valueStatus).toBe('masked_pending');
+  });
+
+  it('keeps fully ambiguous short masks as masked_pending instead of reusing a ready token', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const fullToken = 'sk-abcd';
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'short-token',
+      token: fullToken,
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'short-token', key: maskToken(fullToken), enabled: true, tokenGroup: 'default' },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      synced: true,
+      status: 'synced',
+      reason: 'upstream_masked_tokens',
+      created: 1,
+      updated: 0,
+      maskedPending: 1,
+      total: 2,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(2);
+    expect(tokenRows.find((row) => row.token === fullToken)).toBeDefined();
+    const maskedRow = tokenRows.find((row) => row.token === 'sk-***');
+    expect(maskedRow).toMatchObject({
+      name: 'short-token',
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      tokenGroup: 'default',
+    });
+    expect((maskedRow as any)?.valueStatus).toBe('masked_pending');
   });
 
   it('rejects sync and token management for apikey connections', async () => {
@@ -421,39 +688,6 @@ describe('account tokens sync routes with site status', () => {
     const { account } = await seedAccount({ siteStatus: 'active' });
     getUserGroupsMock.mockResolvedValue(['default', 'vip']);
 
-    undiciFetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        success: true,
-        data: [
-          {
-            model_name: 'gpt-4o',
-            quota_type: 0,
-            model_ratio: 1,
-            completion_ratio: 1,
-            model_price: null,
-            enable_groups: ['default', 'vip'],
-          },
-        ],
-        group_ratio: { default: 1, vip: 0.25 },
-      }),
-      text: async () => JSON.stringify({
-        success: true,
-        data: [
-          {
-            model_name: 'gpt-4o',
-            quota_type: 0,
-            model_ratio: 1,
-            completion_ratio: 1,
-            model_price: null,
-            enable_groups: ['default', 'vip'],
-          },
-        ],
-        group_ratio: { default: 1, vip: 0.25 },
-      }),
-    } as any);
-
     const response = await app.inject({
       method: 'GET',
       url: `/api/account-tokens/groups/${account.id}`,
@@ -463,7 +697,6 @@ describe('account tokens sync routes with site status', () => {
     expect(response.json()).toMatchObject({
       success: true,
       groups: ['default', 'vip'],
-      groupRatios: { default: 1, vip: 0.25 },
     });
     expect(getUserGroupsMock).toHaveBeenCalledTimes(1);
   });
@@ -531,6 +764,7 @@ describe('account tokens sync routes with site status', () => {
       source: 'sync',
       enabled: true,
       isDefault: false,
+      valueStatus: 'masked_pending' as any,
     }).returning().get();
 
     const response = await app.inject({
@@ -542,5 +776,140 @@ describe('account tokens sync routes with site status', () => {
     expect(response.json()).toMatchObject({
       success: false,
     });
+  });
+
+  it('upgrades an existing masked_pending placeholder when upstream later returns the full token', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'masked-only',
+      token: 'sk-abc***xyz',
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      tokenGroup: 'default',
+      valueStatus: 'masked_pending' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'masked-only', key: 'sk-real-token-1234', enabled: true, tokenGroup: 'default' },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      synced: true,
+      status: 'synced',
+      total: 1,
+      created: 0,
+      updated: 1,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(1);
+    expect(tokenRows[0]).toMatchObject({
+      name: 'masked-only',
+      token: 'sk-real-token-1234',
+      enabled: true,
+    });
+    expect((tokenRows[0] as any).valueStatus).toBe('ready');
+  });
+
+  it('does not allow setting a masked_pending placeholder as default', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'masked-token',
+      token: 'sk-mask***tail',
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      valueStatus: 'masked_pending' as any,
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/${token.id}/default`,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      success: false,
+      message: expect.stringContaining('待补全令牌'),
+    });
+  });
+
+  it('promotes a masked_pending placeholder to ready when a full token is saved', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'masked-token',
+      token: 'sk-mask***tail',
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      valueStatus: 'masked_pending' as any,
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: `/api/account-tokens/${token.id}`,
+      payload: {
+        token: 'sk-real-token-updated',
+        enabled: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      token: expect.objectContaining({
+        id: token.id,
+        enabled: true,
+        valueStatus: 'ready',
+      }),
+    });
+
+    const latest = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.id, token.id))
+      .get();
+    expect(latest).toMatchObject({
+      token: 'sk-real-token-updated',
+      enabled: true,
+    });
+    expect((latest as any)?.valueStatus).toBe('ready');
+  });
+
+  it('deletes masked_pending placeholders locally without calling upstream delete', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'masked-token',
+      token: 'sk-mask***tail',
+      source: 'sync',
+      enabled: false,
+      isDefault: false,
+      valueStatus: 'masked_pending' as any,
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/api/account-tokens/${token.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(deleteApiTokenMock).not.toHaveBeenCalled();
+    const removed = await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, token.id)).get();
+    expect(removed).toBeUndefined();
   });
 });

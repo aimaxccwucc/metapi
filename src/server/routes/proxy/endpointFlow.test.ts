@@ -1,9 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetch } from 'undici';
-import { executeEndpointFlow, type BuiltEndpointRequest } from './endpointFlow.js';
+import type { BuiltEndpointRequest } from './endpointFlow.js';
 
 vi.mock('undici', () => ({
   fetch: vi.fn(),
+}));
+
+vi.mock('../../services/siteProxy.js', () => ({
+  withSiteProxyRequestInit: async (_targetUrl: string, init: RequestInit) => init,
 }));
 
 const fetchMock = vi.mocked(fetch);
@@ -22,6 +26,14 @@ function toUndiciResponse(response: Response): Awaited<ReturnType<typeof fetch>>
 }
 
 describe('executeEndpointFlow', () => {
+  let executeEndpointFlow: (input: any) => Promise<any>;
+
+  beforeEach(async () => {
+    if (!executeEndpointFlow) {
+      ({ executeEndpointFlow } = await import('./endpointFlow.js'));
+    }
+  });
+
   beforeEach(() => {
     fetchMock.mockReset();
   });
@@ -42,7 +54,72 @@ describe('executeEndpointFlow', () => {
     if (result.ok) {
       expect(result.upstreamPath).toBe('/v1/responses');
     }
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://example.com/v1/responses');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the injected dispatchRequest hook instead of the default fetch path', async () => {
+    const dispatchRequest = vi.fn(async () => toUndiciResponse(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      endpointCandidates: ['responses'],
+      buildRequest: () => requestFor('/v1/responses'),
+      dispatchRequest,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(dispatchRequest).toHaveBeenCalledTimes(1);
+    expect(dispatchRequest.mock.calls[0]?.[1]).toBe('https://example.com/v1/responses');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('avoids duplicated /v1 when base url already ends with /v1', async () => {
+    fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    await executeEndpointFlow({
+      siteUrl: 'https://api.example.com/v1',
+      endpointCandidates: ['chat'],
+      buildRequest: () => ({ ...requestFor('/v1/chat/completions'), endpoint: 'chat' }),
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://api.example.com/v1/chat/completions');
+  });
+
+  it('avoids duplicated /v1 when base url already ends with /api/v1', async () => {
+    fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    await executeEndpointFlow({
+      siteUrl: 'https://openrouter.ai/api/v1',
+      endpointCandidates: ['chat'],
+      buildRequest: () => ({ ...requestFor('/v1/chat/completions'), endpoint: 'chat' }),
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://openrouter.ai/api/v1/chat/completions');
+  });
+
+  it('keeps url well-formed when base url includes query/hash', async () => {
+    fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    await executeEndpointFlow({
+      siteUrl: 'https://api.example.com/v1?foo=1#keep',
+      endpointCandidates: ['chat'],
+      buildRequest: () => ({ ...requestFor('/v1/chat/completions'), endpoint: 'chat' }),
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://api.example.com/v1/chat/completions?foo=1#keep');
   });
 
   it('downgrades to next endpoint when policy allows', async () => {
@@ -77,6 +154,40 @@ describe('executeEndpointFlow', () => {
     }
     expect(downgradedPaths).toEqual(['/v1/responses']);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('emits attempt callbacks for failed and successful endpoint probes', async () => {
+    fetchMock
+      .mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({
+        error: { message: 'unsupported endpoint', type: 'invalid_request_error' },
+      }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      })))
+      .mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })));
+
+    const onAttemptFailure = vi.fn();
+    const onAttemptSuccess = vi.fn();
+
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      endpointCandidates: ['responses', 'chat'],
+      buildRequest: (endpoint) => endpoint === 'responses'
+        ? requestFor('/v1/responses')
+        : { ...requestFor('/v1/chat/completions'), endpoint },
+      shouldDowngrade: () => true,
+      onAttemptFailure,
+      onAttemptSuccess,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(onAttemptFailure).toHaveBeenCalledTimes(1);
+    expect(onAttemptFailure.mock.calls[0]?.[0]?.request?.path).toBe('/v1/responses');
+    expect(onAttemptSuccess).toHaveBeenCalledTimes(1);
+    expect(onAttemptSuccess.mock.calls[0]?.[0]?.request?.path).toBe('/v1/chat/completions');
   });
 
   it('accepts recovered response from tryRecover hook', async () => {

@@ -1,5 +1,4 @@
 import { FastifyInstance } from 'fastify';
-import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import { db, schema, runtimeDbDialect } from '../../db/index.js';
 import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { refreshBalance } from '../../services/balanceService.js';
@@ -8,7 +7,9 @@ import { refreshModelsForAccount, rebuildTokenRoutesFromAvailability } from '../
 import { ensureDefaultTokenForAccount, syncTokensFromUpstream } from '../../services/accountTokenService.js';
 import {
   getCredentialModeFromExtraConfig,
+  getProxyUrlFromExtraConfig,
   guessPlatformUserIdFromUsername,
+  hasOauthProvider,
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
   normalizeCredentialMode as normalizeCredentialModeInput,
@@ -26,7 +27,8 @@ import {
   type RuntimeHealthState,
 } from '../../services/accountHealthService.js';
 import { appendSessionTokenRebindHint } from '../../services/alertRules.js';
-import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import { parseSiteProxyUrlInput, withAccountProxyOverride, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -48,7 +50,30 @@ type AccountCapabilities = {
   proxyOnly: boolean;
 };
 
+type AccountInitializationParams = {
+  accountId: number;
+  site: typeof schema.sites.$inferSelect;
+  adapter: NonNullable<ReturnType<typeof getAdapter>>;
+  tokenType: 'session' | 'apikey' | 'unknown';
+  accessToken: string;
+  apiToken: string;
+  platformUserId?: number;
+  skipModelFetch?: boolean;
+};
+
 type VerifyFailureReason = 'needs-user-id' | 'invalid-user-id' | 'shield-blocked' | null;
+
+const limitAccountLogin = createRateLimitGuard({
+  bucket: 'accounts-login',
+  max: 5,
+  windowMs: 60_000,
+});
+
+const limitAccountVerifyToken = createRateLimitGuard({
+  bucket: 'accounts-verify-token',
+  max: 5,
+  windowMs: 60_000,
+});
 
 function hasSessionTokenValue(value: string | null | undefined): boolean {
   return typeof value === 'string' && value.trim().length > 0;
@@ -67,7 +92,15 @@ function resolveStoredCredentialMode(account: typeof schema.accounts.$inferSelec
 function buildCapabilitiesFromCredentialMode(
   credentialMode: AccountCredentialMode,
   hasSessionToken: boolean,
+  extraConfig?: string | null,
 ): AccountCapabilities {
+  if (hasOauthProvider(extraConfig)) {
+    return {
+      canCheckin: false,
+      canRefreshBalance: false,
+      proxyOnly: true,
+    };
+  }
   const sessionCapable = credentialMode === 'session'
     ? hasSessionToken
     : (credentialMode === 'apikey' ? false : hasSessionToken);
@@ -80,7 +113,7 @@ function buildCapabilitiesFromCredentialMode(
 
 function buildCapabilitiesForAccount(account: typeof schema.accounts.$inferSelect): AccountCapabilities {
   const credentialMode = resolveStoredCredentialMode(account);
-  return buildCapabilitiesFromCredentialMode(credentialMode, hasSessionTokenValue(account.accessToken));
+  return buildCapabilitiesFromCredentialMode(credentialMode, hasSessionTokenValue(account.accessToken), account.extraConfig);
 }
 
 function normalizeBatchIds(input: unknown): number[] {
@@ -100,6 +133,75 @@ function normalizePinnedFlag(input: unknown): boolean | null {
     if (normalized === 'false' || normalized === '0') return false;
   }
   return null;
+}
+
+async function initializeAccountInBackground({
+  accountId,
+  site,
+  adapter,
+  tokenType,
+  accessToken,
+  apiToken,
+  platformUserId,
+  skipModelFetch,
+}: AccountInitializationParams) {
+  const summary = {
+    accountId,
+    syncedTokenCount: 0,
+    refreshedBalance: false,
+    refreshedModels: false,
+    rebuiltRoutes: false,
+  };
+
+  if (tokenType === 'session' && apiToken) {
+    try {
+      await ensureDefaultTokenForAccount(accountId, apiToken, { name: 'default', source: 'manual' });
+    } catch {}
+  }
+
+  if (tokenType === 'session' && accessToken) {
+    try {
+      const syncedTokens = await adapter.getApiTokens(site.url, accessToken, platformUserId);
+      summary.syncedTokenCount = Array.isArray(syncedTokens) ? syncedTokens.length : 0;
+      if (summary.syncedTokenCount > 0) {
+        await syncTokensFromUpstream(accountId, syncedTokens);
+      }
+    } catch {}
+  }
+
+  if (tokenType === 'session') {
+    try {
+      await refreshBalance(accountId);
+      summary.refreshedBalance = true;
+    } catch {}
+  }
+
+  if (skipModelFetch !== true) {
+    try {
+      await refreshModelsForAccount(accountId);
+      summary.refreshedModels = true;
+      await rebuildTokenRoutesFromAvailability();
+      summary.rebuiltRoutes = true;
+    } catch {}
+  }
+
+  return summary;
+}
+
+function buildQueuedAccountInitializationMessage(
+  tokenType: 'session' | 'apikey' | 'unknown',
+  skipModelFetch?: boolean,
+) {
+  if (tokenType === 'session' && skipModelFetch === true) {
+    return '账号已添加，后台正在同步令牌和余额信息。';
+  }
+  if (tokenType === 'session') {
+    return '账号已添加，后台正在同步令牌、余额和模型信息。';
+  }
+  if (skipModelFetch === true) {
+    return '已添加为 API Key 账号（可用于代理转发）。';
+  }
+  return '已添加为 API Key 账号，后台正在同步模型和路由信息。';
 }
 
 function normalizeSortOrder(input: unknown): number | null {
@@ -331,9 +433,6 @@ async function executeRefreshAccountRuntimeHealth(accountId?: number) {
   };
 }
 
-const limitAccountLogin = createRateLimitGuard({ bucket: 'accounts-login', max: 5, windowMs: 60_000 });
-const limitAccountVerifyToken = createRateLimitGuard({ bucket: 'accounts-verify-token', max: 5, windowMs: 60_000 });
-
 export async function accountsRoutes(app: FastifyInstance) {
   // List all accounts (with site info)
   app.get('/api/accounts', async () => {
@@ -401,6 +500,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         capabilities: buildCapabilitiesFromCredentialMode(
           credentialMode,
           hasSessionTokenValue(r.accounts.accessToken),
+          r.accounts.extraConfig,
         ),
         todaySpend: Math.round((spendByAccount[r.accounts.id] || 0) * 1_000_000) / 1_000_000,
         todayReward: Math.round(estimateRewardWithTodayIncomeFallback({
@@ -417,6 +517,7 @@ export async function accountsRoutes(app: FastifyInstance) {
           sessionCapable: buildCapabilitiesFromCredentialMode(
             credentialMode,
             hasSessionTokenValue(r.accounts.accessToken),
+            r.accounts.extraConfig,
           ).canRefreshBalance,
           hasDiscoveredModels: (modelCountByAccount[r.accounts.id] || 0) > 0,
         }),
@@ -881,7 +982,10 @@ export async function accountsRoutes(app: FastifyInstance) {
 
       let verifyResult: any;
       try {
-        verifyResult = await adapter.verifyToken(site.url, nextAccessToken, candidatePlatformUserId);
+        verifyResult = await withAccountProxyOverride(
+          getProxyUrlFromExtraConfig(account.extraConfig),
+          () => adapter.verifyToken(site.url, nextAccessToken, candidatePlatformUserId),
+        );
       } catch (err: any) {
         return reply.code(400).send({
           success: false,
@@ -959,14 +1063,14 @@ export async function accountsRoutes(app: FastifyInstance) {
         account: latest,
         tokenType: 'session',
         credentialMode: 'session',
-        capabilities: latest ? buildCapabilitiesForAccount(latest) : buildCapabilitiesFromCredentialMode('session', true),
+        capabilities: latest ? buildCapabilitiesForAccount(latest) : buildCapabilitiesFromCredentialMode('session', true, null),
         apiTokenFound: !!nextApiToken,
       };
     },
   );
 
   // Add an account (manual credential input)
-  app.post<{ Body: { siteId: number; username?: string; accessToken: string; apiToken?: string; platformUserId?: number; checkinEnabled?: boolean; credentialMode?: AccountCredentialMode; refreshToken?: string; tokenExpiresAt?: number | string; skipModelFetch?: boolean; allowUnverified?: boolean; preverified?: { tokenType?: 'session' | 'apikey'; username?: string; apiToken?: string } } }>('/api/accounts', async (request, reply) => {
+  app.post<{ Body: { siteId: number; username?: string; accessToken: string; apiToken?: string; platformUserId?: number; checkinEnabled?: boolean; credentialMode?: AccountCredentialMode; refreshToken?: string; tokenExpiresAt?: number | string; skipModelFetch?: boolean } }>('/api/accounts', async (request, reply) => {
     const body = request.body;
     const site = await db.select().from(schema.sites).where(eq(schema.sites.id, body.siteId)).get();
     if (!site) {
@@ -989,25 +1093,8 @@ export async function accountsRoutes(app: FastifyInstance) {
     let apiToken = (body.apiToken || '').trim();
     let tokenType: 'session' | 'apikey' | 'unknown' = 'unknown';
     let verifiedModels: string[] = [];
-    let isUnverifiedBinding = false;
-    const allowUnverified = body.allowUnverified === true;
-    const preverified = body.preverified && typeof body.preverified === 'object'
-      ? body.preverified
-      : null;
 
-    if (preverified?.tokenType === 'session') {
-      tokenType = 'session';
-      const preverifiedUsername = typeof preverified.username === 'string' ? preverified.username.trim() : '';
-      const preverifiedApiToken = typeof preverified.apiToken === 'string' ? preverified.apiToken.trim() : '';
-      if (!username && preverifiedUsername) username = preverifiedUsername;
-      if (!apiToken && preverifiedApiToken) apiToken = preverifiedApiToken;
-    } else if (preverified?.tokenType === 'apikey') {
-      tokenType = 'apikey';
-      accessToken = '';
-      if (!apiToken) apiToken = rawAccessToken;
-    }
-
-    if (tokenType === 'unknown' && credentialMode === 'apikey') {
+    if (credentialMode === 'apikey') {
       if (body.skipModelFetch === true) {
         tokenType = 'apikey';
         accessToken = '';
@@ -1037,7 +1124,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         accessToken = '';
         if (!apiToken) apiToken = rawAccessToken;
       }
-    } else if (tokenType === 'unknown') {
+    } else {
       let verifyResult: any;
       try {
         verifyResult = await adapter.verifyToken(site.url, rawAccessToken, body.platformUserId);
@@ -1050,16 +1137,11 @@ export async function accountsRoutes(app: FastifyInstance) {
 
       tokenType = verifyResult.tokenType;
       if (tokenType === 'unknown') {
-        if (allowUnverified && credentialMode !== 'apikey') {
-          tokenType = 'session';
-          isUnverifiedBinding = true;
-        } else {
-          return reply.code(400).send({
-            success: false,
-            requiresVerification: true,
-            message: 'Token 验证失败，请先点击“验证 Token”，验证成功后再绑定账号',
-          });
-        }
+        return reply.code(400).send({
+          success: false,
+          requiresVerification: true,
+          message: 'Token 验证失败，请先点击“验证 Token”，验证成功后再绑定账号',
+        });
       }
 
       if (credentialMode === 'session' && tokenType !== 'session') {
@@ -1105,7 +1187,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       username: username || undefined,
       accessToken,
       apiToken: apiToken || undefined,
-      checkinEnabled: tokenType === 'session' ? (isUnverifiedBinding ? false : (body.checkinEnabled ?? true)) : false,
+      checkinEnabled: tokenType === 'session' ? (body.checkinEnabled ?? true) : false,
       extraConfig,
       isPinned: false,
       sortOrder: await getNextAccountSortOrder(),
@@ -1119,64 +1201,40 @@ export async function accountsRoutes(app: FastifyInstance) {
       return reply.code(500).send({ success: false, message: '创建账号失败' });
     }
 
-    if (isUnverifiedBinding) {
-      setAccountRuntimeHealth(result.id, {
-        state: 'degraded',
-        reason: '账号已保存但凭证未验证，需人工确认',
-        source: 'auth',
-      });
-    }
-
-    if (apiToken) {
-      try {
-        await ensureDefaultTokenForAccount(result.id, apiToken, { name: 'default', source: 'manual' });
-      } catch { }
-    }
-
-    const accountId = result.id;
-    let initializationTaskId: string | null = null;
-    let initializationQueued = false;
-    if (!isUnverifiedBinding) {
-      const initializationTask = startBackgroundTask({
-        type: 'account-init',
-        title: `账号初始化（#${accountId}）`,
-        dedupeKey: `account-init:${accountId}`,
-        keepMs: 15 * 60 * 1000,
-        notifyOnSuccess: false,
-        notifyOnFailure: false,
-        successMessage: `账号 #${accountId} 初始化完成`,
-        failureMessage: (task) => `账号 #${accountId} 初始化失败：${task.error || 'unknown error'}`,
-      }, async () => {
-        if (tokenType === 'session' && accessToken) {
-          try {
-            const syncedTokens = await adapter.getApiTokens(site.url, accessToken, resolvedPlatformUserId);
-            if (syncedTokens.length > 0) {
-              await syncTokensFromUpstream(accountId, syncedTokens);
-            }
-          } catch { }
-        }
-
-        if (tokenType === 'session') {
-          try { await refreshBalance(accountId); } catch { }
-        }
-
-        if (body.skipModelFetch !== true) {
-          try {
-            await refreshModelsForAccount(accountId);
-            await rebuildTokenRoutesFromAvailability();
-          } catch { }
-        }
-        return { accountId };
-      });
-      initializationTaskId = initializationTask.task.id;
-      initializationQueued = true;
+    const shouldQueueInitialization = tokenType === 'session' || body.skipModelFetch !== true;
+    let queuedTaskId: string | undefined;
+    let queuedMessage: string | undefined;
+    if (shouldQueueInitialization) {
+      const taskTitle = `初始化连接 #${result.id}`;
+      const { task } = startBackgroundTask(
+        {
+          type: 'account-init',
+          title: taskTitle,
+          dedupeKey: `account-init-${result.id}`,
+          notifyOnFailure: true,
+          successMessage: () => `${taskTitle}已完成`,
+          failureMessage: (currentTask) => `${taskTitle}失败：${currentTask.error || 'unknown error'}`,
+        },
+        async () => initializeAccountInBackground({
+          accountId: result.id,
+          site,
+          adapter,
+          tokenType,
+          accessToken,
+          apiToken,
+          platformUserId: resolvedPlatformUserId,
+          skipModelFetch: body.skipModelFetch,
+        }),
+      );
+      queuedTaskId = task.id;
+      queuedMessage = buildQueuedAccountInitializationMessage(tokenType, body.skipModelFetch);
     }
 
     const account = await db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
     const finalCredentialMode = account ? resolveStoredCredentialMode(account) : resolvedCredentialMode;
     const capabilities = account
       ? buildCapabilitiesForAccount(account)
-      : buildCapabilitiesFromCredentialMode(finalCredentialMode, tokenType === 'session');
+      : buildCapabilitiesFromCredentialMode(finalCredentialMode, tokenType === 'session', null);
     return {
       ...account,
       tokenType,
@@ -1184,10 +1242,10 @@ export async function accountsRoutes(app: FastifyInstance) {
       capabilities,
       modelCount: verifiedModels.length,
       apiTokenFound: !!apiToken,
-      queued: initializationQueued,
-      initTaskId: initializationTaskId || undefined,
-      unverified: isUnverifiedBinding,
       usernameDetected: !!(!body.username && username),
+      queued: !!queuedTaskId,
+      jobId: queuedTaskId,
+      message: queuedMessage,
     };
   });
 
@@ -1251,6 +1309,18 @@ export async function accountsRoutes(app: FastifyInstance) {
       updates.sortOrder = normalizedSortOrder;
     }
 
+    if (Object.prototype.hasOwnProperty.call(body, 'proxyUrl')) {
+      const baseExtraConfig = typeof updates.extraConfig === 'string'
+        ? updates.extraConfig : account.extraConfig;
+      const { present, valid, proxyUrl: normalizedProxy } = parseSiteProxyUrlInput(body.proxyUrl);
+      if (present && !valid) {
+        return reply.code(400).send({ message: 'Invalid proxy URL format' });
+      }
+      updates.extraConfig = mergeAccountExtraConfig(baseExtraConfig, {
+        proxyUrl: normalizedProxy ?? undefined,
+      });
+    }
+
     updates.updatedAt = new Date().toISOString();
     await db.update(schema.accounts).set(updates).where(eq(schema.accounts.id, id)).run();
 
@@ -1262,7 +1332,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         ? explicitNextMode
         : (hasSessionTokenValue(nextAccessToken) ? 'session' : 'apikey');
 
-    if (typeof updates.apiToken === 'string' && updates.apiToken.trim()) {
+    if (nextCredentialMode !== 'apikey' && typeof updates.apiToken === 'string' && updates.apiToken.trim()) {
       try {
         await ensureDefaultTokenForAccount(id, updates.apiToken, { name: 'default', source: 'manual' });
       } catch { }
@@ -1557,3 +1627,4 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
   });
 }
+

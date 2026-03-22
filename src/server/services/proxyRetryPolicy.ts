@@ -1,3 +1,13 @@
+export type RetryFailureCategory =
+  | 'network'
+  | 'server'
+  | 'rate_limit'
+  | 'payload_too_large'
+  | 'model_unsupported'
+  | 'auth'
+  | 'bad_request'
+  | 'other';
+
 const MODEL_UNSUPPORTED_PATTERNS: RegExp[] = [
   /当前\s*api\s*不支持所选模型/i,
   /不支持所选模型/i,
@@ -14,20 +24,41 @@ const MODEL_UNSUPPORTED_PATTERNS: RegExp[] = [
   /you\s+do\s+not\s+have\s+access\s+to\s+the\s+model/i,
 ];
 
-export type RetryFailureCategory =
-  | 'network'
-  | 'server'
-  | 'rate_limit'
-  | 'payload_too_large'
-  | 'model_unsupported'
-  | 'auth'
-  | 'bad_request'
-  | 'unknown';
+const RETRYABLE_CHANNEL_LOCAL_PATTERNS: RegExp[] = [
+  /unsupported\s+legacy\s+protocol/i,
+  /please\s+use\s+\/v1\/responses/i,
+  /please\s+use\s+\/v1\/messages/i,
+  /please\s+use\s+\/v1\/chat\/completions/i,
+  /does\s+not\s+allow\s+\/v1\/[a-z0-9/_:-]+\s+dispatch/i,
+  /unsupported\s+endpoint/i,
+  /unsupported\s+path/i,
+  /unknown\s+endpoint/i,
+  /unrecognized\s+request\s+url/i,
+  /no\s+route\s+matched/i,
+  /invalid\s+api\s+key/i,
+  /invalid\s+access\s+token/i,
+  /forbidden/i,
+  /rate\s+limit/i,
+  /quota/i,
+  /bad\s+gateway/i,
+  /gateway\s+time-?out/i,
+  /service\s+unavailable/i,
+  /cpu\s+overloaded/i,
+  /timeout/i,
+];
 
-export type ProxyFailureContext = {
-  status?: number | null;
-  upstreamErrorText?: string | null;
-};
+const NON_RETRYABLE_REQUEST_PATTERNS: RegExp[] = [
+  /invalid\s+request\s+body/i,
+  /validation/i,
+  /missing\s+required/i,
+  /required\s+parameter/i,
+  /unknown\s+parameter/i,
+  /unrecognized\s+(field|key|parameter)/i,
+  /malformed/i,
+  /invalid\s+json/i,
+  /cannot\s+parse/i,
+  /unsupported\s+media\s+type/i,
+];
 
 function isModelUnsupportedErrorMessage(rawMessage?: string | null): boolean {
   const text = (rawMessage || '').trim();
@@ -35,21 +66,19 @@ function isModelUnsupportedErrorMessage(rawMessage?: string | null): boolean {
   return MODEL_UNSUPPORTED_PATTERNS.some((pattern) => pattern.test(text));
 }
 
-export function classifyProxyFailure(context: ProxyFailureContext): RetryFailureCategory {
-  const status = Number.isFinite(context.status) ? Number(context.status) : 0;
-  const errorText = (context.upstreamErrorText || '').trim();
-
-  if (!status || status < 0) return 'network';
-  if (status === 401 || status === 403) return 'auth';
-  if (status === 413) return 'payload_too_large';
-  if (status === 429) return 'rate_limit';
-  if (status >= 500) return 'server';
-  if (isModelUnsupportedErrorMessage(errorText)) return 'model_unsupported';
-  if (status >= 400) return 'bad_request';
-  return 'unknown';
+function matchesAnyPattern(patterns: RegExp[], rawMessage?: string | null): boolean {
+  const text = (rawMessage || '').trim();
+  if (!text) return false;
+  return patterns.some((pattern) => pattern.test(text));
 }
 
 export function shouldRetryProxyRequest(status: number, upstreamErrorText?: string | null): boolean {
-  const category = classifyProxyFailure({ status, upstreamErrorText });
-  return category !== 'auth' && category !== 'bad_request' && category !== 'unknown';
+  if (status >= 500) return true;
+  if (status === 408 || status === 409 || status === 425 || status === 429) return true;
+  if (status === 401 || status === 403) return true;
+  if (isModelUnsupportedErrorMessage(upstreamErrorText)) return true;
+  if (matchesAnyPattern(NON_RETRYABLE_REQUEST_PATTERNS, upstreamErrorText)) return false;
+  if (matchesAnyPattern(RETRYABLE_CHANNEL_LOCAL_PATTERNS, upstreamErrorText)) return true;
+  if (status === 400 || status === 404 || status === 422) return false;
+  return false;
 }

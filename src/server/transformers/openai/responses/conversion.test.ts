@@ -187,6 +187,27 @@ describe('sanitizeResponsesBodyForProxy', () => {
       },
     });
   });
+
+  it('preserves unknown top-level fields while still normalizing known compatibility fields', () => {
+    const result = sanitizeResponsesBodyForProxy(
+      {
+        model: 'gpt-5',
+        input: 'hello',
+        max_completion_tokens: 256,
+        custom_vendor_flag: 'keep-me',
+      },
+      'gpt-5',
+      false,
+    );
+
+    expect(result).toMatchObject({
+      model: 'gpt-5',
+      stream: false,
+      custom_vendor_flag: 'keep-me',
+      max_output_tokens: 256,
+    });
+    expect(result.max_completion_tokens).toBeUndefined();
+  });
 });
 
 describe('convertOpenAiBodyToResponsesBody', () => {
@@ -431,6 +452,84 @@ describe('convertOpenAiBodyToResponsesBody', () => {
         ],
       },
     ]);
+  });
+
+  it('shortens long MCP tool names consistently across tools, tool_choice and assistant tool calls', () => {
+    const sharedSuffix = 'server__execute_super_long_nested_tool_name_that_needs_shortening';
+    const firstName = `mcp__alpha_workspace__${sharedSuffix}`;
+    const secondName = `mcp__beta_workspace__${sharedSuffix}`;
+
+    const result = convertOpenAiBodyToResponsesBody(
+      {
+        model: 'gpt-5',
+        messages: [
+          {
+            role: 'assistant',
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: {
+                  name: firstName,
+                  arguments: '{"city":"shanghai"}',
+                },
+              },
+            ],
+          },
+          {
+            role: 'tool',
+            tool_call_id: 'call_1',
+            content: 'done',
+          },
+        ],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: firstName,
+              parameters: { type: 'object' },
+            },
+          },
+          {
+            type: 'function',
+            function: {
+              name: secondName,
+              parameters: { type: 'object' },
+            },
+          },
+        ],
+        tool_choice: {
+          type: 'function',
+          function: {
+            name: secondName,
+          },
+        },
+      },
+      'gpt-5',
+      false,
+    );
+
+    const toolNames = Array.isArray(result.tools)
+      ? result.tools.map((tool: any) => tool.name)
+      : [];
+    const assistantCall = Array.isArray(result.input)
+      ? result.input.find((item: any) => item.type === 'function_call')
+      : null;
+
+    expect(toolNames).toHaveLength(2);
+    expect(toolNames[0].length).toBeLessThanOrEqual(64);
+    expect(toolNames[1].length).toBeLessThanOrEqual(64);
+    expect(toolNames[0].startsWith('mcp__')).toBe(true);
+    expect(toolNames[1].startsWith('mcp__')).toBe(true);
+    expect(toolNames[0]).not.toBe(toolNames[1]);
+    expect(result.tool_choice).toEqual({
+      type: 'function',
+      name: toolNames[1],
+    });
+    expect(assistantCall).toMatchObject({
+      type: 'function_call',
+      name: toolNames[0],
+    });
   });
 });
 
@@ -853,6 +952,7 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       model: 'gpt-5',
       input: 'hello',
       stream: true,
+      parallel_tool_calls: true,
       include: ['reasoning.encrypted_content'],
       reasoning: {
         effort: 'high',
@@ -864,12 +964,20 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       prompt_cache_retention: { scope: 'workspace' },
       background: true,
       top_logprobs: 2,
+      previous_response_id: 'resp_prev_9',
+      truncation: 'auto',
+      service_tier: 'priority',
+      text: {
+        verbosity: 'high',
+      },
     });
 
     expect(candidates).toContainEqual({
       model: 'gpt-5',
       input: 'hello',
       stream: true,
+      parallel_tool_calls: true,
+      include: ['reasoning.encrypted_content'],
       reasoning: {
         effort: 'high',
         summary: 'auto',
@@ -880,6 +988,12 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       prompt_cache_retention: { scope: 'workspace' },
       background: true,
       top_logprobs: 2,
+      previous_response_id: 'resp_prev_9',
+      truncation: 'auto',
+      service_tier: 'priority',
+      text: {
+        verbosity: 'high',
+      },
     });
   });
 

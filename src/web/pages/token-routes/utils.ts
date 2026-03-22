@@ -1,10 +1,11 @@
 import type { CSSProperties } from 'react';
 import { getBrand, normalizeBrandIconKey, type BrandInfo } from '../../components/BrandIcon.js';
-import type { RouteRow, RouteChannel, RouteDecisionCandidate, ChannelDecisionState, RouteSummaryRow } from './types.js';
+import type { RouteRow, RouteChannel, RouteDecisionCandidate, ChannelDecisionState, RouteSummaryRow, RouteMode } from './types.js';
 
 export const AUTO_ROUTE_DECISION_LIMIT = 80;
 export const ROUTE_RENDER_CHUNK = 40;
 export const ROUTE_BRAND_ICON_PREFIX = 'brand:';
+export const ROUTE_ICON_NONE_VALUE = '__route_icon_none__';
 
 export const ENDPOINT_TYPE_ICON_MODEL_MAP: Record<string, string> = {
   openai: 'chatgpt',
@@ -38,49 +39,34 @@ export const PLATFORM_ALIASES: Record<string, string> = {
 };
 
 export function isRegexModelPattern(modelPattern: string): boolean {
-  const normalized = modelPattern.trim();
-  if (!normalized) return false;
-  if (normalized.toLowerCase().startsWith('re:')) return true;
-  return /^\/(?:[^\\/]|\\.)+\/[a-z]*$/i.test(normalized);
-}
-
-function looksLikeRegexBody(modelPattern: string): boolean {
-  if (!modelPattern) return false;
-  if (/[\*\?\[]/.test(modelPattern)) return false;
-  return modelPattern.startsWith('^')
-    || modelPattern.endsWith('$')
-    || /[()|+\\]/.test(modelPattern);
+  return modelPattern.trim().toLowerCase().startsWith('re:');
 }
 
 export function isExactModelPattern(modelPattern: string): boolean {
   const normalized = modelPattern.trim();
   if (!normalized) return false;
-  if (parseRegexModelPattern(normalized).regex) return false;
-  return !/[\*\?\[]/.test(normalized);
+  if (isRegexModelPattern(normalized)) return false;
+  return !/[\*\?]/.test(normalized);
+}
+
+export function normalizeRouteMode(routeMode: RouteMode | string | null | undefined): RouteMode {
+  return routeMode === 'explicit_group' ? 'explicit_group' : 'pattern';
+}
+
+export function isExplicitGroupRoute(route: Pick<RouteRow | RouteSummaryRow, 'routeMode'>): boolean {
+  return normalizeRouteMode(route.routeMode) === 'explicit_group';
+}
+
+export function isRouteExactModel(route: Pick<RouteRow | RouteSummaryRow, 'modelPattern' | 'routeMode'>): boolean {
+  return !isExplicitGroupRoute(route) && isExactModelPattern(route.modelPattern);
 }
 
 export function parseRegexModelPattern(modelPattern: string): { regex: RegExp | null; error: string | null } {
-  const normalized = modelPattern.trim();
-  if (!normalized) return { regex: null, error: null };
-
-  let body = normalized;
-  let flags = '';
-
-  if (normalized.toLowerCase().startsWith('re:')) {
-    body = normalized.slice(3).trim();
-    if (!body) return { regex: null, error: 're: 后缺少正则表达式' };
-  } else {
-    const slashMatch = normalized.match(/^\/((?:[^\\/]|\\.)+)\/([a-z]*)$/i);
-    if (slashMatch) {
-      body = slashMatch[1];
-      flags = slashMatch[2] || '';
-    } else if (!looksLikeRegexBody(normalized)) {
-      return { regex: null, error: null };
-    }
-  }
-
+  if (!isRegexModelPattern(modelPattern)) return { regex: null, error: null };
+  const body = modelPattern.trim().slice(3).trim();
+  if (!body) return { regex: null, error: 're: 后缺少正则表达式' };
   try {
-    return { regex: new RegExp(body, flags), error: null };
+    return { regex: new RegExp(body), error: null };
   } catch (error) {
     return { regex: null, error: (error as Error)?.message || '无效正则' };
   }
@@ -140,11 +126,10 @@ export function matchesModelPattern(model: string, pattern: string): boolean {
   const cached = matchCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
-  const parsed = parseRegexModelPattern(normalized);
-
   let result: boolean;
-  if (parsed.regex) {
-    result = parsed.regex.test(model);
+  if (isRegexModelPattern(normalized)) {
+    const parsed = parseRegexModelPattern(normalized);
+    result = !!parsed.regex && parsed.regex.test(model);
   } else {
     result = matchesGlobPattern(model, normalized);
   }
@@ -161,30 +146,6 @@ export function getModelPatternError(modelPattern: string): string | null {
   const parsed = parseRegexModelPattern(normalized);
   if (!parsed.error) return null;
   return `模型匹配正则错误：${parsed.error}`;
-}
-
-export function matchesRouteSearchTerm(
-  route: Pick<RouteRow | RouteSummaryRow, 'modelPattern' | 'displayName'> & { siteNames?: string[] | null },
-  rawTerm: string,
-): boolean {
-  const term = rawTerm.trim();
-  if (!term) return true;
-
-  const searchTargets = [
-    route.modelPattern,
-    route.displayName || '',
-    ...(route.siteNames || []),
-  ].map((value) => String(value || '').trim()).filter(Boolean);
-
-  if (searchTargets.length === 0) return false;
-
-  const isPatternTerm = !!parseRegexModelPattern(term).regex || /[\*\?\[]/.test(term);
-  if (isPatternTerm) {
-    return searchTargets.some((value) => matchesModelPattern(value, term));
-  }
-
-  const loweredTerm = term.toLowerCase();
-  return searchTargets.some((value) => value.toLowerCase().includes(loweredTerm));
 }
 
 export function resolveRouteTitle(route: Pick<RouteRow | RouteSummaryRow, 'displayName' | 'modelPattern'>): string {
@@ -212,8 +173,13 @@ export function parseBrandIconValue(raw: string): string | null {
   return normalizeBrandIconKey(icon);
 }
 
+export function isRouteIconNoneValue(raw: string | null | undefined): boolean {
+  return (raw || '').trim() === ROUTE_ICON_NONE_VALUE;
+}
+
 export function normalizeRouteDisplayIconValue(raw: string | null | undefined): string {
   const normalized = (raw || '').trim();
+  if (isRouteIconNoneValue(normalized)) return ROUTE_ICON_NONE_VALUE;
   const brandIcon = parseBrandIconValue(normalized);
   if (brandIcon) return toBrandIconValue(brandIcon);
   return normalized;
@@ -252,9 +218,10 @@ export function siteAvatarLetters(siteName: string): string {
   return compact.slice(0, 2).toUpperCase();
 }
 
-export function resolveRouteIcon(route: Pick<RouteRow | RouteSummaryRow, 'displayIcon'>): { kind: 'none' } | { kind: 'text'; value: string } | { kind: 'brand'; value: string } {
+export function resolveRouteIcon(route: Pick<RouteRow | RouteSummaryRow, 'displayIcon'>): { kind: 'auto' } | { kind: 'none' } | { kind: 'text'; value: string } | { kind: 'brand'; value: string } {
   const icon = (route.displayIcon || '').trim();
-  if (!icon) return { kind: 'none' };
+  if (isRouteIconNoneValue(icon)) return { kind: 'none' };
+  if (!icon) return { kind: 'auto' };
   const brandIcon = parseBrandIconValue(icon);
   if (brandIcon) return { kind: 'brand', value: brandIcon };
   return { kind: 'text', value: icon };
@@ -353,24 +320,6 @@ export function getChannelDecisionState(
         showBar: true,
         reasonText: '冷却中',
         reasonColor: 'var(--color-danger)',
-      };
-    }
-
-    if (candidate.circuitStatus?.isOpen) {
-      return {
-        probability: 0,
-        showBar: true,
-        reasonText: candidate.circuitStatus.reason,
-        reasonColor: 'var(--color-warning)',
-      };
-    }
-
-    if (candidate.circuitStatus?.isHalfOpen) {
-      return {
-        probability: 0,
-        showBar: true,
-        reasonText: candidate.circuitStatus.reason,
-        reasonColor: 'var(--color-info)',
       };
     }
 

@@ -23,6 +23,7 @@ type DesktopServerWorkingDirInput = {
   isPackaged: boolean;
 };
 
+const DEFAULT_DESKTOP_SERVER_PORT = 4000;
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_READY_INTERVAL_MS = 250;
 
@@ -31,9 +32,11 @@ function delay(ms: number) {
 }
 
 export function buildDesktopServerEnv(input: DesktopServerEnvInput): NodeJS.ProcessEnv {
+  const host = (input.inheritedEnv?.HOST || '0.0.0.0').trim() || '0.0.0.0';
+
   return {
     ...(input.inheritedEnv || {}),
-    HOST: '127.0.0.1',
+    HOST: host,
     PORT: String(input.port),
     DATA_DIR: input.userDataDir,
     METAPI_DESKTOP: '1',
@@ -47,6 +50,12 @@ export function createDesktopServerUrl(port: number): string {
 
 export function createDesktopHealthUrl(port: number): string {
   return `${createDesktopServerUrl(port)}/api/desktop/health`;
+}
+
+export function resolveDesktopServerPort(env?: NodeJS.ProcessEnv): number {
+  const forcedPort = Number.parseInt(env?.METAPI_DESKTOP_SERVER_PORT || '', 10);
+  if (Number.isFinite(forcedPort) && forcedPort > 0) return forcedPort;
+  return DEFAULT_DESKTOP_SERVER_PORT;
 }
 
 export function resolveDesktopServerWorkingDir(input: DesktopServerWorkingDirInput): string {

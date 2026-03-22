@@ -21,10 +21,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -39,35 +39,51 @@ jobs:
         run: npm run build
 
       - name: Upload built dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: metapi-dist-${{ github.sha }}
           path: dist
           if-no-files-found: error
 
   build-packages:
-    name: Build Desktop Package (${{ matrix.os }})
+    name: Build Desktop Package (${{ matrix.platform }})
     needs: verify
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+            artifactLabel: linux-x64
+          - platform: windows
+            runner: windows-latest
+            artifactLabel: windows-x64
+          - platform: mac-arm64
+            runner: macos-15
+            artifactLabel: mac-arm64
+            packageCommand: npm run package:desktop -- --mac --arm64
+            expectedMacArch: arm64
+          - platform: mac-x64
+            runner: macos-15-intel
+            artifactLabel: mac-x64
+            packageCommand: npm run package:desktop:mac:intel
+            expectedMacArch: x64
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
 
       - name: Restore Electron cache (Windows)
         if: runner.os == 'Windows'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ${{ runner.temp }}/.cache/electron
@@ -80,7 +96,7 @@ jobs:
 
       - name: Restore Electron cache (Linux)
         if: runner.os == 'Linux'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ${{ runner.temp }}/.cache/electron
@@ -94,7 +110,7 @@ jobs:
 
       - name: Restore Electron cache (macOS)
         if: runner.os == 'macOS'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ${{ runner.temp }}/.cache/electron
@@ -109,7 +125,7 @@ jobs:
         run: npm ci
 
       - name: Download built dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: metapi-dist-${{ github.sha }}
           path: dist
@@ -183,7 +199,7 @@ jobs:
           done
 
       - name: Build desktop artifacts (macOS)
-        if: runner.os == 'macOS'
+        if: startsWith(matrix.platform, 'mac-')
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -195,14 +211,15 @@ jobs:
           APPLE_ID_INPUT: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD_INPUT: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID_INPUT: ${{ secrets.APPLE_TEAM_ID }}
+          PACKAGE_COMMAND: ${{ matrix.packageCommand }}
         run: |
           set -euo pipefail
           if [ -n "${APPLE_ID_INPUT:-}" ]; then export APPLE_ID="$APPLE_ID_INPUT"; fi
           if [ -n "${APPLE_APP_SPECIFIC_PASSWORD_INPUT:-}" ]; then export APPLE_APP_SPECIFIC_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD_INPUT"; fi
           if [ -n "${APPLE_TEAM_ID_INPUT:-}" ]; then export APPLE_TEAM_ID="$APPLE_TEAM_ID_INPUT"; fi
           for attempt in 1 2; do
-            echo "Desktop build (host arch) attempt ${attempt}/2"
-            if npm run package:desktop; then
+            echo "Desktop build (${PACKAGE_COMMAND}) attempt ${attempt}/2"
+            if eval "${PACKAGE_COMMAND}"; then
               break
             fi
             if [ "$attempt" -eq 2 ]; then
@@ -210,25 +227,19 @@ jobs:
             fi
             sleep 90
           done
-          if [ "${RUNNER_ARCH:-}" != "X64" ]; then
-            for attempt in 1 2; do
-              echo "Desktop build (mac intel x64) attempt ${attempt}/2"
-              if npm run package:desktop:mac:intel; then
-                break
-              fi
-              if [ "$attempt" -eq 2 ]; then
-                exit 1
-              fi
-              sleep 90
-            done
-          else
-            echo "Runner is already X64, skip extra Intel build"
-          fi
+
+      - name: Verify packaged macOS architecture
+        if: startsWith(matrix.platform, 'mac-')
+        shell: bash
+        env:
+          expectedMacArch: ${{ matrix.expectedMacArch }}
+        run: |
+          node scripts/desktop/verifyMacArchitecture.mjs --release-dir release --expected-arch "$expectedMacArch"
 
       - name: Upload desktop package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: metapi-desktop-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}
+          name: metapi-desktop-${{ github.run_id }}-${{ matrix.artifactLabel }}
           path: |
             release/*.exe
             release/*.dmg
@@ -250,7 +261,7 @@ jobs:
 
     steps:
       - name: Download package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
@@ -281,10 +292,13 @@ jobs:
           - arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
+          - arch: armv7
+            platform: linux/arm/v7
+            runner: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Ensure Docker Hub secrets are configured
         run: |
@@ -294,24 +308,28 @@ jobs:
           fi
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
+
+      - name: Set up QEMU
+        if: matrix.arch == 'armv7'
+        uses: docker/setup-qemu-action@v4
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             1467078763/metapi
@@ -337,7 +355,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push ${{ matrix.platform }} image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
@@ -357,7 +375,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Ensure Docker Hub secrets are configured
         run: |
@@ -367,24 +385,24 @@ jobs:
           fi
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             1467078763/metapi
@@ -402,5 +420,6 @@ jobs:
             docker buildx imagetools create \
               --tag "$tag" \
               "${tag}-amd64" \
-              "${tag}-arm64"
+              "${tag}-arm64" \
+              "${tag}-armv7"
           done <<< "${{ steps.meta.outputs.tags }}"

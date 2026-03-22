@@ -1,5 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,16 +25,20 @@ vi.mock('undici', async () => {
   };
 });
 
-vi.mock('../../services/tokenRouter.js', () => ({
-  tokenRouter: {
-    selectChannel: (...args: unknown[]) => selectChannelMock(...args),
-    selectNextChannel: (...args: unknown[]) => selectNextChannelMock(...args),
-    selectChannelWithOptions: (...args: unknown[]) => selectChannelMock(...args),
-    selectNextChannelWithOptions: (...args: unknown[]) => selectNextChannelMock(...args),
-    recordSuccess: (...args: unknown[]) => recordSuccessMock(...args),
-    recordFailure: (...args: unknown[]) => recordFailureMock(...args),
-  },
-}));
+vi.mock('../../services/tokenRouter.js', async () => {
+  const actual = await vi.importActual<typeof import('../../services/tokenRouter.js')>('../../services/tokenRouter.js');
+  return {
+    ...actual,
+    tokenRouter: {
+      selectChannel: (...args: unknown[]) => selectChannelMock(...args),
+      selectNextChannel: (...args: unknown[]) => selectNextChannelMock(...args),
+      selectChannelWithOptions: (...args: unknown[]) => selectChannelMock(...args),
+      selectNextChannelWithOptions: (...args: unknown[]) => selectNextChannelMock(...args),
+      recordSuccess: (...args: unknown[]) => recordSuccessMock(...args),
+      recordFailure: (...args: unknown[]) => recordFailureMock(...args),
+    },
+  };
+});
 
 vi.mock('../../services/modelService.js', () => ({
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),

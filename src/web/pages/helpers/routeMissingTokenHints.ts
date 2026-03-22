@@ -40,6 +40,12 @@ export function normalizeMissingTokenModels(
       if (!account || !Number.isFinite(account.accountId)) continue;
       const accountName = (account.username || '').trim();
       const siteName = String(account.siteName || '').trim();
+      const normalizeLabels = (labels: unknown): string[] => Array.isArray(labels)
+        ? Array.from(new Set(labels
+          .map((label) => String(label || '').trim())
+          .filter(Boolean)))
+          .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+        : [];
       accountMap.set(account.accountId, {
         accountId: account.accountId,
         username: accountName || null,

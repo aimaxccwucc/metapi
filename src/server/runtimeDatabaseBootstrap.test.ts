@@ -1,7 +1,27 @@
-import { describe, expect, it, vi } from 'vitest';
-import { ensureRuntimeDatabaseReady } from './runtimeDatabaseBootstrap.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { runSqliteMigrations } from './db/migrate.js';
+import {
+  __runtimeDatabaseBootstrapTestUtils,
+  ensureRuntimeDatabaseReady,
+  runSqliteRuntimeMigrations,
+} from './runtimeDatabaseBootstrap.js';
+
+vi.mock('./db/migrate.js', () => ({
+  runSqliteMigrations: vi.fn(),
+}));
 
 describe('runtimeDatabaseBootstrap', () => {
+  beforeEach(() => {
+    __runtimeDatabaseBootstrapTestUtils.resetSqliteMigrationsBootstrapped();
+    vi.clearAllMocks();
+  });
+
+  it('runs sqlite migrations on the first runtime bootstrap call', async () => {
+    await runSqliteRuntimeMigrations();
+
+    expect(runSqliteMigrations).toHaveBeenCalledTimes(1);
+  });
+
   it('runs sqlite runtime migrations when dialect is sqlite', async () => {
     const runSqliteRuntimeMigrations = vi.fn(async () => {});
     const ensureExternalRuntimeSchema = vi.fn(async () => {});
@@ -16,37 +36,17 @@ describe('runtimeDatabaseBootstrap', () => {
     expect(ensureExternalRuntimeSchema).not.toHaveBeenCalled();
   });
 
-  it.each(['postgres', 'mysql'] as const)('bootstraps external schema when dialect is %s and schema is missing', async (dialect) => {
+  it.each(['postgres', 'mysql'] as const)('bootstraps external schema when dialect is %s', async (dialect) => {
     const runSqliteRuntimeMigrations = vi.fn(async () => {});
     const ensureExternalRuntimeSchema = vi.fn(async () => {});
-    const externalRuntimeSchemaAlreadyInitialized = vi.fn(async () => false);
 
     await ensureRuntimeDatabaseReady({
       dialect,
       runSqliteRuntimeMigrations,
       ensureExternalRuntimeSchema,
-      externalRuntimeSchemaAlreadyInitialized,
     });
 
-    expect(externalRuntimeSchemaAlreadyInitialized).toHaveBeenCalledTimes(1);
     expect(ensureExternalRuntimeSchema).toHaveBeenCalledTimes(1);
-    expect(runSqliteRuntimeMigrations).not.toHaveBeenCalled();
-  });
-
-  it.each(['postgres', 'mysql'] as const)('skips external bootstrap when schema already exists for %s', async (dialect) => {
-    const runSqliteRuntimeMigrations = vi.fn(async () => {});
-    const ensureExternalRuntimeSchema = vi.fn(async () => {});
-    const externalRuntimeSchemaAlreadyInitialized = vi.fn(async () => true);
-
-    await ensureRuntimeDatabaseReady({
-      dialect,
-      runSqliteRuntimeMigrations,
-      ensureExternalRuntimeSchema,
-      externalRuntimeSchemaAlreadyInitialized,
-    });
-
-    expect(externalRuntimeSchemaAlreadyInitialized).toHaveBeenCalledTimes(1);
-    expect(ensureExternalRuntimeSchema).not.toHaveBeenCalled();
     expect(runSqliteRuntimeMigrations).not.toHaveBeenCalled();
   });
 });

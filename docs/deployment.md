@@ -10,7 +10,7 @@
 |------|----------|--------------|----------|
 | 云服务器 / NAS / 家用主机长期运行 | Docker / Docker Compose / Zeabur | 固定服务地址，例如 `http://your-host:4000` 或反向代理域名 | 你挂载的 `DATA_DIR` / 持久化卷 |
 | 免费云部署（24h 在线） | Render + TiDB + UptimeRobot | Render 分配的 `.onrender.com` 域名或自定义域名 | TiDB Serverless（外部 MySQL 数据库） |
-| 个人电脑本地使用 | 桌面版安装包 | 桌面窗口；如需本机客户端直连，使用日志中打印的 `http://127.0.0.1:<port>` | Electron `app.getPath('userData')/data` |
+| 个人电脑本地使用 | 桌面版安装包 | 桌面窗口；默认本机客户端直连使用 `http://127.0.0.1:4000`，局域网客户端可使用当前机器 IP + `4000`；如有覆盖则按 `METAPI_DESKTOP_SERVER_PORT` 的实际端口访问 | Electron `app.getPath('userData')/data` |
 | 二次开发 / 调试 | 本地开发 | 前端 `http://localhost:5173`，后端默认 `http://localhost:4000` | 仓库内 `./data` 或自定义 `DATA_DIR` |
 
 > [!NOTE]
@@ -191,6 +191,10 @@ docker run -d --name metapi \
 - 托盘菜单支持重新打开窗口、重启后端、开机自启
 - 支持基于 GitHub Releases 的应用内更新检查
 
+> [!IMPORTANT]
+> 桌面版首次启动时，如果没有显式注入 `AUTH_TOKEN`，管理员登录令牌默认是 `change-me-admin-token`。
+> 这只适合本机初始调试使用，首次登录后应立即修改。
+
 > [!NOTE]
 > 服务器部署不再提供裸 Node.js Release 压缩包，统一推荐 Docker / Docker Compose。
 
@@ -211,7 +215,7 @@ docker run -d --name metapi \
 
 ## 反向代理
 
-以下反向代理配置面向 Docker / 服务器模式。桌面版内置后端默认只绑定本机 `127.0.0.1`，通常不作为公网服务直接暴露。
+以下反向代理配置面向 Docker / 服务器模式。桌面版内置后端默认监听 `0.0.0.0:4000`，但通常仍作为单机桌面应用使用；如果要给局域网或公网客户端访问，请自行配置防火墙、反向代理和认证边界。若你显式设置了 `METAPI_DESKTOP_SERVER_PORT`，请把示例里的 `4000` 改成对应端口。
 
 ### Nginx
 

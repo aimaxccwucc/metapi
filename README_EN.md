@@ -26,7 +26,7 @@ into <strong>one API Key, one endpoint</strong>, with automatic model discovery,
 --><a href="LICENSE">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-brightgreen?style=flat">
 </a><!--
---><img alt="Node.js" src="https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&style=flat"><!--
+--><img alt="Node.js" src="https://img.shields.io/badge/Node.js-22.15%2B-339933?logo=node.js&style=flat"><!--
 --><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&style=flat"><!--
 --><a href="https://zeabur.com/templates/DOX5PR">
   <img alt="Deploy on Zeabur" src="https://zeabur.com/button.svg" height="28">
@@ -287,7 +287,7 @@ Alert scenarios: low balance warning, site/account anomalies, check-in failures,
 ### Lightweight Deployment
 
 - **Single Docker container** with a default local data directory, plus optional external MySQL / PostgreSQL runtime DB
-- Alpine base image, minimal footprint
+- Docker images support `amd64`, `arm64`, and `armv7l` (`linux/arm/v7`) server deployments
 - Full data import/export for worry-free migration
 
 ---
@@ -344,12 +344,18 @@ docker run -d --name metapi \
 
 After starting, visit `http://localhost:4000` and log in with your `AUTH_TOKEN`!
 
+> [!NOTE]
+> Docker images support `amd64`, `arm64`, and `armv7l` (`linux/arm/v7`) server deployments.
+> Current `armv7l` support is limited to server / Docker usage and does not include Electron desktop packaging support.
+
+<!-- markdownlint-disable-next-line MD028 -->
 > [!IMPORTANT]
 > Make sure to change `AUTH_TOKEN` and `PROXY_TOKEN` — do not use default values. Data is stored in the `./data` directory and persists across upgrades.
 
 > [!TIP]
 > The initial admin token is the `AUTH_TOKEN` configured at startup.
 > If running outside Compose without explicitly setting `AUTH_TOKEN`, the default is `change-me-admin-token` (for local debugging only).
+> The desktop installer falls into this category on first launch too: if you do not inject `AUTH_TOKEN`, the default admin token is also `change-me-admin-token`.
 > If you change the admin token in the Settings panel, use the new token for subsequent logins.
 
 For Docker Compose, desktop installers, reverse proxy, upgrades, and database options, see [Deployment Guide](docs/deployment.md).
@@ -476,7 +482,7 @@ For detailed per-client setup, examples, and troubleshooting, see [docs/client-i
 | **Database** | SQLite / MySQL / PostgreSQL + [Drizzle ORM](https://orm.drizzle.team) |
 | **Charts** | [VChart](https://visactor.io/vchart) (@visactor/react-vchart) |
 | **Scheduling** | [node-cron](https://github.com/node-cron/node-cron) |
-| **Containerization** | Docker (Alpine) + Docker Compose |
+| **Containerization** | Docker (Debian slim) + Docker Compose |
 | **Testing** | [Vitest](https://vitest.dev) |
 
 ---

@@ -34,7 +34,13 @@ type RecoveryMigration = RecoveryMigrationRecord & {
   statements: string[];
 };
 
-const VERIFIED_BOOTSTRAP_TAG = '0011_fuzzy_vulcan';
+type LegacySiteRow = {
+  id: number;
+  platform: string;
+  url: string;
+};
+
+const VERIFIED_BOOTSTRAP_TAG = '0012_account_token_value_status';
 const VERIFIED_SCHEMA_MARKERS: SchemaMarker[] = [
   { table: 'sites' },
   { table: 'settings' },
@@ -57,22 +63,13 @@ const VERIFIED_SCHEMA_MARKERS: SchemaMarker[] = [
   { table: 'account_tokens', column: 'token_group' },
   // 0009: is_manual column on model_availability
   { table: 'model_availability', column: 'is_manual' },
-  // 0010: site health columns
-  { table: 'sites', column: 'health_status' },
-  { table: 'sites', column: 'health_reason' },
-  { table: 'sites', column: 'health_checked_at' },
-  // 0011: route model circuits table
-  { table: 'route_model_circuits' },
-  { table: 'route_model_circuits', column: 'channel_id' },
-  { table: 'route_model_circuits', column: 'model_name' },
-  { table: 'route_model_circuits', column: 'state' },
-  { table: 'route_model_circuits', column: 'fail_count' },
-  { table: 'route_model_circuits', column: 'opened_at' },
-  { table: 'route_model_circuits', column: 'open_until' },
-  { table: 'route_model_circuits', column: 'last_error_at' },
-  { table: 'route_model_circuits', column: 'last_success_at' },
-  { table: 'route_model_circuits', column: 'probe_in_flight' },
-  { table: 'route_model_circuits', column: 'updated_at' },
+  // 0010: downstream_api_key_id column on proxy_logs
+  { table: 'proxy_logs', column: 'downstream_api_key_id' },
+  // 0011: downstream key metadata columns
+  { table: 'downstream_api_keys', column: 'group_name' },
+  { table: 'downstream_api_keys', column: 'tags' },
+  // 0012: value_status column on account_tokens
+  { table: 'account_tokens', column: 'value_status' },
 ];
 
 
@@ -158,36 +155,9 @@ function normalizeSqlForMatch(sqlText: string): string {
 
 function extractFailedSqlFromError(error: unknown): string | null {
   const message = normalizeSchemaErrorMessage(error);
-  const marker = 'Failed to run the query ';
-  const markerIndex = message.search(/failed to run the query /i);
-  if (markerIndex < 0) return null;
-
-  const quotedStart = message.indexOf("'", markerIndex + marker.length - 1);
-  if (quotedStart < 0) return null;
-
-  let quotedEnd = -1;
-  for (let index = quotedStart + 1; index < message.length; index += 1) {
-    if (message[index] !== "'") continue;
-    const remainder = message.slice(index + 1).trimStart().toLowerCase();
-    if (
-      remainder.length === 0
-      || remainder.startsWith('duplicate ')
-      || remainder.startsWith('sqliteerror:')
-      || remainder.startsWith('error:')
-      || remainder.startsWith('|')
-    ) {
-      quotedEnd = index;
-      break;
-    }
-  }
-
-  if (quotedEnd < 0) {
-    quotedEnd = message.lastIndexOf("'");
-    if (quotedEnd <= quotedStart) return null;
-  }
-
-  const sqlText = message.slice(quotedStart + 1, quotedEnd).trim();
-  return sqlText.length > 0 ? sqlText : null;
+  const matched = message.match(/Failed to run the query '([\s\S]*?)'/i);
+  const sqlText = matched?.[1]?.trim();
+  return sqlText && sqlText.length > 0 ? sqlText : null;
 }
 
 function findMatchingSingleStatementMigration(
@@ -228,6 +198,28 @@ function findMatchingMigrationByStatement(
 
   for (const migration of migrations) {
     if (!migration.statements.some((statement) => normalizeSqlForMatch(statement) === normalizedFailedSql)) {
+      continue;
+    }
+
+    return {
+      tag: migration.tag,
+      createdAt: migration.createdAt,
+      hash: migration.hash,
+    };
+  }
+
+  return null;
+}
+
+function findMatchingMigrationByErrorMessage(
+  migrationsFolder: string,
+  error: unknown,
+): RecoveryMigrationRecord | null {
+  const normalizedErrorMessage = normalizeSqlForMatch(normalizeSchemaErrorMessage(error));
+  const migrations = readRecoveryMigrations(migrationsFolder);
+
+  for (const migration of migrations) {
+    if (!migration.statements.some((statement) => normalizedErrorMessage.includes(normalizeSqlForMatch(statement)))) {
       continue;
     }
 
@@ -282,6 +274,14 @@ function markMigrationRecordIfMissing(sqlite: Database.Database, record: Migrati
   return true;
 }
 
+function hasMigrationRecord(sqlite: Database.Database, record: MigrationRecord): boolean {
+  if (!tableExists(sqlite, '__drizzle_migrations')) return false;
+  const row = sqlite
+    .prepare('SELECT 1 FROM "__drizzle_migrations" WHERE "hash" = ? LIMIT 1')
+    .get(record.hash);
+  return !!row;
+}
+
 function normalizeSchemaErrorMessage(error: unknown): string {
   if (!error || typeof error !== 'object') {
     return String(error || '');
@@ -325,15 +325,19 @@ function isRecoverableSchemaConflictError(error: unknown): boolean {
     || lowered.includes('already exists');
 }
 
-function getLatestRecordedMigrationCreatedAt(sqlite: Database.Database): number | null {
-  if (!tableExists(sqlite, '__drizzle_migrations')) return null;
-  const row = sqlite
-    .prepare('SELECT created_at FROM "__drizzle_migrations" ORDER BY created_at DESC LIMIT 1')
-    .get() as { created_at?: number } | undefined;
-  if (!row || row.created_at === undefined || row.created_at === null) {
-    return null;
+function isSitesPlatformUrlUniqueConflictError(error: unknown): boolean {
+  const lowered = normalizeSchemaErrorMessage(error).toLowerCase();
+  if (!lowered.includes('unique constraint failed: sites.platform, sites.url')) {
+    return false;
   }
-  return Number(row.created_at);
+
+  const failedSqlText = extractFailedSqlFromError(error);
+  if (!failedSqlText) {
+    return true;
+  }
+
+  return normalizeSqlForMatch(failedSqlText)
+    === normalizeSqlForMatch('CREATE UNIQUE INDEX `sites_platform_url_unique` ON `sites` (`platform`,`url`);');
 }
 
 function replayMigrationStatements(sqlite: Database.Database, statements: string[]): void {
@@ -341,9 +345,23 @@ function replayMigrationStatements(sqlite: Database.Database, statements: string
     try {
       sqlite.exec(statement);
     } catch (error) {
-      if (!isRecoverableSchemaConflictError(error)) {
-        throw error;
+      if (isRecoverableSchemaConflictError(error)) {
+        continue;
       }
+
+      if (isSitesPlatformUrlUniqueConflictError(error) && deduplicateLegacySitesForUniqueIndex(sqlite)) {
+        try {
+          sqlite.exec(statement);
+          continue;
+        } catch (retryError) {
+          if (isRecoverableSchemaConflictError(retryError)) {
+            continue;
+          }
+          throw retryError;
+        }
+      }
+
+      throw error;
     }
   }
 }
@@ -359,18 +377,38 @@ function recoverMigrationSequence(
     return false;
   }
 
-  let latestRecordedCreatedAt = getLatestRecordedMigrationCreatedAt(sqlite);
   for (const migration of migrations.slice(0, failedMigrationIndex + 1)) {
-    if (latestRecordedCreatedAt !== null && latestRecordedCreatedAt >= migration.createdAt) {
+    if (hasMigrationRecord(sqlite, migration)) {
       continue;
     }
 
     replayMigrationStatements(sqlite, migration.statements);
     markMigrationRecordIfMissing(sqlite, migration);
-    latestRecordedCreatedAt = migration.createdAt;
   }
 
   return true;
+}
+
+function backfillMissingRecordedMigrations(sqlite: Database.Database, migrationsFolder: string): number {
+  if (!tableExists(sqlite, '__drizzle_migrations')) return 0;
+
+  let recoveredCount = 0;
+  for (const migration of readRecoveryMigrations(migrationsFolder)) {
+    if (hasMigrationRecord(sqlite, migration)) {
+      continue;
+    }
+
+    replayMigrationStatements(sqlite, migration.statements);
+    if (markMigrationRecordIfMissing(sqlite, migration)) {
+      recoveredCount += 1;
+    }
+  }
+
+  if (recoveredCount > 0) {
+    console.warn(`[db] Backfilled ${recoveredCount} missing drizzle migration record(s).`);
+  }
+
+  return recoveredCount;
 }
 
 function tryRecoverDuplicateColumnMigrationError(
@@ -383,11 +421,10 @@ function tryRecoverDuplicateColumnMigrationError(
   }
 
   const failedSqlText = extractFailedSqlFromError(error);
-  if (!failedSqlText) {
-    return false;
-  }
-
-  const matchedMigration = findMatchingMigrationByStatement(migrationsFolder, failedSqlText);
+  const matchedMigration = failedSqlText
+    ? findMatchingMigrationByStatement(migrationsFolder, failedSqlText)
+      ?? findMatchingMigrationByErrorMessage(migrationsFolder, error)
+    : findMatchingMigrationByErrorMessage(migrationsFolder, error);
   if (!matchedMigration) {
     return false;
   }
@@ -399,16 +436,120 @@ function tryRecoverDuplicateColumnMigrationError(
   return recovered;
 }
 
+function rewriteDownstreamSiteWeightMultipliers(
+  sqlite: Database.Database,
+  siteIdMapping: Map<number, number>,
+): void {
+  if (siteIdMapping.size <= 0) return;
+  if (!tableExists(sqlite, 'downstream_api_keys')) return;
+  if (!columnExists(sqlite, 'downstream_api_keys', 'site_weight_multipliers')) return;
+
+  const rows = sqlite.prepare(`
+    SELECT id, site_weight_multipliers
+    FROM downstream_api_keys
+    WHERE site_weight_multipliers IS NOT NULL
+      AND TRIM(site_weight_multipliers) <> ''
+  `).all() as Array<{ id: number; site_weight_multipliers: string | null }>;
+
+  const update = sqlite.prepare('UPDATE downstream_api_keys SET site_weight_multipliers = ? WHERE id = ?');
+  for (const row of rows) {
+    if (!row.site_weight_multipliers) continue;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.site_weight_multipliers);
+    } catch {
+      continue;
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+    const nextValue = { ...(parsed as Record<string, unknown>) };
+    let changed = false;
+
+    for (const [fromSiteId, toSiteId] of siteIdMapping.entries()) {
+      const fromKey = String(fromSiteId);
+      const toKey = String(toSiteId);
+      if (!(fromKey in nextValue)) continue;
+      if (!(toKey in nextValue)) {
+        nextValue[toKey] = nextValue[fromKey];
+      }
+      delete nextValue[fromKey];
+      changed = true;
+    }
+
+    if (!changed) continue;
+    update.run(JSON.stringify(nextValue), row.id);
+  }
+}
+
+function deduplicateLegacySitesForUniqueIndex(sqlite: Database.Database): boolean {
+  const duplicateGroups = sqlite.prepare(`
+    SELECT platform, url
+    FROM sites
+    GROUP BY platform, url
+    HAVING COUNT(*) > 1
+  `).all() as Array<{ platform: string; url: string }>;
+
+  if (duplicateGroups.length <= 0) {
+    return false;
+  }
+
+  const selectSitesByIdentity = sqlite.prepare(`
+    SELECT id, platform, url
+    FROM sites
+    WHERE platform = ? AND url = ?
+    ORDER BY id ASC
+  `);
+  const rebindAccounts = sqlite.prepare('UPDATE accounts SET site_id = ? WHERE site_id = ?');
+  const mergeDisabledModels = sqlite.prepare(`
+    INSERT OR IGNORE INTO site_disabled_models (site_id, model_name, created_at)
+    SELECT ?, model_name, created_at
+    FROM site_disabled_models
+    WHERE site_id = ?
+  `);
+  const deleteDisabledModels = sqlite.prepare('DELETE FROM site_disabled_models WHERE site_id = ?');
+  const deleteSite = sqlite.prepare('DELETE FROM sites WHERE id = ?');
+
+  const siteIdMapping = new Map<number, number>();
+
+  const transaction = sqlite.transaction(() => {
+    for (const group of duplicateGroups) {
+      const sites = selectSitesByIdentity.all(group.platform, group.url) as LegacySiteRow[];
+      if (sites.length <= 1) continue;
+
+      const canonicalSiteId = sites[0]!.id;
+      for (const site of sites.slice(1)) {
+        mergeDisabledModels.run(canonicalSiteId, site.id);
+        deleteDisabledModels.run(site.id);
+        rebindAccounts.run(canonicalSiteId, site.id);
+        siteIdMapping.set(site.id, canonicalSiteId);
+        deleteSite.run(site.id);
+      }
+    }
+
+    rewriteDownstreamSiteWeightMultipliers(sqlite, siteIdMapping);
+  });
+
+  transaction();
+  if (siteIdMapping.size > 0) {
+    console.warn(`[db] Deduplicated ${siteIdMapping.size} legacy site entries before applying sites_platform_url_unique.`);
+  }
+  return siteIdMapping.size > 0;
+}
+
 export const __migrateTestUtils = {
   splitMigrationStatements,
   normalizeSqlForMatch,
   extractFailedSqlFromError,
   findMatchingSingleStatementMigration,
   findMatchingMigrationByStatement,
+  findMatchingMigrationByErrorMessage,
   readRecoveryMigrations,
   markMigrationRecordIfMissing,
   recoverMigrationSequence,
   tryRecoverDuplicateColumnMigrationError,
+  isSitesPlatformUrlUniqueConflictError,
+  deduplicateLegacySitesForUniqueIndex,
 };
 
 function bootstrapLegacyDrizzleMigrations(sqlite: Database.Database, migrationsFolder: string): boolean {
@@ -447,17 +588,22 @@ export function runSqliteMigrations(): void {
 
   const sqlite = new Database(dbPath);
   bootstrapLegacyDrizzleMigrations(sqlite, migrationsFolder);
+  backfillMissingRecordedMigrations(sqlite, migrationsFolder);
 
-  for (;;) {
-    try {
-      migrate(drizzle(sqlite), { migrationsFolder });
-      break;
-    } catch (error) {
-      if (!tryRecoverDuplicateColumnMigrationError(sqlite, migrationsFolder, error)) {
-        sqlite.close();
-        throw error;
-      }
+  try {
+    migrate(drizzle(sqlite), { migrationsFolder });
+  } catch (error) {
+    const recoveredDuplicateColumns = tryRecoverDuplicateColumnMigrationError(sqlite, migrationsFolder, error);
+    const recoveredDuplicateSites = (
+      !recoveredDuplicateColumns
+      && isSitesPlatformUrlUniqueConflictError(error)
+      && deduplicateLegacySitesForUniqueIndex(sqlite)
+    );
+    if (!recoveredDuplicateColumns && !recoveredDuplicateSites) {
+      sqlite.close();
+      throw error;
     }
+    migrate(drizzle(sqlite), { migrationsFolder });
   }
 
   sqlite.close();

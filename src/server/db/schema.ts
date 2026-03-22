@@ -6,12 +6,12 @@ export const sites = sqliteTable('sites', {
   name: text('name').notNull(),
   url: text('url').notNull(),
   externalCheckinUrl: text('external_checkin_url'),
-  platform: text('platform').notNull(), // 'new-api' | 'one-api' | 'veloera' | 'one-hub' | 'done-hub' | 'sub2api' | 'openai' | 'claude' | 'gemini'
+  platform: text('platform').notNull(), // 'new-api' | 'one-api' | 'veloera' | 'one-hub' | 'done-hub' | 'sub2api' | 'openai' | 'claude' | 'gemini' | 'codex' | 'gemini-cli' | 'antigravity'
   proxyUrl: text('proxy_url'),
   useSystemProxy: integer('use_system_proxy', { mode: 'boolean' }).default(false),
   customHeaders: text('custom_headers'),
   status: text('status').notNull().default('active'), // 'active' | 'disabled'
-  healthStatus: text('health_status').notNull().default('unknown'), // 'alive' | 'unreachable' | 'unknown'
+  healthStatus: text('health_status').notNull().default('unknown'), // 'unknown' | 'alive' | 'unreachable'
   healthReason: text('health_reason'),
   healthCheckedAt: text('health_checked_at'),
   isPinned: integer('is_pinned', { mode: 'boolean' }).default(false),
@@ -22,6 +22,8 @@ export const sites = sqliteTable('sites', {
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),
 }, (table) => ({
   statusIdx: index('sites_status_idx').on(table.status),
+  healthStatusIdx: index('sites_health_status_idx').on(table.healthStatus),
+  platformUrlUnique: uniqueIndex('sites_platform_url_unique').on(table.platform, table.url),
 }));
 
 export const siteDisabledModels = sqliteTable('site_disabled_models', {
@@ -51,6 +53,9 @@ export const accounts = sqliteTable('accounts', {
   checkinEnabled: integer('checkin_enabled', { mode: 'boolean' }).default(true),
   lastCheckinAt: text('last_checkin_at'),
   lastBalanceRefresh: text('last_balance_refresh'),
+  oauthProvider: text('oauth_provider'),
+  oauthAccountKey: text('oauth_account_key'),
+  oauthProjectId: text('oauth_project_id'),
   extraConfig: text('extra_config'), // JSON string
   createdAt: text('created_at').default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),
@@ -58,6 +63,8 @@ export const accounts = sqliteTable('accounts', {
   siteIdIdx: index('accounts_site_id_idx').on(table.siteId),
   statusIdx: index('accounts_status_idx').on(table.status),
   siteStatusIdx: index('accounts_site_status_idx').on(table.siteId, table.status),
+  oauthProviderIdx: index('accounts_oauth_provider_idx').on(table.oauthProvider),
+  oauthIdentityIdx: index('accounts_oauth_identity_idx').on(table.oauthProvider, table.oauthAccountKey, table.oauthProjectId),
 }));
 
 export const accountTokens = sqliteTable('account_tokens', {
@@ -66,6 +73,7 @@ export const accountTokens = sqliteTable('account_tokens', {
   name: text('name').notNull(),
   token: text('token').notNull(),
   tokenGroup: text('token_group'),
+  valueStatus: text('value_status').notNull().default('ready'),
   source: text('source').default('manual'), // 'manual' | 'sync' | 'legacy'
   enabled: integer('enabled', { mode: 'boolean' }).default(true),
   isDefault: integer('is_default', { mode: 'boolean' }).default(false),
@@ -123,6 +131,7 @@ export const tokenRoutes = sqliteTable('token_routes', {
   modelPattern: text('model_pattern').notNull(),
   displayName: text('display_name'),
   displayIcon: text('display_icon'),
+  routeMode: text('route_mode').default('pattern'),
   modelMapping: text('model_mapping'), // JSON
   decisionSnapshot: text('decision_snapshot'), // JSON
   decisionRefreshedAt: text('decision_refreshed_at'),
@@ -133,6 +142,15 @@ export const tokenRoutes = sqliteTable('token_routes', {
 }, (table) => ({
   modelPatternIdx: index('token_routes_model_pattern_idx').on(table.modelPattern),
   enabledIdx: index('token_routes_enabled_idx').on(table.enabled),
+}));
+
+export const routeGroupSources = sqliteTable('route_group_sources', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  groupRouteId: integer('group_route_id').notNull().references(() => tokenRoutes.id, { onDelete: 'cascade' }),
+  sourceRouteId: integer('source_route_id').notNull().references(() => tokenRoutes.id, { onDelete: 'cascade' }),
+}, (table) => ({
+  groupSourceUnique: uniqueIndex('route_group_sources_group_source_unique').on(table.groupRouteId, table.sourceRouteId),
+  sourceRouteIdx: index('route_group_sources_source_route_id_idx').on(table.sourceRouteId),
 }));
 
 export const routeChannels = sqliteTable('route_channels', {
@@ -168,6 +186,7 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   routeId: integer('route_id'),
   channelId: integer('channel_id'),
   accountId: integer('account_id'),
+  downstreamApiKeyId: integer('downstream_api_key_id'),
   modelRequested: text('model_requested'),
   modelActual: text('model_actual'),
   status: text('status'), // 'success' | 'failed' | 'retried'
@@ -178,6 +197,10 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   totalTokens: integer('total_tokens'),
   estimatedCost: real('estimated_cost'),
   billingDetails: text('billing_details'),
+  clientFamily: text('client_family'),
+  clientAppId: text('client_app_id'),
+  clientAppName: text('client_app_name'),
+  clientConfidence: text('client_confidence'),
   errorMessage: text('error_message'),
   retryCount: integer('retry_count').default(0),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
@@ -186,6 +209,9 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   accountCreatedIdx: index('proxy_logs_account_created_at_idx').on(table.accountId, table.createdAt),
   statusCreatedIdx: index('proxy_logs_status_created_at_idx').on(table.status, table.createdAt),
   modelActualCreatedIdx: index('proxy_logs_model_actual_created_at_idx').on(table.modelActual, table.createdAt),
+  downstreamKeyCreatedIdx: index('proxy_logs_downstream_api_key_created_at_idx').on(table.downstreamApiKeyId, table.createdAt),
+  clientAppCreatedIdx: index('proxy_logs_client_app_id_created_at_idx').on(table.clientAppId, table.createdAt),
+  clientFamilyCreatedIdx: index('proxy_logs_client_family_created_at_idx').on(table.clientFamily, table.createdAt),
 }));
 
 export const proxyVideoTasks = sqliteTable('proxy_video_tasks', {
@@ -239,6 +265,8 @@ export const downstreamApiKeys = sqliteTable('downstream_api_keys', {
   name: text('name').notNull(),
   key: text('key').notNull(),
   description: text('description'),
+  groupName: text('group_name'),
+  tags: text('tags'), // JSON array<string>
   enabled: integer('enabled', { mode: 'boolean' }).default(true),
   expiresAt: text('expires_at'),
   maxCost: real('max_cost'),
@@ -256,6 +284,30 @@ export const downstreamApiKeys = sqliteTable('downstream_api_keys', {
   nameIdx: index('downstream_api_keys_name_idx').on(table.name),
   enabledIdx: index('downstream_api_keys_enabled_idx').on(table.enabled),
   expiresAtIdx: index('downstream_api_keys_expires_at_idx').on(table.expiresAt),
+}));
+
+export const siteAnnouncements = sqliteTable('site_announcements', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  platform: text('platform').notNull(),
+  sourceKey: text('source_key').notNull(),
+  title: text('title').notNull(),
+  content: text('content').notNull(),
+  level: text('level').notNull().default('info'),
+  sourceUrl: text('source_url'),
+  startsAt: text('starts_at'),
+  endsAt: text('ends_at'),
+  upstreamCreatedAt: text('upstream_created_at'),
+  upstreamUpdatedAt: text('upstream_updated_at'),
+  firstSeenAt: text('first_seen_at').default(sql`(datetime('now'))`),
+  lastSeenAt: text('last_seen_at').default(sql`(datetime('now'))`),
+  readAt: text('read_at'),
+  dismissedAt: text('dismissed_at'),
+  rawPayload: text('raw_payload'),
+}, (table) => ({
+  siteSourceKeyUnique: uniqueIndex('site_announcements_site_source_key_unique').on(table.siteId, table.sourceKey),
+  siteIdFirstSeenAtIdx: index('site_announcements_site_id_first_seen_at_idx').on(table.siteId, table.firstSeenAt),
+  readAtIdx: index('site_announcements_read_at_idx').on(table.readAt),
 }));
 
 export const events = sqliteTable('events', {

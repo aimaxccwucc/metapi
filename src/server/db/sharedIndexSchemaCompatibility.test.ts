@@ -25,31 +25,10 @@ function createInspector(
 
 describe('ensureSharedIndexSchemaCompatibility', () => {
   it.each([
-    {
-      dialect: 'sqlite' as const,
-      expectedSql: [
-        'CREATE UNIQUE INDEX IF NOT EXISTS model_availability_account_model_unique ON model_availability (account_id, model_name);',
-        'CREATE INDEX IF NOT EXISTS proxy_logs_status_created_at_idx ON proxy_logs (status, created_at);',
-        'CREATE INDEX IF NOT EXISTS events_created_at_idx ON events (created_at);',
-      ],
-    },
-    {
-      dialect: 'mysql' as const,
-      expectedSql: [
-        'CREATE UNIQUE INDEX `model_availability_account_model_unique` ON `model_availability` (`account_id`, `model_name`(191))',
-        'CREATE INDEX `proxy_logs_status_created_at_idx` ON `proxy_logs` (`status`, `created_at`(191))',
-        'CREATE INDEX `events_created_at_idx` ON `events` (`created_at`(191))',
-      ],
-    },
-    {
-      dialect: 'postgres' as const,
-      expectedSql: [
-        'CREATE UNIQUE INDEX IF NOT EXISTS "model_availability_account_model_unique" ON "model_availability" ("account_id", "model_name")',
-        'CREATE INDEX IF NOT EXISTS "proxy_logs_status_created_at_idx" ON "proxy_logs" ("status", "created_at")',
-        'CREATE INDEX IF NOT EXISTS "events_created_at_idx" ON "events" ("created_at")',
-      ],
-    },
-  ])('creates shared indexes for $dialect', async ({ dialect, expectedSql }) => {
+    'sqlite',
+    'mysql',
+    'postgres',
+  ] as const)('is a no-op for %s now that contract-defined indexes come from runtime bootstrap', async (dialect) => {
     const { inspector, executedSql } = createInspector(dialect, {
       existingTables: [
         'sites',
@@ -68,10 +47,7 @@ describe('ensureSharedIndexSchemaCompatibility', () => {
     });
 
     await ensureSharedIndexSchemaCompatibility(inspector);
-
-    for (const sqlText of expectedSql) {
-      expect(executedSql).toContain(sqlText);
-    }
+    expect(executedSql).toEqual([]);
   });
 
   it('skips indexes for tables that do not exist', async () => {
@@ -81,8 +57,6 @@ describe('ensureSharedIndexSchemaCompatibility', () => {
 
     await ensureSharedIndexSchemaCompatibility(inspector);
 
-    expect(executedSql).toEqual([
-      'CREATE INDEX IF NOT EXISTS "sites_status_idx" ON "sites" ("status")',
-    ]);
+    expect(executedSql).toEqual([]);
   });
 });

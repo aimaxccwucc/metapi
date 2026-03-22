@@ -1,3 +1,8 @@
+import baselineContract from './generated/fixtures/2026-03-14-baseline.schemaContract.json' with { type: 'json' };
+import currentContract from './generated/schemaContract.json' with { type: 'json' };
+import { classifyLegacyCompatMutation } from './legacySchemaCompat.js';
+import { generateUpgradeSql } from './schemaArtifactGenerator.js';
+import type { SchemaContract, SchemaContractColumn } from './schemaContract.js';
 import { describe, expect, it } from 'vitest';
 import {
   __runtimeSchemaBootstrapTestUtils,
@@ -13,6 +18,9 @@ function createStubClient(dialect: RuntimeSchemaDialect, executedSql: string[]):
     commit: async () => {},
     rollback: async () => {},
     execute: async (sqlText: string) => {
+      if (sqlText.trim().toLowerCase().startsWith('select')) {
+        return [];
+      }
       executedSql.push(sqlText);
       return [];
     },
@@ -29,111 +37,113 @@ function createStubClient(dialect: RuntimeSchemaDialect, executedSql: string[]):
   };
 }
 
+function makeColumn(overrides: Partial<SchemaContractColumn> = {}): SchemaContractColumn {
+  return {
+    logicalType: 'text',
+    notNull: false,
+    defaultValue: null,
+    primaryKey: false,
+    ...overrides,
+  };
+}
+
 describe('runtime schema bootstrap', () => {
-  it('dedupes mysql model availability rows before creating the shared unique index', async () => {
+  it.each(['mysql', 'postgres'] as const)('executes live-schema upgrade statements for %s', async (dialect) => {
     const executedSql: string[] = [];
+    const expectedUpgradeSql = __runtimeSchemaBootstrapTestUtils.splitSqlStatements(
+      generateUpgradeSql(dialect, currentContract, baselineContract),
+    );
 
-    await ensureRuntimeDatabaseSchema({
-      ...createStubClient('mysql', executedSql),
-      execute: async (sqlText: string) => {
-        executedSql.push(sqlText);
-        return [];
-      },
+    await ensureRuntimeDatabaseSchema(createStubClient(dialect, executedSql), {
+      currentContract,
+      liveContract: baselineContract,
     });
 
-    const dedupeSql = executedSql.find((sqlText) => sqlText.includes('DELETE duplicate_rows') && sqlText.includes('FROM model_availability AS duplicate_rows'));
-    const uniqueIndexSql = 'CREATE UNIQUE INDEX `model_availability_account_model_unique` ON `model_availability` (`account_id`, `model_name`(191))';
-
-    expect(dedupeSql).toBeTruthy();
-    expect(executedSql.indexOf(dedupeSql!)).toBeLessThan(executedSql.indexOf(uniqueIndexSql));
+    expect(executedSql.slice(0, expectedUpgradeSql.length)).toEqual(expectedUpgradeSql);
   });
 
-  it('dedupes mysql token model availability rows before creating the shared unique index', async () => {
+  it('skips external schema execution when live schema already matches the current contract', async () => {
     const executedSql: string[] = [];
+    const expectedUpgradeSql = __runtimeSchemaBootstrapTestUtils.buildExternalUpgradeStatements(
+      'mysql',
+      currentContract,
+      currentContract,
+    );
 
-    await ensureRuntimeDatabaseSchema({
-      ...createStubClient('mysql', executedSql),
-      execute: async (sqlText: string) => {
-        executedSql.push(sqlText);
-        return [];
-      },
+    await ensureRuntimeDatabaseSchema(createStubClient('mysql', executedSql), {
+      currentContract,
+      liveContract: currentContract,
     });
 
-    const dedupeSql = executedSql.find((sqlText) => sqlText.includes('DELETE duplicate_rows') && sqlText.includes('FROM token_model_availability AS duplicate_rows'));
-    const uniqueIndexSql = 'CREATE UNIQUE INDEX `token_model_availability_token_model_unique` ON `token_model_availability` (`token_id`, `model_name`(191))';
-
-    expect(dedupeSql).toBeTruthy();
-    expect(executedSql.indexOf(dedupeSql!)).toBeLessThan(executedSql.indexOf(uniqueIndexSql));
+    expect(expectedUpgradeSql).toEqual([]);
+    expect(executedSql.every((sqlText) => classifyLegacyCompatMutation(sqlText) === 'legacy')).toBe(true);
   });
-  it.each(['mysql', 'postgres'] as const)('loads generated bootstrap statements for %s', async (dialect) => {
-    const executedSql: string[] = [];
-    const expectedBootstrapSql = __runtimeSchemaBootstrapTestUtils.readGeneratedBootstrapStatements(dialect);
 
-    await ensureRuntimeDatabaseSchema(createStubClient(dialect, executedSql));
+  it('tolerates non-additive live-schema drift and still emits additive runtime patch statements', () => {
+    const driftedLiveContract = __runtimeSchemaBootstrapTestUtils.cloneContract(currentContract);
 
-    for (const sqlText of expectedBootstrapSql) {
-      expect(executedSql).toContain(sqlText);
+    delete driftedLiveContract.tables.model_availability?.columns.is_manual;
+    if (driftedLiveContract.tables.sites?.columns.status) {
+      driftedLiveContract.tables.sites.columns.status.defaultValue = null;
     }
+    driftedLiveContract.indexes = driftedLiveContract.indexes.filter((index) => index.name !== 'accounts_site_id_idx');
+    driftedLiveContract.uniques = driftedLiveContract.uniques.filter((unique) => unique.name !== 'proxy_files_public_id_unique');
+
+    const statements = __runtimeSchemaBootstrapTestUtils.buildExternalUpgradeStatements(
+      'mysql',
+      currentContract,
+      driftedLiveContract,
+    );
+
+    expect(statements.some((sqlText) => sqlText.includes('ALTER TABLE `model_availability` ADD COLUMN `is_manual`'))).toBe(true);
+    expect(statements.some((sqlText) => sqlText.includes('CREATE INDEX `accounts_site_id_idx`'))).toBe(true);
+    expect(statements.some((sqlText) => sqlText.includes('CREATE UNIQUE INDEX `proxy_files_public_id_unique`'))).toBe(true);
   });
 
-  it('ignores duplicate mysql index errors when replaying bootstrap statements', async () => {
+  it('ignores duplicate mysql index and column errors when replaying additive schema statements', async () => {
     const executedSql: string[] = [];
-    const targetSql = 'CREATE UNIQUE INDEX `model_availability_account_model_unique` ON `model_availability` (`account_id`, `model_name`(191))';
+    const duplicateColumnSql = __runtimeSchemaBootstrapTestUtils.splitSqlStatements(
+      generateUpgradeSql('mysql', currentContract, baselineContract),
+    ).find((sqlText) => sqlText.includes('ALTER TABLE `model_availability` ADD COLUMN `is_manual`'));
+    const duplicateIndexSql = __runtimeSchemaBootstrapTestUtils.splitSqlStatements(
+      generateUpgradeSql('mysql', currentContract, baselineContract),
+    ).find((sqlText) => sqlText.includes('proxy_files_public_id_unique'));
+
+    expect(duplicateColumnSql).toBeDefined();
+    expect(duplicateIndexSql).toBeDefined();
 
     await ensureRuntimeDatabaseSchema({
       ...createStubClient('mysql', executedSql),
       execute: async (sqlText: string) => {
         executedSql.push(sqlText);
-        if (sqlText === targetSql) {
+        if (sqlText === duplicateColumnSql) {
+          const error = new Error("Duplicate column name 'is_manual'") as Error & { code?: string };
+          error.code = 'ER_DUP_FIELDNAME';
+          throw error;
+        }
+        if (sqlText === duplicateIndexSql) {
           const error = new Error("Duplicate key name 'model_availability_account_model_unique'") as Error & { code?: string };
           error.code = 'ER_DUP_KEYNAME';
           throw error;
         }
         return [];
       },
+    }, {
+      currentContract,
+      liveContract: baselineContract,
     });
 
-    expect(executedSql).toContain(targetSql);
+    expect(executedSql).toContain(duplicateColumnSql);
+    expect(executedSql).toContain(duplicateIndexSql);
   });
 
-  it('replays the mysql bootstrap against an already-initialized schema', async () => {
+  it('ignores postgres relation-already-exists errors when replaying additive schema statements', async () => {
     const executedSql: string[] = [];
-    const createdStatements = new Set<string>();
+    const targetSql = __runtimeSchemaBootstrapTestUtils.splitSqlStatements(
+      generateUpgradeSql('postgres', currentContract, baselineContract),
+    ).find((sqlText) => sqlText.includes('proxy_files_public_id_unique'));
 
-    const mysqlClient = createStubClient('mysql', executedSql);
-    mysqlClient.execute = async (sqlText: string) => {
-      executedSql.push(sqlText);
-      const normalized = sqlText.trim().toLowerCase();
-      const createsSchemaObject = normalized.startsWith('create table if not exists')
-        || normalized.startsWith('create index')
-        || normalized.startsWith('create unique index');
-
-      if (createsSchemaObject) {
-        if (createdStatements.has(sqlText)) {
-          const error = new Error(
-            normalized.startsWith('create table')
-              ? 'Table already exists'
-              : 'Duplicate key name during bootstrap replay',
-          ) as Error & { code?: string };
-          error.code = normalized.startsWith('create table') ? 'ER_TABLE_EXISTS_ERROR' : 'ER_DUP_KEYNAME';
-          throw error;
-        }
-        createdStatements.add(sqlText);
-      }
-
-      return [];
-    };
-
-    await ensureRuntimeDatabaseSchema(mysqlClient);
-    await ensureRuntimeDatabaseSchema(mysqlClient);
-
-    expect(executedSql.length).toBeGreaterThan(createdStatements.size);
-    expect(createdStatements.size).toBeGreaterThan(0);
-  });
-
-  it('ignores postgres relation-already-exists errors when replaying bootstrap statements', async () => {
-    const executedSql: string[] = [];
-    const targetSql = 'CREATE UNIQUE INDEX "model_availability_account_model_unique" ON "model_availability" ("account_id", "model_name")';
+    expect(targetSql).toBeDefined();
 
     await ensureRuntimeDatabaseSchema({
       ...createStubClient('postgres', executedSql),
@@ -146,8 +156,149 @@ describe('runtime schema bootstrap', () => {
         }
         return [];
       },
+    }, {
+      currentContract,
+      liveContract: baselineContract,
     });
 
     expect(executedSql).toContain(targetSql);
+  });
+
+  it('adds mysql text prefixes for new indexes when live datetime-like columns are still stored as text', async () => {
+    const executedSql: string[] = [];
+    const minimalContract: SchemaContract = {
+      tables: {
+        proxy_logs: {
+          columns: {
+            downstream_api_key_id: makeColumn({ logicalType: 'integer' }),
+            created_at: makeColumn({ logicalType: 'datetime', defaultValue: "datetime('now')" }),
+          },
+        },
+      },
+      indexes: [
+        {
+          name: 'proxy_logs_downstream_api_key_created_at_idx',
+          table: 'proxy_logs',
+          columns: ['downstream_api_key_id', 'created_at'],
+          unique: false,
+        },
+      ],
+      uniques: [],
+      foreignKeys: [],
+    };
+
+    await ensureRuntimeDatabaseSchema({
+      ...createStubClient('mysql', executedSql),
+      execute: async (sqlText: string) => {
+        if (sqlText.includes('FROM information_schema.columns')) {
+          return [[
+            {
+              table_name: 'proxy_logs',
+              column_name: 'downstream_api_key_id',
+              data_type: 'int',
+              column_type: 'int',
+            },
+            {
+              table_name: 'proxy_logs',
+              column_name: 'created_at',
+              data_type: 'text',
+              column_type: 'text',
+            },
+          ]];
+        }
+
+        executedSql.push(sqlText);
+        return [];
+      },
+      queryScalar: async (sqlText: string, params: unknown[] = []) => {
+        if (sqlText.includes('information_schema.tables')) {
+          return params[0] === 'proxy_logs' ? 1 : 0;
+        }
+        if (sqlText.includes('information_schema.columns')) {
+          return 1;
+        }
+        return 0;
+      },
+    }, {
+      currentContract: minimalContract,
+      liveContract: {
+        ...minimalContract,
+        indexes: [],
+      },
+    });
+
+    expect(executedSql).toContain(
+      'CREATE INDEX `proxy_logs_downstream_api_key_created_at_idx` ON `proxy_logs` (`downstream_api_key_id`, `created_at`(191))',
+    );
+  });
+
+  it('does not add mysql text prefixes when live indexed text columns are varchar-backed', async () => {
+    const executedSql: string[] = [];
+    const minimalContract: SchemaContract = {
+      tables: {
+        sites: {
+          columns: {
+            platform: makeColumn({ logicalType: 'text', notNull: true }),
+            url: makeColumn({ logicalType: 'text', notNull: true }),
+          },
+        },
+      },
+      indexes: [],
+      uniques: [
+        {
+          name: 'sites_platform_url_unique',
+          table: 'sites',
+          columns: ['platform', 'url'],
+        },
+      ],
+      foreignKeys: [],
+    };
+
+    await ensureRuntimeDatabaseSchema({
+      ...createStubClient('mysql', executedSql),
+      execute: async (sqlText: string) => {
+        if (sqlText.includes('FROM information_schema.columns')) {
+          return [[
+            {
+              table_name: 'sites',
+              column_name: 'platform',
+              data_type: 'varchar',
+              column_type: 'varchar(32)',
+            },
+            {
+              table_name: 'sites',
+              column_name: 'url',
+              data_type: 'varchar',
+              column_type: 'varchar(255)',
+            },
+          ]];
+        }
+
+        executedSql.push(sqlText);
+        return [];
+      },
+      queryScalar: async (sqlText: string, params: unknown[] = []) => {
+        if (sqlText.includes('information_schema.tables')) {
+          return params[0] === 'sites' ? 1 : 0;
+        }
+        if (sqlText.includes('information_schema.columns')) {
+          return 1;
+        }
+        return 0;
+      },
+    }, {
+      currentContract: minimalContract,
+      liveContract: {
+        ...minimalContract,
+        uniques: [],
+      },
+    });
+
+    expect(executedSql).toContain(
+      'CREATE UNIQUE INDEX `sites_platform_url_unique` ON `sites` (`platform`, `url`)',
+    );
+    expect(executedSql).not.toContain(
+      'CREATE UNIQUE INDEX `sites_platform_url_unique` ON `sites` (`platform`(191), `url`(191))',
+    );
   });
 });

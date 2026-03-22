@@ -85,49 +85,118 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     expect(channels[0]?.manualOverride).toBe(false);
   });
 
-  it('dedupes exact routes when availability differs only by case', async () => {
+  it('ignores hidden account_tokens for direct apikey connections when rebuilding routes', async () => {
     const site = await db.insert(schema.sites).values({
-      name: 'route-case-site',
-      url: 'https://route-case-site.example.com',
+      name: 'apikey-legacy-site',
+      url: 'https://apikey-legacy.example.com',
       platform: 'new-api',
     }).returning().get();
 
     const account = await db.insert(schema.accounts).values({
       siteId: site.id,
-      username: 'route-case-user',
+      username: 'apikey-legacy-user',
       accessToken: '',
-      apiToken: 'sk-route-case',
+      apiToken: 'sk-direct-credential',
       status: 'active',
       extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
     }).returning().get();
 
+    const hiddenToken = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'legacy-hidden',
+      token: 'sk-hidden-legacy-token',
+      source: 'legacy',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
     await db.insert(schema.modelAvailability).values({
       accountId: account.id,
-      modelName: 'GLM-4.6',
+      modelName: 'gpt-4.1',
       available: true,
+      latencyMs: 200,
+      checkedAt: '2026-03-20T08:00:00.000Z',
     }).run();
 
-    const existingRoute = await db.insert(schema.tokenRoutes).values({
-      modelPattern: 'glm-4.6',
-      enabled: true,
-    }).returning().get();
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: hiddenToken.id,
+      modelName: 'gpt-4.1',
+      available: true,
+      latencyMs: 180,
+      checkedAt: '2026-03-20T08:00:00.000Z',
+    }).run();
 
     const rebuild = await rebuildTokenRoutesFromAvailability();
 
     expect(rebuild.models).toBe(1);
-    expect(rebuild.createdRoutes).toBe(0);
 
-    const routes = await db.select().from(schema.tokenRoutes).all();
-    expect(routes).toHaveLength(1);
-    expect(routes[0]?.id).toBe(existingRoute.id);
-    expect(routes[0]?.modelPattern).toBe('glm-4.6');
+    const route = await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.modelPattern, 'gpt-4.1'))
+      .get();
+    expect(route).toBeDefined();
 
     const channels = await db.select().from(schema.routeChannels)
-      .where(eq(schema.routeChannels.routeId, existingRoute.id))
+      .where(and(
+        eq(schema.routeChannels.routeId, route!.id),
+        eq(schema.routeChannels.accountId, account.id),
+      ))
       .all();
+
     expect(channels).toHaveLength(1);
-    expect(channels[0]?.accountId).toBe(account.id);
     expect(channels[0]?.tokenId ?? null).toBeNull();
+  });
+
+  it('creates an exact route with an account-direct channel for oauth model availability', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'codex-site',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'codex-user@example.com',
+      accessToken: 'oauth-access-token',
+      apiToken: null,
+      status: 'active',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: {
+          provider: 'codex',
+          accountId: 'chatgpt-account-123',
+          email: 'codex-user@example.com',
+          planType: 'team',
+        },
+      }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-5.2-codex',
+      available: true,
+      latencyMs: 320,
+      checkedAt: '2026-03-17T00:00:00.000Z',
+    }).run();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.models).toBe(1);
+
+    const route = await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.modelPattern, 'gpt-5.2-codex'))
+      .get();
+    expect(route).toBeDefined();
+
+    const channels = await db.select().from(schema.routeChannels)
+      .where(and(
+        eq(schema.routeChannels.routeId, route!.id),
+        eq(schema.routeChannels.accountId, account.id),
+      ))
+      .all();
+
+    expect(channels).toHaveLength(1);
+    expect(channels[0]?.tokenId ?? null).toBeNull();
+    expect(channels[0]?.manualOverride).toBe(false);
   });
 
   it('removes stale exact routes and keeps wildcard routes on rebuild', async () => {

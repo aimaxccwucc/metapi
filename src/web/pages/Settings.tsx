@@ -1,7 +1,9 @@
-﻿import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
+import { useIsMobile } from '../components/useIsMobile.js';
 import ChangeKeyModal from '../components/ChangeKeyModal.js';
 import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import { BrandGlyph, InlineBrandIcon, getBrand, normalizeBrandIconKey } from '../components/BrandIcon.js';
@@ -15,15 +17,30 @@ import { fuzzyMatch } from './helpers/fuzzySearch.js';
 import { clearAuthSession } from '../authSession.js';
 import { clearAppInstallationState } from '../appLocalState.js';
 import { tr } from '../i18n.js';
+import { ROUTE_ICON_NONE_VALUE } from './token-routes/utils.js';
+import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
 const ROUTE_BRAND_ICON_PREFIX = 'brand:';
 const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
 const FACTORY_RESET_CONFIRM_SECONDS = 3;
+const CHECKIN_SCHEDULE_MODE_OPTIONS = [
+  { value: 'cron', label: 'Cron' },
+  { value: 'interval', label: '间隔签到' },
+] as const;
+const CHECKIN_INTERVAL_OPTIONS = Array.from({ length: 24 }, (_, index) => {
+  const hour = index + 1;
+  return {
+    value: String(hour),
+    label: `${hour} 小时`,
+  };
+});
 type DbDialect = 'sqlite' | 'mysql' | 'postgres';
 
 type RuntimeSettings = {
   checkinCron: string;
+  checkinScheduleMode: 'cron' | 'interval';
+  checkinIntervalHours: number;
   balanceRefreshCron: string;
   siteHealthRefreshCron: string;
   logCleanupCron: string;
@@ -33,10 +50,17 @@ type RuntimeSettings = {
   routingFallbackUnitCost: number;
   routingWeights: RoutingWeights;
   systemProxyUrl: string;
+  proxyErrorKeywords: string[];
+  proxyEmptyContentFailEnabled: boolean;
   proxyTokenMasked?: string;
   adminIpAllowlist?: string[];
   currentAdminIp?: string;
 };
+
+type SystemProxyTestState =
+  | { kind: 'success'; text: string }
+  | { kind: 'error'; text: string }
+  | null;
 
 type DownstreamApiKeyItem = {
   id: number;
@@ -159,7 +183,7 @@ function isExactModelPattern(modelPattern: string): boolean {
   const normalized = modelPattern.trim();
   if (!normalized) return false;
   if (isRegexModelPattern(normalized)) return false;
-  return !/[\*\?\[]/.test(normalized);
+  return !/[\*\?]/.test(normalized);
 }
 
 function routeTitle(route: RouteSelectorItem): string {
@@ -181,8 +205,12 @@ function resolveRouteBrandSource(route: RouteSelectorItem): string {
 }
 
 export default function Settings() {
+  const navigate = useNavigate();
+  const isMobile = useIsMobile();
   const [runtime, setRuntime] = useState<RuntimeSettings>({
     checkinCron: '0 8 * * *',
+    checkinScheduleMode: 'cron',
+    checkinIntervalHours: 6,
     balanceRefreshCron: '0 * * * *',
     siteHealthRefreshCron: '*/15 * * * *',
     logCleanupCron: '0 6 * * *',
@@ -192,13 +220,20 @@ export default function Settings() {
     routingFallbackUnitCost: 1,
     routingWeights: defaultWeights,
     systemProxyUrl: '',
+    proxyErrorKeywords: [],
+    proxyEmptyContentFailEnabled: false,
   });
   const [proxyTokenSuffix, setProxyTokenSuffix] = useState('');
+  const [proxyErrorKeywordsText, setProxyErrorKeywordsText] = useState('');
   const [maskedToken, setMaskedToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [savingSchedule, setSavingSchedule] = useState(false);
+  const [testingCheckin, setTestingCheckin] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
   const [savingSystemProxy, setSavingSystemProxy] = useState(false);
+  const [testingSystemProxy, setTestingSystemProxy] = useState(false);
+  const [systemProxyTestState, setSystemProxyTestState] = useState<SystemProxyTestState>(null);
+  const [savingProxyFailureRules, setSavingProxyFailureRules] = useState(false);
   const [savingRouting, setSavingRouting] = useState(false);
   const [showAdvancedRouting, setShowAdvancedRouting] = useState(false);
   const [savingSecurity, setSavingSecurity] = useState(false);
@@ -390,6 +425,10 @@ export default function Settings() {
       setMaskedToken(authInfo.masked || '****');
       setRuntime({
         checkinCron: runtimeInfo.checkinCron || '0 8 * * *',
+        checkinScheduleMode: runtimeInfo.checkinScheduleMode === 'interval' ? 'interval' : 'cron',
+        checkinIntervalHours: Number(runtimeInfo.checkinIntervalHours) >= 1
+          ? Math.min(24, Math.trunc(Number(runtimeInfo.checkinIntervalHours)))
+          : 6,
         balanceRefreshCron: runtimeInfo.balanceRefreshCron || '0 * * * *',
         siteHealthRefreshCron: runtimeInfo.siteHealthRefreshCron || '*/15 * * * *',
         logCleanupCron: runtimeInfo.logCleanupCron || '0 6 * * *',
@@ -406,12 +445,21 @@ export default function Settings() {
           ...(runtimeInfo.routingWeights || {}),
         },
         systemProxyUrl: typeof runtimeInfo.systemProxyUrl === 'string' ? runtimeInfo.systemProxyUrl : '',
+        proxyErrorKeywords: Array.isArray(runtimeInfo.proxyErrorKeywords)
+          ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string')
+          : [],
+        proxyEmptyContentFailEnabled: !!runtimeInfo.proxyEmptyContentFailEnabled,
         proxyTokenMasked: runtimeInfo.proxyTokenMasked || '',
         adminIpAllowlist: Array.isArray(runtimeInfo.adminIpAllowlist)
           ? runtimeInfo.adminIpAllowlist.filter((item: unknown) => typeof item === 'string')
           : [],
         currentAdminIp: typeof runtimeInfo.currentAdminIp === 'string' ? runtimeInfo.currentAdminIp : '',
       });
+      setProxyErrorKeywordsText(
+        Array.isArray(runtimeInfo.proxyErrorKeywords)
+          ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string').join('\n')
+          : '',
+      );
       setAdminIpAllowlistText(
         Array.isArray(runtimeInfo.adminIpAllowlist)
           ? runtimeInfo.adminIpAllowlist.join('\n')
@@ -463,11 +511,18 @@ export default function Settings() {
     return compact;
   };
 
+  const parseProxyErrorKeywords = (raw: string) => raw
+    .split(/\r?\n|,/g)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+
   const saveSchedule = async () => {
     setSavingSchedule(true);
     try {
       await api.updateRuntimeSettings({
         checkinCron: runtime.checkinCron,
+        checkinScheduleMode: runtime.checkinScheduleMode,
+        checkinIntervalHours: runtime.checkinIntervalHours,
         balanceRefreshCron: runtime.balanceRefreshCron,
         siteHealthRefreshCron: runtime.siteHealthRefreshCron,
         logCleanupCron: runtime.logCleanupCron,
@@ -480,6 +535,18 @@ export default function Settings() {
       toast.error(err?.message || '保存失败');
     } finally {
       setSavingSchedule(false);
+    }
+  };
+
+  const triggerScheduleCheckin = async () => {
+    setTestingCheckin(true);
+    try {
+      await api.triggerCheckinAll();
+      toast.success('已开始全部签到，请稍后查看签到日志');
+    } catch (err: any) {
+      toast.error(err?.message || '触发签到失败');
+    } finally {
+      setTestingCheckin(false);
     }
   };
 
@@ -519,6 +586,58 @@ export default function Settings() {
       toast.error(err?.message || '保存失败');
     } finally {
       setSavingSystemProxy(false);
+    }
+  };
+
+  const testSystemProxy = async () => {
+    const proxyUrl = runtime.systemProxyUrl.trim();
+    if (!proxyUrl) {
+      const message = '请先填写系统代理地址';
+      setSystemProxyTestState({ kind: 'error', text: message });
+      toast.info(message);
+      return;
+    }
+
+    setTestingSystemProxy(true);
+    setSystemProxyTestState(null);
+    try {
+      const res = await api.testSystemProxy({ proxyUrl });
+      const summary = `连通成功，延迟 ${res.latencyMs} ms`;
+      setSystemProxyTestState({ kind: 'success', text: summary });
+      toast.success(`系统代理测试成功（${res.latencyMs} ms）`);
+    } catch (err: any) {
+      const message = err?.message || '系统代理测试失败';
+      setSystemProxyTestState({ kind: 'error', text: message });
+      toast.error(message);
+    } finally {
+      setTestingSystemProxy(false);
+    }
+  };
+
+  const saveProxyFailureRules = async () => {
+    setSavingProxyFailureRules(true);
+    try {
+      const keywords = parseProxyErrorKeywords(proxyErrorKeywordsText);
+      const res = await api.updateRuntimeSettings({
+        proxyErrorKeywords: keywords,
+        proxyEmptyContentFailEnabled: runtime.proxyEmptyContentFailEnabled,
+      });
+      const nextKeywords = Array.isArray(res?.proxyErrorKeywords)
+        ? res.proxyErrorKeywords
+        : keywords;
+      setRuntime((prev) => ({
+        ...prev,
+        proxyErrorKeywords: nextKeywords,
+        proxyEmptyContentFailEnabled: typeof res?.proxyEmptyContentFailEnabled === 'boolean'
+          ? res.proxyEmptyContentFailEnabled
+          : prev.proxyEmptyContentFailEnabled,
+      }));
+      setProxyErrorKeywordsText(nextKeywords.join('\n'));
+      toast.success('代理失败规则已保存');
+    } catch (err: any) {
+      toast.error(err?.message || '保存失败');
+    } finally {
+      setSavingProxyFailureRules(false);
     }
   };
 
@@ -907,13 +1026,47 @@ export default function Settings() {
 
         <div className="card animate-slide-up stagger-2" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>定时任务</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '180px 180px auto', gap: 12, alignItems: 'end', marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>签到方式</div>
+              <ModernSelect
+                value={runtime.checkinScheduleMode}
+                onChange={(value) => setRuntime((prev) => ({
+                  ...prev,
+                  checkinScheduleMode: value === 'interval' ? 'interval' : 'cron',
+                }))}
+                options={CHECKIN_SCHEDULE_MODE_OPTIONS.map((item) => ({ ...item }))}
+              />
+            </div>
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>签到间隔</div>
+              <ModernSelect
+                value={String(runtime.checkinIntervalHours)}
+                onChange={(value) => setRuntime((prev) => ({
+                  ...prev,
+                  checkinIntervalHours: Math.min(24, Math.max(1, Math.trunc(Number(value) || 1))),
+                }))}
+                disabled={runtime.checkinScheduleMode !== 'interval'}
+                options={CHECKIN_INTERVAL_OPTIONS}
+              />
+            </div>
+            <button
+              onClick={triggerScheduleCheckin}
+              disabled={testingCheckin}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', whiteSpace: 'nowrap' }}
+            >
+              {testingCheckin ? '触发中...' : '测试一次签到'}
+            </button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
             <div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>签到 Cron</div>
               <input
                 value={runtime.checkinCron}
                 onChange={(e) => setRuntime((prev) => ({ ...prev, checkinCron: e.target.value }))}
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
+                disabled={runtime.checkinScheduleMode !== 'cron'}
               />
             </div>
             <div>
@@ -943,7 +1096,7 @@ export default function Settings() {
             }}
           >
             <div style={{ fontWeight: 600, fontSize: 13 }}>自动清理日志</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 160px', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 160px', gap: 12 }}>
               <div>
                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>清理 Cron</div>
                 <input
@@ -1007,13 +1160,71 @@ export default function Settings() {
           </div>
           <input
             value={runtime.systemProxyUrl}
-            onChange={(e) => setRuntime((prev) => ({ ...prev, systemProxyUrl: e.target.value }))}
+            onChange={(e) => {
+              setRuntime((prev) => ({ ...prev, systemProxyUrl: e.target.value }));
+              setSystemProxyTestState(null);
+            }}
             placeholder="系统代理 URL（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）"
             style={{ ...inputStyle, fontFamily: 'var(--font-mono)', marginBottom: 10 }}
           />
-          <button onClick={saveSystemProxy} disabled={savingSystemProxy} className="btn btn-primary">
-            {savingSystemProxy ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存系统代理'}
-          </button>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button onClick={saveSystemProxy} disabled={savingSystemProxy} className="btn btn-primary">
+              {savingSystemProxy ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存系统代理'}
+            </button>
+            <button
+              onClick={testSystemProxy}
+              disabled={testingSystemProxy}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+            >
+              {testingSystemProxy ? <><span className="spinner spinner-sm" /> 测试中...</> : '测试系统代理'}
+            </button>
+          </div>
+          {systemProxyTestState && (
+            <div
+              style={{
+                fontSize: 12,
+                marginTop: 10,
+                color: systemProxyTestState.kind === 'success'
+                  ? 'var(--color-success)'
+                  : 'var(--color-danger)',
+              }}
+            >
+              {systemProxyTestState.text}
+            </div>
+          )}
+        </div>
+
+        <div className="card animate-slide-up stagger-4" style={{ padding: 20 }}>
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>代理失败判定</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+            命中任一关键词或空内容时判定失败，可触发重试。
+          </div>
+          <textarea
+            value={proxyErrorKeywordsText}
+            onChange={(e) => setProxyErrorKeywordsText(e.target.value)}
+            placeholder="一行一个关键词，或逗号分隔"
+            style={{
+              ...inputStyle,
+              fontFamily: 'var(--font-mono)',
+              minHeight: 96,
+              resize: 'vertical',
+              marginBottom: 12,
+            }}
+          />
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-text-secondary)', marginBottom: 12 }}>
+            <input
+              type="checkbox"
+              checked={runtime.proxyEmptyContentFailEnabled}
+              onChange={(e) => setRuntime((prev) => ({ ...prev, proxyEmptyContentFailEnabled: e.target.checked }))}
+            />
+            空内容（completion=0，即使 prompt 有 token 也算）判定失败
+          </label>
+          <div>
+            <button onClick={saveProxyFailureRules} disabled={savingProxyFailureRules} className="btn btn-primary">
+              {savingProxyFailureRules ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存失败规则'}
+            </button>
+          </div>
         </div>
 
         <div className="card animate-slide-up stagger-4" style={{ padding: 20 }}>
@@ -1026,42 +1237,83 @@ export default function Settings() {
           </code>
           <div
             style={{
-              ...inputStyle,
-              marginBottom: 10,
-              padding: 0,
               display: 'flex',
-              alignItems: 'center',
-              overflow: 'hidden',
+              gap: 10,
+              alignItems: 'stretch',
+              marginBottom: 10,
+              minWidth: 0,
+              flexWrap: 'wrap',
             }}
           >
-            <span
+            <div
               style={{
-                padding: '10px 12px',
-                borderRight: '1px solid var(--color-border-light)',
-                fontFamily: 'var(--font-mono)',
-                fontSize: 13,
-                color: 'var(--color-text-secondary)',
-                userSelect: 'none',
+                ...inputStyle,
+                flex: 1,
+                minWidth: 200,
+                marginBottom: 0,
+                padding: 0,
+                display: 'flex',
+                alignItems: 'center',
+                overflow: 'hidden',
               }}
             >
-              {PROXY_TOKEN_PREFIX}
-            </span>
-            <input
-              type="password"
-              value={proxyTokenSuffix}
-              onChange={(e) => setProxyTokenSuffix(normalizeProxyTokenSuffix(e.target.value))}
-              placeholder="请输入 sk- 后的令牌内容"
+              <span
+                style={{
+                  padding: '10px 12px',
+                  borderRight: '1px solid var(--color-border-light)',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 13,
+                  color: 'var(--color-text-secondary)',
+                  userSelect: 'none',
+                  background: 'color-mix(in srgb, var(--color-text-muted) 6%, transparent)',
+                }}
+              >
+                {PROXY_TOKEN_PREFIX}
+              </span>
+              <input
+                type="text"
+                value={proxyTokenSuffix}
+                onChange={(e) => setProxyTokenSuffix(normalizeProxyTokenSuffix(e.target.value))}
+                placeholder="请输入 sk- 后的令牌内容"
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  border: 'none',
+                  outline: 'none',
+                  background: 'transparent',
+                  color: 'var(--color-text-primary)',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 13,
+                  padding: '10px 12px',
+                }}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn btn-soft-primary"
+              aria-label="随机生成访问令牌后缀"
+              title="生成高熵随机后缀（不会自动保存）"
               style={{
-                flex: 1,
-                border: 'none',
-                outline: 'none',
-                background: 'transparent',
-                color: 'var(--color-text-primary)',
-                fontFamily: 'var(--font-mono)',
+                flexShrink: 0,
+                padding: '10px 18px',
                 fontSize: 13,
-                padding: '10px 12px',
+                gap: 8,
+                alignSelf: 'stretch',
               }}
-            />
+              onClick={() => {
+                const full = generateDownstreamSkKey(PROXY_TOKEN_PREFIX);
+                setProxyTokenSuffix(full.slice(PROXY_TOKEN_PREFIX.length));
+              }}
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden>
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z"
+                />
+              </svg>
+              随机生成
+            </button>
           </div>
           <button onClick={saveProxyToken} disabled={savingToken} className="btn btn-primary">
             {savingToken ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '更新下游访问令牌'}
@@ -1069,68 +1321,14 @@ export default function Settings() {
         </div>
 
         <div className="card animate-slide-up stagger-5" style={{ padding: 20 }}>
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>下游 API Key 策略（按项目/分组）</div>
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-            每个下游 Key 可独立配置过期、额度，并通过勾选界面限制可访问的模型与群组。
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>下游密钥管理入口已迁移</div>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12, lineHeight: 1.8 }}>
+            下游 API Key 的新增、编辑、模型白名单、群组限制、趋势与用量分析，现统一收口到「控制台 / 下游密钥」页面，设置页不再保留重复管理入口。
           </div>
-
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-            <button onClick={openCreateDownstreamModal} className="btn btn-primary">
-              + 新增 API Key
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button onClick={() => navigate('/downstream-keys')} className="btn btn-primary">
+              打开下游密钥管理页
             </button>
-            <button onClick={loadDownstreamKeys} disabled={downstreamLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
-              {downstreamLoading ? '刷新中...' : '刷新列表'}
-            </button>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {downstreamKeys.length === 0 ? (
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无下游 API Key</div>
-            ) : downstreamKeys.map((item) => {
-              const opLoading = !!downstreamOps[item.id];
-              const quotaText = `${item.usedRequests}${item.maxRequests !== null ? `/${item.maxRequests}` : ''}`;
-              const costText = `$${item.usedCost.toFixed(6)}${item.maxCost !== null ? `/$${item.maxCost}` : ''}`;
-              return (
-                <div key={item.id} style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                      <strong style={{ fontSize: 13 }}>{item.name}</strong>
-                      <code style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-secondary)' }}>{item.keyMasked}</code>
-                      <span style={{
-                        fontSize: 12,
-                        padding: '2px 8px',
-                        borderRadius: 999,
-                        background: item.enabled ? 'var(--color-success-bg)' : 'var(--color-danger-bg)',
-                        color: item.enabled ? 'var(--color-success)' : 'var(--color-danger)',
-                      }}>
-                        {item.enabled ? '启用' : '禁用'}
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                      <button onClick={() => beginEditDownstream(item)} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
-                        编辑
-                      </button>
-                      <button onClick={() => toggleDownstreamEnabled(item)} disabled={opLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
-                        {item.enabled ? '禁用' : '启用'}
-                      </button>
-                      <button onClick={() => resetDownstreamUsage(item)} disabled={opLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
-                        重置用量
-                      </button>
-                      <button onClick={() => deleteDownstreamKey(item)} disabled={opLoading} className="btn btn-link btn-link-warning">
-                        删除
-                      </button>
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-                    <span>请求用量: {quotaText}</span>
-                    <span>费用用量: {costText}</span>
-                    <span>过期: {item.expiresAt ? new Date(item.expiresAt).toLocaleString() : '永久'}</span>
-                    <span>模型规则: {item.supportedModels.length || 0}</span>
-                    <span>群组限制: {item.allowedRouteIds.length || 0}</span>
-                  </div>
-                </div>
-              );
-            })}
           </div>
         </div>
 
@@ -1200,7 +1398,7 @@ export default function Settings() {
 
           <div className={`anim-collapse ${showAdvancedRouting ? 'is-open' : ''}`.trim()}>
             <div className="anim-collapse-inner" style={{ paddingTop: 2 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
               {([
                 ['baseWeightFactor', '基础权重因子'],
                 ['valueScoreFactor', '价值分因子'],
@@ -1246,7 +1444,7 @@ export default function Settings() {
             可先测试连接，再迁移数据；迁移完成后可保存为运行数据库配置（重启容器后生效）。
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 10, marginBottom: 10, alignItems: 'center' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '180px 1fr', gap: 10, marginBottom: 10, alignItems: 'center' }}>
             <ModernSelect
               value={migrationDialect}
               onChange={(value) => setMigrationDialect(value as DbDialect)}
@@ -1287,7 +1485,7 @@ export default function Settings() {
             />
           ) : (
             <div style={{ marginBottom: 10 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 8 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: 10, marginBottom: 8 }}>
                 <input
                   value={shorthandConnection.host}
                   onChange={(e) => setShorthandConnection((prev) => ({ ...prev, host: e.target.value }))}
@@ -1318,7 +1516,7 @@ export default function Settings() {
                 </button>
               </div>
               {showShorthandOptional && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 8 }}>
                   <input
                     value={shorthandConnection.port}
                     onChange={(e) => setShorthandConnection((prev) => ({ ...prev, port: e.target.value }))}
@@ -1741,7 +1939,8 @@ export default function Settings() {
                         ) : filteredGroupRouteOptions.map((route) => {
                           const checked = downstreamCreate.selectedGroupRouteIds.includes(route.id);
                           const explicitBrandIcon = parseBrandIconValue(route.displayIcon);
-                          const textIcon = explicitBrandIcon ? '' : (route.displayIcon || '').trim();
+                          const explicitNoIcon = (route.displayIcon || '').trim() === ROUTE_ICON_NONE_VALUE;
+                          const textIcon = explicitBrandIcon || explicitNoIcon ? '' : (route.displayIcon || '').trim();
                           return (
                             <label
                               key={route.id}
@@ -1804,7 +2003,7 @@ export default function Settings() {
                                       />
                                     ) : textIcon ? (
                                       textIcon
-                                    ) : (
+                                    ) : explicitNoIcon ? null : (
                                       <InlineBrandIcon model={resolveRouteBrandSource(route)} size={18} />
                                     )}
                                   </span>

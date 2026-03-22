@@ -1,11 +1,13 @@
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { appendSessionTokenRebindHint, isTokenExpiredError } from './alertRules.js';
 import { reportTokenExpired } from './alertService.js';
 import {
+  buildStoredSub2ApiSubscriptionSummary,
   getAutoReloginConfig,
   getCredentialModeFromExtraConfig,
+  getProxyUrlFromExtraConfig,
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
   resolvePlatformUserId,
@@ -14,7 +16,7 @@ import { decryptAccountPassword } from './accountCredentialService.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
-import { withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { withAccountProxyOverride, withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
@@ -94,25 +96,13 @@ function parsePositiveNumber(value: unknown): number {
   return 0;
 }
 
-function parseIncomeFromContent(content: unknown, conversionFactor: number): number {
+function parseIncomeFromContent(content: unknown): number {
   if (typeof content !== 'string') return 0;
   const normalized = content.replace(/,/g, '');
   const match = normalized.match(/[-+]?\d+(?:\.\d+)?/);
   if (!match) return 0;
   const parsed = Number(match[0]);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-
-  const text = normalized.toLowerCase();
-  const explicitPointUnit = (
-    normalized.includes('点额度')
-    || normalized.includes('点数')
-    || text.includes('quota point')
-    || text.includes('quota points')
-  );
-  if (explicitPointUnit || parsed >= conversionFactor) {
-    return parsed / conversionFactor;
-  }
-
   return parsed;
 }
 
@@ -211,7 +201,7 @@ async function refreshSub2ApiManagedSession(params: {
       method: 'POST',
       headers,
       body: JSON.stringify({ refresh_token: refreshToken }),
-    }));
+    }, getProxyUrlFromExtraConfig(params.account.extraConfig)));
     payload = await response.json().catch(() => null);
   } catch (err: any) {
     throw new Error(err?.message || 'sub2api token refresh request failed');
@@ -301,7 +291,7 @@ async function fetchTodayIncomeFromLogs(params: {
             totalIncome += quotaRaw / conversionFactor;
             continue;
           }
-          totalIncome += parseIncomeFromContent(item?.content, conversionFactor);
+          totalIncome += parseIncomeFromContent(item?.content);
         }
 
         const total = extractLogTotal(payload);
@@ -328,7 +318,10 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   const password = decryptAccountPassword(relogin.passwordCipher);
   if (!password) return null;
 
-  const loginResult = await adapter.login(site.url, relogin.username, password);
+  const loginResult = await withAccountProxyOverride(
+    getProxyUrlFromExtraConfig(account.extraConfig),
+    () => adapter.login(site.url, relogin.username, password),
+  );
   if (!loginResult.success || !loginResult.accessToken) return null;
 
   await db.update(schema.accounts)
@@ -341,71 +334,6 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
     .run();
 
   return loginResult.accessToken;
-}
-
-function collectApiKeyCandidates(account: typeof schema.accounts.$inferSelect): string[] {
-  const candidates: string[] = [];
-  const push = (value: unknown) => {
-    if (typeof value !== 'string') return;
-    const normalized = value.trim();
-    if (!normalized) return;
-    if (!candidates.includes(normalized)) candidates.push(normalized);
-  };
-
-  push(account.apiToken);
-
-  try {
-    const rows = db.select()
-      .from(schema.accountTokens)
-      .where(and(
-        eq(schema.accountTokens.accountId, account.id),
-        eq(schema.accountTokens.enabled, true),
-      ))
-      .all();
-    rows
-      .slice()
-      .sort((a, b) => Number(b.isDefault || false) - Number(a.isDefault || false))
-      .forEach((row) => push((row as any)?.token));
-  } catch {}
-
-  return candidates;
-}
-
-async function trySwitchToApiKeyMode(params: {
-  account: typeof schema.accounts.$inferSelect;
-  site: typeof schema.sites.$inferSelect;
-  adapter: ReturnType<typeof getAdapter>;
-  platformUserId?: number;
-}): Promise<boolean> {
-  if (!params.adapter) return false;
-
-  for (const apiKey of collectApiKeyCandidates(params.account)) {
-    try {
-      const models = await params.adapter.getModels(params.site.url, apiKey, params.platformUserId);
-      if (!Array.isArray(models) || models.length === 0) continue;
-
-      db.update(schema.accounts)
-        .set({
-          accessToken: '',
-          apiToken: apiKey,
-          checkinEnabled: false,
-          status: 'active',
-          extraConfig: mergeAccountExtraConfig(params.account.extraConfig, { credentialMode: 'apikey' }),
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(schema.accounts.id, params.account.id))
-        .run();
-
-      setAccountRuntimeHealth(params.account.id, {
-        state: 'degraded',
-        reason: 'Session Token 已过期，已自动切换为 API Key 代理模式',
-        source: 'auth',
-      });
-      return true;
-    } catch {}
-  }
-
-  return false;
 }
 
 export async function refreshBalance(accountId: number) {
@@ -454,39 +382,25 @@ export async function refreshBalance(accountId: number) {
   let activeExtraConfig = account.extraConfig;
   let balanceInfo: BalanceInfo | null = null;
 
+  const accountProxyUrl = getProxyUrlFromExtraConfig(account.extraConfig);
+
   if (isSub2ApiPlatform(site.platform)) {
     const managedAuth = getSub2ApiAuthFromExtraConfig(activeExtraConfig);
     if (managedAuth?.refreshToken && isNearTokenExpiry(managedAuth.tokenExpiresAt)) {
       try {
-        const refreshed = await refreshSub2ApiManagedSession({
+        const refreshed = await withAccountProxyOverride(accountProxyUrl, () => refreshSub2ApiManagedSession({
           account,
           site,
           currentAccessToken: activeAccessToken,
           currentExtraConfig: activeExtraConfig,
-        });
+        }));
         activeAccessToken = refreshed.accessToken;
         activeExtraConfig = refreshed.extraConfig;
       } catch {}
     }
   }
-
-  const readBalance = async (token: string) => adapter.getBalance(site.url, token, platformUserId);
-  const tryApiKeyFallback = async (err: any): Promise<BalanceInfo | null> => {
-    const message = err?.message || '';
-    if (!shouldAttemptAutoRelogin(message)) return null;
-    const switched = await trySwitchToApiKeyMode({
-      account,
-      site,
-      adapter,
-      platformUserId,
-    });
-    if (!switched) return null;
-    return {
-      balance: account.balance ?? 0,
-      used: account.balanceUsed ?? 0,
-      quota: account.quota ?? 0,
-    };
-  };
+  const readBalance = async (token: string) => withAccountProxyOverride(accountProxyUrl,
+    () => adapter.getBalance(site.url, token, platformUserId));
   const handleBalanceError = async (err: any) => {
     const message = appendSessionTokenRebindHint(err?.message || 'unknown error');
     setAccountRuntimeHealth(account.id, {
@@ -516,18 +430,16 @@ export async function refreshBalance(accountId: number) {
 
     if (canTryManagedSub2ApiRefresh) {
       try {
-        const refreshed = await refreshSub2ApiManagedSession({
+        const refreshed = await withAccountProxyOverride(accountProxyUrl, () => refreshSub2ApiManagedSession({
           account,
           site,
           currentAccessToken: activeAccessToken,
           currentExtraConfig: activeExtraConfig,
-        });
+        }));
         activeAccessToken = refreshed.accessToken;
         activeExtraConfig = refreshed.extraConfig;
         balanceInfo = await readBalance(activeAccessToken);
       } catch (retryErr: any) {
-        const fallback = await tryApiKeyFallback(retryErr);
-        if (fallback) return fallback;
         await handleBalanceError(retryErr);
       }
     } else if (shouldAttemptAutoRelogin(message)) {
@@ -537,13 +449,9 @@ export async function refreshBalance(accountId: number) {
         try {
           balanceInfo = await readBalance(activeAccessToken);
         } catch (retryErr: any) {
-          const fallback = await tryApiKeyFallback(retryErr);
-          if (fallback) return fallback;
           await handleBalanceError(retryErr);
         }
       } else {
-        const fallback = await tryApiKeyFallback(err);
-        if (fallback) return fallback;
         await handleBalanceError(err);
       }
     } else {
@@ -560,12 +468,12 @@ export async function refreshBalance(accountId: number) {
     supportsTodayIncomeLogFallback(site.platform)
   ) {
     try {
-      const fallbackIncome = await fetchTodayIncomeFromLogs({
+      const fallbackIncome = await withAccountProxyOverride(accountProxyUrl, () => fetchTodayIncomeFromLogs({
         baseUrl: site.url,
         accessToken: activeAccessToken,
         platform: site.platform,
         platformUserId,
-      });
+      }));
       if (typeof fallbackIncome === 'number' && Number.isFinite(fallbackIncome)) {
         balanceInfo.todayIncome = fallbackIncome;
       }
@@ -575,6 +483,11 @@ export async function refreshBalance(accountId: number) {
   let nextExtraConfig = activeExtraConfig;
   if (typeof balanceInfo.todayIncome === 'number' && Number.isFinite(balanceInfo.todayIncome)) {
     nextExtraConfig = updateTodayIncomeSnapshot(nextExtraConfig, balanceInfo.todayIncome);
+  }
+  if (balanceInfo.subscriptionSummary && isSub2ApiPlatform(site.platform)) {
+    nextExtraConfig = mergeAccountExtraConfig(nextExtraConfig, {
+      sub2apiSubscription: buildStoredSub2ApiSubscriptionSummary(balanceInfo.subscriptionSummary),
+    });
   }
 
   const existingRuntimeHealth = extractRuntimeHealth(nextExtraConfig);

@@ -15,6 +15,7 @@ import {
   exportBackupToWebdav,
   getBackupWebdavConfig,
   importBackup,
+  importAllApiHubAccountsMerge,
   importBackupFromWebdav,
   reloadBackupWebdavScheduler,
   saveBackupWebdavConfig,
@@ -1313,6 +1314,27 @@ export async function settingsRoutes(app: FastifyInstance) {
       return {
         success: true,
         message: '导入完成',
+        ...result,
+      };
+    } catch (err: any) {
+      return reply.code(400).send({
+        success: false,
+        message: err?.message || '导入失败',
+      });
+    }
+  });
+
+  app.post<{ Body: { data?: Record<string, unknown> } }>('/api/settings/backup/import-all-api-hub-merge', async (request, reply) => {
+    const payload = request.body?.data;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return reply.code(400).send({ success: false, message: '导入数据格式错误：需要 JSON 对象' });
+    }
+
+    try {
+      const result = await importAllApiHubAccountsMerge(payload);
+      return {
+        success: true,
+        message: 'all-api-hub 账号已合并导入',
         ...result,
       };
     } catch (err: any) {

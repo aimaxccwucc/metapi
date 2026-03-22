@@ -1,47 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('../../components/BrandIcon.js', () => ({
+  getBrand: () => null,
+  normalizeBrandIconKey: (icon: string) => icon.trim().toLowerCase(),
+}));
 
 import {
-  getModelPatternError,
-  isExactModelPattern,
-  matchesModelPattern,
-  matchesRouteSearchTerm,
-  parseRegexModelPattern,
+  ROUTE_ICON_NONE_VALUE,
+  normalizeRouteDisplayIconValue,
+  resolveRouteIcon,
 } from './utils.js';
 
-describe('token route utils pattern parsing', () => {
-  it('supports re: prefixed regex patterns', () => {
-    expect(matchesModelPattern('claude-opus-4-6', 're:^claude-(opus|sonnet)-4-6$')).toBe(true);
-    expect(matchesModelPattern('claude-haiku-4-6', 're:^claude-(opus|sonnet)-4-6$')).toBe(false);
+describe('token route icon helpers', () => {
+  it('preserves the explicit no-icon sentinel during normalization', () => {
+    expect(normalizeRouteDisplayIconValue(ROUTE_ICON_NONE_VALUE)).toBe(ROUTE_ICON_NONE_VALUE);
   });
 
-  it('supports slash-style and bare regex patterns', () => {
-    expect(matchesModelPattern('KIMI-2-5', '/^kimi-(2|1\\.5)-5$/i')).toBe(true);
-    expect(matchesModelPattern('moonshot-v1-32k', '^moonshot-v1-(8k|32k)$')).toBe(true);
-    expect(parseRegexModelPattern('/^kimi-(2|1\\.5)-5$/i').regex).toBeInstanceOf(RegExp);
-    expect(isExactModelPattern('/^kimi-(2|1\\.5)-5$/i')).toBe(false);
-    expect(isExactModelPattern('^moonshot-v1-(8k|32k)$')).toBe(false);
-  });
-
-  it('still treats glob patterns as non-regex', () => {
-    expect(matchesModelPattern('claude-opus-4-6', 'claude-*')).toBe(true);
-    expect(parseRegexModelPattern('claude-*')).toEqual({ regex: null, error: null });
-    expect(isExactModelPattern('claude-*')).toBe(false);
-  });
-
-  it('matches route search terms against wildcard and regex patterns', () => {
-    const route = {
-      modelPattern: 'kimi-k2.5',
-      displayName: 'moonshot kimi',
-      siteNames: ['Moonshot', 'Primary'],
-    };
-
-    expect(matchesRouteSearchTerm(route, '*kimi*')).toBe(true);
-    expect(matchesRouteSearchTerm(route, 're:^kimi-')).toBe(true);
-    expect(matchesRouteSearchTerm(route, 'moonshot')).toBe(true);
-    expect(matchesRouteSearchTerm(route, 'claude')).toBe(false);
-  });
-
-  it('returns a validation error for invalid explicit regex', () => {
-    expect(getModelPatternError('re:([a-z')).toContain('模型匹配正则错误');
+  it('treats the explicit no-icon sentinel as no icon', () => {
+    expect(resolveRouteIcon({ displayIcon: ROUTE_ICON_NONE_VALUE })).toEqual({ kind: 'none' });
   });
 });

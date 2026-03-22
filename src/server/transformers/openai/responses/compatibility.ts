@@ -213,11 +213,17 @@ export function buildResponsesCompatibilityBodies(
     if (temperature !== null) richCandidate.temperature = temperature;
     const topP = toFiniteNumber(body.top_p);
     if (topP !== null) richCandidate.top_p = topP;
-    const instructions = typeof body.instructions === 'string' ? body.instructions.trim() : '';
-    if (instructions) richCandidate.instructions = instructions;
+    const instructions = getExplicitResponsesInstructions(body);
+    if (instructions !== null) richCandidate.instructions = instructions;
 
     const passthroughFields = [
+      'parallel_tool_calls',
+      'include',
       'reasoning',
+      'previous_response_id',
+      'truncation',
+      'text',
+      'service_tier',
       'safety_identifier',
       'max_tool_calls',
       'prompt_cache_key',
@@ -398,6 +404,11 @@ function parseUpstreamErrorShape(rawText: string): {
   }
 }
 
+function getExplicitResponsesInstructions(body: Record<string, unknown>): string | null {
+  if (!Object.prototype.hasOwnProperty.call(body, 'instructions')) return null;
+  return typeof body.instructions === 'string' ? body.instructions.trim() : '';
+}
+
 function stripResponsesMetadata(
   body: Record<string, unknown>,
 ): Record<string, unknown> | null {
@@ -431,8 +442,8 @@ function buildCoreResponsesBody(
   const topP = toFiniteNumber(body.top_p);
   if (topP !== null) core.top_p = topP;
 
-  const instructions = typeof body.instructions === 'string' ? body.instructions.trim() : '';
-  if (instructions) core.instructions = instructions;
+  const instructions = getExplicitResponsesInstructions(body);
+  if (instructions !== null) core.instructions = instructions;
 
   const passthroughFields = [
     'reasoning',
@@ -458,10 +469,15 @@ function buildStrictResponsesBody(
   if (!model) return null;
   if (body.input === undefined) return null;
 
+  const explicitInstructions = getExplicitResponsesInstructions(body);
+
   return {
     model,
     input: body.input,
     stream: body.stream === true,
+    ...(explicitInstructions !== null
+      ? { instructions: explicitInstructions }
+      : {}),
   };
 }
 

@@ -40,43 +40,78 @@
     {
       "idx": 5,
       "version": "6",
-      "when": 1772561400000,
-      "tag": "0005_proxy_log_billing_details",
-      "breakpoints": true
-    },
-    {
-      "idx": 6,
-      "version": "6",
       "when": 1773500331000,
       "tag": "0006_site_disabled_models",
       "breakpoints": true
     },
     {
-      "idx": 7,
+      "idx": 6,
       "version": "6",
       "when": 1773500400000,
       "tag": "0007_account_token_group",
       "breakpoints": true
     },
     {
-      "idx": 8,
+      "idx": 7,
       "version": "6",
       "when": 1773500500000,
       "tag": "0008_sqlite_schema_backfill",
       "breakpoints": true
     },
     {
-      "idx": 9,
+      "idx": 8,
       "version": "6",
       "when": 1773528832339,
       "tag": "0009_model_availability_is_manual",
       "breakpoints": true
     },
     {
+      "idx": 9,
+      "version": "6",
+      "when": 1773553945763,
+      "tag": "0010_proxy_logs_downstream_api_key",
+      "breakpoints": true
+    },
+    {
       "idx": 10,
       "version": "6",
-      "when": 1773609600000,
-      "tag": "0010_site_health_status",
+      "when": 1773605400000,
+      "tag": "0011_downstream_api_key_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1773665311013,
+      "tag": "0012_account_token_value_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1773682200000,
+      "tag": "0013_oauth_multi_provider",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1773855000000,
+      "tag": "0014_explicit_group_routes",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1773900000000,
+      "tag": "0015_site_announcements",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1773979652606,
+      "tag": "0016_proxy_logs_client_fields",
       "breakpoints": true
     }
   ]

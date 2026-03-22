@@ -9,6 +9,30 @@ const MONITOR_AUTH_COOKIE = 'meta_monitor_auth';
 const LDOH_BASE_URL = 'https://ldoh.105117.xyz';
 const LDOH_COOKIE_SETTING_KEY = 'monitor_ldoh_cookie';
 
+const limitMonitorConfigRead = createRateLimitGuard({
+  bucket: 'monitor-config-read',
+  max: 30,
+  windowMs: 60_000,
+});
+
+const limitMonitorConfigWrite = createRateLimitGuard({
+  bucket: 'monitor-config-write',
+  max: 10,
+  windowMs: 60_000,
+});
+
+const limitMonitorSession = createRateLimitGuard({
+  bucket: 'monitor-session',
+  max: 10,
+  windowMs: 60_000,
+});
+
+const limitMonitorProxy = createRateLimitGuard({
+  bucket: 'monitor-proxy',
+  max: 60,
+  windowMs: 60_000,
+});
+
 
 
 async function getSettingString(key: string): Promise<string> {
@@ -103,11 +127,6 @@ function resolveLdohProxyPath(request: FastifyRequest): string {
   return String((request.params as Record<string, unknown>)['*'] || '');
 }
 
-const limitMonitorConfigRead = createRateLimitGuard({ bucket: 'monitor-config-read', max: 30, windowMs: 60_000 });
-const limitMonitorConfigWrite = createRateLimitGuard({ bucket: 'monitor-config-write', max: 10, windowMs: 60_000 });
-const limitMonitorSession = createRateLimitGuard({ bucket: 'monitor-session', max: 10, windowMs: 60_000 });
-const limitMonitorProxy = createRateLimitGuard({ bucket: 'monitor-proxy', max: 60, windowMs: 60_000 });
-
 export async function monitorRoutes(app: FastifyInstance) {
   app.get('/api/monitor/config', { preHandler: [limitMonitorConfigRead] }, async () => {
     const ldohCookie = await getSettingString(LDOH_COOKIE_SETTING_KEY);
@@ -117,7 +136,10 @@ export async function monitorRoutes(app: FastifyInstance) {
     };
   });
 
-  app.put<{ Body: { ldohCookie?: string | null } }>('/api/monitor/config', { preHandler: [limitMonitorConfigWrite] }, async (request, reply) => {
+  app.put<{ Body: { ldohCookie?: string | null } }>(
+    '/api/monitor/config',
+    { preHandler: [limitMonitorConfigWrite] },
+    async (request, reply) => {
     const raw = String(request.body?.ldohCookie || '').trim();
     if (!raw) {
       await upsertSetting(LDOH_COOKIE_SETTING_KEY, '');
@@ -136,7 +158,8 @@ export async function monitorRoutes(app: FastifyInstance) {
       ldohCookieConfigured: true,
       ldohCookieMasked: maskCookieValue(normalized),
     };
-  });
+    },
+  );
 
   app.post('/api/monitor/session', { preHandler: [limitMonitorSession] }, async (_, reply) => {
     // HttpOnly cookie for iframe proxy auth within current origin.

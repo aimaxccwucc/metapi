@@ -112,8 +112,8 @@ describe('accounts skipModelFetch behavior', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    // Upstream refreshModelsForAccount now probes both account-level credential and managed token.
-    expect(getModelsMock).toHaveBeenCalledTimes(3);
+    // getModels is called TWICE: once for block validation, once asynchronously by refreshModelsForAccount
+    expect(getModelsMock).toHaveBeenCalledTimes(2);
 
     const accounts = await db.select().from(schema.accounts).all();
     expect(accounts).toHaveLength(1);

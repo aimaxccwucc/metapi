@@ -23,9 +23,7 @@ vi.mock('undici', () => ({
 vi.mock('../../services/tokenRouter.js', () => ({
   tokenRouter: {
     selectChannel: (...args: unknown[]) => selectChannelMock(...args),
-    selectChannelWithOptions: (...args: unknown[]) => selectChannelMock(...args),
     selectNextChannel: (...args: unknown[]) => selectNextChannelMock(...args),
-    selectNextChannelWithOptions: (...args: unknown[]) => selectNextChannelMock(...args),
     recordSuccess: (...args: unknown[]) => recordSuccessMock(...args),
     recordFailure: (...args: unknown[]) => recordFailureMock(...args),
   },
@@ -56,6 +54,9 @@ vi.mock('../../db/index.js', () => ({
   db: {
     insert: (arg: any) => dbInsertMock(arg),
   },
+  hasProxyLogBillingDetailsColumn: async () => false,
+  hasProxyLogClientColumns: async () => false,
+  hasProxyLogDownstreamApiKeyIdColumn: async () => false,
   schema: {
     proxyLogs: {},
   },
@@ -118,10 +119,7 @@ describe('/v1/search route', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(selectChannelMock).toHaveBeenCalledWith('__search', expect.objectContaining({
-      downstreamPolicy: expect.anything(),
-      allowTokenRepair: true,
-    }));
+    expect(selectChannelMock).toHaveBeenCalledWith('__search', expect.anything());
     const [targetUrl, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(targetUrl).toBe('https://upstream.example.com/v1/search');
     expect(JSON.parse(String(requestInit.body))).toEqual({
