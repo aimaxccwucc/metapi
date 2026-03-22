@@ -60,11 +60,191 @@ function isExistingSchemaObjectError(error: unknown): boolean {
     || lowered.includes('relation') && lowered.includes('already exists');
 }
 
+function normalizeSqlForMatch(sqlText: string): string {
+  return sqlText
+    .replace(/[\n\r\t]+/g, ' ')
+    .replace(/["`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/;+$/g, '')
+    .toLowerCase();
+}
+
+function isSitesPlatformUrlUniqueConflictError(error: unknown, sqlText: string): boolean {
+  const normalizedSql = normalizeSqlForMatch(sqlText);
+  if (
+    !normalizedSql.includes('create unique index sites_platform_url_unique on sites')
+    && !normalizedSql.includes('create unique index sites_platform_url_unique')
+  ) {
+    return false;
+  }
+
+  const lowered = normalizeSchemaErrorMessage(error).toLowerCase();
+  const code = typeof error === 'object' && error && 'code' in error
+    ? String((error as { code?: unknown }).code || '')
+    : '';
+
+  if (code === 'ER_DUP_ENTRY' || code === '23505') {
+    return true;
+  }
+
+  return lowered.includes('sites_platform_url_unique')
+    || lowered.includes('sites.platform, sites.url')
+    || lowered.includes('duplicate entry')
+    || lowered.includes('duplicate key value violates unique constraint');
+}
+
+async function rewriteDownstreamSiteWeightMultipliers(
+  client: RuntimeSchemaClient,
+  siteIdMapping: Map<number, number>,
+): Promise<void> {
+  if (siteIdMapping.size <= 0) return;
+  if (client.dialect !== 'mysql') return;
+
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = await queryRuntimeRows(client, `
+      SELECT id, site_weight_multipliers
+      FROM downstream_api_keys
+      WHERE site_weight_multipliers IS NOT NULL
+        AND TRIM(site_weight_multipliers) <> ''
+    `);
+  } catch {
+    return;
+  }
+
+  for (const row of rows) {
+    const id = Number(row.id);
+    const rawValue = typeof row.site_weight_multipliers === 'string'
+      ? row.site_weight_multipliers
+      : '';
+    if (!id || !rawValue) {
+      continue;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawValue);
+    } catch {
+      continue;
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      continue;
+    }
+
+    const nextValue = { ...(parsed as Record<string, unknown>) };
+    let changed = false;
+    for (const [fromSiteId, toSiteId] of siteIdMapping.entries()) {
+      const fromKey = String(fromSiteId);
+      const toKey = String(toSiteId);
+      if (!(fromKey in nextValue)) {
+        continue;
+      }
+      if (!(toKey in nextValue)) {
+        nextValue[toKey] = nextValue[fromKey];
+      }
+      delete nextValue[fromKey];
+      changed = true;
+    }
+
+    if (!changed) {
+      continue;
+    }
+
+    await client.execute(
+      'UPDATE downstream_api_keys SET site_weight_multipliers = ? WHERE id = ?',
+      [JSON.stringify(nextValue), id],
+    );
+  }
+}
+
+async function deduplicateLegacySitesForUniqueIndex(client: RuntimeSchemaClient): Promise<boolean> {
+  if (client.dialect !== 'mysql') {
+    return false;
+  }
+
+  const duplicateGroups = await queryRuntimeRows(client, `
+    SELECT platform, url
+    FROM sites
+    GROUP BY platform, url
+    HAVING COUNT(*) > 1
+  `);
+  if (duplicateGroups.length <= 0) {
+    return false;
+  }
+
+  const siteIdMapping = new Map<number, number>();
+  await client.begin();
+  try {
+    for (const group of duplicateGroups) {
+      const platform = String(group.platform || '');
+      const url = String(group.url || '');
+      const sites = await queryRuntimeRows(
+        client,
+        'SELECT id FROM sites WHERE platform = ? AND url = ? ORDER BY id ASC',
+        [platform, url],
+      );
+      const canonicalSiteId = Number(sites[0]?.id || 0);
+      if (!canonicalSiteId || sites.length <= 1) {
+        continue;
+      }
+
+      for (const site of sites.slice(1)) {
+        const duplicateSiteId = Number(site.id || 0);
+        if (!duplicateSiteId || duplicateSiteId === canonicalSiteId) {
+          continue;
+        }
+
+        try {
+          await client.execute(`
+            INSERT IGNORE INTO site_disabled_models (site_id, model_name, created_at)
+            SELECT ?, model_name, created_at
+            FROM site_disabled_models
+            WHERE site_id = ?
+          `, [canonicalSiteId, duplicateSiteId]);
+          await client.execute('DELETE FROM site_disabled_models WHERE site_id = ?', [duplicateSiteId]);
+        } catch {
+          // Best effort merge for optional tables.
+        }
+
+        await client.execute('UPDATE accounts SET site_id = ? WHERE site_id = ?', [canonicalSiteId, duplicateSiteId]);
+        await client.execute('DELETE FROM sites WHERE id = ?', [duplicateSiteId]);
+        siteIdMapping.set(duplicateSiteId, canonicalSiteId);
+      }
+    }
+
+    await rewriteDownstreamSiteWeightMultipliers(client, siteIdMapping);
+    await client.commit();
+  } catch (error) {
+    await client.rollback();
+    throw error;
+  }
+
+  if (siteIdMapping.size > 0) {
+    console.warn(`[db] Deduplicated ${siteIdMapping.size} legacy site entries before applying sites_platform_url_unique.`);
+  }
+  return siteIdMapping.size > 0;
+}
+
 async function executeBootstrapStatement(client: RuntimeSchemaClient, sqlText: string): Promise<void> {
   try {
     await client.execute(sqlText);
   } catch (error) {
     if (!isExistingSchemaObjectError(error)) {
+      if (isSitesPlatformUrlUniqueConflictError(error, sqlText)) {
+        const deduplicated = await deduplicateLegacySitesForUniqueIndex(client);
+        if (deduplicated) {
+          try {
+            await client.execute(sqlText);
+          } catch (retryError) {
+            if (!isExistingSchemaObjectError(retryError)) {
+              throw retryError;
+            }
+          }
+          return;
+        }
+      }
       throw error;
     }
   }
