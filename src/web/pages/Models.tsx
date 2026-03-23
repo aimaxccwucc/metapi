@@ -13,6 +13,7 @@ import { tr } from '../i18n.js';
 
 type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate' | 'balance';
 type ViewMode = 'card' | 'table';
+type AccountDetailSortColumn = 'site' | 'username' | 'latency' | 'balance';
 
 interface ModelTokenInfo {
   id: number;
@@ -172,6 +173,8 @@ export default function Models() {
   const [activeBrand, setActiveBrand] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('card');
+  const [accountDetailSortBy, setAccountDetailSortBy] = useState<AccountDetailSortColumn>('latency');
+  const [accountDetailSortDir, setAccountDetailSortDir] = useState<'asc' | 'desc'>('asc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [copied, setCopied] = useState<string | null>(null);
@@ -428,6 +431,51 @@ export default function Models() {
   };
 
   const accountModelKey = (modelName: string, accountId: number) => `${modelName}::${accountId}`;
+
+  const toggleAccountDetailSort = (nextSortBy: AccountDetailSortColumn) => {
+    if (accountDetailSortBy === nextSortBy) {
+      setAccountDetailSortDir((dir) => (dir === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+    setAccountDetailSortBy(nextSortBy);
+    setAccountDetailSortDir(nextSortBy === 'site' || nextSortBy === 'username' ? 'asc' : 'desc');
+  };
+
+  const accountDetailSortHeaderProps = (column: AccountDetailSortColumn, testId?: string) => ({
+    'data-testid': testId,
+    onClick: (event: React.MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleAccountDetailSort(column);
+    },
+  });
+
+  const sortAccountsForDetail = (accounts: ModelAccountInfo[]) => {
+    const valueOf = (account: ModelAccountInfo) => {
+      if (accountDetailSortBy === 'site') return String(account.site || '').toLowerCase();
+      if (accountDetailSortBy === 'username') return String(account.username || `id:${account.id}`).toLowerCase();
+      if (accountDetailSortBy === 'latency') {
+        return typeof account.latency === 'number' && Number.isFinite(account.latency)
+          ? account.latency
+          : (accountDetailSortDir === 'asc' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY);
+      }
+      return Number(account.balance || 0);
+    };
+
+    return [...accounts].sort((a, b) => {
+      const va = valueOf(a);
+      const vb = valueOf(b);
+      if (typeof va === 'string' && typeof vb === 'string') {
+        const cmp = va.localeCompare(vb);
+        if (cmp !== 0) return accountDetailSortDir === 'asc' ? cmp : -cmp;
+        return a.id - b.id;
+      }
+      if (va === vb) return a.id - b.id;
+      return accountDetailSortDir === 'desc'
+        ? Number(vb) - Number(va)
+        : Number(va) - Number(vb);
+    });
+  };
 
   const testModelAvailability = async (modelName: string, account: ModelAccountInfo) => {
     const key = accountModelKey(modelName, account.id);
@@ -865,7 +913,7 @@ export default function Models() {
                     {isMobile ? (
                       <div style={{ display: 'grid', gap: 8 }}>
                         <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)' }}>{tr('账号明细')}</div>
-                        {m.accounts.map((a) => (
+                        {sortAccountsForDetail(m.accounts).map((a) => (
                           <div
                             key={a.id}
                             className="card"
@@ -932,16 +980,16 @@ export default function Models() {
                       <table className="data-table" style={{ width: '100%' }}>
                         <thead>
                           <tr>
-                            <th style={{ fontWeight: 500 }}>{tr('站点')}</th>
-                            <th style={{ fontWeight: 500 }}>{tr('账号')}</th>
+                            <th style={{ fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('site')}>{tr('站点')} {accountDetailSortBy === 'site' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                            <th style={{ fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('username')}>{tr('账号')} {accountDetailSortBy === 'username' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
                             <th style={{ fontWeight: 500 }}>{tr('令牌')}</th>
-                            <th style={{ fontWeight: 500 }}>{tr('延迟')}</th>
+                            <th style={{ fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('latency', 'model-detail-sort-latency')}>{tr('延迟')} {accountDetailSortBy === 'latency' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
                             <th style={{ fontWeight: 500 }}>{tr('可用性检测')}</th>
-                            <th style={{ fontWeight: 500 }}>{tr('余额')}</th>
+                            <th style={{ fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('balance', 'model-detail-sort-balance')}>{tr('余额')} {accountDetailSortBy === 'balance' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {m.accounts.map(a => {
+                          {sortAccountsForDetail(m.accounts).map(a => {
                             const rowKey = accountModelKey(m.name, a.id);
                             const checking = !!availabilityTesting[rowKey];
                             const check = availabilityChecks[rowKey];
@@ -1130,14 +1178,14 @@ export default function Models() {
 
                             <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                               <thead><tr style={{ color: 'var(--color-text-muted)' }}>
-                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('站点')}</th>
-                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('账号')}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('site')}>{tr('站点')} {accountDetailSortBy === 'site' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('username')}>{tr('账号')} {accountDetailSortBy === 'username' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
                                 <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('令牌')}</th>
-                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('延迟')}</th>
-                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('余额')}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('latency', 'model-card-detail-sort-latency')}>{tr('延迟')} {accountDetailSortBy === 'latency' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('balance', 'model-card-detail-sort-balance')}>{tr('余额')} {accountDetailSortBy === 'balance' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
                               </tr></thead>
                               <tbody>
-                                {m.accounts.map(a => (
+                                {sortAccountsForDetail(m.accounts).map(a => (
                                   <tr key={a.id} style={{ borderTop: '1px solid var(--color-border-light)' }}>
                                     <td style={{ padding: 8 }}><SiteBadgeLink siteId={siteIdByName.get(a.site)} siteName={a.site} badgeClassName="badge badge-info" badgeStyle={{ fontSize: 11 }} /></td>
                                     <td style={{ padding: 8 }}>{a.username || `ID:${a.id}`}</td>

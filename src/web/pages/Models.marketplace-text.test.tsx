@@ -756,4 +756,103 @@ describe('Models marketplace text', () => {
       await unmountRoot(root);
     }
   });
+
+  it('sorts expanded card details by latency and balance', async () => {
+    apiMock.getModelsMarketplace.mockResolvedValue({
+      models: [
+        {
+          name: 'gemini-2.5-pro',
+          accountCount: 2,
+          tokenCount: 2,
+          avgLatency: 300,
+          successRate: 95,
+          balance: 0,
+          description: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          pricingSources: [],
+          accounts: [
+            {
+              id: 1,
+              site: 'Site Slow',
+              username: 'slow-user',
+              latency: 802,
+              balance: 56.3,
+              tokens: [{ id: 1, name: 'cc', isDefault: true }],
+            },
+            {
+              id: 2,
+              site: 'Site Fast',
+              username: 'fast-user',
+              latency: 257,
+              balance: 1.55,
+              tokens: [{ id: 2, name: 'cc', isDefault: true }],
+            },
+          ],
+        },
+      ],
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const tableToggle = root!.root.find((node) => (
+        node.type === 'button'
+        && node.props['aria-label'] === '表格视图'
+      ));
+      await act(async () => {
+        tableToggle.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const modelRow = root!.root.find((node) => (
+        node.type === 'tr'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).includes('gemini-2.5-pro')
+      ));
+      await act(async () => {
+        modelRow.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const latencyHeader = root!.root.find((node) => node.props['data-testid'] === 'model-card-detail-sort-latency');
+      await act(async () => {
+        latencyHeader.props.onClick({ preventDefault() {}, stopPropagation() {} });
+      });
+      await flushMicrotasks();
+
+      let detailRows = root!.root.findAll((node) => (
+        node.type === 'tr'
+        && collectText(node).includes('slow-user') || collectText(node).includes('fast-user')
+      ));
+      expect(collectText(detailRows[0]!)).toContain('slow-user');
+
+      const balanceHeader = root!.root.find((node) => node.props['data-testid'] === 'model-card-detail-sort-balance');
+      await act(async () => {
+        balanceHeader.props.onClick({ preventDefault() {}, stopPropagation() {} });
+      });
+      await flushMicrotasks();
+
+      detailRows = root!.root.findAll((node) => (
+        node.type === 'tr'
+        && (collectText(node).includes('slow-user') || collectText(node).includes('fast-user'))
+      ));
+      expect(collectText(detailRows[0]!)).toContain('slow-user');
+
+    } finally {
+      await unmountRoot(root);
+    }
+  });
+
 });
