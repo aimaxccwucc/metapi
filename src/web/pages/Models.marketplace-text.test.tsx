@@ -855,4 +855,65 @@ describe('Models marketplace text', () => {
     }
   });
 
+  it('summarizes protocol mismatch and credential errors into concise Chinese tips', async () => {
+    apiMock.testMarketplaceModelAvailability
+      .mockResolvedValueOnce({
+        available: false,
+        reason: '该站点可能使用了不同的请求协议（gemini-native）：probe rejected model via gemini-native: x-goog-api-key is required',
+        probeClassification: 'protocol_mismatch',
+        probeEndpoint: 'gemini-native',
+      })
+      .mockResolvedValueOnce({
+        available: false,
+        reason: '当前凭证无权访问该模型（chat）：probe rejected model via chat: This token has no access to model',
+        probeClassification: 'credential',
+        probeEndpoint: 'chat',
+      });
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const cards = root!.root.findAll((node) => (
+        node.type === 'div'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('model-card')
+        && typeof node.props.onClick === 'function'
+      ));
+      await act(async () => {
+        cards[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const checkButtons = root!.root.findAll((node) => (
+        node.type === 'button'
+        && collectText(node).includes('检测')
+      ));
+
+      await act(async () => {
+        await checkButtons[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+      expect(collectText(root!.root)).toContain('该站点可能需要不同的请求方式（gemini-native）');
+
+      await act(async () => {
+        await checkButtons[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+      expect(collectText(root!.root)).toContain('当前凭证无权访问该模型（chat）');
+    } finally {
+      await unmountRoot(root);
+    }
+  });
+
 });

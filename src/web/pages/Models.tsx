@@ -138,6 +138,31 @@ function renderGroupPricingValue(pricing: ModelGroupPricing): string {
   return `${pricing.perCallTotal ?? 0} USD / call`;
 }
 
+function summarizeAvailabilityMessage(input: {
+  available: boolean;
+  reason?: string | null;
+  probeClassification?: string | null;
+  probeEndpoint?: string | null;
+}): string {
+  if (input.available) return '模型可用';
+
+  const endpointLabel = input.probeEndpoint ? `（${input.probeEndpoint}）` : '';
+  if (input.probeClassification === 'credential') {
+    return `当前凭证无权访问该模型${endpointLabel}`;
+  }
+  if (input.probeClassification === 'protocol_mismatch') {
+    return `该站点可能需要不同的请求方式${endpointLabel}`;
+  }
+  if (input.probeClassification === 'model_unavailable') {
+    return `上游已拒绝该模型${endpointLabel}`;
+  }
+  const reason = String(input.reason || '').trim();
+  if (!reason) return '暂未确认该模型可用性';
+  if (reason.includes('模型已出现在上游列表中')) return '模型已出现在上游列表中';
+  if (reason.includes('实时探测成功')) return '实时探测成功';
+  return reason;
+}
+
 const PAGE_SIZES = [10, 20, 50];
 
 function compareModels(a: ModelRow, b: ModelRow, sortBy: SortColumn, sortDir: 'asc' | 'desc'): number {
@@ -500,7 +525,12 @@ export default function Models() {
       const available = res?.available === true;
       const state: AvailabilityCheckState = {
         status: available ? 'available' : 'unavailable',
-        message: res?.reason || (available ? '可用' : '不可用'),
+        message: summarizeAvailabilityMessage({
+          available,
+          reason: res?.reason,
+          probeClassification: res?.probeClassification,
+          probeEndpoint: res?.probeEndpoint,
+        }),
         latencyMs: Number.isFinite(res?.latencyMs as number) ? Number(res?.latencyMs) : undefined,
         probeEndpoint: typeof res?.probeEndpoint === 'string' ? res.probeEndpoint : null,
         probeClassification: typeof res?.probeClassification === 'string' ? res.probeClassification : null,
