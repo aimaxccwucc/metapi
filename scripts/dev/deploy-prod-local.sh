@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 DEPLOY_DIR="/home/tanmw/metapi-deploy"
 IMAGE_TAG="metapi-local:latest"
 RUNTIME_BASE_IMAGE="${RUNTIME_BASE_IMAGE:-node:22-bookworm-slim}"
+SKIP_POST_DEPLOY_CHECKS="${SKIP_POST_DEPLOY_CHECKS:-0}"
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   cat <<'EOF'
@@ -109,10 +110,15 @@ echo "[5/6] Recreate metapi container"
 cd "$DEPLOY_DIR"
 docker compose up -d --force-recreate metapi
 
-echo "[6/6] Quick health checks"
-sleep 2
-docker compose ps metapi
-curl -fsS -I --max-time 15 http://127.0.0.1:4000/ | sed -n '1,6p'
-curl -fsS -I --max-time 20 https://metapi.aimax.ccwu.cc/sites | sed -n '1,8p'
+if [ "$SKIP_POST_DEPLOY_CHECKS" = "1" ]; then
+  echo "[6/6] Skip quick health checks (delegated to caller)"
+  docker compose ps metapi
+else
+  echo "[6/6] Quick health checks"
+  sleep 2
+  docker compose ps metapi
+  curl -fsS -I --max-time 15 http://127.0.0.1:4000/ | sed -n '1,6p'
+  curl -fsS -I --max-time 20 https://metapi.aimax.ccwu.cc/sites | sed -n '1,8p'
+fi
 
 echo "Deploy done"
