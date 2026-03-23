@@ -238,7 +238,7 @@ type LoginFailureInfo = {
 };
 
 const ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS = 10_000;
-const ACCOUNT_VERIFY_TIMEOUT_MS = 10_000;
+const ACCOUNT_VERIFY_TIMEOUT_MS = 30_000;
 const ACCOUNT_VERIFY_DIAG_TIMEOUT_MS = 2_500;
 
 function normalizeLoginFailure(message: string | null | undefined): LoginFailureInfo {
@@ -1627,4 +1627,3 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
   });
 }
-

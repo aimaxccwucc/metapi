@@ -342,7 +342,7 @@ export default function Accounts() {
 
   const handleTokenAdd = async () => {
     if (!tokenForm.siteId || !tokenForm.accessToken) return;
-    if (!verifyResult?.success && !tokenForm.skipModelFetch) {
+    if (activeSegment === 'apikey' && !verifyResult?.success && !tokenForm.skipModelFetch) {
       toast.error('请先验证 Token 成功后再添加账号');
       return;
     }
@@ -912,6 +912,7 @@ export default function Accounts() {
       || (activeSegment === 'session' && verifyResult.tokenType === 'session')
     ),
   );
+  const canSubmitWithoutVerification = activeSegment === 'session';
 
   return (
     <div className="animate-fade-in">
@@ -1233,6 +1234,9 @@ export default function Accounts() {
                         若站点要求 New-Api-User / User-ID，请在这里提前填写。
                       </div>
                     </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                      可直接添加，系统会在后台异步补全 API Key、余额和模型；若想先确认凭证有效，再点“验证 Token”。
+                    </div>
                     {isSub2ApiSelected && (
                       <>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1305,7 +1309,7 @@ export default function Accounts() {
                       </button>
                       <button
                         onClick={handleTokenAdd}
-                        disabled={saving || !tokenForm.siteId || !tokenForm.accessToken || !canAddVerifiedConnection}
+                        disabled={saving || !tokenForm.siteId || !tokenForm.accessToken || (!canSubmitWithoutVerification && !canAddVerifiedConnection)}
                         className="btn btn-success"
                       >
                         {saving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />添加中...</> : '添加连接'}

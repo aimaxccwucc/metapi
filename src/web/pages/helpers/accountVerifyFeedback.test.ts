@@ -13,7 +13,7 @@ describe('account verify feedback', () => {
   });
 
   it('treats timeout failures as reachability issues instead of token mistakes', () => {
-    const timeoutMessage = 'Token verification timed out (10s)';
+    const timeoutMessage = 'Token verification timed out (30s)';
     expect(normalizeVerifyFailureMessage(timeoutMessage)).toBe(timeoutMessage);
     expect(buildVerifyFailureHint({ success: false, message: timeoutMessage })).toMatch(/Token|站点|代理|超时/i);
     expect(buildAddAccountPrereqHint({ success: false, message: timeoutMessage })).toMatch(/站点|代理|超时/i);

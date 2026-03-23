@@ -254,7 +254,7 @@ describe('accounts verify-token shield detection', () => {
       },
     });
 
-    await vi.advanceTimersByTimeAsync(10_100);
+    await vi.advanceTimersByTimeAsync(30_100);
     const response = await responsePromise;
 
     expect(response.statusCode).toBe(200);
