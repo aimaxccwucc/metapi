@@ -24,6 +24,22 @@ STABLE_CHECK_INTERVAL="${STABLE_CHECK_INTERVAL:-5}"
 # Image tag used by scripts/dev/deploy-prod-local.sh
 IMAGE_TAG="${IMAGE_TAG:-metapi-local:latest}"
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  cat <<'EOF'
+Usage:
+  bash scripts/prod/upgrade.sh
+
+Optional env overrides:
+  HOST_WARMUP_SECONDS=12
+  HOST_CHECK_RETRIES=20
+  PUBLIC_CHECK_RETRIES=20
+
+Rollback:
+  bash scripts/prod/rollback.sh latest
+EOF
+  exit 0
+fi
+
 timestamp() {
   date +%Y%m%d-%H%M%S
 }
