@@ -662,4 +662,98 @@ describe('Models marketplace text', () => {
       await unmountRoot(root);
     }
   });
+
+  it('supports sorting by balance from the table header', async () => {
+    apiMock.getModelsMarketplace.mockResolvedValue({
+      models: [
+        {
+          name: 'gpt-low',
+          accountCount: 1,
+          tokenCount: 1,
+          avgLatency: 200,
+          successRate: 99,
+          balance: 0,
+          description: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          pricingSources: [],
+          accounts: [
+            {
+              id: 1,
+              site: 'Site A',
+              username: 'alice',
+              latency: 200,
+              balance: 3,
+              tokens: [{ id: 1, name: 'default', isDefault: true }],
+            },
+          ],
+        },
+        {
+          name: 'gpt-high',
+          accountCount: 1,
+          tokenCount: 1,
+          avgLatency: 200,
+          successRate: 99,
+          balance: 0,
+          description: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          pricingSources: [],
+          accounts: [
+            {
+              id: 2,
+              site: 'Site B',
+              username: 'bob',
+              latency: 200,
+              balance: 15,
+              tokens: [{ id: 2, name: 'default', isDefault: true }],
+            },
+          ],
+        },
+      ],
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const tableToggle = root!.root.find((node) => (
+        node.type === 'button'
+        && node.props['aria-label'] === '表格视图'
+      ));
+
+      await act(async () => {
+        tableToggle.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const balanceHeader = root!.root.find((node) => (
+        node.type === 'th'
+        && collectText(node).includes('余额')
+        && typeof node.props.onClick === 'function'
+      ));
+
+      await act(async () => {
+        balanceHeader.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const codeNodes = root!.root.findAll((node) => node.type === 'code');
+      expect(collectText(codeNodes[0]!)).toContain('gpt-high');
+      expect(collectText(root!.root)).toContain('$15.00');
+      expect(collectText(root!.root)).toContain('$3.00');
+    } finally {
+      await unmountRoot(root);
+    }
+  });
 });

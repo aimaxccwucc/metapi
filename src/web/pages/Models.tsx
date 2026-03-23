@@ -11,7 +11,7 @@ import { useIsMobile } from '../components/useIsMobile.js';
 import { mergeMarketplaceMetadata, shouldHydrateMarketplaceMetadata } from './helpers/modelsMarketplaceMetadata.js';
 import { tr } from '../i18n.js';
 
-type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate';
+type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate' | 'balance';
 type ViewMode = 'card' | 'table';
 
 interface ModelTokenInfo {
@@ -54,6 +54,7 @@ interface ModelRow {
   tokenCount: number;
   avgLatency: number | null;
   successRate: number | null;
+  balance: number;
   description: string | null;
   tags: string[];
   supportedEndpointTypes: string[];
@@ -359,9 +360,13 @@ export default function Models() {
   // The list-level filter uses "model has at least one account on this site" semantics;
   // once a model is shown, its detail should honor the active site as well.
   const detailModels = useMemo(() => {
-    const scopedModels = activeSite ? filteredModels.map((model) => {
-      const accounts = model.accounts.filter((account) => account.site === activeSite);
-      const pricingSources = model.pricingSources.filter((source) => source.siteName === activeSite);
+    const scopedModels = filteredModels.map((model) => {
+      const accounts = activeSite
+        ? model.accounts.filter((account) => account.site === activeSite)
+        : model.accounts;
+      const pricingSources = activeSite
+        ? model.pricingSources.filter((source) => source.siteName === activeSite)
+        : model.pricingSources;
       const latencyValues = accounts
         .map((account) => account.latency)
         .filter(isKnownLatency);
@@ -371,11 +376,12 @@ export default function Models() {
         pricingSources,
         accountCount: accounts.length,
         tokenCount: accounts.reduce((sum, account) => sum + account.tokens.length, 0),
+        balance: accounts.reduce((sum, account) => sum + (account.balance || 0), 0),
         avgLatency: latencyValues.length > 0
           ? Math.round(latencyValues.reduce((sum, latency) => sum + latency, 0) / latencyValues.length)
           : null,
       };
-    }) : filteredModels;
+    });
 
     return [...scopedModels].sort((a, b) => compareModels(a, b, sortBy, sortDir));
   }, [filteredModels, activeSite, sortBy, sortDir]);
@@ -410,6 +416,15 @@ export default function Models() {
     navigator.clipboard.writeText(name).catch(() => { });
     setCopied(name);
     setTimeout(() => setCopied(null), 1500);
+  };
+
+  const toggleSort = (nextSortBy: SortColumn) => {
+    if (sortBy === nextSortBy) {
+      setSortDir((dir) => (dir === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+    setSortBy(nextSortBy);
+    setSortDir(nextSortBy === 'name' ? 'asc' : 'desc');
   };
 
   const accountModelKey = (modelName: string, accountId: number) => `${modelName}::${accountId}`;
@@ -993,20 +1008,23 @@ export default function Models() {
               <thead>
                 <tr>
                   <th style={{ width: 44 }} />
-                  <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('name'); setSortDir(d => d === 'asc' ? 'desc' : 'asc'); }}>
+                  <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('name')}>
                     {tr('模型名称')} {sortBy === 'name' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
-                  <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('accountCount'); setSortDir(d => d === 'asc' ? 'desc' : 'asc'); }}>
+                  <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('accountCount')}>
                     {tr('账号数')} {sortBy === 'accountCount' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
-                  <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('tokenCount'); setSortDir(d => d === 'asc' ? 'desc' : 'asc'); }}>
+                  <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('tokenCount')}>
                     {tr('令牌数')} {sortBy === 'tokenCount' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
-                  <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('avgLatency'); setSortDir(d => d === 'asc' ? 'desc' : 'asc'); }}>
+                  <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('avgLatency')}>
                     {tr('延迟')} {sortBy === 'avgLatency' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
-                  <th style={{ cursor: 'pointer' }} onClick={() => { setSortBy('successRate'); setSortDir(d => d === 'asc' ? 'desc' : 'asc'); }}>
+                  <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('successRate')}>
                     {tr('成功率')} {sortBy === 'successRate' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </th>
+                  <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('balance')}>
+                    {tr('余额')} {sortBy === 'balance' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
                   <th style={{ width: 60 }}>{tr('操作')}</th>
                 </tr>
@@ -1043,6 +1061,7 @@ export default function Models() {
                           {m.successRate != null ? `${m.successRate}%` : '—'}
                         </span>
                       </td>
+                      <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>${m.balance.toFixed(2)}</td>
                       <td onClick={e => e.stopPropagation()}>
                         <button className="model-card-action-btn" data-tooltip={tr('复制')} aria-label={tr('复制')} onClick={() => copyName(m.name)}>
                           {copied === m.name ? (
@@ -1055,7 +1074,7 @@ export default function Models() {
                     </tr>
                     {isExpanded ? (
                     <tr className="log-detail-row">
-                      <td colSpan={7} style={{ padding: 0 }}>
+                      <td colSpan={8} style={{ padding: 0 }}>
                         <div className="anim-collapse is-open">
                           <div className="anim-collapse-inner">
                             <div style={{ padding: '12px 16px 12px 54px' }}>
