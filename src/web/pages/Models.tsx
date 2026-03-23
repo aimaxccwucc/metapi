@@ -78,6 +78,8 @@ type AvailabilityCheckState = {
   status: 'available' | 'unavailable' | 'error';
   message: string;
   latencyMs?: number;
+  probeEndpoint?: string | null;
+  probeClassification?: string | null;
   autoKeyCreated?: boolean;
   autoKeyName?: string | null;
   autoKeyGroup?: string | null;
@@ -489,6 +491,8 @@ export default function Models() {
         available?: boolean;
         reason?: string;
         latencyMs?: number;
+        probeEndpoint?: string | null;
+        probeClassification?: string | null;
         autoKeyCreated?: boolean;
         autoKeyName?: string | null;
         autoKeyGroup?: string | null;
@@ -498,6 +502,8 @@ export default function Models() {
         status: available ? 'available' : 'unavailable',
         message: res?.reason || (available ? '可用' : '不可用'),
         latencyMs: Number.isFinite(res?.latencyMs as number) ? Number(res?.latencyMs) : undefined,
+        probeEndpoint: typeof res?.probeEndpoint === 'string' ? res.probeEndpoint : null,
+        probeClassification: typeof res?.probeClassification === 'string' ? res.probeClassification : null,
         autoKeyCreated: res?.autoKeyCreated === true,
         autoKeyName: typeof res?.autoKeyName === 'string' ? res.autoKeyName : null,
         autoKeyGroup: typeof res?.autoKeyGroup === 'string' ? res.autoKeyGroup : null,

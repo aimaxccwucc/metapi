@@ -210,4 +210,114 @@ describe('/api/models/marketplace', () => {
       modelLimits: 'gpt-4.1',
     });
   });
+
+  it('returns protocol mismatch classification when upstream suggests another request style', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'gemini-site',
+      url: 'https://gemini-probe.example.com',
+      platform: 'new-api',
+      status: 'active',
+      apiKey: 'sk-gemini-probe',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'gemini-user',
+      accessToken: 'session-token',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gemini-2.5-pro',
+      available: true,
+      latencyMs: 200,
+    }).run();
+
+    getModelsMock.mockResolvedValue(['gpt-4o']);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'Please use /v1beta/models/{model}:generateContent with x-goog-api-key' },
+    }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'gemini-2.5-pro',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      available: false,
+      probeClassification: 'protocol_mismatch',
+      probeEndpoint: 'chat',
+    });
+    expect(String(response.json().reason || '')).toContain('不同的请求协议');
+  });
+
+  it('accepts gemini native probe when openai-compatible probe misses', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'gemini-native',
+      url: 'https://gemini-native.example.com',
+      platform: 'new-api',
+      status: 'active',
+      apiKey: 'sk-gemini-native',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'native-user',
+      accessToken: 'session-token',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gemini-2.5-pro',
+      available: true,
+      latencyMs: 200,
+    }).run();
+
+    getModelsMock.mockResolvedValue(['gpt-4o']);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'Please use /v1beta/models/{model}:generateContent with x-goog-api-key' } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'Please use /v1beta/models/{model}:generateContent with x-goog-api-key' } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'x-goog-api-key is required' } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'pong' }] } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'gemini-2.5-pro',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      available: true,
+      probeEndpoint: 'gemini-native',
+      probeClassification: 'supported',
+    });
+  });
 });

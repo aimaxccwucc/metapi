@@ -30,6 +30,8 @@ type MarketplaceProbeResult = {
   reason: string;
   checkedUrl: string | null;
   statusCode: number | null;
+  endpoint: string | null;
+  classification: 'supported' | 'model_unavailable' | 'credential' | 'protocol_mismatch' | 'inconclusive';
 };
 
 function summarizeProbeError(rawText: string): string {
@@ -43,9 +45,19 @@ function summarizeProbeError(rawText: string): string {
   return text.slice(0, 320);
 }
 
-function classifyProbeFailureMessage(message: string): 'model_unavailable' | 'credential' | 'inconclusive' {
+function classifyProbeFailureMessage(message: string): 'model_unavailable' | 'credential' | 'protocol_mismatch' | 'inconclusive' {
   const text = String(message || '').toLowerCase();
   if (!text) return 'inconclusive';
+  if (
+    /please use \/v1\/responses/i.test(text)
+    || /use.*\/v1\/responses/i.test(text)
+    || /messages is required for \/v1\/chat\/completions/i.test(text)
+    || /anthropic-version/i.test(text)
+    || /x-goog-api-key/i.test(text)
+    || /generatecontent/i.test(text)
+  ) {
+    return 'protocol_mismatch';
+  }
   if (
     /model.*(not found|does not exist|unsupported|invalid)/i.test(text)
     || /unknown model|no such model|unsupported model/i.test(text)
@@ -61,6 +73,26 @@ function classifyProbeFailureMessage(message: string): 'model_unavailable' | 'cr
     return 'credential';
   }
   return 'inconclusive';
+}
+
+function formatProbeReason(input: { listHit: boolean; probe: MarketplaceProbeResult | null }): string {
+  if (input.listHit) return '模型已出现在上游列表中';
+  if (!input.probe) return '上游模型列表未包含该模型，且未完成实时探测';
+
+  const endpointLabel = input.probe.endpoint || 'auto';
+  if (input.probe.available === true) {
+    return `实时探测成功（${endpointLabel}）`;
+  }
+  if (input.probe.classification === 'model_unavailable') {
+    return `上游已拒绝该模型（${endpointLabel}）：${input.probe.reason}`;
+  }
+  if (input.probe.classification === 'credential') {
+    return `当前凭证无权访问该模型（${endpointLabel}）：${input.probe.reason}`;
+  }
+  if (input.probe.classification === 'protocol_mismatch') {
+    return `该站点可能使用了不同的请求协议（${endpointLabel}）：${input.probe.reason}`;
+  }
+  return `上游列表未命中，实时探测未得出确定结论：${input.probe.reason}`;
 }
 
 function buildProbeEndpoints(platform: string): Array<'chat' | 'responses' | 'messages'> {
@@ -100,6 +132,17 @@ function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' 
       max_tokens: 1,
       temperature: 0,
       stream: false,
+    },
+  };
+}
+
+function buildGeminiNativeProbeRequest(baseUrl: string, modelName: string) {
+  const normalizedBase = String(baseUrl || '').trim().replace(/\/+$/, '');
+  return {
+    url: `${normalizedBase}/v1beta/models/${encodeURIComponent(modelName)}:generateContent`,
+    body: {
+      contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+      generationConfig: { maxOutputTokens: 1, temperature: 0 },
     },
   };
 }
@@ -150,6 +193,8 @@ async function probeModelAvailabilityViaRealtimeCall(input: {
           reason: `probe succeeded via ${endpoint} (HTTP ${response.status})`,
           checkedUrl: probe.url,
           statusCode: response.status,
+          endpoint,
+          classification: 'supported',
         };
       }
 
@@ -162,6 +207,8 @@ async function probeModelAvailabilityViaRealtimeCall(input: {
           reason: `probe rejected model via ${endpoint}: ${summarized}`,
           checkedUrl: probe.url,
           statusCode: response.status,
+          endpoint,
+          classification,
         };
       }
 
@@ -172,11 +219,65 @@ async function probeModelAvailabilityViaRealtimeCall(input: {
     }
   }
 
+  const geminiProbe = buildGeminiNativeProbeRequest(input.baseUrl, input.modelName);
+  try {
+    const geminiResponse = await withTimeout(
+      async () => {
+        return await fetch(
+          geminiProbe.url,
+          await withSiteProxyRequestInit(geminiProbe.url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json,text/plain,*/*',
+              'x-goog-api-key': input.credential,
+            },
+            body: JSON.stringify(geminiProbe.body),
+            signal: AbortSignal.timeout(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS),
+          }),
+        );
+      },
+      MARKETPLACE_MODEL_PROBE_TIMEOUT_MS + 500,
+      `model probe timeout (${Math.round(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS / 1000)}s)`,
+    );
+
+    if (geminiResponse.ok) {
+      return {
+        available: true,
+        reason: `probe succeeded via gemini-native (HTTP ${geminiResponse.status})`,
+        checkedUrl: geminiProbe.url,
+        statusCode: geminiResponse.status,
+        endpoint: 'gemini-native',
+        classification: 'supported',
+      };
+    }
+
+    const geminiText = await geminiResponse.text();
+    const geminiSummary = summarizeProbeError(geminiText) || `HTTP ${geminiResponse.status}`;
+    const geminiClass = classifyProbeFailureMessage(geminiSummary);
+    if (geminiClass === 'model_unavailable' || geminiClass === 'credential') {
+      return {
+        available: false,
+        reason: `probe rejected model via gemini-native: ${geminiSummary}`,
+        checkedUrl: geminiProbe.url,
+        statusCode: geminiResponse.status,
+        endpoint: 'gemini-native',
+        classification: geminiClass,
+      };
+    }
+    attemptMessages.push(`gemini-native:${geminiResponse.status} ${geminiSummary}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || 'unknown error');
+    attemptMessages.push(`gemini-native: ${message}`);
+  }
+
   return {
     available: null,
     reason: attemptMessages[0] || 'probe inconclusive',
     checkedUrl: null,
     statusCode: null,
+    endpoint: attemptMessages[0]?.split(':')[0] || null,
+    classification: classifyProbeFailureMessage(attemptMessages[0] || ''),
   };
 }
 
@@ -264,8 +365,8 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
       .all();
 
     const candidateRows = modelRows
-      .filter((row) => (accountId == null ? true : row.accounts.id === accountId))
-      .filter((row) => (siteName ? row.sites.name === siteName : true));
+      .filter((row: typeof modelRows[number]) => (accountId == null ? true : row.accounts.id === accountId))
+      .filter((row: typeof modelRows[number]) => (siteName ? row.sites.name === siteName : true));
 
     if (candidateRows.length === 0) {
       return reply.code(404).send({
@@ -380,9 +481,11 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
       );
       let available = normalizedSet.has(modelName)
         || Array.from(normalizedSet).some((item) => isModelAliasEquivalent(item, modelName));
-      let reason = available ? 'model found in upstream list' : 'model not found in upstream list';
+      let reason = available ? formatProbeReason({ listHit: true, probe: null }) : formatProbeReason({ listHit: false, probe: null });
       let probeCheckedUrl: string | null = null;
       let probeStatusCode: number | null = null;
+      let probeEndpoint: string | null = null;
+      let probeClassification: MarketplaceProbeResult['classification'] | null = null;
 
       if (!available) {
         const probe = await probeModelAvailabilityViaRealtimeCall({
@@ -393,14 +496,12 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
         });
         probeCheckedUrl = probe.checkedUrl;
         probeStatusCode = probe.statusCode;
+        probeEndpoint = probe.endpoint;
+        probeClassification = probe.classification;
         if (probe.available === true) {
           available = true;
-          reason = `model accepted by realtime probe: ${probe.reason}`;
-        } else if (probe.available === false) {
-          reason = probe.reason;
-        } else {
-          reason = `${reason}; probe inconclusive: ${probe.reason}`;
         }
+        reason = formatProbeReason({ listHit: false, probe });
       }
 
       return {
@@ -415,6 +516,8 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
         reason,
         probeCheckedUrl,
         probeStatusCode,
+        probeEndpoint,
+        probeClassification,
         autoKeyCreated,
         autoKeyName,
         autoKeyGroup,
