@@ -76,6 +76,17 @@ function normalizeOptionalExternalCheckinUrl(input: unknown): {
   return { valid: true, present: true, url: parsed.toString().replace(/\/+$/, '') };
 }
 
+function normalizeSiteUrl(input: string): string {
+  const trimmed = String(input || '').trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.origin;
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
+}
+
 type SiteSubscriptionAggregate = {
   activeCount: number;
   totalUsedUsd: number;
@@ -278,7 +289,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     }
     const inserted = await db.insert(schema.sites).values({
       name,
-      url: url.replace(/\/+$/, ''),
+      url: normalizeSiteUrl(url),
       platform: detectedPlatform,
       proxyUrl: normalizedProxyUrl.proxyUrl,
       useSystemProxy: normalizedUseSystemProxy ?? false,
@@ -361,7 +372,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     }
 
     if (body.name !== undefined) updates.name = body.name;
-    if (body.url !== undefined) updates.url = body.url.replace(/\/+$/, '');
+    if (body.url !== undefined) updates.url = normalizeSiteUrl(body.url);
     if (body.platform !== undefined) updates.platform = body.platform;
     if (normalizedProxyUrl.present) updates.proxyUrl = normalizedProxyUrl.proxyUrl;
     if (body.useSystemProxy !== undefined) updates.useSystemProxy = normalizedUseSystemProxy;

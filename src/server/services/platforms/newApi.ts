@@ -3,6 +3,17 @@ import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
 
+function normalizeBaseUrl(baseUrl: string): string {
+  const trimmed = (baseUrl || '').trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.origin;
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
+}
+
 export class NewApiAdapter extends BasePlatformAdapter {
   readonly platformName: string = 'new-api';
   private static readonly SHIELD_CHALLENGE_MAX_ATTEMPTS = 2;
@@ -17,6 +28,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   override async getSiteAnnouncements(baseUrl: string, _accessToken: string): Promise<SiteAnnouncement[]> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     try {
       const payload = await this.fetchJson<any>(`${baseUrl}/api/notice`);
       const content = typeof payload?.data === 'string'
@@ -803,6 +815,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   override async getUserInfo(baseUrl: string, accessToken: string, platformUserId?: number): Promise<UserInfo | null> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     try {
       const directRes = await this.fetchJsonRaw<any>(`${baseUrl}/api/user/self`, {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -837,6 +850,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     username: string,
     password: string,
   ): Promise<{ success: boolean; accessToken?: string; username?: string; message?: string }> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     try {
       const { data: res, cookieHeader } = await this.fetchJsonRawWithCookie<any>(`${baseUrl}/api/user/login`, {
         method: 'POST',
@@ -878,6 +892,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   override async verifyToken(baseUrl: string, token: string, platformUserId?: number): Promise<TokenVerifyResult> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     const openAiModels = await this.getOpenAiModels(baseUrl, token);
     if (openAiModels.length > 0) {
       return { tokenType: 'apikey', models: openAiModels };
@@ -946,6 +961,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   private async probeUserId(baseUrl: string, accessToken: string): Promise<number | null> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     const jwtId = this.tryDecodeUserId(accessToken);
     if (jwtId) {
       const valid = await this.testUserId(baseUrl, accessToken, jwtId);
@@ -972,6 +988,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   async checkin(baseUrl: string, accessToken: string, platformUserId?: number): Promise<CheckinResult> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     let firstFailureMessage: string | undefined;
 
@@ -1055,6 +1072,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   async getBalance(baseUrl: string, accessToken: string, platformUserId?: number): Promise<BalanceInfo> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     let failureMessage: string | null = null;
     const rememberFailure = (message?: string | null) => {
@@ -1098,6 +1116,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   async getModels(baseUrl: string, token: string, platformUserId?: number): Promise<string[]> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     const openAiModels = await this.getOpenAiModels(baseUrl, token);
     if (openAiModels.length > 0) return openAiModels;
 
@@ -1129,12 +1148,14 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   async getApiToken(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string | null> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     const userId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     const tokens = await this.getApiTokensWithUser(baseUrl, accessToken, userId);
     return tokens.find((token) => token.enabled !== false)?.key || tokens[0]?.key || null;
   }
 
   async getApiTokens(baseUrl: string, accessToken: string, platformUserId?: number): Promise<ApiTokenInfo[]> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     const userId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     return this.getApiTokensWithUser(baseUrl, accessToken, userId);
   }
@@ -1150,6 +1171,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     platformUserId?: number,
     options?: CreateApiTokenOptions,
   ): Promise<boolean> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     const payload = JSON.stringify(this.buildDefaultTokenPayload(options));
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
 
@@ -1180,6 +1202,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
   }
 
   async getUserGroups(baseUrl: string, accessToken: string, platformUserId?: number): Promise<string[]> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);
     const dedupe = (groups: string[]) => Array.from(new Set(groups.map((item) => item.trim()).filter(Boolean)));
     let terminalError: string | null = null;
@@ -1243,6 +1266,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
     tokenKey: string,
     platformUserId?: number,
   ): Promise<boolean> {
+    baseUrl = normalizeBaseUrl(baseUrl);
     const targetKey = this.normalizeTokenKeyForCompare(tokenKey);
     if (!targetKey) return false;
     const resolvedUserId = platformUserId || await this.discoverUserId(baseUrl, accessToken);

@@ -479,6 +479,15 @@ describe('NewApiAdapter', () => {
     ).toBe(true);
   });
 
+  it('normalizes console path urls back to site origin before session verification', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.verifyToken(`${baseUrl}/console/personal`, COOKIE_SESSION_TOKEN);
+
+    expect(result.tokenType).toBe('session');
+    expect(requests.some((r) => r.url === '/api/user/self')).toBe(true);
+    expect(requests.every((r) => !String(r.url).startsWith('/console/personal/'))).toBe(true);
+  });
+
   it('auto-probes New-Api-User for cookie sessions when header is required', async () => {
     const adapter = new NewApiAdapter();
     const result = await adapter.verifyToken(baseUrl, COOKIE_REQUIRES_USER_TOKEN);
