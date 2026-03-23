@@ -1136,12 +1136,16 @@ export async function accountsRoutes(app: FastifyInstance) {
       }
 
       tokenType = verifyResult.tokenType;
-      if (tokenType === 'unknown') {
+      if (tokenType === 'unknown' && credentialMode !== 'session') {
         return reply.code(400).send({
           success: false,
           requiresVerification: true,
           message: 'Token 验证失败，请先点击“验证 Token”，验证成功后再绑定账号',
         });
+      }
+
+      if (tokenType === 'unknown' && credentialMode === 'session') {
+        tokenType = 'session';
       }
 
       if (credentialMode === 'session' && tokenType !== 'session') {

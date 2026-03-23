@@ -138,4 +138,35 @@ describe('accounts add requires token verification success', () => {
     expect(accounts).toHaveLength(1);
     expect((accounts[0]?.apiToken || '').startsWith('sk-')).toBe(true);
   });
+
+  it('allows explicit session binding to fall back to background initialization when verify result is unknown', async () => {
+    verifyTokenMock.mockResolvedValueOnce({ tokenType: 'unknown' });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Slow Session Site',
+      url: 'https://slow-session.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts',
+      payload: {
+        siteId: site.id,
+        accessToken: 'slow-session-token',
+        credentialMode: 'session',
+        platformUserId: 94,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      tokenType: 'session',
+      queued: true,
+    });
+
+    const accounts = await db.select().from(schema.accounts).all();
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]?.accessToken).toBe('slow-session-token');
+  });
 });
