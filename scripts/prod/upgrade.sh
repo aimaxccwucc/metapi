@@ -20,6 +20,7 @@ PUBLIC_CHECK_RETRIES="${PUBLIC_CHECK_RETRIES:-15}"
 PUBLIC_CHECK_INTERVAL="${PUBLIC_CHECK_INTERVAL:-3}"
 STABLE_CHECK_ROUNDS="${STABLE_CHECK_ROUNDS:-3}"
 STABLE_CHECK_INTERVAL="${STABLE_CHECK_INTERVAL:-5}"
+BACKUP_KEEP_COUNT="${BACKUP_KEEP_COUNT:-2}"
 
 # Image tag used by scripts/dev/deploy-prod-local.sh
 IMAGE_TAG="${IMAGE_TAG:-metapi-local:latest}"
@@ -62,6 +63,40 @@ backup_copy() {
   fi
   mkdir -p "$(dirname "$dest")"
   cp -a "$src" "$dest"
+}
+
+prune_backup_dirs() {
+  local keep_count="$1"
+  local backup_root="$2"
+  local dirs=()
+  local stale=()
+  mapfile -t dirs < <(ls -dt "$backup_root"/upgrade-* 2>/dev/null || true)
+  if [ "${#dirs[@]}" -le "$keep_count" ]; then
+    return 0
+  fi
+  stale=("${dirs[@]:$keep_count}")
+  for dir in "${stale[@]}"; do
+    [ -d "$dir" ] || continue
+    rm -rf "$dir"
+    echo "[cleanup] removed backup dir: $dir"
+  done
+}
+
+prune_image_tags() {
+  local keep_count="$1"
+  local pattern="$2"
+  local tags=()
+  local stale=()
+  mapfile -t tags < <(docker image ls "$pattern" --format '{{.Repository}}:{{.Tag}}' | grep -v ':latest$' | sort -t: -k2,2r || true)
+  if [ "${#tags[@]}" -le "$keep_count" ]; then
+    return 0
+  fi
+  stale=("${tags[@]:$keep_count}")
+  for tag in "${stale[@]}"; do
+    [ -n "$tag" ] || continue
+    docker image rm "$tag" >/dev/null 2>&1 || true
+    echo "[cleanup] removed image tag: $tag"
+  done
 }
 
 health_check() {
@@ -231,6 +266,11 @@ docker inspect "$CONTAINER_NAME" --format '{{.Id}} {{.Image}} {{.Config.Image}}'
 echo "[7/8] Mark upgrade as successful"
 trap - ERR
 echo "success=1" >>"$BACKUP_DIR/state.env"
+
+echo "[7.5/8] Prune old backups"
+prune_backup_dirs "$BACKUP_KEEP_COUNT" "$BACKUP_ROOT"
+prune_image_tags "$BACKUP_KEEP_COUNT" 'metapi-local:[0-9]*'
+prune_image_tags "$BACKUP_KEEP_COUNT" 'metapi-local:rollback-*'
 
 echo "[8/8] Completed"
 echo "Backup saved at: $BACKUP_DIR"
