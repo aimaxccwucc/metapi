@@ -61,7 +61,7 @@ describe('/v1/models route', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('hides models that have no routable channel even if model availability contains them', async () => {
+  it('returns no public models when only automatic exact routes exist', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'test-site',
       url: 'https://upstream.example.com',
@@ -109,6 +109,13 @@ describe('/v1/models route', () => {
       enabled: true,
     }).run();
 
+    await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'routable-model',
+      displayName: 'routable-model',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).run();
+
     await db.insert(schema.downstreamApiKeys).values({
       name: 'managed-key',
       key: 'sk-managed-models',
@@ -130,12 +137,10 @@ describe('/v1/models route', () => {
       data: Array<{ id: string }>;
     };
 
-    const ids = body.data.map((item) => item.id);
-    expect(ids).toContain('routable-model');
-    expect(ids).not.toContain('orphan-model');
+    expect(body.data).toEqual([]);
   });
 
-  it('keeps global proxy token unrestricted when no managed key matches', async () => {
+  it('returns no public models for global proxy token when only automatic exact routes exist', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'global-site',
       url: 'https://global.example.com',
@@ -176,6 +181,13 @@ describe('/v1/models route', () => {
       enabled: true,
     }).run();
 
+    await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'global-routable-model',
+      displayName: 'global-routable-model',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).run();
+
     const response = await app.inject({
       method: 'GET',
       url: '/v1/models',
@@ -190,10 +202,10 @@ describe('/v1/models route', () => {
       data: Array<{ id: string }>;
     };
 
-    expect(body.data.map((item) => item.id)).toContain('global-routable-model');
+    expect(body.data).toEqual([]);
   });
 
-  it('returns only whitelist models for managed key with supportedModels policy', async () => {
+  it('returns no models for managed key when only automatic exact routes exist', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'test-site',
       url: 'https://upstream.example.com',
@@ -254,6 +266,13 @@ describe('/v1/models route', () => {
       },
     ]).run();
 
+    await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'allowed-model',
+      displayName: 'allowed-model',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).run();
+
     await db.insert(schema.downstreamApiKeys).values({
       name: 'managed-key',
       key: 'sk-managed-whitelist',
@@ -274,12 +293,10 @@ describe('/v1/models route', () => {
       object: 'list';
       data: Array<{ id: string }>;
     };
-    const ids = body.data.map((item) => item.id);
-    expect(ids).toContain('allowed-model');
-    expect(ids).not.toContain('blocked-model');
+    expect(body.data).toEqual([]);
   });
 
-  it('returns only selected group route alias for managed key with allowedRouteIds policy', async () => {
+  it('returns no models when allowedRouteIds points only to automatic routes', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'test-site',
       url: 'https://upstream.example.com',
@@ -348,10 +365,7 @@ describe('/v1/models route', () => {
       data: Array<{ id: string }>;
     };
 
-    const ids = body.data.map((item) => item.id);
-    expect(ids).toContain('claude-opus-4-6');
-    expect(ids).not.toContain('claude-opus-4-5');
-    expect(ids).not.toContain('claude-sonnet-4-5');
+    expect(body.data).toEqual([]);
   });
 
   it('returns no models for managed key with empty model and group selections', async () => {
@@ -467,6 +481,13 @@ describe('/v1/models route', () => {
       },
     ]).run();
 
+    await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4.1',
+      displayName: 'gpt-4.1',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).run();
+
     const groupResponse = await app.inject({
       method: 'POST',
       url: '/api/routes',
@@ -506,7 +527,7 @@ describe('/v1/models route', () => {
     expect(ids).not.toContain('claude-sonnet-4-5');
   });
 
-  it('filters search pseudo models out of /v1/models', async () => {
+  it('returns no models when only automatic routes remain after filtering pseudo models', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'search-site',
       url: 'https://search.example.com',
@@ -593,9 +614,6 @@ describe('/v1/models route', () => {
       object: 'list';
       data: Array<{ id: string }>;
     };
-    const ids = body.data.map((item) => item.id);
-    expect(ids).toContain('gpt-4.1');
-    expect(ids).not.toContain('__search');
-    expect(ids).not.toContain('__tavily_search');
+    expect(body.data).toEqual([]);
   });
 });

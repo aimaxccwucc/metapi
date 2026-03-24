@@ -1139,46 +1139,7 @@ function buildVisibleEnabledRoutes(routes: RouteRow[]): RouteRow[] {
     && route.sourceRouteIds.length > 0
   ));
 
-  if (explicitGroups.length > 0) {
-    return explicitGroups;
-  }
-
-  const exactModelNames = new Set(
-    routes
-      .filter((route) => !isExplicitGroupRoute(route) && isExactRouteModelPattern(route.modelPattern))
-      .map((route) => (route.modelPattern || '').trim())
-      .filter(Boolean),
-  );
-  const coveringGroups = routes.filter((route) => (
-    route.enabled
-    && (
-      (isExplicitGroupRoute(route) && normalizeRouteDisplayName(route.displayName).length > 0 && route.sourceRouteIds.length > 0)
-      || (!isExplicitGroupRoute(route) && !isExactRouteModelPattern(route.modelPattern) && hasCustomDisplayName(route))
-    )
-  ));
-
-  if (coveringGroups.length === 0) return routes;
-
-  return routes.filter((route) => {
-    if (isExplicitGroupRoute(route)) {
-      return normalizeRouteDisplayName(route.displayName).length > 0;
-    }
-    if (!isExactRouteModelPattern(route.modelPattern)) return true;
-    if (hasCustomDisplayName(route)) return true;
-
-    const exactModel = (route.modelPattern || '').trim();
-    if (!exactModel) return true;
-
-    return !coveringGroups.some((groupRoute) => {
-      if (groupRoute.id === route.id) return false;
-      const groupDisplayName = normalizeRouteDisplayName(groupRoute.displayName);
-      if (!groupDisplayName || exactModelNames.has(groupDisplayName)) return false;
-      if (isExplicitGroupRoute(groupRoute)) {
-        return groupRoute.sourceRouteIds.includes(route.id);
-      }
-      return matchesModelPattern(exactModel, groupRoute.modelPattern);
-    });
-  });
+  return explicitGroups;
 }
 
 function normalizeModelAlias(modelName: string): string {

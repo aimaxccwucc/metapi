@@ -90,6 +90,22 @@ async function flushMicrotasks() {
   });
 }
 
+async function switchToAllRoutes(root: ReactTestInstance) {
+  const filterSummary = root.find((node) => (
+    node.type === 'button'
+    && String(node.props.className || '').includes('route-filter-bar-summary')
+  ));
+  await act(async () => {
+    filterSummary.props.onClick();
+  });
+  await flushMicrotasks();
+
+  await act(async () => {
+    findButtonByText(root, '显示全部路由').props.onClick();
+  });
+  await flushMicrotasks();
+}
+
 describe('TokenRoutes grouped source models', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -194,6 +210,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       // Card is collapsed by default, so channel detail is not visible
       const text = collectText(root.root);
@@ -254,6 +271,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       // Expand the card first
       const expandBtn = root.root.find((node) =>
@@ -309,6 +327,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       // Expand card to see missing token hints
       const expandBtn = root.root.find((node) =>
@@ -349,6 +368,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       const text = collectText(root.root);
       expect(text).toContain('显示 0 通道路由');
@@ -395,6 +415,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       const toggle = findButtonByText(root.root, '显示 0 通道路由');
       await act(async () => {
@@ -462,6 +483,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       const text = collectText(root.root);
       expect(text).not.toContain('待注册站点');
@@ -510,6 +532,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       const expandBtn = root.root.find((node) =>
         node.type === 'div' && String(node.props.className || '').includes('route-card-collapsed'),
@@ -556,6 +579,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       // Expand filter bar to see endpoint types
       const filterSummary = root.root.find((node) =>
@@ -608,6 +632,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       // Expand filter bar
       const filterSummary = root.root.find((node) =>
@@ -749,6 +774,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       const normalizedText = collectText(root.root).replace(/\s+/g, '');
       expect(normalizedText).toContain('共1条路由');
@@ -788,6 +814,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       const toggle = findButtonByText(root.root, '显示 0 通道路由');
       await act(async () => {
@@ -838,6 +865,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       const normalizedText = collectText(root.root).replace(/\s+/g, '');
       expect(normalizedText).toContain('共3条路由');
@@ -869,6 +897,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       const searchInput = findInputByPlaceholder(root.root, '搜索模型路由');
       await act(async () => {
@@ -1411,6 +1440,7 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+      await switchToAllRoutes(root.root);
 
       // Expand the card
       const expandBtn = root.root.find((node) =>

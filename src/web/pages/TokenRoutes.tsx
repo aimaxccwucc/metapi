@@ -685,9 +685,8 @@ export default function TokenRoutes() {
 
   const filteredRoutes = useMemo(() => {
     let list = sortedRoutes;
-    const hasManualRoutes = sortedRoutes.some((route) => isExplicitGroupRoute(route));
 
-    if (showOnlyManualRoutes && hasManualRoutes) {
+    if (showOnlyManualRoutes) {
       list = list.filter((route) => isExplicitGroupRoute(route));
     }
 
