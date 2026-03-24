@@ -921,4 +921,35 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.selectedChannelId).not.toBeUndefined();
     expect(decision.summary.join(' ')).toContain('同层均近期失败，允许回退重试');
   });
+
+  it('extends cooldown for auth-like failures to avoid hammering bad tokens', async () => {
+    const route = await createRoute('gpt-auth-cooldown');
+
+    const site = await createSite('auth-cooldown');
+    const account = await createAccount(site.id, 'auth-cooldown-user');
+    const token = await createToken(account.id, 'auth-cooldown-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const beforeMs = Date.now();
+    await router.recordFailure(channel.id, {
+      status: 401,
+      errorText: 'invalid api key',
+      modelName: 'gpt-auth-cooldown',
+    });
+
+    const stored = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    const cooldownMs = stored?.cooldownUntil ? Date.parse(stored.cooldownUntil) - beforeMs : 0;
+
+    expect(cooldownMs).toBeGreaterThanOrEqual(29 * 60 * 1000);
+  });
 });

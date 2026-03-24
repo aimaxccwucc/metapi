@@ -69,12 +69,46 @@ prune_backup_dirs() {
   local keep_count="$1"
   local backup_root="$2"
   local dirs=()
+  local dates=()
   local stale=()
   mapfile -t dirs < <(ls -dt "$backup_root"/upgrade-* 2>/dev/null || true)
   if [ "${#dirs[@]}" -le "$keep_count" ]; then
     return 0
   fi
-  stale=("${dirs[@]:$keep_count}")
+
+  mapfile -t dates < <(
+    for dir in "${dirs[@]}"; do
+      base_name="$(basename "$dir")"
+      backup_date="${base_name#upgrade-}"
+      backup_date="${backup_date%%-*}"
+      [ -n "$backup_date" ] && printf '%s\n' "$backup_date"
+    done | awk '!seen[$0]++'
+  )
+
+  if [ "${#dates[@]}" -le "$keep_count" ]; then
+    return 0
+  fi
+
+  local keep_dates=()
+  keep_dates=("${dates[@]:0:$keep_count}")
+
+  for dir in "${dirs[@]}"; do
+    local base_name backup_date should_keep
+    base_name="$(basename "$dir")"
+    backup_date="${base_name#upgrade-}"
+    backup_date="${backup_date%%-*}"
+    should_keep=0
+    for keep_date in "${keep_dates[@]}"; do
+      if [ "$backup_date" = "$keep_date" ]; then
+        should_keep=1
+        break
+      fi
+    done
+    if [ "$should_keep" -eq 0 ]; then
+      stale+=("$dir")
+    fi
+  done
+
   for dir in "${stale[@]}"; do
     [ -d "$dir" ] || continue
     rm -rf "$dir"

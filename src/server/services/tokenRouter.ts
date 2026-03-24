@@ -267,6 +267,17 @@ function resolveImmediateModelBreakerDurationMs(context: SiteRuntimeFailureConte
   return 0;
 }
 
+function isAuthLikeFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  const status = typeof context.status === 'number' ? context.status : 0;
+  const errorText = (context.errorText || '').trim();
+  if (status === 401 || status === 403) return true;
+  return /invalid\s+api\s+key|invalid\s+access\s+token|unauthorized|forbidden/i.test(errorText);
+}
+
+function resolveAuthFailureCooldownSec(context: SiteRuntimeFailureContext = {}): number {
+  return isAuthLikeFailure(context) ? 30 * 60 : 0;
+}
+
 function isTransientSiteRuntimeFailure(context: SiteRuntimeFailureContext = {}): boolean {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
@@ -1948,6 +1959,14 @@ export class TokenRouter {
       cooldownUntil = new Date(nowMs + cooldownSec * 1000).toISOString();
       consecutiveFailCount = 0;
       cooldownLevel = 0;
+    }
+
+    const authCooldownSec = resolveAuthFailureCooldownSec(normalizedContext);
+    if (authCooldownSec > 0) {
+      const authCooldownUntil = new Date(nowMs + authCooldownSec * 1000).toISOString();
+      if (!cooldownUntil || authCooldownUntil > cooldownUntil) {
+        cooldownUntil = authCooldownUntil;
+      }
     }
 
     await db.update(schema.routeChannels).set({

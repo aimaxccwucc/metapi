@@ -39,15 +39,15 @@ vi.mock('../../services/alertService.js', () => ({
 }));
 
 vi.mock('../../services/alertRules.js', () => ({
-  isTokenExpiredError: () => false,
+  isTokenExpiredError: ({ status }: { status?: number }) => status === 401 || status === 403,
 }));
 
 vi.mock('../../services/modelPricingService.js', () => ({
-  estimateProxyCost: (arg: any) => estimateProxyCostMock(arg),
+  estimateProxyCost: (arg?: any) => (estimateProxyCostMock as any)(arg),
 }));
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
-  shouldRetryProxyRequest: () => false,
+  shouldRetryProxyRequest: (status: number) => status === 401 || status === 403 || status >= 500,
 }));
 
 vi.mock('../../db/index.js', () => ({
@@ -196,5 +196,57 @@ describe('/v1/search route', () => {
       },
     });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('switches to the next channel after auth failure on the first source', async () => {
+    selectChannelMock.mockReturnValueOnce({
+      channel: { id: 11, routeId: 22 },
+      site: { id: 44, name: 'bad-site', url: 'https://bad.example.com', platform: 'openai' },
+      account: { id: 33, username: 'bad-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-bad',
+      actualModel: '__search',
+    });
+    selectNextChannelMock.mockReturnValueOnce({
+      channel: { id: 12, routeId: 22 },
+      site: { id: 45, name: 'good-site', url: 'https://good.example.com', platform: 'openai' },
+      account: { id: 34, username: 'good-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-good',
+      actualModel: '__search',
+    });
+    fetchMock
+      .mockResolvedValueOnce(new Response('invalid api key', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ object: 'search.result', data: [{ title: 'ok' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/search',
+      headers: {
+        authorization: 'Bearer sk-demo',
+      },
+      payload: {
+        query: 'axonhub',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 401,
+      errorText: 'invalid api key',
+      modelName: '__search',
+    }));
+    expect(reportTokenExpiredMock).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: 33,
+      siteName: 'bad-site',
+    }));
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectNextChannelMock.mock.calls[0]?.[0]).toBe('__search');
+    expect(selectNextChannelMock.mock.calls[0]?.[1]).toEqual(expect.arrayContaining([11]));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://good.example.com/v1/search');
   });
 });
