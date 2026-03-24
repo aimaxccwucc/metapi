@@ -1178,6 +1178,9 @@ export default function TokenRoutes() {
         previewModelSamples={previewModelSamples}
         exactSourceRouteOptions={exactSourceRouteOptions}
         sourceEndpointTypesByRouteId={sourceEndpointTypesByRouteId}
+        modelCandidates={modelCandidates}
+        missingTokenModelsByName={missingTokenModelsByName}
+        missingTokenGroupModelsByName={missingTokenGroupModelsByName}
         onSave={handleAddRoute}
         onCancel={handleCancelEditRoute}
       />

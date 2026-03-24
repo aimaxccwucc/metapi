@@ -1,8 +1,13 @@
-import { useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { BrandGlyph, InlineBrandIcon, hashColor, type BrandInfo } from '../../components/BrandIcon.js';
+import { api } from '../../api.js';
 import CenteredModal from '../../components/CenteredModal.js';
 import ModernSelect from '../../components/ModernSelect.js';
+import { useToast } from '../../components/Toast.js';
 import { tr } from '../../i18n.js';
+import { getInitialVisibleCount, getNextVisibleCount } from '../helpers/progressiveRender.js';
+import type { MissingTokenModelsByName } from '../helpers/routeMissingTokenHints.js';
+import type { RouteModelCandidatesByModelName } from '../helpers/routeModelCandidatesIndex.js';
 import type { RouteIconOption, RouteMode, RouteSummaryRow } from './types.js';
 import {
   ROUTE_ICON_NONE_VALUE,
@@ -37,9 +42,20 @@ type ManualRoutePanelProps = {
   previewModelSamples: string[];
   exactSourceRouteOptions: RouteSummaryRow[];
   sourceEndpointTypesByRouteId: Record<number, string[]>;
+  modelCandidates: RouteModelCandidatesByModelName;
+  missingTokenModelsByName: MissingTokenModelsByName;
+  missingTokenGroupModelsByName: MissingTokenModelsByName;
   onSave: () => void;
   onCancel: () => void;
 };
+
+type SourceRouteProbeState = {
+  status: 'idle' | 'checking' | 'available' | 'unavailable' | 'error';
+  message?: string;
+  autoKeyCreated?: boolean;
+};
+
+const SOURCE_PICKER_RENDER_CHUNK = 40;
 
 function renderRouteOptionLabel(route: RouteSummaryRow): string {
   const displayName = (route.displayName || '').trim();
@@ -122,15 +138,21 @@ export default function ManualRoutePanel({
   previewModelSamples,
   exactSourceRouteOptions,
   sourceEndpointTypesByRouteId,
+  modelCandidates,
+  missingTokenModelsByName,
+  missingTokenGroupModelsByName,
   onSave,
   onCancel,
 }: ManualRoutePanelProps) {
+  const toast = useToast();
   const [showSourcePicker, setShowSourcePicker] = useState(false);
   const [sourceSearch, setSourceSearch] = useState('');
   const [sourcePickerSelection, setSourcePickerSelection] = useState<number[]>([]);
   const [activeSourceBrand, setActiveSourceBrand] = useState<string | null>(null);
   const [activeSourceSite, setActiveSourceSite] = useState<string | null>(null);
   const [activeSourceEndpointType, setActiveSourceEndpointType] = useState<string | null>(null);
+  const [visibleSourceCount, setVisibleSourceCount] = useState(SOURCE_PICKER_RENDER_CHUNK);
+  const [sourceProbeStateByRouteId, setSourceProbeStateByRouteId] = useState<Record<number, SourceRouteProbeState>>({});
 
   useEffect(() => {
     if (!show) {
@@ -140,6 +162,8 @@ export default function ManualRoutePanel({
       setActiveSourceBrand(null);
       setActiveSourceSite(null);
       setActiveSourceEndpointType(null);
+      setVisibleSourceCount(SOURCE_PICKER_RENDER_CHUNK);
+      setSourceProbeStateByRouteId({});
     }
   }, [show]);
 
@@ -297,6 +321,67 @@ export default function ManualRoutePanel({
     sourceSearch,
   ]);
 
+  useEffect(() => {
+    setVisibleSourceCount(getInitialVisibleCount(filteredSourceRoutes.length, SOURCE_PICKER_RENDER_CHUNK));
+  }, [filteredSourceRoutes.length]);
+
+  const visibleSourceRoutes = useMemo(
+    () => filteredSourceRoutes.slice(0, visibleSourceCount),
+    [filteredSourceRoutes, visibleSourceCount],
+  );
+
+  const loadMoreSourceRoutes = () => {
+    setVisibleSourceCount((current) => getNextVisibleCount(current, filteredSourceRoutes.length, SOURCE_PICKER_RENDER_CHUNK));
+  };
+
+  const resolveProbeTarget = (route: RouteSummaryRow): { accountId?: number; siteName?: string } => {
+    const exactModel = String(route.modelPattern || '').trim();
+    const candidate = (modelCandidates[exactModel] || [])[0];
+    if (candidate) {
+      return { accountId: candidate.accountId, siteName: candidate.siteName };
+    }
+    const missing = (missingTokenModelsByName[exactModel] || [])[0] || (missingTokenGroupModelsByName[exactModel] || [])[0];
+    if (missing) {
+      return { accountId: missing.accountId, siteName: missing.siteName };
+    }
+    return {};
+  };
+
+  const handleProbeSourceRoute = async (route: RouteSummaryRow) => {
+    const modelName = String(route.modelPattern || '').trim();
+    if (!modelName) return;
+    setSourceProbeStateByRouteId((prev) => ({
+      ...prev,
+      [route.id]: { status: 'checking', message: '检测中...' },
+    }));
+    try {
+      const target = resolveProbeTarget(route);
+      const res = await api.testMarketplaceModelAvailability({
+        modelName,
+        ...(target.accountId ? { accountId: target.accountId } : {}),
+        ...(target.siteName ? { siteName: target.siteName } : {}),
+      }) as { available?: boolean; reason?: string; autoKeyCreated?: boolean };
+      const available = res?.available === true;
+      const message = available ? '模型可用' : String(res?.reason || '暂未确认该模型可用性');
+      setSourceProbeStateByRouteId((prev) => ({
+        ...prev,
+        [route.id]: {
+          status: available ? 'available' : 'unavailable',
+          message,
+          autoKeyCreated: res?.autoKeyCreated === true,
+        },
+      }));
+      toast.success(available ? `${modelName}: 模型可用` : `${modelName}: ${message}`);
+    } catch (error: any) {
+      const message = String(error?.message || '检测失败');
+      setSourceProbeStateByRouteId((prev) => ({
+        ...prev,
+        [route.id]: { status: 'error', message },
+      }));
+      toast.error(`${modelName}: ${message}`);
+    }
+  };
+
   const selectedSourceRoutes = useMemo(() => {
     const routeById = new Map(exactSourceRouteOptions.map((route) => [route.id, route]));
     return form.sourceRouteIds
@@ -399,6 +484,10 @@ export default function ManualRoutePanel({
       </button>
     </>
   );
+
+  const sourcePickerBodyStyle: CSSProperties = {
+    width: 'min(1320px, 96vw)',
+  };
 
   return (
     <>
@@ -746,7 +835,8 @@ export default function ManualRoutePanel({
         onClose={closeSourcePicker}
         title={tr('选择来源模型')}
         footer={sourcePickerFooter}
-        maxWidth={980}
+        maxWidth={1320}
+        bodyStyle={sourcePickerBodyStyle}
         closeOnEscape
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -861,7 +951,15 @@ export default function ManualRoutePanel({
             </div>
           </div>
 
-          <div style={{ maxHeight: 520, overflowY: 'auto', paddingRight: 4 }}>
+          <div
+            style={{ maxHeight: '72vh', overflowY: 'auto', paddingRight: 4 }}
+            onScroll={(event) => {
+              const current = event.currentTarget;
+              if (current.scrollTop + current.clientHeight >= current.scrollHeight - 120) {
+                loadMoreSourceRoutes();
+              }
+            }}
+          >
             {filteredSourceRoutes.length === 0 ? (
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', padding: '12px 0', textAlign: 'center' }}>
                 {exactSourceRouteOptions.length === 0
@@ -878,12 +976,22 @@ export default function ManualRoutePanel({
                   alignItems: 'stretch',
                 }}
               >
-                {filteredSourceRoutes.map((route) => {
+                {visibleSourceRoutes.map((route) => {
                   const selected = sourcePickerSelectionSet.has(route.id);
                   const label = renderRouteOptionLabel(route);
                   const brand = sourceRouteBrandById.get(route.id) || null;
                   const endpointTypes = (sourceEndpointTypesByRouteId[route.id] || []).slice(0, 3);
                   const siteNames = Array.from(new Set((route.siteNames || []).filter((siteName) => String(siteName || '').trim())));
+                  const probeState = sourceProbeStateByRouteId[route.id];
+                  const probeTone = probeState?.status === 'available'
+                    ? 'badge-success'
+                    : probeState?.status === 'checking'
+                      ? 'badge-info'
+                      : probeState?.status === 'unavailable'
+                        ? 'badge-warning'
+                        : probeState?.status === 'error'
+                          ? 'badge-error'
+                          : 'badge-muted';
 
                   return (
                     <button
@@ -892,7 +1000,7 @@ export default function ManualRoutePanel({
                       onClick={() => setSourcePickerSelection((current) => toggleSourceRouteId(current, route.id))}
                       className="btn btn-ghost source-route-picker-card"
                       style={{
-                        minHeight: 156,
+                        minHeight: 184,
                         display: 'flex',
                         alignItems: 'stretch',
                         textAlign: 'left',
@@ -989,12 +1097,54 @@ export default function ManualRoutePanel({
                             {tr('当前未绑定站点信息')}
                           </div>
                         )}
+
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 'auto' }}>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            {probeState ? (
+                              <div style={{ display: 'grid', gap: 4 }}>
+                                <span className={`badge ${probeTone}`} style={{ fontSize: 10, width: 'fit-content' }}>
+                                  {probeState.status === 'available'
+                                    ? tr('模型可用')
+                                    : probeState.status === 'checking'
+                                      ? tr('检测中...')
+                                      : probeState.status === 'unavailable'
+                                        ? tr('需处理')
+                                        : tr('检测失败')}
+                                </span>
+                                <div style={{ fontSize: 11, color: 'var(--color-text-muted)', lineHeight: 1.45 }}>
+                                  {probeState.message}
+                                  {probeState.autoKeyCreated ? ` · ${tr('已自动补 Key')}` : ''}
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                          <button
+                            type="button"
+                            data-testid={`source-route-probe-${route.id}`}
+                            className="btn btn-ghost"
+                            style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '4px 10px', flexShrink: 0 }}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleProbeSourceRoute(route);
+                            }}
+                            disabled={probeState?.status === 'checking'}
+                          >
+                            {probeState?.status === 'checking' ? tr('检测中...') : tr('检测可用性')}
+                          </button>
+                        </div>
                       </div>
                     </button>
                   );
                 })}
               </div>
             )}
+            {visibleSourceCount < filteredSourceRoutes.length ? (
+              <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 0 4px' }}>
+                <button type="button" className="btn btn-secondary" onClick={loadMoreSourceRoutes}>
+                  {`加载更多 (${visibleSourceCount}/${filteredSourceRoutes.length})`}
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       </CenteredModal>

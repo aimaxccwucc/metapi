@@ -10,6 +10,7 @@ const { apiMock, getBrandMock } = vi.hoisted(() => ({
     getRoutesSummary: vi.fn(),
     getRouteChannels: vi.fn(),
     getModelTokenCandidates: vi.fn(),
+    testMarketplaceModelAvailability: vi.fn(),
     getRouteDecisionsBatch: vi.fn(),
     getRouteWideDecisionsBatch: vi.fn(),
     updateRoute: vi.fn(),
@@ -1143,6 +1144,102 @@ describe('TokenRoutes grouped source models', () => {
         displayName: 'claude-opus-4-6',
         sourceRouteIds: [11, 12],
       }));
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('renders a larger source picker, progressively loads cards, and can probe source model availability', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue(
+      Array.from({ length: 55 }, (_, index) => ({
+        id: index + 1,
+        modelPattern: `gpt-${index + 1}`,
+        displayName: null,
+        displayIcon: null,
+        modelMapping: null,
+        enabled: true,
+        routeMode: 'pattern',
+        sourceRouteIds: [],
+        channelCount: index % 3,
+        enabledChannelCount: index % 3,
+        siteNames: ['site-a'],
+        decisionSnapshot: null,
+        decisionRefreshedAt: null,
+      })),
+    );
+    apiMock.getModelTokenCandidates.mockResolvedValue({
+      models: {
+        'gpt-1': [{ accountId: 301, tokenId: 401, tokenName: 'default', isDefault: true, username: 'tester', siteId: 11, siteName: 'site-a' }],
+      },
+      modelsWithoutToken: {
+        'gpt-1': [{ accountId: 301, username: 'tester', siteId: 11, siteName: 'site-a' }],
+      },
+      modelsMissingTokenGroups: {},
+      endpointTypesByModel: {},
+    });
+    apiMock.testMarketplaceModelAvailability.mockResolvedValue({
+      available: true,
+      reason: '模型可用',
+      autoKeyCreated: true,
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '新建群组').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '选择来源模型').props.onClick();
+      });
+      await flushMicrotasks();
+
+      const sourcePickerModal = root.root.find((node) => (
+        node.type === 'div'
+        && String(node.props.className || '').includes('modal-content')
+        && node.props.style?.maxWidth === 1320
+      ));
+      expect(sourcePickerModal).toBeTruthy();
+
+      const pickerGrid = root.root.find((node) => (
+        node.type === 'div'
+        && String(node.props.className || '').includes('source-route-picker-grid')
+      ));
+      expect(collectText(pickerGrid)).toContain('gpt-1');
+      expect(collectText(pickerGrid)).not.toContain('gpt-55');
+
+      await act(async () => {
+        findButtonByText(root.root, '加载更多').props.onClick();
+      });
+      await flushMicrotasks();
+      expect(collectText(root.root)).toContain('gpt-55');
+
+      const probeButton = root.root.find((node) => node.props['data-testid'] === 'source-route-probe-1');
+      await act(async () => {
+        await probeButton.props.onClick({ stopPropagation() {} });
+      });
+      await flushMicrotasks();
+
+      const lastCall = apiMock.testMarketplaceModelAvailability.mock.calls.at(-1)?.[0];
+      expect(lastCall).toEqual({
+        modelName: 'gpt-1',
+        accountId: 301,
+        siteName: 'site-a',
+      });
+      expect(collectText(root.root)).toContain('模型可用');
+      expect(collectText(root.root)).toContain('已自动补 Key');
     } finally {
       root?.unmount();
     }
