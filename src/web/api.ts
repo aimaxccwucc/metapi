@@ -1,10 +1,10 @@
-import { clearAuthSession, getAuthToken } from './authSession.js';
+import { clearAuthSession, getAuthToken, getBearerAuthToken } from './authSession.js';
 
 type RequestOptions = RequestInit & {
   timeoutMs?: number;
 };
 
-function requireAuthToken(): string {
+function ensureAuthSession(): void {
   const token = getAuthToken(localStorage);
   if (!token) {
     const hadToken = !!localStorage.getItem('auth_token');
@@ -14,7 +14,6 @@ function requireAuthToken(): string {
     }
     throw new Error('Session expired');
   }
-  return token;
 }
 
 async function extractResponseErrorMessage(res: Response): Promise<string> {
@@ -89,15 +88,18 @@ async function fetchAuthenticatedResponse(url: string, options: RequestOptions =
     }
   }
 
-  const token = requireAuthToken();
-  const headers: Record<string, string> = {
-    'Authorization': `Bearer ${token}`,
-  };
+  ensureAuthSession();
+  const bearerToken = getBearerAuthToken(localStorage);
+  const headers: Record<string, string> = {};
+  if (bearerToken) {
+    headers['Authorization'] = `Bearer ${bearerToken}`;
+  }
   if (fetchOptions.body) headers['Content-Type'] = 'application/json';
 
   try {
     const res = await fetch(url, {
       ...fetchOptions,
+      credentials: fetchOptions.credentials ?? 'same-origin',
       signal: controller.signal,
       headers: {
         ...headers,
@@ -202,6 +204,101 @@ export type ProxyTestJobResponse = {
   createdAt?: string;
   updatedAt?: string;
   expiresAt?: string;
+};
+
+export type RouteDecisionCandidate = {
+  channelId: number;
+  accountId: number;
+  username: string;
+  siteName: string;
+  tokenName: string;
+  priority: number;
+  weight: number;
+  eligible: boolean;
+  recentlyFailed: boolean;
+  avoidedByRecentFailure: boolean;
+  probability: number;
+  reason: string;
+  circuitStatus?: {
+    state?: string;
+    isOpen?: boolean;
+    reason?: string;
+  };
+  modelCircuitStatus?: {
+    state?: string;
+    isOpen?: boolean;
+    isHalfOpen?: boolean;
+    reason?: string;
+    effectiveMultiplier?: number;
+  };
+};
+
+export type RouteDecision = {
+  requestedModel: string;
+  actualModel: string;
+  matched: boolean;
+  routeId?: number;
+  modelPattern?: string;
+  selectedChannelId?: number;
+  selectedAccountId?: number;
+  selectedLabel?: string;
+  summary: string[];
+  candidates: RouteDecisionCandidate[];
+};
+
+export type RuntimeOverview = {
+  service: {
+    name: string;
+    version: string;
+    uptimeSec: number;
+    startedAt: string;
+    now: string;
+    environment: {
+      port: number;
+      host: string;
+      dbDialect: string;
+      dataDir: string;
+    };
+  };
+  database: {
+    ready: boolean;
+    dialect: string;
+  };
+  oauthLoopback: {
+    total: number;
+    ready: number;
+    attempted: number;
+    states: Array<{
+      provider: string;
+      attempted: boolean;
+      ready: boolean;
+      host?: string;
+      port: number;
+      path: string;
+      origin: string;
+      redirectUri: string;
+      error?: string;
+    }>;
+  };
+  backgroundTasks: {
+    total: number;
+    pending: number;
+    running: number;
+    failed: number;
+  };
+  notifications: {
+    webhookEnabled: boolean;
+    barkEnabled: boolean;
+    telegramEnabled: boolean;
+    serverChanEnabled: boolean;
+    smtpEnabled: boolean;
+    cooldownSec: number;
+  };
+  recentActivity: {
+    proxyRequests24h: number;
+    proxyFailures24h: number;
+    unreadEvents: number;
+  };
 };
 
 export type SystemProxyTestRequest = {
@@ -321,6 +418,15 @@ export type ProxyLogsResponse = {
   summary: ProxyLogsSummary;
 };
 
+export type AccountKeyRepairResponse = {
+  success: boolean;
+  queued?: boolean;
+  reused?: boolean;
+  jobId?: string;
+  status?: string;
+  message?: string;
+};
+
 export type OAuthProviderInfo = {
   provider: string;
   label: string;
@@ -412,6 +518,40 @@ export type OAuthConnectionsResponse = {
 };
 
 export const api = {
+  createAdminSession: async (token: string) => {
+    const response = await fetch('/api/auth/session', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ token }),
+    });
+    if (!response.ok) {
+      throw new Error(await extractResponseErrorMessage(response));
+    }
+    return response.json();
+  },
+  getAdminSession: async () => {
+    const response = await fetch('/api/auth/session', {
+      method: 'GET',
+      credentials: 'same-origin',
+    });
+    if (!response.ok) {
+      throw new Error(await extractResponseErrorMessage(response));
+    }
+    return response.json();
+  },
+  clearAdminSession: async () => {
+    const response = await fetch('/api/auth/session', {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    });
+    if (!response.ok) {
+      throw new Error(await extractResponseErrorMessage(response));
+    }
+    return response.json();
+  },
   // Sites
   getSites: () => request('/api/sites'),
   addSite: (data: any) => request('/api/sites', { method: 'POST', body: JSON.stringify(data) }),
@@ -450,6 +590,11 @@ export const api = {
     body: JSON.stringify(data || {}),
     timeoutMs: data?.wait ? 150_000 : 30_000,
   }),
+  repairAccountKeys: (data?: { wait?: boolean }) => request('/api/accounts/keys/repair', {
+    method: 'POST',
+    body: JSON.stringify(data || {}),
+    timeoutMs: data?.wait ? 150_000 : 30_000,
+  }) as Promise<AccountKeyRepairResponse>,
 
   // Account tokens
   getAccountTokens: (accountId?: number) => request(`/api/account-tokens${accountId ? `?accountId=${accountId}` : ''}`),
@@ -493,7 +638,7 @@ export const api = {
     body: JSON.stringify({ refreshModels, ...(wait ? { wait: true } : {}) }),
     timeoutMs: wait ? 150_000 : 30_000,
   }),
-  getRouteDecision: (model: string) => request(`/api/routes/decision?model=${encodeURIComponent(model)}`),
+  getRouteDecision: (model: string) => request(`/api/routes/decision?model=${encodeURIComponent(model)}`) as Promise<{ success: true; decision: RouteDecision }>,
   getRouteDecisionsBatch: (models: string[], options?: { refreshPricingCatalog?: boolean; persistSnapshots?: boolean }) => request('/api/routes/decision/batch', {
     method: 'POST',
     body: JSON.stringify({
@@ -521,6 +666,7 @@ export const api = {
 
   // Stats
   getDashboard: () => request('/api/stats/dashboard'),
+  getRuntimeOverview: () => request('/api/system/runtime-overview') as Promise<RuntimeOverview>,
   getProxyLogs: (params?: ProxyLogsQuery) => request(`/api/stats/proxy-logs${buildQueryString(params)}`) as Promise<ProxyLogsResponse>,
   getProxyLogDetail: (id: number) => request(`/api/stats/proxy-logs/${id}`) as Promise<ProxyLogDetail>,
   checkModels: (accountId: number) => request(`/api/models/check/${accountId}`, { method: 'POST' }),
@@ -718,7 +864,7 @@ export const api = {
     fileId: string,
     options: Pick<RequestOptions, 'signal' | 'timeoutMs'> = {},
   ) => {
-    const response = await fetchAuthenticatedResponse(`/v1/files/${encodeURIComponent(fileId)}/content`, {
+    const response = await fetchAuthenticatedResponse(`/api/test/proxy/files/${encodeURIComponent(fileId)}/content`, {
       method: 'GET',
       ...options,
     });
@@ -757,11 +903,13 @@ export const api = {
       clearAuthSession(localStorage);
       throw new Error('Session expired');
     }
+    const bearerToken = getBearerAuthToken(localStorage);
     return fetch('/api/test/proxy/stream', {
       method: 'POST',
       signal,
+      credentials: 'same-origin',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        ...(bearerToken ? { 'Authorization': `Bearer ${bearerToken}` } : {}),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(data),
@@ -773,11 +921,13 @@ export const api = {
       clearAuthSession(localStorage);
       throw new Error('Session expired');
     }
+    const bearerToken = getBearerAuthToken(localStorage);
     return fetch('/api/test/proxy/stream', {
       method: 'POST',
       signal,
+      credentials: 'same-origin',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        ...(bearerToken ? { 'Authorization': `Bearer ${bearerToken}` } : {}),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(data),
@@ -789,11 +939,13 @@ export const api = {
       clearAuthSession(localStorage);
       throw new Error('Session expired');
     }
+    const bearerToken = getBearerAuthToken(localStorage);
     return fetch('/api/test/chat/stream', {
       method: 'POST',
       signal,
+      credentials: 'same-origin',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        ...(bearerToken ? { 'Authorization': `Bearer ${bearerToken}` } : {}),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(data),

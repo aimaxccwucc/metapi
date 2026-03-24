@@ -418,7 +418,11 @@ export async function handleChatSurfaceRequest(
             );
             const latency = Date.now() - startTime;
             if (streamResult.status === 'failed') {
-              tokenRouter.recordFailure(selected.channel.id, modelName);
+              tokenRouter.recordFailure(selected.channel.id, {
+                status: 502,
+                errorText: streamResult.errorMessage,
+                modelName,
+              });
               logProxy(
                 selected,
                 requestedModel,

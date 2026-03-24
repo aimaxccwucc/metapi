@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '../api.js';
+import { api, type RouteDecision } from '../api.js';
 import { clearAuthSession, getAuthToken } from '../authSession.js';
 import {
   DEBUG_TABS,
   DEFAULT_INPUTS,
   DEFAULT_MODE_STATE,
   DEFAULT_PARAMETER_ENABLED,
+  MODEL_TESTER_HISTORY_LIMIT,
+  MODEL_TESTER_HISTORY_STORAGE_KEY,
   MODEL_TESTER_STORAGE_KEY,
   MESSAGE_STATUS,
   buildApiPayload,
@@ -27,10 +29,12 @@ import {
   filterModelTesterModelNames,
   finalizeIncompleteMessage,
   findLastLoadingAssistantIndex,
+  parseModelTesterHistory,
   parseCustomRequestBody,
   parseModelTesterSession,
   processThinkTags,
   resolveConversationReplayFiles,
+  serializeModelTesterHistory,
   serializeModelTesterSession,
   syncCustomRequestBodyToMessages,
   syncMessagesToCustomRequestBody,
@@ -43,9 +47,12 @@ import {
   type ModelTesterModeState,
   type ParameterEnabled,
   type PlaygroundMode,
+  type PlaygroundProtocol,
   type PlaygroundMultipartFile,
+  type ProxyTestEnvelope,
   type TestTargetFormat,
   type TestChatPayload,
+  type ModelTesterHistoryEntry,
 } from './helpers/modelTesterSession.js';
 import {
   buildConversationFileAccept,
@@ -79,11 +86,21 @@ type UploadState = {
 
 type ConversationFileState = ConversationDraftFile;
 
+type RouteDecisionState = {
+  loading: boolean;
+  error: string | null;
+  data: RouteDecision | null;
+  refreshedAt: string | null;
+};
+
 const POLL_INTERVAL_MS = 1200;
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const createConversationFileLocalId = () =>
   `draft-file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const createHistoryId = () =>
+  `history-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 const summarizeModeRequest = (
   mode: PlaygroundMode,
@@ -122,6 +139,25 @@ const formatJson = (value: unknown): string => {
   } catch {
     return String(value);
   }
+};
+
+const buildHistoryTitle = (
+  mode: PlaygroundMode,
+  protocol: PlaygroundProtocol,
+  model: string,
+  preview: string,
+) => {
+  const modeLabel = mode === 'conversation' ? '对话' : mode;
+  const protocolLabel = protocol === 'responses'
+    ? 'Responses'
+    : protocol === 'claude'
+      ? 'Claude'
+      : protocol === 'gemini'
+        ? 'Gemini'
+        : 'OpenAI';
+  const parts = [modeLabel, protocolLabel, model || '未选模型'].filter(Boolean);
+  const summary = preview.trim() || '无摘要';
+  return `${parts.join(' / ')} · ${summary.slice(0, 48)}`;
 };
 
 const extractErrorMessage = (error: unknown): string => {
@@ -673,6 +709,13 @@ export default function ModelTester() {
   const [debugTimeline, setDebugTimeline] = useState<DebugTimelineEntry[]>([]);
   const [debugTimestamp, setDebugTimestamp] = useState('');
   const [nonConversationResult, setNonConversationResult] = useState<unknown>(null);
+  const [historyEntries, setHistoryEntries] = useState<ModelTesterHistoryEntry[]>([]);
+  const [routeDecisionState, setRouteDecisionState] = useState<RouteDecisionState>({
+    loading: false,
+    error: null,
+    data: null,
+    refreshedAt: null,
+  });
 
   const [searchQueryValue, setSearchQueryValue] = useState('');
   const [searchAllowedDomains, setSearchAllowedDomains] = useState('');
@@ -716,6 +759,59 @@ export default function ModelTester() {
     setDebugTimestamp(now);
   }, []);
 
+  const recordHistory = useCallback((entry: Omit<ModelTesterHistoryEntry, 'id' | 'createdAt'>) => {
+    setHistoryEntries((prev) => {
+      const nextEntry: ModelTesterHistoryEntry = {
+        ...entry,
+        id: createHistoryId(),
+        createdAt: new Date().toISOString(),
+      };
+      return [nextEntry, ...prev].slice(0, MODEL_TESTER_HISTORY_LIMIT);
+    });
+  }, []);
+
+  const updateLatestHistory = useCallback((jobId: string, patch: Partial<ModelTesterHistoryEntry>) => {
+    setHistoryEntries((prev) => prev.map((entry) => (
+      entry.jobId === jobId
+        ? { ...entry, ...patch }
+        : entry
+    )));
+  }, []);
+
+  const updateMostRecentPendingHistory = useCallback((patch: Partial<ModelTesterHistoryEntry>) => {
+    setHistoryEntries((prev) => {
+      const index = prev.findIndex((entry) => entry.status === 'pending');
+      if (index === -1) return prev;
+      const next = [...prev];
+      next[index] = {
+        ...next[index],
+        ...patch,
+      };
+      return next;
+    });
+  }, []);
+
+  const loadHistoryEntry = useCallback((entry: ModelTesterHistoryEntry) => {
+    setPendingPayload(entry.request);
+    setPendingJobId(entry.jobId || null);
+    setInputs((prev) => ({
+      ...prev,
+      mode: entry.mode,
+      protocol: entry.protocol,
+      model: entry.model,
+      targetFormat: entry.protocol,
+    }));
+    setCustomRequestMode(!!entry.request.rawMode);
+    if (entry.request.rawMode && typeof entry.request.rawJsonText === 'string') {
+      setCustomRequestBody(entry.request.rawJsonText);
+    }
+    setDebugRequest(formatJson(entry.request.rawMode
+      ? { path: entry.request.path, rawJsonText: entry.request.rawJsonText }
+      : entry.request));
+    setActiveDebugTab(DEBUG_TABS.REQUEST);
+    pushDebug('info', `已载入历史记录 ${entry.id}。`);
+  }, [pushDebug]);
+
   const updateInput = useCallback(<K extends keyof ModelTesterInputs>(key: K, value: ModelTesterInputs[K]) => {
     setInputs((prev) => {
       if (key === 'protocol') {
@@ -742,6 +838,42 @@ export default function ModelTester() {
   const toggleParameter = useCallback((key: keyof ParameterEnabled) => {
     setParameterEnabled((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
+
+  const refreshRouteDecision = useCallback(async (modelName: string, options?: { silent?: boolean }) => {
+    const trimmedModel = modelName.trim();
+    if (!trimmedModel || customRequestMode) {
+      setRouteDecisionState({
+        loading: false,
+        error: null,
+        data: null,
+        refreshedAt: null,
+      });
+      return;
+    }
+
+    setRouteDecisionState((prev) => ({
+      ...prev,
+      loading: true,
+      error: options?.silent ? prev.error : null,
+    }));
+
+    try {
+      const response = await api.getRouteDecision(trimmedModel);
+      setRouteDecisionState({
+        loading: false,
+        error: null,
+        data: response.decision,
+        refreshedAt: new Date().toISOString(),
+      });
+    } catch (decisionError: any) {
+      const message = decisionError?.message || '路由解释加载失败';
+      setRouteDecisionState((prev) => ({
+        ...prev,
+        loading: false,
+        error: message,
+      }));
+    }
+  }, [customRequestMode]);
 
   useEffect(() => {
     const restored = parseModelTesterSession(localStorage.getItem(MODEL_TESTER_STORAGE_KEY));
@@ -777,6 +909,10 @@ export default function ModelTester() {
       pushDebug('warn', '恢复待处理的请求快照。');
     }
   }, [pushDebug]);
+
+  useEffect(() => {
+    setHistoryEntries(parseModelTesterHistory(localStorage.getItem(MODEL_TESTER_HISTORY_STORAGE_KEY)));
+  }, []);
 
   useEffect(() => {
     const fetchModels = async () => {
@@ -819,6 +955,24 @@ export default function ModelTester() {
     void fetchModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!inputs.model || customRequestMode) {
+      setRouteDecisionState({
+        loading: false,
+        error: null,
+        data: null,
+        refreshedAt: null,
+      });
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void refreshRouteDecision(inputs.model, { silent: true });
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [customRequestMode, inputs.model, refreshRouteDecision]);
 
   useEffect(() => {
     if (!inputs.model) return;
@@ -867,6 +1021,10 @@ export default function ModelTester() {
     showDebugPanel,
     videoInspectId,
   ]);
+
+  useEffect(() => {
+    localStorage.setItem(MODEL_TESTER_HISTORY_STORAGE_KEY, serializeModelTesterHistory(historyEntries));
+  }, [historyEntries]);
 
   const handleUploadChange = useCallback(async (
     fileList: FileList | null,
@@ -1342,12 +1500,15 @@ export default function ModelTester() {
             setDebugResponse(formatJson(status.result));
             setActiveDebugTab(DEBUG_TABS.RESPONSE);
             pushDebug('info', `任务 ${pendingJobId} 已成功。`);
+            updateLatestHistory(pendingJobId, { status: 'succeeded', errorMessage: null });
+            void refreshRouteDecision(inputs.model, { silent: true });
           } else if (status.status === 'cancelled') {
             setMessages((prev) => applyAssistantStopped(prev));
             setError('生成已取消。');
             setDebugResponse(formatJson(status.error));
             setActiveDebugTab(DEBUG_TABS.RESPONSE);
             pushDebug('warn', `任务 ${pendingJobId} 已取消。`);
+            updateLatestHistory(pendingJobId, { status: 'cancelled', errorMessage: '生成已取消。' });
           } else {
             const message = extractErrorMessage(status.error);
             setMessages((prev) => applyAssistantError(prev, message));
@@ -1355,6 +1516,7 @@ export default function ModelTester() {
             setDebugResponse(formatJson(status.error));
             setActiveDebugTab(DEBUG_TABS.RESPONSE);
             pushDebug('error', `任务 ${pendingJobId} 失败：${message}`);
+            updateLatestHistory(pendingJobId, { status: 'failed', errorMessage: message });
           }
 
           setPendingJobId(null);
@@ -1374,7 +1536,7 @@ export default function ModelTester() {
     return () => {
       active = false;
     };
-  }, [finalizeJob, pendingJobId, pushDebug]);
+  }, [finalizeJob, inputs.model, pendingJobId, pushDebug, refreshRouteDecision, updateLatestHistory]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1419,6 +1581,16 @@ export default function ModelTester() {
       setError('');
       setPendingPayload(payload);
       const created = await api.startProxyTestJob(payload) as { jobId: string };
+      recordHistory({
+        mode: inputs.mode,
+        protocol: inputs.protocol,
+        model: inputs.model,
+        title: buildHistoryTitle(inputs.mode, inputs.protocol, inputs.model, input || '任务请求'),
+        request: payload,
+        requestPreview: input || '任务请求',
+        status: 'pending',
+        jobId: created.jobId,
+      });
       setPendingJobId(created.jobId);
       setSending(true);
       pushDebug('info', `已创建任务 ${created.jobId}。`);
@@ -1431,7 +1603,7 @@ export default function ModelTester() {
       setActiveDebugTab(DEBUG_TABS.RESPONSE);
       pushDebug('error', `创建任务失败：${message}`);
     }
-  }, [pushDebug]);
+  }, [input, inputs.mode, inputs.model, inputs.protocol, pushDebug, recordHistory]);
 
   const startStream = useCallback(async (payload: TestChatPayload) => {
     const controller = new AbortController();
@@ -1524,6 +1696,10 @@ export default function ModelTester() {
       }
 
       const emptyOutput = !hasAnyContent && !hasAnyReasoning;
+      updateMostRecentPendingHistory({
+        status: emptyOutput ? 'failed' : 'succeeded',
+        errorMessage: emptyOutput ? '上游返回空内容' : null,
+      });
 
       setMessages((prev) => {
         const idx = findLastLoadingAssistantIndex(prev);
@@ -1555,6 +1731,7 @@ export default function ModelTester() {
           ? '流式传输已成功完成。'
           : '流式传输未收到 [DONE] 信号，已在本地完成。');
       }
+      void refreshRouteDecision(inputs.model, { silent: true });
     } catch (streamError: any) {
       const abortedByUser = controller.signal.aborted && streamStopRequestedRef.current;
       const abortedUnexpectedly = controller.signal.aborted
@@ -1566,24 +1743,27 @@ export default function ModelTester() {
         setMessages((prev) => applyAssistantStopped(prev));
         setError('生成已停止。');
         pushDebug('warn', '流式传输被用户中止。');
+        updateMostRecentPendingHistory({ status: 'cancelled', errorMessage: '生成已停止。' });
       } else if (abortedUnexpectedly) {
         const message = '流式连接中断，请重试。';
         setMessages((prev) => applyAssistantError(prev, message));
         setError(message);
         pushDebug('error', `流式传输异常中断：${streamError?.message || 'AbortError'}`);
+        updateMostRecentPendingHistory({ status: 'failed', errorMessage: message });
       } else {
         const rawMsg = streamError?.message || '流式请求失败';
         const message = rawMsg === 'This operation was aborted' ? '操作已中止' : rawMsg;
         setMessages((prev) => applyAssistantError(prev, message));
         setError(message);
         pushDebug('error', `流式传输失败：${message}`);
+        updateMostRecentPendingHistory({ status: 'failed', errorMessage: message });
       }
     } finally {
       if (streamAbortRef.current === controller) streamAbortRef.current = null;
       streamStopRequestedRef.current = false;
       setSending(false);
     }
-  }, [pushDebug]);
+  }, [inputs.model, pushDebug, refreshRouteDecision, updateMostRecentPendingHistory]);
 
   const startProxyStream = useCallback(async (
     envelope: ProxyTestEnvelope,
@@ -1673,6 +1853,10 @@ export default function ModelTester() {
       }
 
       const emptyOutput = !hasAnyContent && !hasAnyReasoning;
+      updateMostRecentPendingHistory({
+        status: emptyOutput ? 'failed' : 'succeeded',
+        errorMessage: emptyOutput ? '上游返回空内容' : null,
+      });
 
       setMessages((prev) => {
         const idx = findLastLoadingAssistantIndex(prev);
@@ -1703,6 +1887,7 @@ export default function ModelTester() {
           ? '代理流式传输已成功完成。'
           : '代理流式传输未收到 [DONE] 信号，已在本地完成。');
       }
+      void refreshRouteDecision(inputs.model, { silent: true });
     } catch (streamError: any) {
       const abortedByUser = controller.signal.aborted && streamStopRequestedRef.current;
       const abortedUnexpectedly = controller.signal.aborted
@@ -1713,20 +1898,23 @@ export default function ModelTester() {
       if (abortedByUser) {
         setMessages((prev) => applyAssistantStopped(prev));
         setError('生成已停止。');
+        updateMostRecentPendingHistory({ status: 'cancelled', errorMessage: '生成已停止。' });
       } else if (abortedUnexpectedly) {
         setMessages((prev) => applyAssistantError(prev, '流式连接中断，请重试。'));
         setError('流式连接中断，请重试。');
+        updateMostRecentPendingHistory({ status: 'failed', errorMessage: '流式连接中断，请重试。' });
       } else {
         const message = streamError?.message || '流式请求失败';
         setMessages((prev) => applyAssistantError(prev, message));
         setError(message);
+        updateMostRecentPendingHistory({ status: 'failed', errorMessage: message });
       }
     } finally {
       if (streamAbortRef.current === controller) streamAbortRef.current = null;
       streamStopRequestedRef.current = false;
       setSending(false);
     }
-  }, [pushDebug]);
+  }, [inputs.model, pushDebug, refreshRouteDecision, updateMostRecentPendingHistory]);
 
   const dispatchPayload = useCallback(async (
     nextMessages: ChatMessage[],
@@ -1743,13 +1931,21 @@ export default function ModelTester() {
     setDebugResponse('');
     setActiveDebugTab(DEBUG_TABS.REQUEST);
     setDebugTimestamp(new Date().toISOString());
-
     if (payload.stream) {
+      recordHistory({
+        mode: inputs.mode,
+        protocol: inputs.protocol,
+        model: inputs.model,
+        title: buildHistoryTitle(inputs.mode, inputs.protocol, inputs.model, input || '流式请求'),
+        request: payload,
+        requestPreview: input || '流式请求',
+        status: 'pending',
+      });
       await startStream(payload);
     } else {
       await startChatJob(payload);
     }
-  }, [startChatJob, startStream]);
+  }, [input, inputs.mode, inputs.model, inputs.protocol, recordHistory, startChatJob, startStream]);
 
   const dispatchProxyEnvelope = useCallback(async (envelope: ProxyTestEnvelope, nextMessages?: ChatMessage[]) => {
     setError('');
@@ -1757,6 +1953,15 @@ export default function ModelTester() {
     setDebugResponse('');
     setActiveDebugTab(DEBUG_TABS.REQUEST);
     setDebugTimestamp(new Date().toISOString());
+    recordHistory({
+      mode: inputs.mode,
+      protocol: inputs.protocol,
+      model: inputs.model,
+      title: buildHistoryTitle(inputs.mode, inputs.protocol, inputs.model, input || envelope.path),
+      request: envelope,
+      requestPreview: input || envelope.path,
+      status: 'pending',
+    });
 
     if (envelope.stream && nextMessages) {
       await startProxyStream(envelope, nextMessages);
@@ -1769,6 +1974,7 @@ export default function ModelTester() {
       setDebugResponse(formatJson(result));
       setActiveDebugTab(DEBUG_TABS.RESPONSE);
       setNonConversationResult(result);
+      updateMostRecentPendingHistory({ status: 'succeeded', errorMessage: null });
 
       if (nextMessages) {
         setMessages((prev) => applyAssistantSuccess(nextMessages, result));
@@ -1776,6 +1982,7 @@ export default function ModelTester() {
 
       setError('');
       pushDebug('info', `代理请求成功：${envelope.path}`);
+      void refreshRouteDecision(inputs.model, { silent: true });
     } catch (requestError: any) {
       const message = requestError?.message || '请求失败';
       if (nextMessages) {
@@ -1785,10 +1992,11 @@ export default function ModelTester() {
       setDebugResponse(formatJson({ error: { message } }));
       setActiveDebugTab(DEBUG_TABS.RESPONSE);
       pushDebug('error', `代理请求失败：${message}`);
+      updateMostRecentPendingHistory({ status: 'failed', errorMessage: message });
     } finally {
       setSending(false);
     }
-  }, [pushDebug, startProxyStream]);
+  }, [input, inputs.mode, inputs.model, inputs.protocol, pushDebug, recordHistory, refreshRouteDecision, startProxyStream, updateMostRecentPendingHistory]);
 
   const buildPayloadWithMessages = useCallback((nextMessages: ChatMessage[]): {
     payload: TestChatPayload | null;
@@ -2011,6 +2219,12 @@ export default function ModelTester() {
     setDebugTimeline([]);
     setDebugTimestamp('');
     setNonConversationResult(null);
+    setRouteDecisionState({
+      loading: false,
+      error: null,
+      data: null,
+      refreshedAt: null,
+    });
     setSearchQueryValue('');
     setSearchAllowedDomains('');
     setSearchBlockedDomains('');
@@ -2275,7 +2489,188 @@ export default function ModelTester() {
       </div>
 
       <div
-        className="animate-slide-up stagger-2"
+        className="card animate-slide-up stagger-2"
+        style={{
+          padding: 16,
+          marginBottom: 16,
+          display: 'grid',
+          gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1.1fr) minmax(0, 0.9fr)',
+          gap: 16,
+        }}
+      >
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 600 }}>路由解释摘要</div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                直接复用当前路由决策接口，查看模型会命中哪条通道。
+              </div>
+            </div>
+            <button
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}
+              onClick={() => { void refreshRouteDecision(inputs.model); }}
+              disabled={!inputs.model || customRequestMode || routeDecisionState.loading}
+            >
+              {routeDecisionState.loading ? '刷新中...' : '刷新解释'}
+            </button>
+          </div>
+          {!inputs.model || customRequestMode ? (
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              {customRequestMode ? '自定义请求模式下不自动推断路由解释。' : '请选择模型后查看路由解释。'}
+            </div>
+          ) : routeDecisionState.error ? (
+            <div style={{ fontSize: 12, color: 'var(--color-danger)' }}>{routeDecisionState.error}</div>
+          ) : routeDecisionState.data ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+                <div style={{ padding: 10, border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)' }}>
+                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 4 }}>命中路由</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, wordBreak: 'break-all' }}>{routeDecisionState.data.modelPattern || '未匹配'}</div>
+                </div>
+                <div style={{ padding: 10, border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)' }}>
+                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 4 }}>最终选择</div>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{routeDecisionState.data.selectedLabel || '未选出通道'}</div>
+                </div>
+                <div style={{ padding: 10, border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)' }}>
+                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 4 }}>实际转发模型</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, wordBreak: 'break-all' }}>{routeDecisionState.data.actualModel || inputs.model}</div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {routeDecisionState.data.summary.slice(0, 5).map((line, index) => (
+                  <div key={`${line}-${index}`} style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                    {line}
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {routeDecisionState.data.candidates.slice(0, 4).map((candidate) => (
+                  <div
+                    key={candidate.channelId}
+                    style={{
+                      padding: 10,
+                      border: '1px solid var(--color-border-light)',
+                      borderRadius: 'var(--radius-sm)',
+                      background: routeDecisionState.data?.selectedChannelId === candidate.channelId ? 'var(--color-primary-soft)' : 'transparent',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 4 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>
+                        {candidate.username} @ {candidate.siteName}
+                      </div>
+                      <div style={{ fontSize: 12, color: candidate.eligible ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                        {candidate.probability.toFixed(2)}%
+                      </div>
+                    </div>
+                    {(candidate.modelCircuitStatus?.reason || candidate.circuitStatus?.reason) ? (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+                        {candidate.modelCircuitStatus?.reason ? (
+                          <span
+                            style={{
+                              fontSize: 11,
+                              padding: '2px 6px',
+                              borderRadius: 999,
+                              background: candidate.modelCircuitStatus.isOpen
+                                ? 'color-mix(in srgb, var(--color-danger) 12%, transparent)'
+                                : 'color-mix(in srgb, var(--color-warning) 12%, transparent)',
+                              color: candidate.modelCircuitStatus.isOpen ? 'var(--color-danger)' : 'var(--color-warning)',
+                            }}
+                          >
+                            模型熔断：{candidate.modelCircuitStatus.reason}
+                          </span>
+                        ) : null}
+                        {candidate.circuitStatus?.reason ? (
+                          <span
+                            style={{
+                              fontSize: 11,
+                              padding: '2px 6px',
+                              borderRadius: 999,
+                              background: candidate.circuitStatus.isOpen
+                                ? 'color-mix(in srgb, var(--color-danger) 10%, transparent)'
+                                : 'color-mix(in srgb, var(--color-info) 10%, transparent)',
+                              color: candidate.circuitStatus.isOpen ? 'var(--color-danger)' : 'var(--color-info)',
+                            }}
+                          >
+                            站点状态：{candidate.circuitStatus.reason}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{candidate.reason}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                {routeDecisionState.refreshedAt ? `最近刷新：${new Date(routeDecisionState.refreshedAt).toLocaleString()}` : '尚未刷新'}
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>正在等待路由解释数据。</div>
+          )}
+        </div>
+
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 600 }}>最近历史</div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                本地保存最近 {MODEL_TESTER_HISTORY_LIMIT} 条请求快照，支持重新载入。
+              </div>
+            </div>
+          </div>
+          {historyEntries.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无历史记录。</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 320, overflowY: 'auto' }}>
+              {historyEntries.slice(0, 8).map((entry) => (
+                <div
+                  key={entry.id}
+                  style={{
+                    padding: 10,
+                    border: '1px solid var(--color-border-light)',
+                    borderRadius: 'var(--radius-sm)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{entry.title}</div>
+                    <div style={{ fontSize: 11, color: entry.status === 'succeeded' ? 'var(--color-success)' : entry.status === 'pending' ? 'var(--color-warning)' : 'var(--color-danger)' }}>
+                      {entry.status}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{entry.requestPreview}</div>
+                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                    {new Date(entry.createdAt).toLocaleString()}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                      className="btn btn-ghost"
+                      style={{ border: '1px solid var(--color-border)', padding: '4px 8px', fontSize: 11 }}
+                      onClick={() => loadHistoryEntry(entry)}
+                    >
+                      载入
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      style={{ border: '1px solid var(--color-border)', padding: '4px 8px', fontSize: 11 }}
+                      onClick={() => { void dispatchProxyEnvelope(entry.request); }}
+                      disabled={sending || !!pendingJobId}
+                    >
+                      重放
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div
+        className="animate-slide-up stagger-3"
         style={{
           display: 'grid',
           gridTemplateColumns: layoutColumns,

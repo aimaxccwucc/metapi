@@ -11,6 +11,8 @@ describe('TokenRouter model circuit breaker', () => {
   let schema: DbModule['schema'];
   let TokenRouter: TokenRouterModule['TokenRouter'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
+  let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
+  let resetAllModelCircuits: typeof import('./modelCircuitBreaker.js')['resetAllModelCircuits'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -20,23 +22,31 @@ describe('TokenRouter model circuit breaker', () => {
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const tokenRouterModule = await import('./tokenRouter.js');
+    const modelCircuitBreakerModule = await import('./modelCircuitBreaker.js');
     db = dbModule.db;
     schema = dbModule.schema;
     TokenRouter = tokenRouterModule.TokenRouter;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
+    resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
+    resetAllModelCircuits = modelCircuitBreakerModule.resetAllModelCircuits;
   });
 
   beforeEach(async () => {
+    await db.delete(schema.settings).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
     invalidateTokenRouterCache();
+    resetSiteRuntimeHealthState();
+    resetAllModelCircuits();
   });
 
   afterAll(() => {
     invalidateTokenRouterCache();
+    resetSiteRuntimeHealthState();
+    resetAllModelCircuits();
     delete process.env.DATA_DIR;
   });
 
@@ -117,17 +127,17 @@ describe('TokenRouter model circuit breaker', () => {
 
     expect(channelACandidate?.eligible).toBe(false);
     expect(channelACandidate?.reason || '').toContain('模型熔断');
-    expect(channelACandidate?.circuitStatus?.state).toBe('open');
-    expect(channelACandidate?.circuitStatus?.isOpen).toBe(true);
-    expect(channelACandidate?.circuitStatus?.reason || '').toContain('模型熔断');
+    expect(channelACandidate?.modelCircuitStatus?.state).toBe('open');
+    expect(channelACandidate?.modelCircuitStatus?.isOpen).toBe(true);
+    expect(channelACandidate?.modelCircuitStatus?.reason || '').toContain('模型熔断');
     expect(channelBCandidate?.eligible).toBe(true);
-    expect(channelBCandidate?.circuitStatus?.state).toBe('closed');
+    expect(channelBCandidate?.modelCircuitStatus?.state).toBe('closed');
 
     const otherModelSelection = await router.selectChannel('gpt-4o-mini');
     expect(otherModelSelection?.account.id).toBe(accountA.id);
   });
 
-  it('opens a site-level breaker for repeated auth failures so sibling channels are avoided temporarily', async () => {
+  it('keeps sibling channels available on the same site when auth failure is isolated to one channel', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'shared-auth-site',
       url: 'https://shared-auth-site.example.com',
@@ -203,11 +213,14 @@ describe('TokenRouter model circuit breaker', () => {
     const decision = await router.explainSelection('gpt-auth-shared');
     const siblingCandidate = decision.candidates.find((candidate) => candidate.channelId === siblingChannel.id);
     const backupCandidate = decision.candidates.find((candidate) => candidate.channelId === backupChannel.id);
+    const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
 
-    expect(decision.selectedChannelId).toBe(backupChannel.id);
-    expect(siblingCandidate?.eligible).toBe(false);
-    expect(siblingCandidate?.reason || '').toContain('站点熔断');
-    expect(siblingCandidate?.circuitStatus?.isOpen).toBe(true);
+    expect(decision.selectedChannelId).toBe(siblingChannel.id);
+    expect(primaryCandidate?.eligible).toBe(false);
+    expect(primaryCandidate?.reason || '').toContain('模型熔断');
+    expect(primaryCandidate?.modelCircuitStatus?.isOpen).toBe(true);
+    expect(siblingCandidate?.eligible).toBe(true);
+    expect(siblingCandidate?.circuitStatus?.isOpen).toBe(false);
     expect(backupCandidate?.eligible).toBe(true);
   });
 });

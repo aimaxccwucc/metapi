@@ -11,6 +11,20 @@ import {
 import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
 import { isUsableAccountToken } from './accountTokenService.js';
 import { getOauthInfoFromExtraConfig } from './oauth/oauthAccount.js';
+import {
+  calculateChannelHealthScore,
+  resolveRoundRobinCooldownMs,
+  resolveWeightedFailureCooldownLevel,
+  resolveWeightedFailureCooldownMs,
+} from './channelRoutingHealth.js';
+import {
+  canUseModelCircuit,
+  getModelCircuitStatus,
+  recordModelCircuitFailure,
+  recordModelCircuitSuccess,
+  type ModelCircuitStatusView,
+} from './modelCircuitBreaker.js';
+import { classifyProxyFailureCategory } from './proxyRetryPolicy.js';
 
 interface RouteMatch {
   route: RouteRow;
@@ -57,10 +71,8 @@ type SiteRuntimeHealthState = {
   lastSuccessAtMs: number | null;
 };
 
-const FAILURE_BACKOFF_BASE_SEC = 15;
 const MIN_EFFECTIVE_UNIT_COST = 1e-6;
 const ROUND_ROBIN_FAILURE_THRESHOLD = 3;
-const ROUND_ROBIN_COOLDOWN_LEVELS_SEC = [0, 10 * 60, 60 * 60, 24 * 60 * 60] as const;
 const MAX_ROUTE_REGEX_BODY_LENGTH = 256;
 const SITE_RUNTIME_HEALTH_DECAY_HALF_LIFE_MS = 10 * 60 * 1000;
 const SITE_RUNTIME_MIN_MULTIPLIER = 0.08;
@@ -160,28 +172,6 @@ let siteRuntimeHealthLoadPromise: Promise<void> | null = null;
 let siteRuntimeHealthSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let siteRuntimeHealthPersistInFlight: Promise<void> | null = null;
 
-function fibonacciNumber(index: number): number {
-  if (index <= 2) return 1;
-  let prev = 1;
-  let current = 1;
-  for (let i = 3; i <= index; i += 1) {
-    const next = prev + current;
-    prev = current;
-    current = next;
-  }
-  return current;
-}
-
-function resolveFailureBackoffSec(failCount?: number | null): number {
-  const normalizedFailCount = Math.max(1, Math.trunc(failCount ?? 0));
-  return FAILURE_BACKOFF_BASE_SEC * fibonacciNumber(normalizedFailCount);
-}
-
-function resolveRoundRobinCooldownSec(level: number): number {
-  const normalizedLevel = Math.max(0, Math.min(ROUND_ROBIN_COOLDOWN_LEVELS_SEC.length - 1, Math.trunc(level)));
-  return ROUND_ROBIN_COOLDOWN_LEVELS_SEC[normalizedLevel] ?? 0;
-}
-
 function resolveSiteRuntimeBreakerMs(level: number): number {
   const normalizedLevel = Math.max(0, Math.min(SITE_RUNTIME_BREAKER_LEVELS_MS.length - 1, Math.trunc(level)));
   return SITE_RUNTIME_BREAKER_LEVELS_MS[normalizedLevel] ?? 0;
@@ -276,6 +266,16 @@ function isAuthLikeFailure(context: SiteRuntimeFailureContext = {}): boolean {
 
 function resolveAuthFailureCooldownSec(context: SiteRuntimeFailureContext = {}): number {
   return isAuthLikeFailure(context) ? 30 * 60 : 0;
+}
+
+function shouldApplySiteWideFailureTracking(context: SiteRuntimeFailureContext = {}): boolean {
+  const category = classifyProxyFailureCategory(context.status, context.errorText);
+  return category === 'network' || category === 'server' || category === 'rate_limit';
+}
+
+function shouldApplySiteModelFailureTracking(context: SiteRuntimeFailureContext = {}): boolean {
+  const category = classifyProxyFailureCategory(context.status, context.errorText);
+  return category === 'network' || category === 'server' || category === 'rate_limit';
 }
 
 function isTransientSiteRuntimeFailure(context: SiteRuntimeFailureContext = {}): boolean {
@@ -420,7 +420,7 @@ function getSiteRuntimeHealthDetails(siteId: number, modelName?: string | null, 
 function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
   state.penaltyScore += resolveSiteRuntimeFailurePenalty(context);
   const immediateBreakerMs = resolveImmediateModelBreakerDurationMs(context);
-  if (immediateBreakerMs > 0) {
+  if (immediateBreakerMs > 0 && shouldOpenSiteWideRuntimeBreaker(context)) {
     state.breakerLevel = Math.min(
       SITE_RUNTIME_BREAKER_LEVELS_MS.length - 1,
       state.breakerLevel + 1,
@@ -599,12 +599,26 @@ async function ensureSiteRuntimeHealthStateLoaded(): Promise<void> {
 }
 
 function recordSiteRuntimeFailure(siteId: number, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
-  applyRuntimeHealthFailure(getOrCreateSiteRuntimeHealthState(siteId, nowMs), context, nowMs);
-  const modelState = getOrCreateSiteModelRuntimeHealthState(siteId, context.modelName, nowMs);
-  if (modelState) {
-    applyRuntimeHealthFailure(modelState, context, nowMs);
+  let changed = false;
+  if (shouldApplySiteWideFailureTracking(context)) {
+    applyRuntimeHealthFailure(getOrCreateSiteRuntimeHealthState(siteId, nowMs), context, nowMs);
+    changed = true;
   }
-  scheduleSiteRuntimeHealthPersistence();
+  if (shouldApplySiteModelFailureTracking(context)) {
+    const modelState = getOrCreateSiteModelRuntimeHealthState(siteId, context.modelName, nowMs);
+    if (modelState) {
+      applyRuntimeHealthFailure(modelState, context, nowMs);
+      changed = true;
+    }
+  }
+  if (changed) {
+    scheduleSiteRuntimeHealthPersistence();
+  }
+}
+
+function shouldOpenSiteWideRuntimeBreaker(context: SiteRuntimeFailureContext = {}): boolean {
+  const category = classifyProxyFailureCategory(context.status, context.errorText);
+  return category === 'network' || category === 'server' || category === 'rate_limit';
 }
 
 function recordSiteRuntimeSuccess(siteId: number, latencyMs: number, modelName?: string | null, nowMs = Date.now()): void {
@@ -857,7 +871,6 @@ function patchCachedChannel(channelId: number, apply: (channel: ChannelRow) => v
     const target = entry.match.channels.find((item) => item.channel.id === channelId);
     if (!target) continue;
     apply(target.channel);
-    break;
   }
 }
 
@@ -876,7 +889,13 @@ function isSiteDisabled(status?: string | null): boolean {
 export function isChannelRecentlyFailed(
   channel: FailureAwareChannel,
   nowMs = Date.now(),
-  avoidSec = resolveFailureBackoffSec(channel.failCount),
+  avoidSec = Math.max(
+    60,
+    Math.trunc(resolveWeightedFailureCooldownMs(
+      Math.max(1, Math.trunc((channel.failCount ?? 0) || 1)),
+      'server',
+    ) / 1000),
+  ),
 ): boolean {
   if (avoidSec <= 0) return false;
   if ((channel.failCount ?? 0) <= 0) return false;
@@ -912,7 +931,13 @@ function partitionRecentlyFailedCandidates<T extends { channel: FailureAwareChan
   if (candidates.length === 0) {
     return { preferred: [], avoided: [] };
   }
-  const effectiveAvoidSec = avoidSec ?? resolveFailureBackoffSec(Math.max(...candidates.map((candidate) => candidate.channel.failCount ?? 0), 0));
+  const effectiveAvoidSec = avoidSec ?? Math.max(
+    60,
+    Math.trunc(resolveWeightedFailureCooldownMs(
+      Math.max(...candidates.map((candidate) => candidate.channel.failCount ?? 0), 1),
+      'server',
+    ) / 1000),
+  );
   if (effectiveAvoidSec <= 0) {
     return { preferred: candidates, avoided: [] };
   }
@@ -938,6 +963,13 @@ export interface RouteDecisionCandidate {
     state: 'closed' | 'open';
     isOpen: boolean;
     reason: string;
+  };
+  modelCircuitStatus?: {
+    state: 'closed' | 'open' | 'half_open';
+    isOpen: boolean;
+    isHalfOpen: boolean;
+    reason: string;
+    effectiveMultiplier: number;
   };
 }
 
@@ -974,6 +1006,8 @@ type CandidateEligibilityOptions = {
   bypassSourceModelCheck?: boolean;
   excludeChannelIds?: number[];
   nowIso?: string;
+  nowMs?: number;
+  runtimeModelName?: string | null;
 };
 
 type CostSignal = {
@@ -1163,14 +1197,42 @@ function hasCustomDisplayName(route: Pick<RouteRow, 'modelPattern' | 'displayNam
 }
 
 function buildVisibleEnabledRoutes(routes: RouteRow[]): RouteRow[] {
-  const explicitGroups = routes.filter((route: RouteRow) => (
-    route.enabled
-    && isExplicitGroupRoute(route)
-    && normalizeRouteDisplayName(route.displayName).length > 0
-    && route.sourceRouteIds.length > 0
-  ));
+  return routes.filter((route: RouteRow) => {
+    if (!route.enabled) return false;
+    if (isExplicitGroupRoute(route)) {
+      return normalizeRouteDisplayName(route.displayName).length > 0
+        && route.sourceRouteIds.length > 0;
+    }
+    return hasCustomDisplayName(route);
+  });
+}
 
-  return explicitGroups;
+function buildVisibleEnabledRoutesForPolicy(
+  routes: RouteRow[],
+  downstreamPolicy: DownstreamRoutingPolicy,
+): RouteRow[] {
+  const visibleRoutes = buildVisibleEnabledRoutes(routes);
+  const supportedPatterns = Array.isArray(downstreamPolicy.supportedModels)
+    ? downstreamPolicy.supportedModels
+    : [];
+  const allowedRouteIdSet = new Set(
+    Array.isArray(downstreamPolicy.allowedRouteIds)
+      ? downstreamPolicy.allowedRouteIds.filter((routeId) => Number.isFinite(routeId) && routeId > 0)
+      : [],
+  );
+
+  if (supportedPatterns.length === 0 && allowedRouteIdSet.size === 0) {
+    return visibleRoutes;
+  }
+
+  return visibleRoutes.filter((route) => {
+    const exposedName = getExposedModelNameForRoute(route).trim();
+    if (!exposedName) return false;
+    if (supportedPatterns.some((pattern) => matchesModelPattern(exposedName, pattern))) {
+      return true;
+    }
+    return allowedRouteIdSet.has(route.id) && isExplicitGroupRoute(route);
+  });
 }
 
 function normalizeModelAlias(modelName: string): string {
@@ -1187,6 +1249,35 @@ function isModelAliasEquivalent(left: string, right: string): boolean {
   const a = normalizeModelAlias(left);
   const b = normalizeModelAlias(right);
   return !!a && !!b && a === b;
+}
+
+function getCandidateModelCircuitStatus(
+  channelId: number,
+  modelName?: string | null,
+  nowMs = Date.now(),
+): ModelCircuitStatusView | null {
+  const normalizedModelName = normalizeModelAlias(modelName || '');
+  if (!normalizedModelName) return null;
+  return getModelCircuitStatus(channelId, normalizedModelName, nowMs);
+}
+
+function describeModelCircuitStatus(status?: ModelCircuitStatusView | null): string {
+  if (!status) return '关闭';
+  if (status.state === 'open') {
+    return `打开（${status.reason}，倍率=${status.effectiveMultiplier.toFixed(2)}）`;
+  }
+  if (status.state === 'half_open') {
+    return `半开（${status.reason}，倍率=${status.effectiveMultiplier.toFixed(2)}）`;
+  }
+  return `关闭（倍率=${status.effectiveMultiplier.toFixed(2)}）`;
+}
+
+function shouldOpenSiteLevelModelCircuit(reasonParts: string[]): boolean {
+  return reasonParts.some((reason) => reason.startsWith('站点状态='))
+    || reasonParts.includes('冷却中')
+    || reasonParts.includes('令牌不可用')
+    || reasonParts.includes('当前请求已尝试')
+    || reasonParts.includes('模型熔断中');
 }
 
 function channelSupportsRequestedModel(channelSourceModel: string | null | undefined, requestedModel: string): boolean {
@@ -1547,15 +1638,18 @@ export class TokenRouter {
     const candidateMap = new Map<number, RouteDecisionCandidate>();
 
     for (const row of match.channels) {
+      const runtimeModelName = typeof runtimeModelResolver === 'function'
+        ? runtimeModelResolver(row)
+        : runtimeModelResolver;
       const reasonParts = this.getCandidateEligibilityReasons(row, {
         requestedModel,
         bypassSourceModelCheck,
         excludeChannelIds,
         nowIso,
+        nowMs,
+        runtimeModelName,
       });
-      const runtimeModelName = typeof runtimeModelResolver === 'function'
-        ? runtimeModelResolver(row)
-        : runtimeModelResolver;
+      const modelCircuitStatus = getCandidateModelCircuitStatus(row.channel.id, runtimeModelName, nowMs);
       const runtimeCircuit = buildRuntimeCircuitStatus(getSiteRuntimeHealthDetails(row.site.id, runtimeModelName, nowMs));
 
       const recentlyFailed = routeStrategy !== 'round_robin'
@@ -1563,7 +1657,13 @@ export class TokenRouter {
         : false;
       const eligible = reasonParts.length === 0;
       let reason = eligible ? '可用' : reasonParts.join('、');
-      if (!eligible && runtimeCircuit.isOpen && !reason.includes('模型熔断') && !reason.includes('站点熔断')) {
+      if (
+        !eligible
+        && runtimeCircuit.isOpen
+        && !reason.includes('模型熔断')
+        && !reason.includes('站点熔断')
+        && shouldOpenSiteLevelModelCircuit(reasonParts)
+      ) {
         reason = `${reason}、${runtimeCircuit.reason}`;
       }
       const candidate: RouteDecisionCandidate = {
@@ -1580,6 +1680,7 @@ export class TokenRouter {
         probability: 0,
         reason,
         circuitStatus: runtimeCircuit,
+        modelCircuitStatus: modelCircuitStatus ?? undefined,
       };
       candidates.push(candidate);
       candidateMap.set(candidate.channelId, candidate);
@@ -1602,6 +1703,11 @@ export class TokenRouter {
         summary,
         candidates,
       };
+    }
+
+    const modelCircuitOpenCount = candidates.filter((candidate) => candidate.modelCircuitStatus?.isOpen).length;
+    if (modelCircuitOpenCount > 0) {
+      summary.push(`模型熔断避让 ${modelCircuitOpenCount}`);
     }
 
     if (routeStrategy === 'round_robin') {
@@ -1634,9 +1740,12 @@ export class TokenRouter {
         const target = candidateMap.get(ordered[index].channel.id);
         if (!target || !target.eligible) continue;
         target.probability = index === 0 ? 100 : 0;
-        target.reason = index === 0
+        const baseReason = index === 0
           ? `轮询命中（全局第 1 / ${ordered.length} 位，忽略优先级）`
           : `轮询排队中（全局第 ${index + 1} / ${ordered.length} 位，忽略优先级）`;
+        target.reason = target.modelCircuitStatus?.isHalfOpen
+          ? `${baseReason}；${target.modelCircuitStatus.reason}`
+          : baseReason;
         if (index === 0) {
           selected = ordered[index];
         }
@@ -1717,24 +1826,23 @@ export class TokenRouter {
       const filteredLayer = recentFailurePartition.preferred.length > 0
         ? recentFailurePartition.preferred
         : breakerFiltered.candidates;
-      const avoided = recentFailurePartition.preferred.length > 0
-        ? recentFailurePartition.avoided
-        : [];
+      const avoided = recentFailurePartition.avoided;
       if (avoided.length > 0) {
         for (const row of avoided) {
           const target = candidateMap.get(row.channel.id);
           if (!target) continue;
           target.avoidedByRecentFailure = true;
-          target.reason = `最近失败，优先避让（${resolveFailureBackoffSec(row.channel.failCount)} 秒窗口）`;
+          const avoidWindowSec = Math.max(
+            60,
+            Math.trunc(resolveWeightedFailureCooldownMs(
+              Math.max(1, row.channel.consecutiveFailCount ?? row.channel.failCount ?? 1),
+              'server',
+            ) / 1000),
+          );
+          target.reason = `最近失败，优先避让（${avoidWindowSec} 秒窗口）`;
         }
       }
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        for (const row of recentFailurePartition.avoided) {
-          const target = candidateMap.get(row.channel.id);
-          if (!target) continue;
-          target.avoidedByRecentFailure = true;
-          target.reason = `最近失败，优先避让（${resolveFailureBackoffSec(row.channel.failCount)} 秒窗口）`;
-        }
         degradedAcrossPriority = true;
         continue;
       }
@@ -1783,8 +1891,16 @@ export class TokenRouter {
         const fallbackCandidates = breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length
           ? rawLayer
           : breakerFiltered.candidates;
-        const weighted = this.calculateWeightedSelection(
+        const fallbackPartition = partitionRecentlyFailedCandidates(
           fallbackCandidates,
+          nowMs,
+          Number.MAX_SAFE_INTEGER,
+        );
+        if (fallbackPartition.preferred.length === 0) {
+          continue;
+        }
+        const weighted = this.calculateWeightedSelection(
+          fallbackPartition.preferred,
           useChannelSourceModelForCost ? runtimeModelResolver : mappedModel,
           downstreamPolicy,
           nowMs,
@@ -1796,12 +1912,12 @@ export class TokenRouter {
           if (!target) continue;
           if (target.eligible && !target.avoidedByRecentFailure) {
             target.probability = Number((detail.probability * 100).toFixed(2));
-            target.reason = `${detail.reason}；同层均近期失败，允许回退重试`;
+            target.reason = `${detail.reason}；高优先级均失败，退回较旧失败通道`;
           }
         }
         selected = weighted.selected;
         selectedPriority = priority;
-        summary.push(`优先级 P${priority}：同层均近期失败，允许回退重试`);
+        summary.push(`优先级 P${priority}：高优先级均失败，退回较旧失败通道`);
         break;
       }
     }
@@ -1900,7 +2016,8 @@ export class TokenRouter {
     if (!row) return;
     const ch = row.route_channels;
     const account = row.accounts;
-    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
     const nextSuccessCount = (ch.successCount ?? 0) + 1;
     const nextTotalLatencyMs = (ch.totalLatencyMs ?? 0) + latencyMs;
     const nextTotalCost = (ch.totalCost ?? 0) + cost;
@@ -1926,7 +2043,10 @@ export class TokenRouter {
       channel.cooldownLevel = 0;
     });
 
-    recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
+    if (normalizeModelAlias(modelName || '')) {
+      recordModelCircuitSuccess(channelId, modelName || '', nowMs);
+    }
+    recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName, nowMs);
   }
 
   /**
@@ -1955,19 +2075,22 @@ export class TokenRouter {
     let cooldownUntil: string | null = null;
     let consecutiveFailCount = Math.max(0, ch.consecutiveFailCount ?? 0) + 1;
     let cooldownLevel = Math.max(0, ch.cooldownLevel ?? 0);
+    const failureCategory = classifyProxyFailureCategory(normalizedContext.status, normalizedContext.errorText);
 
     if (routeStrategy === 'round_robin') {
       if (consecutiveFailCount >= ROUND_ROBIN_FAILURE_THRESHOLD) {
-        cooldownLevel = Math.min(cooldownLevel + 1, ROUND_ROBIN_COOLDOWN_LEVELS_SEC.length - 1);
-        const cooldownSec = resolveRoundRobinCooldownSec(cooldownLevel);
-        cooldownUntil = cooldownSec > 0 ? new Date(nowMs + cooldownSec * 1000).toISOString() : null;
+        cooldownLevel = Math.min(cooldownLevel + 1, 3);
+        const cooldownMs = resolveRoundRobinCooldownMs(cooldownLevel);
+        cooldownUntil = cooldownMs > 0 ? new Date(nowMs + cooldownMs).toISOString() : null;
         consecutiveFailCount = 0;
       }
     } else {
-      const cooldownSec = resolveFailureBackoffSec(failCount);
-      cooldownUntil = new Date(nowMs + cooldownSec * 1000).toISOString();
-      consecutiveFailCount = 0;
-      cooldownLevel = 0;
+      cooldownLevel = Math.max(
+        cooldownLevel,
+        resolveWeightedFailureCooldownLevel(consecutiveFailCount, failureCategory),
+      );
+      const cooldownMs = resolveWeightedFailureCooldownMs(consecutiveFailCount, failureCategory);
+      cooldownUntil = new Date(nowMs + cooldownMs).toISOString();
     }
 
     const authCooldownSec = resolveAuthFailureCooldownSec(normalizedContext);
@@ -1994,15 +2117,23 @@ export class TokenRouter {
       channel.cooldownLevel = cooldownLevel;
     });
 
+    if (normalizeModelAlias(normalizedContext.modelName || '')) {
+      recordModelCircuitFailure(
+        channelId,
+        normalizedContext.modelName || '',
+        failureCategory === 'other' ? 'unknown' : failureCategory,
+        nowMs,
+      );
+    }
     recordSiteRuntimeFailure(account.siteId, normalizedContext, nowMs);
   }
 
   /**
    * Get all available models (aggregated from all routes).
    */
-  async getAvailableModels(): Promise<string[]> {
+  async getAvailableModels(downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<string[]> {
     const routes = await loadEnabledRoutes();
-    const exposed = buildVisibleEnabledRoutes(routes)
+    const exposed = buildVisibleEnabledRoutesForPolicy(routes, downstreamPolicy)
       .map((route) => getExposedModelNameForRoute(route).trim())
       .filter((name) => name.length > 0);
     return Array.from(new Set(exposed));
@@ -2033,6 +2164,10 @@ export class TokenRouter {
         bypassSourceModelCheck,
         excludeChannelIds,
         nowIso,
+        nowMs,
+        runtimeModelName: typeof runtimeModelResolver === 'function'
+          ? runtimeModelResolver(candidate)
+          : runtimeModelResolver,
       }).length === 0
     ));
 
@@ -2040,7 +2175,17 @@ export class TokenRouter {
 
     if (routeStrategy === 'round_robin') {
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(available, runtimeModelResolver, nowMs);
-      const selected = this.selectRoundRobinCandidate(breakerFiltered.candidates);
+      const selected = this.selectWithModelCircuitGuard(
+        breakerFiltered.candidates,
+        (items) => this.selectRoundRobinCandidate(items),
+        (candidate) => (
+          typeof runtimeModelResolver === 'function'
+            ? runtimeModelResolver(candidate)
+            : runtimeModelResolver
+        ),
+        nowMs,
+        recordSelection,
+      );
       if (!selected) return null;
 
       const tokenValue = this.resolveChannelTokenValue(selected);
@@ -2089,18 +2234,38 @@ export class TokenRouter {
         continue;
       }
       const selected = routeStrategy === 'stable_first'
-        ? this.stableFirstSelect(
+        ? this.selectWithModelCircuitGuard(
           candidates,
-          requestedByDisplayName ? runtimeModelResolver : mappedModel,
-          downstreamPolicy,
+          (items) => this.stableFirstSelect(
+            items,
+            requestedByDisplayName ? runtimeModelResolver : mappedModel,
+            downstreamPolicy,
+            nowMs,
+          ),
+          (candidate) => (
+            requestedByDisplayName && typeof runtimeModelResolver === 'function'
+              ? runtimeModelResolver(candidate)
+              : mappedModel
+          ),
           nowMs,
+          recordSelection,
         )
-        : this.weightedRandomSelect(
-        candidates,
-        requestedByDisplayName ? runtimeModelResolver : mappedModel,
-        downstreamPolicy,
-        nowMs,
-      );
+        : this.selectWithModelCircuitGuard(
+          candidates,
+          (items) => this.weightedRandomSelect(
+            items,
+            requestedByDisplayName ? runtimeModelResolver : mappedModel,
+            downstreamPolicy,
+            nowMs,
+          ),
+          (candidate) => (
+            requestedByDisplayName && typeof runtimeModelResolver === 'function'
+              ? runtimeModelResolver(candidate)
+              : mappedModel
+          ),
+          nowMs,
+          recordSelection,
+        );
       if (!selected) continue;
 
       const tokenValue = this.resolveChannelTokenValue(selected);
@@ -2131,18 +2296,46 @@ export class TokenRouter {
         const fallbackCandidates = breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length
           ? rawLayer
           : breakerFiltered.candidates;
+        const fallbackPartition = partitionRecentlyFailedCandidates(
+          fallbackCandidates,
+          nowMs,
+          Number.MAX_SAFE_INTEGER,
+        );
+        if (fallbackPartition.preferred.length === 0) {
+          continue;
+        }
         const selected = routeStrategy === 'stable_first'
-          ? this.stableFirstSelect(
-            fallbackCandidates,
-            requestedByDisplayName ? runtimeModelResolver : mappedModel,
-            downstreamPolicy,
+          ? this.selectWithModelCircuitGuard(
+            fallbackPartition.preferred,
+            (items) => this.stableFirstSelect(
+              items,
+              requestedByDisplayName ? runtimeModelResolver : mappedModel,
+              downstreamPolicy,
+              nowMs,
+            ),
+            (candidate) => (
+              requestedByDisplayName && typeof runtimeModelResolver === 'function'
+                ? runtimeModelResolver(candidate)
+                : mappedModel
+            ),
             nowMs,
+            recordSelection,
           )
-          : this.weightedRandomSelect(
-            fallbackCandidates,
-            requestedByDisplayName ? runtimeModelResolver : mappedModel,
-            downstreamPolicy,
+          : this.selectWithModelCircuitGuard(
+            fallbackPartition.preferred,
+            (items) => this.weightedRandomSelect(
+              items,
+              requestedByDisplayName ? runtimeModelResolver : mappedModel,
+              downstreamPolicy,
+              nowMs,
+            ),
+            (candidate) => (
+              requestedByDisplayName && typeof runtimeModelResolver === 'function'
+                ? runtimeModelResolver(candidate)
+                : mappedModel
+            ),
             nowMs,
+            recordSelection,
           );
         if (!selected) continue;
 
@@ -2246,6 +2439,7 @@ export class TokenRouter {
     const bypassSourceModelCheck = options.bypassSourceModelCheck ?? false;
     const excludeChannelIds = options.excludeChannelIds ?? [];
     const nowIso = options.nowIso ?? new Date().toISOString();
+    const nowMs = options.nowMs ?? Date.now();
 
     if (!bypassSourceModelCheck && !channelSupportsRequestedModel(candidate.channel.sourceModel, options.requestedModel)) {
       reasonParts.push(`来源模型不匹配=${candidate.channel.sourceModel || ''}`);
@@ -2274,6 +2468,15 @@ export class TokenRouter {
 
     if (candidate.channel.cooldownUntil && candidate.channel.cooldownUntil > nowIso) {
       reasonParts.push('冷却中');
+    }
+
+    const modelCircuitStatus = getCandidateModelCircuitStatus(
+      candidate.channel.id,
+      options.runtimeModelName,
+      nowMs,
+    );
+    if (modelCircuitStatus?.isOpen) {
+      reasonParts.push('模型熔断中');
     }
 
     return reasonParts;
@@ -2320,6 +2523,35 @@ export class TokenRouter {
     patchCachedChannel(channelId, (channel) => {
       channel.lastSelectedAt = nowIso;
     });
+  }
+
+  private selectWithModelCircuitGuard(
+    candidates: RouteChannelCandidate[],
+    picker: (candidates: RouteChannelCandidate[]) => RouteChannelCandidate | null,
+    resolveModelName: (candidate: RouteChannelCandidate) => string,
+    nowMs: number,
+    reserveHalfOpenProbe: boolean,
+  ): RouteChannelCandidate | null {
+    const remaining = [...candidates];
+    while (remaining.length > 0) {
+      const selected = picker(remaining);
+      if (!selected) return null;
+
+      const modelName = resolveModelName(selected);
+      const modelCircuitStatus = getCandidateModelCircuitStatus(selected.channel.id, modelName, nowMs);
+      const canUseCandidate = !modelCircuitStatus?.isHalfOpen
+        || !reserveHalfOpenProbe
+        || canUseModelCircuit(selected.channel.id, modelName, nowMs);
+      if (canUseCandidate) {
+        return selected;
+      }
+
+      const index = remaining.findIndex((candidate) => candidate.channel.id === selected.channel.id);
+      if (index < 0) return null;
+      remaining.splice(index, 1);
+    }
+
+    return null;
   }
 
   private weightedRandomSelect(
@@ -2373,6 +2605,9 @@ export class TokenRouter {
     const runtimeHealthDetails = candidates.map((candidate) => (
       getSiteRuntimeHealthDetails(candidate.site.id, resolveModelName(candidate), nowMs)
     ));
+    const modelCircuitStatuses = candidates.map((candidate) => (
+      getCandidateModelCircuitStatus(candidate.channel.id, resolveModelName(candidate), nowMs)
+    ));
 
     const valueScores = candidates.map((c, i) => {
       const unitCost = effectiveCosts[i]?.unitCost || 1;
@@ -2399,6 +2634,14 @@ export class TokenRouter {
       siteChannelCounts.set(candidate.site.id, (siteChannelCounts.get(candidate.site.id) || 0) + 1);
     }
     const siteHistoricalHealthMetrics = buildSiteHistoricalHealthMetrics(candidates);
+    const channelHealthScores = candidates.map((candidate) => calculateChannelHealthScore({
+      successCount: candidate.channel.successCount,
+      failCount: candidate.channel.failCount,
+      totalLatencyMs: candidate.channel.totalLatencyMs,
+      lastFailAt: candidate.channel.lastFailAt,
+      consecutiveFailCount: candidate.channel.consecutiveFailCount,
+      cooldownLevel: candidate.channel.cooldownLevel,
+    }, nowMs));
 
     const contributions = candidates.map((candidate, i) => {
       const siteChannels = Math.max(1, siteChannelCounts.get(candidate.site.id) || 1);
@@ -2418,6 +2661,8 @@ export class TokenRouter {
       }
 
       contribution *= runtimeHealthDetails[i]?.combinedMultiplier ?? 1;
+      contribution *= modelCircuitStatuses[i]?.effectiveMultiplier ?? 1;
+      contribution *= channelHealthScores[i]?.multiplier ?? 1;
       contribution *= siteHistoricalHealthMetrics.get(candidate.site.id)?.multiplier ?? 1;
 
       // If upstream price is unknown and we are using fallback unit cost,
@@ -2461,6 +2706,8 @@ export class TokenRouter {
           : 1;
       const combinedSiteWeight = siteGlobalWeight * normalizedDownstreamSiteMultiplier;
       const siteRuntimeDetail = runtimeHealthDetails[i];
+      const modelCircuitStatus = modelCircuitStatuses[i];
+      const channelHealth = channelHealthScores[i];
       const siteHistoricalHealth = siteHistoricalHealthMetrics.get(candidate.site.id);
       const siteHistoricalMultiplier = siteHistoricalHealth?.multiplier ?? 1;
       const historicalSuccessRateText = siteHistoricalHealth?.successRate == null
@@ -2472,6 +2719,7 @@ export class TokenRouter {
       const runtimeHealthText = siteRuntimeDetail.modelKey
         ? `${siteRuntimeDetail.combinedMultiplier.toFixed(2)}（站点=${siteRuntimeDetail.globalMultiplier.toFixed(2)}，模型=${siteRuntimeDetail.modelMultiplier.toFixed(2)}）`
         : `${siteRuntimeDetail.globalMultiplier.toFixed(2)}`;
+      const modelCircuitText = describeModelCircuitStatus(modelCircuitStatus);
       const reasonPrefix = selectionMode === 'stable_first'
         ? `稳定优先（综合评分第 ${rankByIndex.get(i) ?? 1} / ${candidates.length}`
         : '按权重随机';
@@ -2479,8 +2727,8 @@ export class TokenRouter {
         candidate,
         probability,
         reason: selectionMode === 'stable_first'
-          ? `${reasonPrefix}，W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），同站点通道=${siteChannels}，评分占比≈${(probability * 100).toFixed(1)}%）`
-          : `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`,
+          ? `${reasonPrefix}，W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，模型熔断=${modelCircuitText}，通道健康=${channelHealth.summary}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），同站点通道=${siteChannels}，评分占比≈${(probability * 100).toFixed(1)}%）`
+          : `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，模型熔断=${modelCircuitText}，通道健康=${channelHealth.summary}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`,
       };
     });
 

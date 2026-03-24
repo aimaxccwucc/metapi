@@ -51,6 +51,12 @@ function getCircuitKey(channelId: number, modelName: string): string {
   return `${channelId}::${modelName.trim().toLowerCase()}`;
 }
 
+function getEntry(channelId: number, modelName: string): CircuitEntry | null {
+  const normalizedModelName = modelName.trim().toLowerCase();
+  if (!normalizedModelName) return null;
+  return circuitEntries.get(getCircuitKey(channelId, normalizedModelName)) ?? null;
+}
+
 function ensureEntry(channelId: number, modelName: string): CircuitEntry {
   const normalizedModelName = modelName.trim().toLowerCase();
   const key = getCircuitKey(channelId, normalizedModelName);
@@ -80,7 +86,19 @@ function normalizeOpenState(entry: CircuitEntry, nowMs: number): CircuitEntry {
 }
 
 export function getModelCircuitStatus(channelId: number, modelName: string, nowMs = Date.now()): ModelCircuitStatusView {
-  const entry = normalizeOpenState(ensureEntry(channelId, modelName), nowMs);
+  const existing = getEntry(channelId, modelName);
+  if (!existing) {
+    return {
+      state: 'closed',
+      isOpen: false,
+      isHalfOpen: false,
+      openUntil: null,
+      reason: '模型熔断关闭',
+      effectiveMultiplier: 1,
+    };
+  }
+
+  const entry = normalizeOpenState(existing, nowMs);
   if (entry.state === 'open' && entry.openUntil && entry.openUntil > nowMs) {
     return {
       state: 'open',
@@ -114,7 +132,9 @@ export function getModelCircuitStatus(channelId: number, modelName: string, nowM
 export function canUseModelCircuit(channelId: number, modelName: string, nowMs = Date.now()): boolean {
   const status = getModelCircuitStatus(channelId, modelName, nowMs);
   if (status.state === 'closed') return true;
-  const entry = normalizeOpenState(ensureEntry(channelId, modelName), nowMs);
+  const existing = getEntry(channelId, modelName);
+  if (!existing) return true;
+  const entry = normalizeOpenState(existing, nowMs);
   if (status.state === 'half_open' && !entry.probeInFlight) {
     entry.probeInFlight = true;
     return true;
@@ -123,7 +143,8 @@ export function canUseModelCircuit(channelId: number, modelName: string, nowMs =
 }
 
 export function recordModelCircuitSuccess(channelId: number, modelName: string, nowMs = Date.now()): void {
-  const entry = ensureEntry(channelId, modelName);
+  const entry = getEntry(channelId, modelName);
+  if (!entry) return;
   entry.state = 'closed';
   entry.failCount = 0;
   entry.openedAt = null;
@@ -163,4 +184,8 @@ export function recordModelCircuitFailure(
 export function resetModelCircuit(channelId: number, modelName: string): void {
   const key = getCircuitKey(channelId, modelName);
   circuitEntries.delete(key);
+}
+
+export function resetAllModelCircuits(): void {
+  circuitEntries.clear();
 }

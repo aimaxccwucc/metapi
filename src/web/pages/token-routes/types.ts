@@ -95,6 +95,18 @@ export type RouteDecisionCandidate = {
   avoidedByRecentFailure: boolean;
   probability: number;
   reason: string;
+  circuitStatus?: {
+    state?: string;
+    isOpen?: boolean;
+    reason?: string;
+  };
+  modelCircuitStatus?: {
+    state?: string;
+    isOpen?: boolean;
+    isHalfOpen?: boolean;
+    reason?: string;
+    effectiveMultiplier?: number;
+  };
 };
 
 export type RouteDecision = {

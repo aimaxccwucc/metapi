@@ -26,6 +26,7 @@ describe('TokenRouter selection scoring', () => {
   let TokenRouter: TokenRouterModule['TokenRouter'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
   let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
+  let resetAllModelCircuits: typeof import('./modelCircuitBreaker.js')['resetAllModelCircuits'];
   let flushSiteRuntimeHealthPersistence: TokenRouterModule['flushSiteRuntimeHealthPersistence'];
   let config: ConfigModule['config'];
   let dataDir = '';
@@ -45,12 +46,14 @@ describe('TokenRouter selection scoring', () => {
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const tokenRouterModule = await import('./tokenRouter.js');
+    const modelCircuitBreakerModule = await import('./modelCircuitBreaker.js');
     const configModule = await import('../config.js');
     db = dbModule.db;
     schema = dbModule.schema;
     TokenRouter = tokenRouterModule.TokenRouter;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
     resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
+    resetAllModelCircuits = modelCircuitBreakerModule.resetAllModelCircuits;
     flushSiteRuntimeHealthPersistence = tokenRouterModule.flushSiteRuntimeHealthPersistence;
     config = configModule.config;
     originalRoutingWeights = { ...config.routingWeights };
@@ -69,6 +72,7 @@ describe('TokenRouter selection scoring', () => {
     await db.delete(schema.sites).run();
     invalidateTokenRouterCache();
     resetSiteRuntimeHealthState();
+    resetAllModelCircuits();
   });
 
   afterAll(() => {
@@ -76,6 +80,7 @@ describe('TokenRouter selection scoring', () => {
     config.routingFallbackUnitCost = originalRoutingFallbackUnitCost;
     invalidateTokenRouterCache();
     resetSiteRuntimeHealthState();
+    resetAllModelCircuits();
     delete process.env.DATA_DIR;
   });
 
@@ -862,7 +867,7 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.summary.join(' ')).toContain('上层最近失败，已自动降级');
   });
 
-  it('falls back to recently failed channels only when every priority layer is degraded', async () => {
+  it('does not immediately recycle recently failed channels when every priority layer is degraded', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
       valueScoreFactor: 0,
@@ -916,10 +921,9 @@ describe('TokenRouter selection scoring', () => {
     const preview = await router.previewSelectedChannel('gpt-5.7');
     const decision = await router.explainSelection('gpt-5.7');
 
-    expect(preview).not.toBeNull();
-    expect([primaryChannel.id, fallbackChannel.id]).toContain(preview?.channel.id || -1);
-    expect(decision.selectedChannelId).not.toBeUndefined();
-    expect(decision.summary.join(' ')).toContain('同层均近期失败，允许回退重试');
+    expect(preview).toBeNull();
+    expect(decision.selectedChannelId).toBeUndefined();
+    expect(decision.summary.join(' ')).toContain('本次未选出通道');
   });
 
   it('extends cooldown for auth-like failures to avoid hammering bad tokens', async () => {
@@ -951,5 +955,80 @@ describe('TokenRouter selection scoring', () => {
     const cooldownMs = stored?.cooldownUntil ? Date.parse(stored.cooldownUntil) - beforeMs : 0;
 
     expect(cooldownMs).toBeGreaterThanOrEqual(29 * 60 * 1000);
+  });
+
+  it('hard-skips the same channel for the failing model while preserving other models on that channel', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-4o-hard-skip');
+    const otherRoute = await createRoute('claude-sonnet-hard-skip');
+
+    const primarySite = await createSite('hard-skip-primary');
+    const primaryAccount = await createAccount(primarySite.id, 'hard-skip-user-primary');
+    const primaryToken = await createToken(primaryAccount.id, 'hard-skip-token-primary');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: primaryAccount.id,
+      tokenId: primaryToken.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: otherRoute.id,
+      accountId: primaryAccount.id,
+      tokenId: primaryToken.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).run();
+
+    const backupSite = await createSite('hard-skip-backup');
+    const backupAccount = await createAccount(backupSite.id, 'hard-skip-user-backup');
+    const backupToken = await createToken(backupAccount.id, 'hard-skip-token-backup');
+    const backupChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: backupAccount.id,
+      tokenId: backupToken.id,
+      priority: 0,
+      weight: 5,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(primaryChannel.id, {
+      status: 401,
+      errorText: 'invalid api key',
+      modelName: 'gpt-4o-hard-skip',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).where(eq(schema.routeChannels.id, primaryChannel.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-4o-hard-skip');
+    const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+    const backupCandidate = decision.candidates.find((candidate) => candidate.channelId === backupChannel.id);
+    const preview = await router.previewSelectedChannel('gpt-4o-hard-skip');
+    const otherModelPreview = await router.previewSelectedChannel('claude-sonnet-hard-skip');
+
+    expect(decision.summary.join(' ')).toContain('模型熔断避让');
+    expect(primaryCandidate?.eligible).toBe(false);
+    expect(primaryCandidate?.reason || '').toContain('模型熔断中');
+    expect(primaryCandidate?.modelCircuitStatus?.isOpen).toBe(true);
+    expect(backupCandidate?.eligible).toBe(true);
+    expect(preview?.channel.id).toBe(backupChannel.id);
+    expect(otherModelPreview?.channel.id).toBeTruthy();
+    expect(otherModelPreview?.channel.id).not.toBe(backupChannel.id);
   });
 });

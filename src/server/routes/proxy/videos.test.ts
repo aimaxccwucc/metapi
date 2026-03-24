@@ -245,4 +245,27 @@ describe('/v1/videos routes', () => {
     expect(response.statusCode).toBe(204);
     expect(deleteProxyVideoTaskByPublicIdMock).toHaveBeenCalledWith('vid_local_123');
   });
+
+  it('reports upstream failure with status and error text for routing cooldown classification', async () => {
+    fetchMock.mockResolvedValue(new Response('model not supported', {
+      status: 400,
+      headers: { 'content-type': 'text/plain' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/videos',
+      payload: {
+        model: 'sora-2',
+        prompt: 'a cat walking',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(recordFailureMock).toHaveBeenCalledWith(11, {
+      status: 400,
+      errorText: 'model not supported',
+      modelName: 'sora-2',
+    });
+  });
 });
