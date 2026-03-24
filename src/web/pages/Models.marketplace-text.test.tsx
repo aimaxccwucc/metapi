@@ -904,7 +904,7 @@ describe('Models marketplace text', () => {
         await checkButtons[0]!.props.onClick();
       });
       await flushMicrotasks();
-      expect(collectText(root!.root)).toContain('该站点可能需要不同的请求方式（gemini-native）');
+      expect(collectText(root!.root)).toContain('该站点可能需要不同的请求方式（Gemini 原生协议）');
 
       const detailToggle = root!.root.find((node) => (
         node.type === 'button'
@@ -915,13 +915,14 @@ describe('Models marketplace text', () => {
       });
       await flushMicrotasks();
       expect(collectText(root!.root)).toContain('探测结果：请求协议可能不匹配');
-      expect(collectText(root!.root)).toContain('探测方式：gemini-native');
+      expect(collectText(root!.root)).toContain('探测方式：Gemini 原生协议');
+      expect(collectText(root!.root)).toContain('建议动作：检查该站点是否应使用 Gemini 原生协议');
 
       await act(async () => {
         await checkButtons[0]!.props.onClick();
       });
       await flushMicrotasks();
-      expect(collectText(root!.root)).toContain('当前凭证无权访问该模型（chat）');
+      expect(collectText(root!.root)).toContain('当前凭证无权访问该模型（OpenAI Chat）');
     } finally {
       await unmountRoot(root);
     }

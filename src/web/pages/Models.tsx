@@ -147,7 +147,7 @@ function summarizeAvailabilityMessage(input: {
 }): string {
   if (input.available) return '模型可用';
 
-  const endpointLabel = input.probeEndpoint ? `（${input.probeEndpoint}）` : '';
+  const endpointLabel = input.probeEndpoint ? `（${humanizeProbeEndpoint(input.probeEndpoint)}）` : '';
   if (input.probeClassification === 'credential') {
     return `当前凭证无权访问该模型${endpointLabel}`;
   }
@@ -162,6 +162,34 @@ function summarizeAvailabilityMessage(input: {
   if (reason.includes('模型已出现在上游列表中')) return '模型已出现在上游列表中';
   if (reason.includes('实时探测成功')) return '实时探测成功';
   return reason;
+}
+
+function humanizeProbeEndpoint(endpoint: string | null | undefined): string {
+  const normalized = String(endpoint || '').trim().toLowerCase();
+  if (normalized === 'chat') return 'OpenAI Chat';
+  if (normalized === 'responses') return 'OpenAI Responses';
+  if (normalized === 'messages') return 'Claude Messages';
+  if (normalized === 'gemini-native') return 'Gemini 原生协议';
+  return String(endpoint || '').trim();
+}
+
+function buildAvailabilitySuggestion(input: {
+  probeClassification?: string | null;
+  probeEndpoint?: string | null;
+}): string | null {
+  if (input.probeClassification === 'credential') {
+    return '建议动作：更换可访问该模型的 API Key，或检查当前 Key 的模型权限/分组。';
+  }
+  if (input.probeClassification === 'protocol_mismatch') {
+    const endpoint = humanizeProbeEndpoint(input.probeEndpoint);
+    return endpoint
+      ? `建议动作：检查该站点是否应使用 ${endpoint}，并确认对应请求头与密钥格式。`
+      : '建议动作：检查该站点实际支持的协议、请求头和密钥格式。';
+  }
+  if (input.probeClassification === 'model_unavailable') {
+    return '建议动作：确认模型名称、模型别名和站点分组权限是否正确。';
+  }
+  return null;
 }
 
 function buildAvailabilityDetail(input: {
@@ -183,7 +211,7 @@ function buildAvailabilityDetail(input: {
     };
     parts.push(labelMap[input.probeClassification] || `探测结果：${input.probeClassification}`);
   }
-  if (input.probeEndpoint) parts.push(`探测方式：${input.probeEndpoint}`);
+  if (input.probeEndpoint) parts.push(`探测方式：${humanizeProbeEndpoint(input.probeEndpoint)}`);
   if (input.autoKeyCreated) {
     const autoKeyParts = ['已自动补 Key'];
     if (input.autoKeyName) autoKeyParts.push(`名称 ${input.autoKeyName}`);
@@ -192,6 +220,8 @@ function buildAvailabilityDetail(input: {
   }
   const reason = String(input.reason || '').trim();
   if (reason) parts.push(`原始原因：${reason}`);
+  const suggestion = buildAvailabilitySuggestion(input);
+  if (suggestion) parts.push(suggestion);
   return parts.length > 0 ? parts.join('；') : null;
 }
 
@@ -1034,6 +1064,11 @@ export default function Models() {
                                       {availabilityChecks[accountModelKey(m.name, a.id)]!.latencyMs != null ? ` ${availabilityChecks[accountModelKey(m.name, a.id)]!.latencyMs}ms` : ''}
                                     </span>
                                   ) : null}
+                                  {availabilityChecks[accountModelKey(m.name, a.id)] ? (
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                      {availabilityChecks[accountModelKey(m.name, a.id)]!.message}
+                                    </span>
+                                  ) : null}
                                 </div>
                                 {availabilityChecks[accountModelKey(m.name, a.id)]?.autoKeyCreated ? (
                                   <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
@@ -1102,6 +1137,11 @@ export default function Models() {
                                     >
                                       {check.status === 'available' ? tr('可用') : (check.status === 'unavailable' ? tr('不可用') : tr('失败'))}
                                       {check.latencyMs != null ? ` ${check.latencyMs}ms` : ''}
+                                    </span>
+                                  ) : null}
+                                  {check ? (
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                      {check.message}
                                     </span>
                                   ) : null}
                                   {check?.autoKeyCreated ? (
