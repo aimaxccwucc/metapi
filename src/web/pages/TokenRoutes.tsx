@@ -359,8 +359,9 @@ export default function TokenRoutes() {
 
     const summaries = (summaryRows || []) as RouteSummaryRow[];
     setRouteSummaries(summaries);
+    const shouldIncludeCandidates = !!options?.includeCandidates || summaries.some((route) => isExplicitGroupRoute(route));
     let candidateRows: ModelTokenCandidatesPayload | undefined;
-    if (options?.includeCandidates) {
+    if (shouldIncludeCandidates) {
       candidateRows = await api.getModelTokenCandidates() as ModelTokenCandidatesPayload;
       applyRouteCandidateRows(candidateRows);
     }

@@ -1316,6 +1316,8 @@ describe('TokenRoutes grouped source models', () => {
       const text = collectText(routeCard).replace(/\s+/g, '');
       expect(text).toContain('2来源模型');
       expect(text).toContain('来源健康1/2');
+      expect(text).toContain('无通道1');
+      expect(text).toContain('缺少Key1');
     } finally {
       root?.unmount();
     }

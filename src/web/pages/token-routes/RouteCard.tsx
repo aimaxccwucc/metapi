@@ -249,6 +249,16 @@ function RouteCardInner({
                   {`${tr('来源健康')} ${explicitGroupSourceHealth.readyCount}/${explicitGroupSourceHealth.totalCount}`}
                 </span>
               ) : null}
+              {explicitGroupSourceHealth && explicitGroupSourceHealth.zeroChannelRoutes.length > 0 ? (
+                <span className="badge badge-warning" style={{ fontSize: 10, flexShrink: 0 }}>
+                  {`${tr('无通道')} ${explicitGroupSourceHealth.zeroChannelRoutes.length}`}
+                </span>
+              ) : null}
+              {explicitGroupSourceHealth && explicitGroupSourceHealth.missingTokenRoutes.length > 0 ? (
+                <span className="badge badge-warning" style={{ fontSize: 10, flexShrink: 0 }}>
+                  {`${tr('缺少 Key')} ${explicitGroupSourceHealth.missingTokenRoutes.length}`}
+                </span>
+              ) : null}
               <span className="badge badge-muted" style={{ fontSize: 10, flexShrink: 0 }}>
                 {route.channelCount} {tr('通道')}
               </span>
