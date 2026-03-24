@@ -415,6 +415,12 @@ export default function TokenRoutes() {
       }
       setShowManual(false);
       resetRouteForm();
+      setShowOnlyManualRoutes(true);
+      setActiveBrand(null);
+      setActiveSite(null);
+      setActiveEndpointType(null);
+      setActiveGroupFilter(null);
+      setSearch('');
       await load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded });
     } catch (e: any) {
       toast.error(e.message || (editingRouteId ? tr('更新群组失败') : tr('创建群组失败')));

@@ -1415,6 +1415,84 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 
+  it('resets route filters after creating a group so the new manual route remains visible', async () => {
+    apiMock.getRoutesSummary
+      .mockResolvedValueOnce([
+        {
+          id: 11, modelPattern: 'claude-opus-4-5', displayName: null,
+          displayIcon: null, modelMapping: null, enabled: true,
+          routeMode: 'pattern', sourceRouteIds: [],
+          channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
+          decisionSnapshot: null, decisionRefreshedAt: null,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: 71, modelPattern: 'claude-opus-4-6', displayName: 'claude-opus-4-6',
+          displayIcon: null, modelMapping: null, enabled: true,
+          routeMode: 'explicit_group', sourceRouteIds: [11],
+          channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
+          decisionSnapshot: null, decisionRefreshedAt: null,
+        },
+      ]);
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const searchInput = findInputByPlaceholder(root.root, '搜索模型路由');
+      await act(async () => {
+        searchInput.props.onChange({ target: { value: 'not-match' } });
+      });
+      await flushMicrotasks();
+      expect(collectText(root.root)).toContain('没有匹配的路由');
+
+      await act(async () => {
+        findButtonByText(root.root, '新建群组').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findInputByPlaceholder(root.root, '对外模型名').props.onChange({ target: { value: 'claude-opus-4-6' } });
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '选择来源模型').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, 'claude-opus-4-5').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '确认选择').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '创建群组').props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(collectText(root.root)).toContain('claude-opus-4-6');
+      expect(collectText(root.root)).not.toContain('没有匹配的路由');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('edits legacy regex groups in advanced mode only', async () => {
     apiMock.getRoutesSummary
       .mockResolvedValueOnce([
