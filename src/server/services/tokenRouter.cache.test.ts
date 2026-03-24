@@ -14,6 +14,7 @@ describe('TokenRouter runtime cache', () => {
   let TokenRouter: TokenRouterModule['TokenRouter'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
   let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
+  let reportTokenExpired: typeof import('./alertService.js')['reportTokenExpired'];
   let config: ConfigModule['config'];
   let dataDir = '';
   let originalCacheTtlMs = 0;
@@ -25,12 +26,14 @@ describe('TokenRouter runtime cache', () => {
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const tokenRouterModule = await import('./tokenRouter.js');
+    const alertServiceModule = await import('./alertService.js');
     const configModule = await import('../config.js');
     db = dbModule.db;
     schema = dbModule.schema;
     TokenRouter = tokenRouterModule.TokenRouter;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
     resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
+    reportTokenExpired = alertServiceModule.reportTokenExpired;
     config = configModule.config;
     originalCacheTtlMs = config.tokenRouterCacheTtlMs;
   });
@@ -104,6 +107,67 @@ describe('TokenRouter runtime cache', () => {
     invalidateTokenRouterCache();
     const refreshedSelection = await router.selectChannel('gpt-4o-mini');
     expect(refreshedSelection).toBeNull();
+  });
+
+  it('clears cached selection immediately after token expiration is reported', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'expired-cache-site',
+      url: 'https://expired-cache-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'expired-cache-user',
+      accessToken: 'expired-cache-access-token',
+      apiToken: 'expired-cache-api-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'expired-cache-token',
+      token: 'sk-expired-cache-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-expired-mini',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    const router = new TokenRouter();
+    const cachedSelection = await router.selectChannel('gpt-expired-mini');
+    expect(cachedSelection?.account.id).toBe(account.id);
+
+    await db.delete(schema.routeChannels).where(eq(schema.routeChannels.routeId, route.id)).run();
+    await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).run();
+
+    await reportTokenExpired({
+      accountId: account.id,
+      username: account.username,
+      siteName: site.name,
+      detail: '401 unauthorized',
+    });
+
+    const refreshedSelection = await router.selectChannel('gpt-expired-mini');
+    expect(refreshedSelection).toBeNull();
+
+    const storedAccount = await db.select().from(schema.accounts)
+      .where(eq(schema.accounts.id, account.id))
+      .get();
+    expect(storedAccount?.status).toBe('expired');
   });
 
   it('uses fibonacci-style cooldown across repeated failures', async () => {

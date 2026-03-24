@@ -64,7 +64,7 @@ vi.mock('../../services/modelService.js', async () => {
         .from(schema.accountTokens)
         .where(eq(schema.accountTokens.accountId, accountId))
         .all())
-        .filter((token) => token.enabled && !!token.token);
+        .filter((token: AccountTokenRow) => token.enabled && !!token.token);
 
       for (const token of tokens) {
         await db.delete(schema.tokenModelAvailability)
@@ -100,6 +100,8 @@ vi.mock('../../services/modelService.js', async () => {
 });
 
 type DbModule = typeof import('../../db/index.js');
+type AccountTokenRow = DbModule['schema']['accountTokens']['$inferSelect'];
+type RouteGroupSourceRow = DbModule['schema']['routeGroupSources']['$inferSelect'];
 
 describe('POST /api/routes auto token coverage', () => {
   let app: FastifyInstance;
@@ -213,7 +215,7 @@ describe('POST /api/routes auto token coverage', () => {
       .from(schema.accountTokens)
       .where(eq(schema.accountTokens.accountId, account.id))
       .all();
-    const createdToken = tokens.find((item) => item.token === 'sk-vip-created');
+    const createdToken = tokens.find((item: AccountTokenRow) => item.token === 'sk-vip-created');
     expect(createdToken?.tokenGroup).toBe('vip');
 
     const route = response.json() as { id: number };
@@ -274,5 +276,183 @@ describe('POST /api/routes auto token coverage', () => {
       .where(eq(schema.routeChannels.routeId, route.id))
       .all();
     expect(channels).toHaveLength(0);
+  });
+
+  it('rebuilds selected exact source routes before creating an explicit group', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'explicit-group-source-site',
+      url: 'https://explicit-group-source.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'explicit-group-source-user',
+      accessToken: 'explicit-group-session',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'group-target-model',
+      available: true,
+    }).run();
+
+    const sourceRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'group-target-model',
+      enabled: true,
+    }).returning().get();
+
+    getUserGroupsMock.mockResolvedValue(['default', 'cheap']);
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      groupRatio: { default: 1, cheap: 0.1 },
+      models: [{
+        modelName: 'group-target-model',
+        quotaType: 0,
+        modelDescription: null,
+        tags: [],
+        supportedEndpointTypes: [],
+        ownerBy: null,
+        enableGroups: ['default', 'cheap'],
+        groupPricing: {},
+      }],
+    });
+    createApiTokenMock.mockResolvedValue(true);
+    getApiTokensMock.mockResolvedValue([
+      { name: 'metapi-cheap-group-target-model', key: 'sk-group-created', enabled: true, tokenGroup: 'cheap' },
+    ]);
+    getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
+      if (credential === 'sk-group-created') return ['group-target-model'];
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        routeMode: 'explicit_group',
+        displayName: 'public-group-model',
+        sourceRouteIds: [sourceRoute.id],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(createApiTokenMock).toHaveBeenCalledTimes(1);
+
+    const sourceChannels = await db.select()
+      .from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, sourceRoute.id))
+      .all();
+    expect(sourceChannels).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        accountId: account.id,
+        sourceModel: 'group-target-model',
+        manualOverride: false,
+      }),
+    ]));
+  });
+
+  it('rebuilds newly selected exact source routes when updating an explicit group', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'explicit-group-update-site',
+      url: 'https://explicit-group-update.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'explicit-group-update-user',
+      accessToken: 'explicit-group-update-session',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: account.id,
+        modelName: 'existing-group-model',
+        available: true,
+      },
+      {
+        accountId: account.id,
+        modelName: 'new-group-model',
+        available: true,
+      },
+    ]).run();
+
+    const existingSourceRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'existing-group-model',
+      enabled: true,
+    }).returning().get();
+    const newSourceRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'new-group-model',
+      enabled: true,
+    }).returning().get();
+
+    const groupRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'public-group-model',
+      displayName: 'public-group-model',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeGroupSources).values({
+      groupRouteId: groupRoute.id,
+      sourceRouteId: existingSourceRoute.id,
+    }).run();
+
+    getUserGroupsMock.mockResolvedValue(['default', 'cheap']);
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      groupRatio: { default: 1, cheap: 0.2 },
+      models: [{
+        modelName: 'new-group-model',
+        quotaType: 0,
+        modelDescription: null,
+        tags: [],
+        supportedEndpointTypes: [],
+        ownerBy: null,
+        enableGroups: ['default', 'cheap'],
+        groupPricing: {},
+      }],
+    });
+    createApiTokenMock.mockResolvedValue(true);
+    getApiTokensMock.mockResolvedValue([
+      { name: 'metapi-cheap-new-group-model', key: 'sk-update-created', enabled: true, tokenGroup: 'cheap' },
+    ]);
+    getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
+      if (credential === 'sk-update-created') return ['new-group-model'];
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: `/api/routes/${groupRoute.id}`,
+      payload: {
+        sourceRouteIds: [newSourceRoute.id],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(createApiTokenMock).toHaveBeenCalledTimes(1);
+
+    const sourceChannels = await db.select()
+      .from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, newSourceRoute.id))
+      .all();
+    expect(sourceChannels).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        accountId: account.id,
+        sourceModel: 'new-group-model',
+        manualOverride: false,
+      }),
+    ]));
+
+    const storedSources = await db.select()
+      .from(schema.routeGroupSources)
+      .where(eq(schema.routeGroupSources.groupRouteId, groupRoute.id))
+      .all();
+    expect(storedSources.map((item: RouteGroupSourceRow) => item.sourceRouteId)).toEqual([newSourceRoute.id]);
   });
 });

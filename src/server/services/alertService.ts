@@ -4,6 +4,7 @@ import { sendNotification } from './notifyService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { appendSessionTokenRebindHint } from './alertRules.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
+import { invalidateTokenRouterCache } from './tokenRouter.js';
 
 export async function reportTokenExpired(params: {
   accountId: number;
@@ -31,6 +32,7 @@ export async function reportTokenExpired(params: {
     status: 'expired',
     updatedAt: new Date().toISOString(),
   }).where(eq(schema.accounts.id, params.accountId)).run();
+  invalidateTokenRouterCache();
 
   setAccountRuntimeHealth(params.accountId, {
     state: 'unhealthy',

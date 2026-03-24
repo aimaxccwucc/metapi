@@ -1176,6 +1176,11 @@ export async function tokensRoutes(app: FastifyInstance) {
 
     if (routeMode === 'explicit_group') {
       await replaceRouteSourceRouteIds(route.id, sourceRouteIds);
+      for (const sourceRouteId of sourceRouteIds) {
+        const sourceRoute = await getRouteWithSources(sourceRouteId);
+        if (!sourceRoute) continue;
+        await rebuildAutomaticRouteChannelsByModelPattern(sourceRoute.id, sourceRoute.modelPattern);
+      }
     } else {
       await populateRouteChannelsByModelPattern(route.id, modelPattern);
     }
@@ -1232,6 +1237,11 @@ export async function tokensRoutes(app: FastifyInstance) {
     await db.update(schema.tokenRoutes).set(updates).where(eq(schema.tokenRoutes.id, id)).run();
     if (routeMode === 'explicit_group' && body.sourceRouteIds !== undefined) {
       await replaceRouteSourceRouteIds(id, nextSourceRouteIds);
+      for (const sourceRouteId of nextSourceRouteIds) {
+        const sourceRoute = await getRouteWithSources(sourceRouteId);
+        if (!sourceRoute) continue;
+        await rebuildAutomaticRouteChannelsByModelPattern(sourceRoute.id, sourceRoute.modelPattern);
+      }
     }
     const modelPatternChanged = nextModelPattern !== existingRoute.modelPattern;
     const routeBehaviorChanged = modelPatternChanged
