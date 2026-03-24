@@ -1,9 +1,6 @@
-﻿import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
 import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { ToastProvider, useToast } from './components/Toast.js';
-import SearchModal from './components/SearchModal.js';
-import NotificationPanel from './components/NotificationPanel.js';
-import TooltipLayer from './components/TooltipLayer.js';
 import { api } from './api.js';
 import { clearAuthSession, hasValidAuthSession, persistAuthSession } from './authSession.js';
 import {
@@ -17,8 +14,11 @@ import { resolveLoginErrorMessage } from './loginError.js';
 import { SITE_DOCS_URL, SITE_GITHUB_URL } from './docsLink.js';
 import { useAnimatedVisibility } from './components/useAnimatedVisibility.js';
 import { useIsMobile } from './components/useIsMobile.js';
-import { MobileDrawer } from './components/MobileDrawer.js';
 import CenteredModal from './components/CenteredModal.js';
+const SearchModal = lazy(() => import('./components/SearchModal.js'));
+const NotificationPanel = lazy(() => import('./components/NotificationPanel.js'));
+const TooltipLayer = lazy(() => import('./components/TooltipLayer.js'));
+const MobileDrawer = lazy(() => import('./components/MobileDrawer.js').then((module) => ({ default: module.MobileDrawer })));
 const Dashboard = lazy(() => import('./pages/Dashboard.js'));
 const Sites = lazy(() => import('./pages/Sites.js'));
 const Accounts = lazy(() => import('./pages/Accounts.js'));
@@ -451,6 +451,10 @@ function RouteLoadingFallback() {
   );
 }
 
+function OverlayFallback() {
+  return null;
+}
+
 function AppShell() {
   const { language, toggleLanguage, t } = useI18n();
   const [authed, setAuthed] = useState(() => hasValidAuthSession(localStorage));
@@ -529,6 +533,7 @@ function AppShell() {
   useEffect(() => {
     if (!authed) return;
     let cancelled = false;
+    let initialPollTimer: ReturnType<typeof setTimeout> | null = null;
 
     const pollEvents = async () => {
       try {
@@ -573,10 +578,11 @@ function AppShell() {
       }
     };
 
-    void pollEvents();
+    initialPollTimer = setTimeout(() => { void pollEvents(); }, 1200);
     const timer = setInterval(() => { void pollEvents(); }, 15000);
     return () => {
       cancelled = true;
+      if (initialPollTimer) clearTimeout(initialPollTimer);
       clearInterval(timer);
     };
   }, [authed, toast]);
@@ -691,7 +697,9 @@ function AppShell() {
                 </span>
               )}
             </button>
-            <NotificationPanel open={showNotifications} onClose={() => setShowNotifications(false)} anchorRef={notifBtnRef} onUnreadCountChange={setUnreadCount} />
+            <Suspense fallback={<OverlayFallback />}>
+              {showNotifications ? <NotificationPanel open={showNotifications} onClose={() => setShowNotifications(false)} anchorRef={notifBtnRef} onUnreadCountChange={setUnreadCount} /> : null}
+            </Suspense>
           </div>
           <div ref={themeMenuRef} style={{ position: 'relative' }}>
             <button
@@ -783,49 +791,53 @@ function AppShell() {
 
       <div className="app-layout">
         {isMobile ? (
-          <MobileDrawer
-            open={drawerOpen}
-            onClose={() => setDrawerOpen(false)}
-            title={t('导航菜单')}
-            closeLabel={t('关闭导航')}
-          >
-            <div className="mobile-drawer-header">
-              <img src="/logo.png" alt="Metapi" />
-              <span>Metapi</span>
-            </div>
-            <nav className="mobile-nav">
-              {sidebarGroups.map((group) => (
-                <div key={group.label} className="mobile-nav-group">
-                  <div className="mobile-nav-label">{t(group.label)}</div>
-                  {group.items.map((item) => (
-                    <NavLink
-                      key={item.to}
-                      to={item.to}
-                      end={item.to === '/' || item.to === '/settings'}
-                      className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
-                      onClick={() => setDrawerOpen(false)}
-                    >
-                      {item.icon}
-                      <span>{t(item.label)}</span>
-                    </NavLink>
-                  ))}
+          <Suspense fallback={<OverlayFallback />}>
+            {drawerOpen ? (
+              <MobileDrawer
+                open={drawerOpen}
+                onClose={() => setDrawerOpen(false)}
+                title={t('导航菜单')}
+                closeLabel={t('关闭导航')}
+              >
+                <div className="mobile-drawer-header">
+                  <img src="/logo.png" alt="Metapi" />
+                  <span>Metapi</span>
                 </div>
-              ))}
-              <div className="mobile-nav-group">
-                <div className="mobile-nav-label">{t('更多')}</div>
-                {topNavItems.filter((n) => n.to !== '/').map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
-                    onClick={() => setDrawerOpen(false)}
-                  >
-                    <span>{t(item.label)}</span>
-                  </NavLink>
-                ))}
-              </div>
-            </nav>
-          </MobileDrawer>
+                <nav className="mobile-nav">
+                  {sidebarGroups.map((group) => (
+                    <div key={group.label} className="mobile-nav-group">
+                      <div className="mobile-nav-label">{t(group.label)}</div>
+                      {group.items.map((item) => (
+                        <NavLink
+                          key={item.to}
+                          to={item.to}
+                          end={item.to === '/' || item.to === '/settings'}
+                          className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
+                          onClick={() => setDrawerOpen(false)}
+                        >
+                          {item.icon}
+                          <span>{t(item.label)}</span>
+                        </NavLink>
+                      ))}
+                    </div>
+                  ))}
+                  <div className="mobile-nav-group">
+                    <div className="mobile-nav-label">{t('更多')}</div>
+                    {topNavItems.filter((n) => n.to !== '/').map((item) => (
+                      <NavLink
+                        key={item.to}
+                        to={item.to}
+                        className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
+                        onClick={() => setDrawerOpen(false)}
+                      >
+                        <span>{t(item.label)}</span>
+                      </NavLink>
+                    ))}
+                  </div>
+                </nav>
+              </MobileDrawer>
+            ) : null}
+          </Suspense>
         ) : (
           <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
             {sidebarGroups.map((group) => (
@@ -891,7 +903,9 @@ function AppShell() {
         onSave={handleSaveProfile}
         t={t}
       />
-      <SearchModal open={showSearch} onClose={() => setShowSearch(false)} />
+      <Suspense fallback={<OverlayFallback />}>
+        {showSearch ? <SearchModal open={showSearch} onClose={() => setShowSearch(false)} /> : null}
+      </Suspense>
     </>
   );
 }
@@ -901,7 +915,9 @@ export default function App() {
     <I18nProvider>
       <ToastProvider>
         <AppShell />
-        <TooltipLayer />
+        <Suspense fallback={<OverlayFallback />}>
+          <TooltipLayer />
+        </Suspense>
       </ToastProvider>
     </I18nProvider>
   );
