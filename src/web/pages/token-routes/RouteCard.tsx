@@ -244,6 +244,11 @@ function RouteCardInner({
               <span className="badge badge-info" style={{ fontSize: 10, flexShrink: 0 }}>
                 {explicitGroupSourceCount} {tr('来源模型')}
               </span>
+              {explicitGroupSourceHealth ? (
+                <span className={`badge ${explicitGroupHealthTone}`} style={{ fontSize: 10, flexShrink: 0 }}>
+                  {`${tr('来源健康')} ${explicitGroupSourceHealth.readyCount}/${explicitGroupSourceHealth.totalCount}`}
+                </span>
+              ) : null}
               <span className="badge badge-muted" style={{ fontSize: 10, flexShrink: 0 }}>
                 {route.channelCount} {tr('通道')}
               </span>

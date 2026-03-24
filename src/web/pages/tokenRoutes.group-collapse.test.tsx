@@ -1260,6 +1260,67 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 
+  it('shows source health summary on collapsed explicit-group cards', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        id: 11, modelPattern: 'claude-opus-4-5', displayName: null,
+        displayIcon: null, modelMapping: null, enabled: true,
+        routeMode: 'pattern', sourceRouteIds: [],
+        channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+      {
+        id: 12, modelPattern: 'claude-sonnet-4-5', displayName: null,
+        displayIcon: null, modelMapping: null, enabled: true,
+        routeMode: 'pattern', sourceRouteIds: [],
+        channelCount: 0, enabledChannelCount: 0, siteNames: ['site-b'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+      {
+        id: 21, modelPattern: 'claude-opus-4-6', displayName: 'claude-opus-4-6',
+        displayIcon: '', modelMapping: null, enabled: true,
+        routeMode: 'explicit_group', sourceRouteIds: [11, 12],
+        channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a', 'site-b'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+    ]);
+    apiMock.getModelTokenCandidates.mockResolvedValue({
+      models: {
+        'claude-opus-4-5': [{ accountId: 301, tokenId: 401, tokenName: 'default', isDefault: true, username: 'tester', siteId: 11, siteName: 'site-a' }],
+      },
+      modelsWithoutToken: {
+        'claude-sonnet-4-5': [{ accountId: 302, username: 'tester2', siteId: 12, siteName: 'site-b' }],
+      },
+      modelsMissingTokenGroups: {},
+      endpointTypesByModel: {},
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const routeCard = root.root.find((node) =>
+        node.type === 'div'
+        && String(node.props.className || '').includes('route-card-collapsed')
+        && collectText(node).includes('claude-opus-4-6'),
+      );
+      const text = collectText(routeCard).replace(/\s+/g, '');
+      expect(text).toContain('2来源模型');
+      expect(text).toContain('来源健康1/2');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('renders a larger source picker, progressively loads cards, and can probe source model availability', async () => {
     apiMock.getRoutesSummary.mockResolvedValue(
       Array.from({ length: 55 }, (_, index) => ({
