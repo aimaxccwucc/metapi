@@ -9,11 +9,13 @@ import MobileFilterSheet from '../components/MobileFilterSheet.js';
 import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import { mergeMarketplaceMetadata, shouldHydrateMarketplaceMetadata } from './helpers/modelsMarketplaceMetadata.js';
+import { getInitialVisibleCount, getNextVisibleCount } from './helpers/progressiveRender.js';
 import { tr } from '../i18n.js';
 
 type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate' | 'balance';
 type ViewMode = 'card' | 'table';
 type AccountDetailSortColumn = 'site' | 'username' | 'latency' | 'balance';
+const MODEL_RENDER_CHUNK = 40;
 
 interface ModelTokenInfo {
   id: number;
@@ -288,6 +290,7 @@ export default function Models() {
   const [availabilityTesting, setAvailabilityTesting] = useState<Record<string, boolean>>({});
   const [availabilityChecks, setAvailabilityChecks] = useState<Record<string, AvailabilityCheckState>>({});
   const [expandedCheckDetails, setExpandedCheckDetails] = useState<Record<string, boolean>>({});
+  const [visibleModelCount, setVisibleModelCount] = useState(MODEL_RENDER_CHUNK);
   const isMobile = useIsMobile();
   const filterPanelPresence = useAnimatedVisibility(!isMobile && !filterCollapsed, 220);
   const latestPrimaryRequestRef = useRef(0);
@@ -499,7 +502,23 @@ export default function Models() {
   const safePageVal = Math.min(page, totalPages);
   const paged = detailModels.slice((safePageVal - 1) * pageSize, safePageVal * pageSize);
 
-  useEffect(() => { setPage(1); }, [search, activeSite, activeBrand, pageSize]);
+  useEffect(() => {
+    setPage(1);
+    setVisibleModelCount(getInitialVisibleCount(pageSize, MODEL_RENDER_CHUNK));
+  }, [search, activeSite, activeBrand, pageSize, sortBy, sortDir]);
+
+  useEffect(() => {
+    setVisibleModelCount(getInitialVisibleCount(paged.length, MODEL_RENDER_CHUNK));
+  }, [paged.length, safePageVal]);
+
+  const renderedModels = useMemo(
+    () => paged.slice(0, visibleModelCount),
+    [paged, visibleModelCount],
+  );
+
+  const loadMoreModels = useCallback(() => {
+    setVisibleModelCount((current) => getNextVisibleCount(current, paged.length, MODEL_RENDER_CHUNK));
+  }, [paged.length]);
 
   /* ---- stats ---- */
   const totalCoverageSlots = detailModels.reduce((s, m) => s + m.accountCount, 0);
@@ -916,7 +935,7 @@ export default function Models() {
         ) : viewMode === 'card' ? (
           /* ====== Card View ====== */
           <div>
-            {paged.map((m) => {
+            {renderedModels.map((m) => {
               const isExpanded = expanded === m.name;
               return (
               <div key={m.name} className="model-card" onClick={() => setExpanded(isExpanded ? null : m.name)}>
@@ -1269,7 +1288,7 @@ export default function Models() {
                 </tr>
               </thead>
               <tbody>
-                {paged.map((m) => {
+                {renderedModels.map((m) => {
                   const isExpanded = expanded === m.name;
                   return (
                   <React.Fragment key={m.name}>
@@ -1408,6 +1427,13 @@ export default function Models() {
         )}
 
         {/* Pagination */}
+        {renderedModels.length < paged.length ? (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '4px 0 12px' }}>
+            <button type="button" className="btn btn-secondary" onClick={loadMoreModels}>
+              {`加载更多模型 (${renderedModels.length}/${paged.length})`}
+            </button>
+          </div>
+        ) : null}
         {filteredModels.length > 0 && (
           <div className="pagination">
             <button className="pagination-btn" disabled={safePageVal <= 1} onClick={() => setPage(p => p - 1)}>

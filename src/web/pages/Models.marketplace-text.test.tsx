@@ -762,6 +762,7 @@ describe('Models marketplace text', () => {
     }
   });
 
+
   it('sorts expanded card details by latency and balance', async () => {
     apiMock.getModelsMarketplace.mockResolvedValue({
       models: [
