@@ -1733,6 +1733,76 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 
+  it('shows persisted source health summary for existing explicit groups', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        id: 11, modelPattern: 'claude-opus-4-5', displayName: null,
+        displayIcon: null, modelMapping: null, enabled: true,
+        routeMode: 'pattern', sourceRouteIds: [],
+        channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+      {
+        id: 12, modelPattern: 'claude-sonnet-4-5', displayName: null,
+        displayIcon: null, modelMapping: null, enabled: true,
+        routeMode: 'pattern', sourceRouteIds: [],
+        channelCount: 0, enabledChannelCount: 0, siteNames: ['site-b'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+      {
+        id: 21, modelPattern: 'claude-opus-4-6', displayName: 'claude-opus-4-6',
+        displayIcon: '', modelMapping: null, enabled: true,
+        routeMode: 'explicit_group', sourceRouteIds: [11, 12],
+        channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a', 'site-b'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+    ]);
+    apiMock.getModelTokenCandidates.mockResolvedValue({
+      models: {
+        'claude-opus-4-5': [{ accountId: 301, tokenId: 401, tokenName: 'default', isDefault: true, username: 'tester', siteId: 11, siteName: 'site-a' }],
+      },
+      modelsWithoutToken: {
+        'claude-sonnet-4-5': [{ accountId: 302, username: 'tester2', siteId: 12, siteName: 'site-b' }],
+      },
+      modelsMissingTokenGroups: {},
+      endpointTypesByModel: {},
+    });
+    apiMock.getRouteChannels.mockResolvedValue([]);
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const expandBtn = root.root.find((node) =>
+        node.type === 'div'
+        && String(node.props.className || '').includes('route-card-collapsed')
+        && collectText(node).includes('claude-opus-4-6'),
+      );
+      await act(async () => {
+        expandBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root).replace(/\s+/g, '');
+      expect(text).toContain('来源健康1/2');
+      expect(text).toContain('无通道1');
+      expect(text).toContain('缺少Key1');
+      expect(text).toContain('无可用通道：claude-sonnet-4-5');
+      expect(text).toContain('待补Key：claude-sonnet-4-5');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('reuses the standard channel row presentation for explicit-group details in read-only mode', async () => {
     apiMock.getRoutesSummary.mockResolvedValue([
       {

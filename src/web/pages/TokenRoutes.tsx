@@ -36,6 +36,7 @@ import type {
   MissingTokenRouteSiteActionItem,
   MissingTokenGroupRouteSiteActionItem,
   GroupRouteItem,
+  ExplicitGroupSourceHealthSummary,
 } from './token-routes/types.js';
 import {
   AUTO_ROUTE_DECISION_LIMIT,
@@ -95,14 +96,6 @@ type ModelTokenCandidatesPayload = {
   endpointTypesByModel?: Record<string, string[]>;
 };
 
-type ExplicitGroupSaveFeedback = {
-  selectedCount: number;
-  readyCount: number;
-  zeroChannelRoutes: string[];
-  missingTokenRoutes: string[];
-  missingGroupRoutes: string[];
-};
-
 function pickFeedbackExamples(names: string[]): string {
   return names.slice(0, 2).join('、');
 }
@@ -111,7 +104,7 @@ function buildExplicitGroupSaveFeedback(
   sourceRouteIds: number[],
   summaries: RouteSummaryRow[],
   candidateRows?: ModelTokenCandidatesPayload,
-): ExplicitGroupSaveFeedback | null {
+): ExplicitGroupSourceHealthSummary | null {
   const normalizedSourceRouteIds = Array.from(new Set(
     (sourceRouteIds || []).filter((routeId) => Number.isFinite(routeId) && routeId > 0),
   ));
@@ -150,7 +143,7 @@ function buildExplicitGroupSaveFeedback(
   }
 
   return {
-    selectedCount: normalizedSourceRouteIds.length,
+    totalCount: normalizedSourceRouteIds.length,
     readyCount,
     zeroChannelRoutes,
     missingTokenRoutes,
@@ -158,8 +151,8 @@ function buildExplicitGroupSaveFeedback(
   };
 }
 
-function formatExplicitGroupSaveFeedback(feedback: ExplicitGroupSaveFeedback): string {
-  const parts = [`来源检查：${feedback.readyCount}/${feedback.selectedCount} 个来源模型已有可用通道`];
+function formatExplicitGroupSaveFeedback(feedback: ExplicitGroupSourceHealthSummary): string {
+  const parts = [`来源检查：${feedback.readyCount}/${feedback.totalCount} 个来源模型已有可用通道`];
   if (feedback.zeroChannelRoutes.length > 0) {
     parts.push(`无通道 ${feedback.zeroChannelRoutes.length} 个（${pickFeedbackExamples(feedback.zeroChannelRoutes)}）`);
   }
@@ -177,6 +170,21 @@ function formatExplicitGroupSaveFeedback(feedback: ExplicitGroupSaveFeedback): s
     parts.push('来源可直接用于转发');
   }
   return parts.join('；');
+}
+
+function formatExplicitGroupHealthHint(summary: ExplicitGroupSourceHealthSummary): string {
+  const parts = [`来源健康 ${summary.readyCount}/${summary.totalCount}`];
+  if (summary.zeroChannelRoutes.length > 0) parts.push(`无通道 ${summary.zeroChannelRoutes.length}`);
+  if (summary.missingTokenRoutes.length > 0) parts.push(`缺少 Key ${summary.missingTokenRoutes.length}`);
+  if (summary.missingGroupRoutes.length > 0) parts.push(`缺少分组 ${summary.missingGroupRoutes.length}`);
+  if (
+    summary.zeroChannelRoutes.length === 0
+    && summary.missingTokenRoutes.length === 0
+    && summary.missingGroupRoutes.length === 0
+  ) {
+    parts.push('可直接转发');
+  }
+  return parts.join(' · ');
 }
 
 function normalizeRouteRoutingStrategyValue(value?: RouteRoutingStrategy | null): RouteRoutingStrategy {
@@ -886,6 +894,23 @@ export default function TokenRoutes() {
     [routePatterns, missingTokenGroupModelsByName],
   );
 
+  const explicitGroupSourceHealthByRouteId = useMemo<Record<number, ExplicitGroupSourceHealthSummary>>(() => {
+    const result: Record<number, ExplicitGroupSourceHealthSummary> = {};
+    for (const route of visibleRouteRows) {
+      if (!isExplicitGroupRoute(route)) continue;
+      const summary = buildExplicitGroupSaveFeedback(route.sourceRouteIds || [], routeSummaries, {
+        models: modelCandidates,
+        modelsWithoutToken: missingTokenModelsByName,
+        modelsMissingTokenGroups: missingTokenGroupModelsByName,
+        endpointTypesByModel,
+      });
+      if (summary) {
+        result[route.id] = summary;
+      }
+    }
+    return result;
+  }, [endpointTypesByModel, missingTokenGroupModelsByName, missingTokenModelsByName, modelCandidates, routeSummaries, visibleRouteRows]);
+
   const getRouteCandidateView = (routeId: number): RouteCandidateView => {
     return routeModelCandidateIndex[routeId] || EMPTY_ROUTE_CANDIDATE_VIEW;
   };
@@ -1436,6 +1461,7 @@ export default function TokenRoutes() {
                     onChannelDragEnd={stableChannelDragEnd}
                     missingTokenSiteItems={missingTokenSiteItemsByRouteId[route.id] || EMPTY_MISSING_ITEMS}
                     missingTokenGroupItems={missingTokenGroupItemsByRouteId[route.id] || EMPTY_MISSING_GROUP_ITEMS}
+                    explicitGroupSourceHealth={explicitGroupSourceHealthByRouteId[route.id] || null}
                     onCreateTokenForMissing={stableCreateTokenForMissing}
                     onAddChannel={stableAddChannel}
                     expandedSourceGroupMap={expandedSourceGroupMap}
@@ -1472,6 +1498,7 @@ export default function TokenRoutes() {
               onChannelDragEnd={stableChannelDragEnd}
               missingTokenSiteItems={missingTokenSiteItemsByRouteId[route.id] || EMPTY_MISSING_ITEMS}
               missingTokenGroupItems={missingTokenGroupItemsByRouteId[route.id] || EMPTY_MISSING_GROUP_ITEMS}
+              explicitGroupSourceHealth={explicitGroupSourceHealthByRouteId[route.id] || null}
               onCreateTokenForMissing={stableCreateTokenForMissing}
               onAddChannel={stableAddChannel}
               expandedSourceGroupMap={expandedSourceGroupMap}

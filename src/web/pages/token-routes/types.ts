@@ -173,3 +173,11 @@ export type GroupRouteItem = {
   channelCount: number;
   sourceRouteCount: number;
 };
+
+export type ExplicitGroupSourceHealthSummary = {
+  readyCount: number;
+  totalCount: number;
+  zeroChannelRoutes: string[];
+  missingTokenRoutes: string[];
+  missingGroupRoutes: string[];
+};

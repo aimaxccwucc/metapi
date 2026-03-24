@@ -25,6 +25,7 @@ import type {
   MissingTokenRouteSiteActionItem,
   MissingTokenGroupRouteSiteActionItem,
   RouteRoutingStrategy,
+  ExplicitGroupSourceHealthSummary,
 } from './types.js';
 import type { RouteCandidateView, RouteTokenOption } from '../helpers/routeModelCandidatesIndex.js';
 import { SortableChannelRow } from './SortableChannelRow.js';
@@ -65,6 +66,7 @@ type RouteCardProps = {
   // Missing token hints
   missingTokenSiteItems: MissingTokenRouteSiteActionItem[];
   missingTokenGroupItems: MissingTokenGroupRouteSiteActionItem[];
+  explicitGroupSourceHealth?: ExplicitGroupSourceHealthSummary | null;
   onCreateTokenForMissing: (accountId: number, modelName: string) => void;
   // Add channel
   onAddChannel: (routeId: number) => void;
@@ -122,6 +124,7 @@ function RouteCardInner({
   onChannelDragEnd,
   missingTokenSiteItems,
   missingTokenGroupItems,
+  explicitGroupSourceHealth,
   onCreateTokenForMissing,
   onAddChannel,
   expandedSourceGroupMap,
@@ -152,6 +155,16 @@ function RouteCardInner({
       description: tr('按优先级优先选择当前最稳、最快、成功率更高的通道，不做随机分流'),
     },
   ] as const;
+  const explicitGroupHealthTone = explicitGroupSourceHealth
+    ? explicitGroupSourceHealth.readyCount === explicitGroupSourceHealth.totalCount
+      && explicitGroupSourceHealth.zeroChannelRoutes.length === 0
+      && explicitGroupSourceHealth.missingTokenRoutes.length === 0
+      && explicitGroupSourceHealth.missingGroupRoutes.length === 0
+        ? 'badge-success'
+        : explicitGroupSourceHealth.readyCount > 0
+          ? 'badge-warning'
+          : 'badge-error'
+    : 'badge-muted';
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -388,8 +401,58 @@ function RouteCardInner({
       )}
 
       {explicitGroupRoute ? (
-        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
-          {tr('该群组会将多个来源模型聚合为一个对外模型名；通道信息继承自来源模型，当前仅支持查看，不支持直接维护。')}
+        <div style={{ display: 'grid', gap: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+            {tr('该群组会将多个来源模型聚合为一个对外模型名；通道信息继承自来源模型，当前仅支持查看，不支持直接维护。')}
+          </div>
+          {explicitGroupSourceHealth ? (
+            <div
+              style={{
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-sm)',
+                padding: '10px 12px',
+                background: 'var(--color-bg-card)',
+                display: 'grid',
+                gap: 6,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span className={`badge ${explicitGroupHealthTone}`} style={{ fontSize: 10 }}>
+                  {`来源健康 ${explicitGroupSourceHealth.readyCount}/${explicitGroupSourceHealth.totalCount}`}
+                </span>
+                {explicitGroupSourceHealth.zeroChannelRoutes.length > 0 ? (
+                  <span className="badge badge-warning" style={{ fontSize: 10 }}>
+                    {`无通道 ${explicitGroupSourceHealth.zeroChannelRoutes.length}`}
+                  </span>
+                ) : null}
+                {explicitGroupSourceHealth.missingTokenRoutes.length > 0 ? (
+                  <span className="badge badge-warning" style={{ fontSize: 10 }}>
+                    {`缺少 Key ${explicitGroupSourceHealth.missingTokenRoutes.length}`}
+                  </span>
+                ) : null}
+                {explicitGroupSourceHealth.missingGroupRoutes.length > 0 ? (
+                  <span className="badge badge-warning" style={{ fontSize: 10 }}>
+                    {`缺少分组 ${explicitGroupSourceHealth.missingGroupRoutes.length}`}
+                  </span>
+                ) : null}
+              </div>
+              {explicitGroupSourceHealth.zeroChannelRoutes.length > 0 ? (
+                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                  {`无可用通道：${explicitGroupSourceHealth.zeroChannelRoutes.slice(0, 3).join('、')}`}
+                </div>
+              ) : null}
+              {explicitGroupSourceHealth.missingTokenRoutes.length > 0 ? (
+                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                  {`待补 Key：${explicitGroupSourceHealth.missingTokenRoutes.slice(0, 3).join('、')}`}
+                </div>
+              ) : null}
+              {explicitGroupSourceHealth.missingGroupRoutes.length > 0 ? (
+                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                  {`待补分组：${explicitGroupSourceHealth.missingGroupRoutes.slice(0, 3).join('、')}`}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : !exactRoute ? (
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
