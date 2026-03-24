@@ -428,6 +428,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             await tokenRouter.recordFailure?.(selected.channel.id, {
               status: 500,
               errorText: 'Gemini CLI OAuth project is missing',
+              modelName: actualModel,
             });
             if (retryCount < MAX_RETRIES) {
               retryCount += 1;
@@ -537,6 +538,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             await tokenRouter.recordFailure?.(selected.channel.id, {
               status: upstream.status,
               errorText: lastText,
+              modelName: actualModel,
             });
             await logProxy(
               selected,
@@ -572,7 +574,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               : upstreamReader;
             if (!reader) {
               const latency = Date.now() - startTime;
-              await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0);
+              await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0, actualModel);
               await logProxy(
                 selected,
                 requestedModel,
@@ -622,7 +624,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             }
             const parsedUsage = parseProxyUsage(aggregateState);
             const latency = Date.now() - startTime;
-            await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0);
+            await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0, actualModel);
             await logProxy(
               selected,
               requestedModel,
@@ -658,7 +660,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               );
             parsedUsage = parseProxyUsage(aggregateState);
             const latency = Date.now() - startTime;
-            await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0);
+            await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0, actualModel);
             await logProxy(
               selected,
               requestedModel,
@@ -681,7 +683,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             );
           } catch {
             const latency = Date.now() - startTime;
-            await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0);
+            await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0, actualModel);
             await logProxy(
               selected,
               requestedModel,
@@ -830,6 +832,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           await tokenRouter.recordFailure?.(selected.channel.id, {
             status: endpointResult.status,
             errorText: endpointResult.rawErrText || endpointResult.errText,
+            modelName: actualModel,
           });
           await logProxy(
             selected,
@@ -868,7 +871,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           },
         });
         const latency = Date.now() - startTime;
-        await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0);
+        await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0, actualModel);
         await logProxy(
           selected,
           requestedModel,
@@ -907,6 +910,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         });
         await tokenRouter.recordFailure?.(selected.channel.id, {
           errorText: error instanceof Error ? error.message : 'Gemini upstream request failed',
+          modelName: actualModel,
         });
         await logProxy(
           selected,

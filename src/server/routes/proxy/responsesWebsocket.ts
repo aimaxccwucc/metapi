@@ -556,6 +556,8 @@ async function handleResponsesWebsocketConnection(
             : null;
 
           if (codexWebsocketChannel) {
+            const actualModel = asTrimmedString(codexWebsocketChannel.actualModel) || requestModel;
+            const requestStartedAt = Date.now();
             const downstreamHeaders: Record<string, unknown> = {
               ...(request.headers as Record<string, unknown>),
               [RESPONSES_WEBSOCKET_TRANSPORT_HEADER]: '1',
@@ -569,7 +571,7 @@ async function handleResponsesWebsocketConnection(
             });
             const prepared = buildUpstreamEndpointRequest({
               endpoint: 'responses',
-              modelName: asTrimmedString(codexWebsocketChannel.actualModel) || requestModel,
+              modelName: actualModel,
               stream: true,
               tokenValue: codexWebsocketChannel.tokenValue,
               sitePlatform: codexWebsocketChannel.site.platform,
@@ -590,6 +592,12 @@ async function handleResponsesWebsocketConnection(
                 headers: prepared.headers,
                 body: prepared.body,
               });
+              await tokenRouter.recordSuccess?.(
+                codexWebsocketChannel.channel.id,
+                Date.now() - requestStartedAt,
+                0,
+                actualModel,
+              );
               lastResponseOutput = collectResponsesOutput(runtimeResult.events);
               for (const payload of runtimeResult.events) {
                 socket.send(JSON.stringify(payload));
@@ -598,6 +606,12 @@ async function handleResponsesWebsocketConnection(
               const runtimeError = error instanceof CodexWebsocketRuntimeError
                 ? error
                 : new CodexWebsocketRuntimeError('upstream websocket request failed');
+              await tokenRouter.recordFailure?.(codexWebsocketChannel.channel.id, {
+                status: runtimeError.status ?? 0,
+                errorText: runtimeError.message,
+                modelName: actualModel,
+              });
+              selectedChannel = null;
               if (runtimeError.status && runtimeError.events.length === 0) {
                 const fallbackOutput = await forwardResponsesRequestViaHttp({
                   app,

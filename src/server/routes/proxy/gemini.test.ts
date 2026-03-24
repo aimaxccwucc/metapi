@@ -680,6 +680,7 @@ describe('gemini native proxy routes', () => {
     expect(recordFailureMock).toHaveBeenCalledWith(31, {
       status: 500,
       errorText: 'Gemini CLI OAuth project is missing',
+      modelName: 'gemini-2.5-pro',
     });
     expect(JSON.parse(response.body)).toEqual({
       error: {
@@ -1345,7 +1346,7 @@ describe('gemini native proxy routes', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(recordSuccessMock).toHaveBeenCalledWith(11, expect.any(Number), 0);
+    expect(recordSuccessMock).toHaveBeenCalledWith(11, expect.any(Number), 0, 'gemini-2.5-flash');
     expect(dbInsertMock).toHaveBeenCalledTimes(1);
     expect(dbInsertValuesMock).toHaveBeenCalledWith(expect.objectContaining({
       routeId: 22,
@@ -1761,6 +1762,7 @@ describe('gemini native proxy routes', () => {
     expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
       status: 400,
       errorText: JSON.stringify({ error: { message: 'bad request on first channel' } }),
+      modelName: 'gemini-2.5-flash',
     }));
     const [firstUrl] = fetchMock.mock.calls[0] as [string, RequestInit];
     const [secondUrl] = fetchMock.mock.calls[1] as [string, RequestInit];
@@ -1814,6 +1816,7 @@ describe('gemini native proxy routes', () => {
     expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
       status: 403,
       errorText: JSON.stringify({ error: { message: 'forbidden on first channel' } }),
+      modelName: 'gemini-2.5-flash',
     }));
   });
 
@@ -1860,6 +1863,7 @@ describe('gemini native proxy routes', () => {
     expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
       status: 500,
       errorText: 'upstream crash',
+      modelName: 'gemini-2.5-flash',
     }));
   });
 
@@ -1902,6 +1906,7 @@ describe('gemini native proxy routes', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
       errorText: 'socket hang up',
+      modelName: 'gemini-2.5-flash',
     }));
   });
 
@@ -1951,6 +1956,7 @@ describe('gemini native proxy routes', () => {
     expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
       status: 500,
       errorText: JSON.stringify({ error: { message: 'upstream unavailable' } }),
+      modelName: 'gemini-2.5-flash',
     }));
     expect(response.body).toContain('hello from fallback sse');
   });
@@ -2015,6 +2021,6 @@ describe('gemini native proxy routes', () => {
       totalTokens: 17,
       errorMessage: '[downstream:/v1beta/models/gemini-2.5-flash:streamGenerateContent] [upstream:/v1beta/models/gemini-2.5-flash:streamGenerateContent]',
     }));
-    expect(recordSuccessMock).toHaveBeenCalledWith(12, expect.any(Number), 0);
+    expect(recordSuccessMock).toHaveBeenCalledWith(12, expect.any(Number), 0, 'gemini-2.5-flash');
   });
 });

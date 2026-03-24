@@ -423,6 +423,7 @@ describe('responses websocket transport', () => {
     expect(messages[3]?.response?.output?.[0]?.content?.[0]?.text).toBe('pong');
     expect(fetchMock).toHaveBeenCalledTimes(0);
     expect(upstreamConnectionCount).toBe(1);
+    expect(recordSuccessMock).toHaveBeenCalledWith(11, expect.any(Number), 0, 'gpt-5.4');
   });
 
   it('echoes x-codex-turn-state on websocket upgrade responses', async () => {
@@ -519,6 +520,11 @@ describe('responses websocket transport', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(messages.map((message) => message.type)).toEqual(['response.completed']);
     expect(messages[0]?.response?.id).toBe('resp_http_fallback');
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 426,
+      errorText: 'Upgrade Required',
+      modelName: 'gpt-5.4',
+    }));
   });
 
   it('falls back to the HTTP responses executor when the upstream codex websocket upgrade returns 401', async () => {
@@ -557,6 +563,71 @@ describe('responses websocket transport', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(messages.map((message) => message.type)).toEqual(['response.completed']);
     expect(messages[0]?.response?.id).toBe('resp_http_fallback_401');
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 401,
+      errorText: JSON.stringify({
+        error: {
+          message: 'expired token',
+          type: 'invalid_request_error',
+        },
+      }),
+      modelName: 'gpt-5.4',
+    }));
+  });
+
+  it('reselects a channel on the next turn after websocket upgrade fallback failed the previous channel', async () => {
+    const rejectedChannel = {
+      ...createSelectedChannel({
+        siteUrl: rejectedUpgradeSiteUrl,
+      }),
+      channel: { id: 21, routeId: 22 },
+    };
+    const healthyChannel = {
+      ...createSelectedChannel({
+        siteUrl: upstreamSiteUrl,
+      }),
+      channel: { id: 22, routeId: 22 },
+    };
+    selectChannelMock
+      .mockReturnValueOnce(rejectedChannel)
+      .mockReturnValueOnce(healthyChannel)
+      .mockReturnValueOnce(healthyChannel);
+    previewSelectedChannelMock.mockResolvedValue(healthyChannel);
+    fetchMock.mockResolvedValueOnce(createSseResponse([
+      'event: response.completed\n',
+      'data: {"type":"response.completed","response":{"id":"resp_http_fallback_retry","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n',
+      'data: [DONE]\n\n',
+    ]));
+
+    const socket = createClientSocket(baseUrl);
+    await waitForSocketOpen(socket);
+
+    const firstMessagesPromise = waitForSocketMessages(socket, 1);
+    socket.send(JSON.stringify({
+      type: 'response.create',
+      model: 'gpt-5.4',
+      input: [],
+    }));
+    const firstMessages = await firstMessagesPromise;
+
+    const secondMessagesPromise = waitForSocketMessages(socket, 1);
+    socket.send(JSON.stringify({
+      type: 'response.create',
+      model: 'gpt-5.4',
+      input: [],
+    }));
+    const secondMessages = await secondMessagesPromise;
+    socket.close();
+
+    expect(firstMessages[0]?.response?.id).toBe('resp_http_fallback_retry');
+    expect(secondMessages[0]?.type).toBe('response.completed');
+    expect(selectChannelMock).toHaveBeenCalledTimes(3);
+    expect(recordFailureMock).toHaveBeenCalledWith(21, expect.objectContaining({
+      status: 426,
+      errorText: 'Upgrade Required',
+      modelName: 'gpt-5.4',
+    }));
+    expect(recordSuccessMock).toHaveBeenCalledWith(22, expect.any(Number), 0, 'gpt-5.4');
   });
 
   it('preserves query parameter auth when websocket transport falls back to the HTTP responses route', async () => {
