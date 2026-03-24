@@ -38,6 +38,37 @@ const Monitors = lazy(() => import('./pages/Monitors.js'));
 const OAuthManagement = lazy(() => import('./pages/OAuthManagement.js'));
 const SiteAnnouncements = lazy(() => import('./pages/SiteAnnouncements.js'));
 
+const routePreloaders = {
+  '/': () => import('./pages/Dashboard.js'),
+  '/sites': () => import('./pages/Sites.js'),
+  '/site-announcements': () => import('./pages/SiteAnnouncements.js'),
+  '/accounts': () => import('./pages/Accounts.js'),
+  '/oauth': () => import('./pages/OAuthManagement.js'),
+  '/tokens': () => import('./pages/Tokens.js'),
+  '/checkin': () => import('./pages/CheckinLog.js'),
+  '/routes': () => import('./pages/TokenRoutes.js'),
+  '/logs': () => import('./pages/ProxyLogs.js'),
+  '/monitor': () => import('./pages/Monitors.js'),
+  '/settings': () => import('./pages/Settings.js'),
+  '/downstream-keys': () => import('./pages/DownstreamKeys.js'),
+  '/events': () => import('./pages/ProgramLogs.js'),
+  '/settings/import-export': () => import('./pages/ImportExport.js'),
+  '/settings/notify': () => import('./pages/NotificationSettings.js'),
+  '/models': () => import('./pages/Models.js'),
+  '/playground': () => import('./pages/ModelTester.js'),
+  '/about': () => import('./pages/About.js'),
+} as const;
+
+const preloadedRouteSet = new Set<string>();
+
+function preloadRoute(path: string) {
+  if (preloadedRouteSet.has(path)) return;
+  const loader = routePreloaders[path as keyof typeof routePreloaders];
+  if (!loader) return;
+  preloadedRouteSet.add(path);
+  void loader();
+}
+
 type ThemeMode = 'system' | 'light' | 'dark';
 
 type UserProfile = {
@@ -455,6 +486,14 @@ function OverlayFallback() {
   return null;
 }
 
+function navLinkPreloadProps(path: string) {
+  return {
+    onMouseEnter: () => preloadRoute(path),
+    onFocus: () => preloadRoute(path),
+    onTouchStart: () => preloadRoute(path),
+  };
+}
+
 function AppShell() {
   const { language, toggleLanguage, t } = useI18n();
   const [authed, setAuthed] = useState(() => hasValidAuthSession(localStorage));
@@ -484,6 +523,31 @@ function AppShell() {
   const displayName = rawDisplayName ? (rawDisplayName === '管理员' ? t('管理员') : rawDisplayName) : t('管理员');
   const resolvedThemeLabel = resolvedTheme === 'dark' ? t('深色') : t('浅色');
   const avatarUrl = buildDicebearAvatarUrl(userProfile.avatarStyle, userProfile.avatarSeed);
+
+  useEffect(() => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let idleId: number | null = null;
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      idleId = window.requestIdleCallback(() => {
+        preloadRoute('/accounts');
+        preloadRoute('/routes');
+        preloadRoute('/models');
+      }, { timeout: 2000 });
+    } else {
+      timeoutId = setTimeout(() => {
+        preloadRoute('/accounts');
+        preloadRoute('/routes');
+        preloadRoute('/models');
+      }, 1500);
+    }
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (idleId != null && typeof window !== 'undefined' && 'cancelIdleCallback' in window) {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -669,7 +733,7 @@ function AppShell() {
         </div>
         <nav className="topbar-nav">
           {topNavItems.map((item) => (
-            <NavLink key={item.to} to={item.to} end className={({ isActive }) => `topbar-nav-item ${isActive ? 'active' : ''}`}>
+            <NavLink key={item.to} to={item.to} end className={({ isActive }) => `topbar-nav-item ${isActive ? 'active' : ''}`} {...navLinkPreloadProps(item.to)}>
               {t(item.label)}
             </NavLink>
           ))}
@@ -814,6 +878,7 @@ function AppShell() {
                           end={item.to === '/' || item.to === '/settings'}
                           className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
                           onClick={() => setDrawerOpen(false)}
+                          {...navLinkPreloadProps(item.to)}
                         >
                           {item.icon}
                           <span>{t(item.label)}</span>
@@ -829,6 +894,7 @@ function AppShell() {
                         to={item.to}
                         className={({ isActive }) => `mobile-nav-item ${isActive ? 'active' : ''}`}
                         onClick={() => setDrawerOpen(false)}
+                        {...navLinkPreloadProps(item.to)}
                       >
                         <span>{t(item.label)}</span>
                       </NavLink>
@@ -844,14 +910,15 @@ function AppShell() {
               <div key={group.label} className="sidebar-group">
                 {!sidebarCollapsed && <div className="sidebar-group-label">{t(group.label)}</div>}
                 {group.items.map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={item.to === '/' || item.to === '/settings'}
-                    className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
-                    data-tooltip={sidebarCollapsed ? t(item.label) : undefined}
-                    aria-label={sidebarCollapsed ? t(item.label) : undefined}
-                  >
+                    <NavLink
+                      key={item.to}
+                      to={item.to}
+                      end={item.to === '/' || item.to === '/settings'}
+                      className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
+                      data-tooltip={sidebarCollapsed ? t(item.label) : undefined}
+                      aria-label={sidebarCollapsed ? t(item.label) : undefined}
+                      {...navLinkPreloadProps(item.to)}
+                    >
                     {item.icon}
                     {!sidebarCollapsed && <span>{t(item.label)}</span>}
                   </NavLink>
