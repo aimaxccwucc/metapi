@@ -88,6 +88,97 @@ const EMPTY_ROUTE_FORM: RouteEditorForm = {
   advancedOpen: false,
 };
 
+type ModelTokenCandidatesPayload = {
+  models?: RouteModelCandidatesByModelName;
+  modelsWithoutToken?: MissingTokenModelsByName;
+  modelsMissingTokenGroups?: MissingTokenModelsByName;
+  endpointTypesByModel?: Record<string, string[]>;
+};
+
+type ExplicitGroupSaveFeedback = {
+  selectedCount: number;
+  readyCount: number;
+  zeroChannelRoutes: string[];
+  missingTokenRoutes: string[];
+  missingGroupRoutes: string[];
+};
+
+function pickFeedbackExamples(names: string[]): string {
+  return names.slice(0, 2).join('、');
+}
+
+function buildExplicitGroupSaveFeedback(
+  sourceRouteIds: number[],
+  summaries: RouteSummaryRow[],
+  candidateRows?: ModelTokenCandidatesPayload,
+): ExplicitGroupSaveFeedback | null {
+  const normalizedSourceRouteIds = Array.from(new Set(
+    (sourceRouteIds || []).filter((routeId) => Number.isFinite(routeId) && routeId > 0),
+  ));
+  if (normalizedSourceRouteIds.length === 0) return null;
+
+  const selectedRoutes = summaries.filter((route) => normalizedSourceRouteIds.includes(route.id));
+  const routePatterns = selectedRoutes.map((route) => ({
+    id: route.id,
+    modelPattern: route.modelPattern,
+  }));
+  const missingTokenIndex = buildRouteMissingTokenIndex(
+    routePatterns,
+    normalizeMissingTokenModels(candidateRows?.modelsWithoutToken || {}),
+    matchesModelPattern,
+  );
+  const missingGroupIndex = buildRouteMissingTokenIndex(
+    routePatterns,
+    normalizeMissingTokenModels(candidateRows?.modelsMissingTokenGroups || {}),
+    matchesModelPattern,
+  );
+
+  const zeroChannelRoutes: string[] = [];
+  const missingTokenRoutes: string[] = [];
+  const missingGroupRoutes: string[] = [];
+  let readyCount = 0;
+
+  for (const route of selectedRoutes) {
+    const title = resolveRouteTitle(route);
+    const hasChannels = (route.enabledChannelCount || route.channelCount || 0) > 0;
+    const missingTokenHints = missingTokenIndex[route.id] || [];
+    const missingGroupHints = missingGroupIndex[route.id] || [];
+    if (hasChannels) readyCount += 1;
+    else zeroChannelRoutes.push(title);
+    if (missingTokenHints.length > 0) missingTokenRoutes.push(title);
+    if (missingGroupHints.length > 0) missingGroupRoutes.push(title);
+  }
+
+  return {
+    selectedCount: normalizedSourceRouteIds.length,
+    readyCount,
+    zeroChannelRoutes,
+    missingTokenRoutes,
+    missingGroupRoutes,
+  };
+}
+
+function formatExplicitGroupSaveFeedback(feedback: ExplicitGroupSaveFeedback): string {
+  const parts = [`来源检查：${feedback.readyCount}/${feedback.selectedCount} 个来源模型已有可用通道`];
+  if (feedback.zeroChannelRoutes.length > 0) {
+    parts.push(`无通道 ${feedback.zeroChannelRoutes.length} 个（${pickFeedbackExamples(feedback.zeroChannelRoutes)}）`);
+  }
+  if (feedback.missingTokenRoutes.length > 0) {
+    parts.push(`缺少 Key ${feedback.missingTokenRoutes.length} 个（${pickFeedbackExamples(feedback.missingTokenRoutes)}）`);
+  }
+  if (feedback.missingGroupRoutes.length > 0) {
+    parts.push(`缺少分组 ${feedback.missingGroupRoutes.length} 个（${pickFeedbackExamples(feedback.missingGroupRoutes)}）`);
+  }
+  if (
+    feedback.zeroChannelRoutes.length === 0
+    && feedback.missingTokenRoutes.length === 0
+    && feedback.missingGroupRoutes.length === 0
+  ) {
+    parts.push('来源可直接用于转发');
+  }
+  return parts.join('；');
+}
+
 function normalizeRouteRoutingStrategyValue(value?: RouteRoutingStrategy | null): RouteRoutingStrategy {
   if (value === 'round_robin' || value === 'stable_first') return value;
   return 'weighted';
@@ -260,8 +351,10 @@ export default function TokenRoutes() {
 
     const summaries = (summaryRows || []) as RouteSummaryRow[];
     setRouteSummaries(summaries);
+    let candidateRows: ModelTokenCandidatesPayload | undefined;
     if (options?.includeCandidates) {
-      await loadRouteCandidates(options.forceCandidates === true);
+      candidateRows = await api.getModelTokenCandidates() as ModelTokenCandidatesPayload;
+      applyRouteCandidateRows(candidateRows);
     }
     const decisionPlaceholder: Record<number, RouteDecision | null> = {};
     for (const route of summaries) {
@@ -271,6 +364,7 @@ export default function TokenRoutes() {
     setDecisionAutoSkipped(
       summaries.some((route) => isRouteExactModel(route) && !(route.decisionSnapshot || route.decisionSnapshotAvailable)),
     );
+    return { summaries, candidateRows };
   };
 
   useEffect(() => {
@@ -392,6 +486,7 @@ export default function TokenRoutes() {
 
     setSaving(true);
     try {
+      const selectedSourceRouteIds = routeMode === 'explicit_group' ? [...form.sourceRouteIds] : [];
       if (editingRouteId) {
         const currentRoute = routeSummaries.find((route) => route.id === editingRouteId) || null;
         const modelPatternChanged = routeMode === 'pattern' && !!currentRoute && currentRoute.modelPattern !== trimmedModelPattern;
@@ -413,6 +508,13 @@ export default function TokenRoutes() {
         });
         toast.success(tr('群组已创建'));
       }
+      const refreshed = await load({ includeCandidates: routeMode === 'explicit_group' || routeCandidatesLoaded, forceCandidates: routeMode === 'explicit_group' || routeCandidatesLoaded });
+      if (routeMode === 'explicit_group') {
+        const feedback = buildExplicitGroupSaveFeedback(selectedSourceRouteIds, refreshed.summaries, refreshed.candidateRows);
+        if (feedback) {
+          toast.info(formatExplicitGroupSaveFeedback(feedback));
+        }
+      }
       setShowManual(false);
       resetRouteForm();
       setShowOnlyManualRoutes(true);
@@ -421,7 +523,6 @@ export default function TokenRoutes() {
       setActiveEndpointType(null);
       setActiveGroupFilter(null);
       setSearch('');
-      await load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded });
     } catch (e: any) {
       toast.error(e.message || (editingRouteId ? tr('更新群组失败') : tr('创建群组失败')));
     } finally {

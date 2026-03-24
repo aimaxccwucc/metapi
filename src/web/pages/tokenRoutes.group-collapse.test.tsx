@@ -1179,6 +1179,87 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 
+  it('shows source readiness feedback after saving an explicit group', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        id: 11, modelPattern: 'claude-opus-4-5', displayName: null,
+        displayIcon: null, modelMapping: null, enabled: true,
+        routeMode: 'pattern', sourceRouteIds: [],
+        channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+      {
+        id: 12, modelPattern: 'claude-sonnet-4-5', displayName: null,
+        displayIcon: null, modelMapping: null, enabled: true,
+        routeMode: 'pattern', sourceRouteIds: [],
+        channelCount: 0, enabledChannelCount: 0, siteNames: ['site-b'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+    ]);
+    apiMock.getModelTokenCandidates.mockResolvedValue({
+      models: {
+        'claude-opus-4-5': [{ accountId: 301, tokenId: 401, tokenName: 'default', isDefault: true, username: 'tester', siteId: 11, siteName: 'site-a' }],
+      },
+      modelsWithoutToken: {
+        'claude-sonnet-4-5': [{ accountId: 302, username: 'tester2', siteId: 12, siteName: 'site-b' }],
+      },
+      modelsMissingTokenGroups: {},
+      endpointTypesByModel: {},
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '新建群组').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findInputByPlaceholder(root.root, '对外模型名').props.onChange({ target: { value: 'claude-opus-4-6' } });
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '选择来源模型').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, 'claude-opus-4-5').props.onClick();
+        findButtonByText(root.root, 'claude-sonnet-4-5').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '确认选择').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '创建群组').props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root).replace(/\s+/g, '');
+      expect(text).toContain('来源检查：1/2个来源模型已有可用通道');
+      expect(text).toContain('无通道1个（claude-sonnet-4-5）');
+      expect(text).toContain('缺少Key1个（claude-sonnet-4-5）');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('renders a larger source picker, progressively loads cards, and can probe source model availability', async () => {
     apiMock.getRoutesSummary.mockResolvedValue(
       Array.from({ length: 55 }, (_, index) => ({
