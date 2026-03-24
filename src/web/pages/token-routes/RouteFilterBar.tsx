@@ -7,6 +7,8 @@ import { resolveEndpointTypeIconModel, siteAvatarLetters } from './utils.js';
 
 type RouteFilterBarProps = {
   totalRouteCount: number;
+  showOnlyManualRoutes: boolean;
+  setShowOnlyManualRoutes: (value: boolean | ((prev: boolean) => boolean)) => void;
   activeBrand: string | null;
   setActiveBrand: (brand: string | null) => void;
   activeSite: string | null;
@@ -78,6 +80,8 @@ function ActiveFilterSummary({
 export default function RouteFilterBar(props: RouteFilterBarProps) {
   const {
     totalRouteCount,
+    showOnlyManualRoutes,
+    setShowOnlyManualRoutes,
     activeBrand,
     setActiveBrand,
     activeSite,
@@ -123,6 +127,22 @@ export default function RouteFilterBar(props: RouteFilterBarProps) {
       {/* Expanded panel */}
       {expandPresence.shouldRender && (
         <div className={`route-filter-bar-expanded ${expandPresence.isVisible ? '' : 'is-closing'}`.trim()}>
+          {/* Brand row */}
+          <FilterRow label={tr('视图')}>
+            <FilterChip
+              active={showOnlyManualRoutes}
+              label={tr('只看我创建的')}
+              icon={<span style={{ fontSize: 10 }}>★</span>}
+              onClick={() => setShowOnlyManualRoutes(true)}
+            />
+            <FilterChip
+              active={!showOnlyManualRoutes}
+              label={tr('显示全部路由')}
+              icon={<span style={{ fontSize: 10 }}>∞</span>}
+              onClick={() => setShowOnlyManualRoutes(false)}
+            />
+          </FilterRow>
+
           {/* Brand row */}
           <FilterRow label={tr('品牌')}>
             <FilterChip

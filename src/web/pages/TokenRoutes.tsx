@@ -1137,16 +1137,6 @@ export default function TokenRoutes() {
 
           <button
             type="button"
-            aria-pressed={showOnlyManualRoutes}
-            onClick={() => setShowOnlyManualRoutes((prev) => !prev)}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-          >
-            {showOnlyManualRoutes ? tr('只看我创建的') : tr('显示全部路由')}
-          </button>
-
-          <button
-            type="button"
             aria-pressed={showZeroChannelRoutes}
             onClick={() => setShowZeroChannelRoutes((prev) => !prev)}
             className="btn btn-ghost"
@@ -1161,6 +1151,12 @@ export default function TokenRoutes() {
         </span>
       </div>
 
+      {showOnlyManualRoutes ? (
+        <div className="info-tip" style={{ marginBottom: 12 }}>
+          {tr('当前仅显示你手工创建的群组路由；如需排查系统自动生成的精确路由，请到筛选面板切换为“显示全部路由”。')}
+        </div>
+      ) : null}
+
       {/* Collapsible filter panel */}
       {isMobile ? (
         <>
@@ -1174,6 +1170,8 @@ export default function TokenRoutes() {
           <MobileFilterSheet open={showFilters} onClose={() => setShowFilters(false)} title={tr('筛选路由')}>
             <RouteFilterBar
               totalRouteCount={listVisibleRoutes.length}
+              showOnlyManualRoutes={showOnlyManualRoutes}
+              setShowOnlyManualRoutes={setShowOnlyManualRoutes}
               activeBrand={activeBrand}
               setActiveBrand={setActiveBrand}
               activeSite={activeSite}
@@ -1194,6 +1192,8 @@ export default function TokenRoutes() {
       ) : (
         <RouteFilterBar
           totalRouteCount={listVisibleRoutes.length}
+          showOnlyManualRoutes={showOnlyManualRoutes}
+          setShowOnlyManualRoutes={setShowOnlyManualRoutes}
           activeBrand={activeBrand}
           setActiveBrand={setActiveBrand}
           activeSite={activeSite}
