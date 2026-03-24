@@ -67,6 +67,14 @@ export function SortableChannelRow({
   );
 
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
+  const nowIso = new Date().toISOString();
+  const runtimeHealthMultiplier = Number(decisionCandidate?.siteRuntimeState?.combinedMultiplier ?? 1);
+  const runtimeHealthText = Number.isFinite(runtimeHealthMultiplier)
+    ? `${Math.round(runtimeHealthMultiplier * 100)}%`
+    : null;
+  const cooldownActive = !!decisionCandidate?.cooldownUntil && decisionCandidate.cooldownUntil > nowIso;
+  const failStreak = Math.max(0, decisionCandidate?.consecutiveFailCount ?? 0);
+  const cooldownLevel = Math.max(0, decisionCandidate?.cooldownLevel ?? 0);
 
   if (mobile) {
     return (
@@ -175,6 +183,34 @@ export function SortableChannelRow({
                   data-tooltip="该通道由用户手动添加，而非系统自动生成"
                 >
                   手动配置
+                </span>
+              ) : null}
+
+              {cooldownActive ? (
+                <span className="badge badge-error" style={{ fontSize: 10 }}>
+                  冷却中
+                </span>
+              ) : null}
+
+              {failStreak > 0 ? (
+                <span className="badge badge-warning" style={{ fontSize: 10 }}>
+                  连败 {failStreak}
+                </span>
+              ) : null}
+
+              {cooldownLevel > 0 ? (
+                <span className="badge badge-muted" style={{ fontSize: 10 }}>
+                  冷却级别 {cooldownLevel}
+                </span>
+              ) : null}
+
+              {runtimeHealthText ? (
+                <span
+                  className="badge badge-muted"
+                  style={{ fontSize: 10 }}
+                  data-tooltip={`站点运行时健康倍率：${runtimeHealthText}`}
+                >
+                  运行时 {runtimeHealthText}
                 </span>
               ) : null}
             </div>
@@ -373,6 +409,34 @@ export function SortableChannelRow({
             data-tooltip="该通道由用户手动添加，而非系统自动生成"
           >
             手动配置
+          </span>
+        ) : null}
+
+        {cooldownActive ? (
+          <span className="badge badge-error" style={{ fontSize: 10 }}>
+            冷却中
+          </span>
+        ) : null}
+
+        {failStreak > 0 ? (
+          <span className="badge badge-warning" style={{ fontSize: 10 }}>
+            连败 {failStreak}
+          </span>
+        ) : null}
+
+        {cooldownLevel > 0 ? (
+          <span className="badge badge-muted" style={{ fontSize: 10 }}>
+            冷却级别 {cooldownLevel}
+          </span>
+        ) : null}
+
+        {runtimeHealthText ? (
+          <span
+            className="badge badge-muted"
+            style={{ fontSize: 10 }}
+            data-tooltip={`站点运行时健康倍率：${runtimeHealthText}`}
+          >
+            运行时 {runtimeHealthText}
           </span>
         ) : null}
 

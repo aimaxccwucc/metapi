@@ -990,6 +990,10 @@ export interface RouteDecisionCandidate {
   eligible: boolean;
   recentlyFailed: boolean;
   avoidedByRecentFailure: boolean;
+  cooldownUntil?: string | null;
+  lastFailAt?: string | null;
+  consecutiveFailCount?: number;
+  cooldownLevel?: number;
   probability: number;
   reason: string;
   circuitStatus?: {
@@ -1003,6 +1007,13 @@ export interface RouteDecisionCandidate {
     isHalfOpen: boolean;
     reason: string;
     effectiveMultiplier: number;
+  };
+  siteRuntimeState?: {
+    globalMultiplier: number;
+    modelMultiplier: number;
+    combinedMultiplier: number;
+    globalBreakerOpen: boolean;
+    modelBreakerOpen: boolean;
   };
 }
 
@@ -1683,7 +1694,8 @@ export class TokenRouter {
         runtimeModelName,
       });
       const modelCircuitStatus = getCandidateModelCircuitStatus(row.channel.id, runtimeModelName, nowMs);
-      const runtimeCircuit = buildRuntimeCircuitStatus(getSiteRuntimeHealthDetails(row.site.id, runtimeModelName, nowMs));
+      const runtimeHealthDetails = getSiteRuntimeHealthDetails(row.site.id, runtimeModelName, nowMs);
+      const runtimeCircuit = buildRuntimeCircuitStatus(runtimeHealthDetails);
 
       const recentlyFailed = routeStrategy !== 'round_robin'
         ? isChannelRecentlyFailed(row.channel, nowMs)
@@ -1710,10 +1722,21 @@ export class TokenRouter {
         eligible,
         recentlyFailed,
         avoidedByRecentFailure: false,
+        cooldownUntil: row.channel.cooldownUntil ?? null,
+        lastFailAt: row.channel.lastFailAt ?? null,
+        consecutiveFailCount: Math.max(0, row.channel.consecutiveFailCount ?? 0),
+        cooldownLevel: Math.max(0, row.channel.cooldownLevel ?? 0),
         probability: 0,
         reason,
         circuitStatus: runtimeCircuit,
         modelCircuitStatus: modelCircuitStatus ?? undefined,
+        siteRuntimeState: {
+          globalMultiplier: runtimeHealthDetails.globalMultiplier,
+          modelMultiplier: runtimeHealthDetails.modelMultiplier,
+          combinedMultiplier: runtimeHealthDetails.combinedMultiplier,
+          globalBreakerOpen: runtimeHealthDetails.globalBreakerOpen,
+          modelBreakerOpen: runtimeHealthDetails.modelBreakerOpen,
+        },
       };
       candidates.push(candidate);
       candidateMap.set(candidate.channelId, candidate);
@@ -1828,7 +1851,7 @@ export class TokenRouter {
     }
 
     const sortedPriorities = Array.from(availableByPriority.keys()).sort((a, b) => a - b);
-    let degradedAcrossPriority = false;
+    let degradedAcrossPriorityByRecentFailure = false;
     let selected: RouteChannelCandidate | null = null;
     let selectedPriority = 0;
 
@@ -1837,6 +1860,8 @@ export class TokenRouter {
       if (rawLayer.length === 0) continue;
 
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
+      const fullyBlockedByRuntimeBreaker =
+        breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length;
       if (breakerFiltered.avoided.length > 0) {
         for (const item of breakerFiltered.avoided) {
           const target = candidateMap.get(item.candidate.channel.id);
@@ -1850,8 +1875,11 @@ export class TokenRouter {
           };
         }
       }
-      if (breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length) {
-        degradedAcrossPriority = true;
+      if (fullyBlockedByRuntimeBreaker) {
+        const breakerSummaryLabel = breakerFiltered.avoided.some((item) => item.reason.includes('模型熔断'))
+          ? '运行时熔断避让'
+          : '站点熔断避让';
+        summary.push(`优先级 P${priority}：${breakerSummaryLabel} ${breakerFiltered.avoided.length}`);
         continue;
       }
 
@@ -1876,7 +1904,7 @@ export class TokenRouter {
         }
       }
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        degradedAcrossPriority = true;
+        degradedAcrossPriorityByRecentFailure = true;
         continue;
       }
 
@@ -1909,21 +1937,24 @@ export class TokenRouter {
       if (avoided.length > 0) {
         layerSummaryParts.push(`最近失败避让 ${avoided.length}`);
       }
-      if (degradedAcrossPriority) {
+      if (degradedAcrossPriorityByRecentFailure) {
         layerSummaryParts.push('上层最近失败，已自动降级');
       }
       summary.push(layerSummaryParts.join('，'));
       break;
     }
 
-    if (!selected && degradedAcrossPriority) {
+    if (!selected && degradedAcrossPriorityByRecentFailure) {
       for (const priority of sortedPriorities) {
         const rawLayer = availableByPriority.get(priority) ?? [];
         if (rawLayer.length === 0) continue;
         const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
-        const fallbackCandidates = breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length
-          ? rawLayer
-          : breakerFiltered.candidates;
+        const fullyBlockedByRuntimeBreaker =
+          breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length;
+        if (fullyBlockedByRuntimeBreaker) {
+          continue;
+        }
+        const fallbackCandidates = breakerFiltered.candidates;
         const fallbackPartition = partitionRecentlyFailedCandidates(
           fallbackCandidates,
           nowMs,
@@ -2254,12 +2285,13 @@ export class TokenRouter {
     }
 
     const sortedPriorities = Array.from(layers.keys()).sort((a, b) => a - b);
-    let degradedAcrossPriority = false;
+    let degradedAcrossPriorityByRecentFailure = false;
     for (const priority of sortedPriorities) {
       const rawLayer = layers.get(priority) ?? [];
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
-      if (breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length) {
-        degradedAcrossPriority = true;
+      const fullyBlockedByRuntimeBreaker =
+        breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length;
+      if (fullyBlockedByRuntimeBreaker) {
         continue;
       }
       const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
@@ -2267,7 +2299,7 @@ export class TokenRouter {
         ? recentFailurePartition.preferred
         : breakerFiltered.candidates;
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        degradedAcrossPriority = true;
+        degradedAcrossPriorityByRecentFailure = true;
         continue;
       }
       const selected = routeStrategy === 'stable_first'
@@ -2326,13 +2358,16 @@ export class TokenRouter {
       };
     }
 
-    if (degradedAcrossPriority) {
+    if (degradedAcrossPriorityByRecentFailure) {
       for (const priority of sortedPriorities) {
         const rawLayer = layers.get(priority) ?? [];
         const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
-        const fallbackCandidates = breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length
-          ? rawLayer
-          : breakerFiltered.candidates;
+        const fullyBlockedByRuntimeBreaker =
+          breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length;
+        if (fullyBlockedByRuntimeBreaker) {
+          continue;
+        }
+        const fallbackCandidates = breakerFiltered.candidates;
         const fallbackPartition = partitionRecentlyFailedCandidates(
           fallbackCandidates,
           nowMs,

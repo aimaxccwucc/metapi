@@ -926,6 +926,89 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.summary.join(' ')).toContain('本次未选出通道');
   });
 
+  it('does not fall back to a runtime-breaker-blocked layer when only lower priorities are recently failed', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-runtime-breaker-guard');
+
+    const sitePrimary = await createSite('runtime-breaker-primary');
+    const accountPrimary = await createAccount(sitePrimary.id, 'runtime-breaker-user-primary');
+    const tokenPrimary = await createToken(accountPrimary.id, 'runtime-breaker-token-primary');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountPrimary.id,
+      tokenId: tokenPrimary.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteFallback = await createSite('runtime-breaker-fallback');
+    const accountFallback = await createAccount(siteFallback.id, 'runtime-breaker-user-fallback');
+    const tokenFallback = await createToken(accountFallback.id, 'runtime-breaker-token-fallback');
+    const fallbackChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountFallback.id,
+      tokenId: tokenFallback.id,
+      priority: 10,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(primaryChannel.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-runtime-breaker-guard',
+    });
+    await router.recordFailure(primaryChannel.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-runtime-breaker-guard',
+    });
+    await router.recordFailure(primaryChannel.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-runtime-breaker-guard',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).where(eq(schema.routeChannels.id, primaryChannel.id)).run();
+
+    await router.recordFailure(fallbackChannel.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-runtime-breaker-guard',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+    }).where(eq(schema.routeChannels.id, fallbackChannel.id)).run();
+    invalidateTokenRouterCache();
+
+    const preview = await router.previewSelectedChannel('gpt-runtime-breaker-guard');
+    const decision = await router.explainSelection('gpt-runtime-breaker-guard');
+    const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+    const fallbackCandidate = decision.candidates.find((candidate) => candidate.channelId === fallbackChannel.id);
+
+    expect(preview).toBeNull();
+    expect(decision.selectedChannelId).toBeUndefined();
+    expect(primaryCandidate?.eligible).toBe(false);
+    expect(primaryCandidate?.reason || '').toContain('熔断');
+    expect(fallbackCandidate?.avoidedByRecentFailure).toBe(true);
+    expect(fallbackCandidate?.reason || '').toContain('最近失败');
+    expect(decision.summary.join(' ')).toContain('本次未选出通道');
+  });
+
   it('extends cooldown for auth-like failures to avoid hammering bad tokens', async () => {
     const route = await createRoute('gpt-auth-cooldown');
 

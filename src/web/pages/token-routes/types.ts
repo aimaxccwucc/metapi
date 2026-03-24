@@ -93,6 +93,10 @@ export type RouteDecisionCandidate = {
   eligible: boolean;
   recentlyFailed: boolean;
   avoidedByRecentFailure: boolean;
+  cooldownUntil?: string | null;
+  lastFailAt?: string | null;
+  consecutiveFailCount?: number;
+  cooldownLevel?: number;
   probability: number;
   reason: string;
   circuitStatus?: {
@@ -106,6 +110,13 @@ export type RouteDecisionCandidate = {
     isHalfOpen?: boolean;
     reason?: string;
     effectiveMultiplier?: number;
+  };
+  siteRuntimeState?: {
+    globalMultiplier?: number;
+    modelMultiplier?: number;
+    combinedMultiplier?: number;
+    globalBreakerOpen?: boolean;
+    modelBreakerOpen?: boolean;
   };
 };
 
