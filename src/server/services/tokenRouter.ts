@@ -890,6 +890,26 @@ export function filterRecentlyFailedCandidates<T extends { channel: FailureAware
   return healthy.length > 0 ? healthy : candidates;
 }
 
+function partitionRecentlyFailedCandidates<T extends { channel: FailureAwareChannel }>(
+  candidates: T[],
+  nowMs = Date.now(),
+  avoidSec?: number,
+): {
+  preferred: T[];
+  avoided: T[];
+} {
+  if (candidates.length === 0) {
+    return { preferred: [], avoided: [] };
+  }
+  const effectiveAvoidSec = avoidSec ?? resolveFailureBackoffSec(Math.max(...candidates.map((candidate) => candidate.channel.failCount ?? 0), 0));
+  if (effectiveAvoidSec <= 0) {
+    return { preferred: candidates, avoided: [] };
+  }
+  const preferred = candidates.filter((candidate) => !isChannelRecentlyFailed(candidate.channel, nowMs, effectiveAvoidSec));
+  const avoided = candidates.filter((candidate) => isChannelRecentlyFailed(candidate.channel, nowMs, effectiveAvoidSec));
+  return { preferred, avoided };
+}
+
 export interface RouteDecisionCandidate {
   channelId: number;
   accountId: number;
@@ -1654,6 +1674,7 @@ export class TokenRouter {
     }
 
     const sortedPriorities = Array.from(availableByPriority.keys()).sort((a, b) => a - b);
+    let degradedAcrossPriority = false;
     let selected: RouteChannelCandidate | null = null;
     let selectedPriority = 0;
 
@@ -1675,8 +1696,13 @@ export class TokenRouter {
         }
       }
 
-      const filteredLayer = filterRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
-      const avoided = breakerFiltered.candidates.filter((row) => !filteredLayer.some((item) => item.channel.id === row.channel.id));
+      const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
+      const filteredLayer = recentFailurePartition.preferred.length > 0
+        ? recentFailurePartition.preferred
+        : breakerFiltered.candidates;
+      const avoided = recentFailurePartition.preferred.length > 0
+        ? recentFailurePartition.avoided
+        : [];
       if (avoided.length > 0) {
         for (const row of avoided) {
           const target = candidateMap.get(row.channel.id);
@@ -1684,6 +1710,16 @@ export class TokenRouter {
           target.avoidedByRecentFailure = true;
           target.reason = `最近失败，优先避让（${resolveFailureBackoffSec(row.channel.failCount)} 秒窗口）`;
         }
+      }
+      if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
+        for (const row of recentFailurePartition.avoided) {
+          const target = candidateMap.get(row.channel.id);
+          if (!target) continue;
+          target.avoidedByRecentFailure = true;
+          target.reason = `最近失败，优先避让（${resolveFailureBackoffSec(row.channel.failCount)} 秒窗口）`;
+        }
+        degradedAcrossPriority = true;
+        continue;
       }
 
       const weighted = this.calculateWeightedSelection(
@@ -1715,8 +1751,39 @@ export class TokenRouter {
       if (avoided.length > 0) {
         layerSummaryParts.push(`最近失败避让 ${avoided.length}`);
       }
+      if (degradedAcrossPriority) {
+        layerSummaryParts.push('上层最近失败，已自动降级');
+      }
       summary.push(layerSummaryParts.join('，'));
       break;
+    }
+
+    if (!selected && degradedAcrossPriority) {
+      for (const priority of sortedPriorities) {
+        const rawLayer = availableByPriority.get(priority) ?? [];
+        if (rawLayer.length === 0) continue;
+        const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
+        const weighted = this.calculateWeightedSelection(
+          breakerFiltered.candidates,
+          useChannelSourceModelForCost ? runtimeModelResolver : mappedModel,
+          downstreamPolicy,
+          nowMs,
+          routeStrategy === 'stable_first' ? 'stable_first' : 'weighted',
+        );
+        if (!weighted.selected) continue;
+        for (const detail of weighted.details) {
+          const target = candidateMap.get(detail.candidate.channel.id);
+          if (!target) continue;
+          if (target.eligible && !target.avoidedByRecentFailure) {
+            target.probability = Number((detail.probability * 100).toFixed(2));
+            target.reason = `${detail.reason}；同层均近期失败，允许回退重试`;
+          }
+        }
+        selected = weighted.selected;
+        selectedPriority = priority;
+        summary.push(`优先级 P${priority}：同层均近期失败，允许回退重试`);
+        break;
+      }
     }
 
     if (!selected) {
@@ -1977,10 +2044,18 @@ export class TokenRouter {
     }
 
     const sortedPriorities = Array.from(layers.keys()).sort((a, b) => a - b);
+    let degradedAcrossPriority = false;
     for (const priority of sortedPriorities) {
       const rawLayer = layers.get(priority) ?? [];
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
-      const candidates = filterRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
+      const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
+      const candidates = recentFailurePartition.preferred.length > 0
+        ? recentFailurePartition.preferred
+        : breakerFiltered.candidates;
+      if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
+        degradedAcrossPriority = true;
+        continue;
+      }
       const selected = routeStrategy === 'stable_first'
         ? this.stableFirstSelect(
           candidates,
@@ -2015,6 +2090,47 @@ export class TokenRouter {
         tokenName: selected.token?.name || 'default',
         actualModel,
       };
+    }
+
+    if (degradedAcrossPriority) {
+      for (const priority of sortedPriorities) {
+        const rawLayer = layers.get(priority) ?? [];
+        const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
+        const selected = routeStrategy === 'stable_first'
+          ? this.stableFirstSelect(
+            breakerFiltered.candidates,
+            requestedByDisplayName ? runtimeModelResolver : mappedModel,
+            downstreamPolicy,
+            nowMs,
+          )
+          : this.weightedRandomSelect(
+            breakerFiltered.candidates,
+            requestedByDisplayName ? runtimeModelResolver : mappedModel,
+            downstreamPolicy,
+            nowMs,
+          );
+        if (!selected) continue;
+
+        const tokenValue = this.resolveChannelTokenValue(selected);
+        if (!tokenValue) continue;
+        if (routeStrategy === 'stable_first' && recordSelection) {
+          await this.recordChannelSelection(selected.channel.id);
+        }
+
+        const actualModel = resolveActualModelForSelectedChannel(
+          requestedModel,
+          match.route,
+          mappedModel,
+          selected.channel.sourceModel,
+        );
+
+        return {
+          ...selected,
+          tokenValue,
+          tokenName: selected.token?.name || 'default',
+          actualModel,
+        };
+      }
     }
 
     return null;

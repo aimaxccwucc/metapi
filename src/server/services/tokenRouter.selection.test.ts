@@ -802,4 +802,123 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.summary.join(' ')).toContain('稳定优先');
     expect(decision.selectedChannelId).toBe(channelB.id);
   });
+
+  it('falls through to the next priority when all higher-priority channels recently failed', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-5.6');
+
+    const sitePrimary = await createSite('degrade-primary');
+    const accountPrimary = await createAccount(sitePrimary.id, 'degrade-user-primary');
+    const tokenPrimary = await createToken(accountPrimary.id, 'degrade-token-primary');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountPrimary.id,
+      tokenId: tokenPrimary.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteFallback = await createSite('degrade-fallback');
+    const accountFallback = await createAccount(siteFallback.id, 'degrade-user-fallback');
+    const tokenFallback = await createToken(accountFallback.id, 'degrade-token-fallback');
+    const fallbackChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountFallback.id,
+      tokenId: tokenFallback.id,
+      priority: 10,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(primaryChannel.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-5.6',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+    }).where(eq(schema.routeChannels.id, primaryChannel.id)).run();
+    invalidateTokenRouterCache();
+
+    const preview = await router.previewSelectedChannel('gpt-5.6');
+    const decision = await router.explainSelection('gpt-5.6');
+    const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+    const fallbackCandidate = decision.candidates.find((candidate) => candidate.channelId === fallbackChannel.id);
+
+    expect(preview?.channel.id).toBe(fallbackChannel.id);
+    expect(decision.selectedChannelId).toBe(fallbackChannel.id);
+    expect(primaryCandidate?.avoidedByRecentFailure).toBe(true);
+    expect(primaryCandidate?.reason || '').toContain('最近失败');
+    expect(fallbackCandidate?.probability || 0).toBeGreaterThan(0);
+    expect(decision.summary.join(' ')).toContain('上层最近失败，已自动降级');
+  });
+
+  it('falls back to recently failed channels only when every priority layer is degraded', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-5.7');
+
+    const sitePrimary = await createSite('retry-primary');
+    const accountPrimary = await createAccount(sitePrimary.id, 'retry-user-primary');
+    const tokenPrimary = await createToken(accountPrimary.id, 'retry-token-primary');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountPrimary.id,
+      tokenId: tokenPrimary.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteFallback = await createSite('retry-fallback');
+    const accountFallback = await createAccount(siteFallback.id, 'retry-user-fallback');
+    const tokenFallback = await createToken(accountFallback.id, 'retry-token-fallback');
+    const fallbackChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountFallback.id,
+      tokenId: tokenFallback.id,
+      priority: 10,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(primaryChannel.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-5.7',
+    });
+    await router.recordFailure(fallbackChannel.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-5.7',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+    }).where(eq(schema.routeChannels.routeId, route.id)).run();
+    invalidateTokenRouterCache();
+
+    const preview = await router.previewSelectedChannel('gpt-5.7');
+    const decision = await router.explainSelection('gpt-5.7');
+
+    expect(preview).not.toBeNull();
+    expect([primaryChannel.id, fallbackChannel.id]).toContain(preview?.channel.id || -1);
+    expect(decision.selectedChannelId).not.toBeUndefined();
+    expect(decision.summary.join(' ')).toContain('同层均近期失败，允许回退重试');
+  });
 });
