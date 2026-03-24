@@ -11,6 +11,8 @@ const recordFailureMock = vi.fn();
 const refreshModelsAndRebuildRoutesMock = vi.fn();
 const reportProxyAllFailedMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
+const isTokenExpiredErrorMock = vi.fn(() => false);
+const shouldRetryProxyRequestMock = vi.fn(() => false);
 const estimateProxyCostMock = vi.fn(async (_arg?: any) => 0);
 const buildProxyBillingDetailsMock = vi.fn(async (_arg?: any) => null);
 const fetchModelPricingCatalogMock = vi.fn(async (_arg?: any): Promise<any> => null);
@@ -48,7 +50,7 @@ vi.mock('../../services/alertService.js', () => ({
 }));
 
 vi.mock('../../services/alertRules.js', () => ({
-  isTokenExpiredError: () => false,
+  isTokenExpiredError: (arg?: unknown) => (isTokenExpiredErrorMock as any)(arg),
 }));
 
 vi.mock('../../services/modelPricingService.js', () => ({
@@ -58,7 +60,7 @@ vi.mock('../../services/modelPricingService.js', () => ({
 }));
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
-  shouldRetryProxyRequest: () => false,
+  shouldRetryProxyRequest: (status?: unknown, message?: unknown) => (shouldRetryProxyRequestMock as any)(status, message),
 }));
 
 vi.mock('../../services/proxyUsageFallbackService.js', () => ({
@@ -98,6 +100,8 @@ describe('chat proxy stream behavior', () => {
     refreshModelsAndRebuildRoutesMock.mockReset();
     reportProxyAllFailedMock.mockReset();
     reportTokenExpiredMock.mockReset();
+    isTokenExpiredErrorMock.mockReset();
+    shouldRetryProxyRequestMock.mockReset();
     estimateProxyCostMock.mockClear();
     buildProxyBillingDetailsMock.mockClear();
     fetchModelPricingCatalogMock.mockReset();
@@ -128,6 +132,8 @@ describe('chat proxy stream behavior', () => {
     };
     config.proxyEmptyContentFailEnabled = false;
     config.proxyErrorKeywords = [];
+    isTokenExpiredErrorMock.mockReturnValue(false);
+    shouldRetryProxyRequestMock.mockReturnValue(false);
   });
 
   afterAll(async () => {
@@ -256,6 +262,7 @@ describe('chat proxy stream behavior', () => {
     expect(body?.error?.message).toContain('/v1/responses');
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
 
   it('sets anti-buffering SSE headers for streamed chat responses', async () => {
     const encoder = new TextEncoder();
@@ -1282,6 +1289,7 @@ describe('chat proxy stream behavior', () => {
     expect(forwardedBody.reasoning).toEqual({ effort: 'high' });
     expect(forwardedBody.include).toEqual(['reasoning.encrypted_content']);
   });
+
 
   it('retries /v1/responses without metadata when upstream returns empty upstream_error', async () => {
     fetchMock
