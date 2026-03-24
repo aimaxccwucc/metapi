@@ -1,8 +1,6 @@
 type StartupSummaryInput = {
   port: number;
   host: string;
-  authToken: string;
-  proxyToken: string;
 };
 
 type StartupEndpoints = {
@@ -10,8 +8,9 @@ type StartupEndpoints = {
   adminDashboardUrl: string;
   adminApiExample: string;
   proxyApiExample: string;
-  adminApiCurl: string;
-  proxyApiCurl: string;
+  healthzUrl: string;
+  readyzUrl: string;
+  metricsUrl: string;
 };
 
 function resolveDisplayHost(host: string): string {
@@ -26,14 +25,18 @@ export function buildStartupEndpoints(input: StartupSummaryInput): StartupEndpoi
 
   const adminApiExample = `${baseUrl}/api/stats/dashboard`;
   const proxyApiExample = `${baseUrl}/v1/chat/completions`;
+  const healthzUrl = `${baseUrl}/healthz`;
+  const readyzUrl = `${baseUrl}/readyz`;
+  const metricsUrl = `${baseUrl}/metrics`;
 
   return {
     baseUrl,
     adminDashboardUrl: baseUrl,
     adminApiExample,
     proxyApiExample,
-    adminApiCurl: `curl '${adminApiExample}' -H 'Authorization: Bearer ${input.authToken}'`,
-    proxyApiCurl: `curl '${proxyApiExample}' -H 'Authorization: Bearer ${input.proxyToken}' -H 'Content-Type: application/json' -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'`,
+    healthzUrl,
+    readyzUrl,
+    metricsUrl,
   };
 }
 
@@ -45,7 +48,10 @@ export function buildStartupSummaryLines(input: StartupSummaryInput): string[] {
     `Dashboard: ${endpoints.adminDashboardUrl}`,
     `Admin API: ${endpoints.adminApiExample}`,
     `Proxy API: ${endpoints.proxyApiExample}`,
-    `Admin curl: ${endpoints.adminApiCurl}`,
-    `Proxy curl: ${endpoints.proxyApiCurl}`,
+    `Health: ${endpoints.healthzUrl}`,
+    `Ready: ${endpoints.readyzUrl}`,
+    `Metrics: ${endpoints.metricsUrl}`,
+    'Admin auth: use the configured admin session to access /api/*',
+    'Proxy auth: use the configured PROXY_TOKEN or a managed downstream API key for /v1/*',
   ];
 }

@@ -201,6 +201,9 @@ function resolveEventTask(row: ProgramEvent, tasks: BackgroundTask[]) {
 }
 
 export default function ProgramLogs() {
+  const accountMaintenanceApi = api as typeof api & {
+    repairAccountKeys?: () => Promise<unknown>;
+  };
   const isMobile = useIsMobile();
   const [events, setEvents] = useState<ProgramEvent[]>([]);
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
@@ -311,7 +314,10 @@ export default function ProgramLogs() {
       if (task.type === 'checkin') {
         await api.triggerCheckinAll();
       } else if (task.type === 'token' && (task.title || '').includes('Key 一键修复')) {
-        await api.repairAccountKeys();
+        if (typeof accountMaintenanceApi.repairAccountKeys !== 'function') {
+          throw new Error('当前版本未提供 Key 修复接口');
+        }
+        await accountMaintenanceApi.repairAccountKeys();
       } else if (task.type === 'status' && (task.title || '').includes('运行健康状态')) {
         await api.refreshAccountHealth();
       } else if (task.type === 'status' && (task.title || '').includes('站点存活')) {

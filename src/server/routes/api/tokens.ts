@@ -1179,7 +1179,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       for (const sourceRouteId of sourceRouteIds) {
         const sourceRoute = await getRouteWithSources(sourceRouteId);
         if (!sourceRoute) continue;
-        await rebuildAutomaticRouteChannelsByModelPattern(sourceRoute.id, sourceRoute.modelPattern);
+        await populateRouteChannelsByModelPattern(sourceRoute.id, sourceRoute.modelPattern);
       }
     } else {
       await populateRouteChannelsByModelPattern(route.id, modelPattern);
@@ -1240,7 +1240,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       for (const sourceRouteId of nextSourceRouteIds) {
         const sourceRoute = await getRouteWithSources(sourceRouteId);
         if (!sourceRoute) continue;
-        await rebuildAutomaticRouteChannelsByModelPattern(sourceRoute.id, sourceRoute.modelPattern);
+        await populateRouteChannelsByModelPattern(sourceRoute.id, sourceRoute.modelPattern);
       }
     }
     const modelPatternChanged = nextModelPattern !== existingRoute.modelPattern;

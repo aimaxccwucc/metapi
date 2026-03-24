@@ -17,13 +17,6 @@
       - any-glob-to-any-file:
           - "src/web/**"
 
-"area: desktop":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/desktop/**"
-          - "electron-builder.yml"
-          - "tsconfig.desktop.json"
-
 "area: docs":
   - changed-files:
       - any-glob-to-any-file:

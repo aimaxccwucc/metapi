@@ -1,6 +1,8 @@
-import { useState, useMemo } from 'react';
-import { VChart } from '@visactor/react-vchart';
+import { Suspense, lazy, useState, useMemo } from 'react';
+import type { IPieChartSpec } from '@visactor/vchart';
 import { useThemeLabelColor } from '../useThemeLabelColor.js';
+
+const PieChartRenderer = lazy(() => import('./PieChartRenderer.js'));
 
 interface SiteDistributionData {
   siteName: string;
@@ -20,6 +22,10 @@ type ViewMode = 'balance' | 'spend';
 function safeNumber(value: unknown): number {
   if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value)) return 0;
   return value;
+}
+
+function getDatumRecord(datum: unknown): Record<string, unknown> {
+  return datum && typeof datum === 'object' ? datum as Record<string, unknown> : {};
 }
 
 function SkeletonCircle() {
@@ -120,22 +126,23 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
         mark: {
           content: [
             {
-              key: (datum: Record<string, unknown>) => datum.siteName as string,
-              value: (datum: Record<string, unknown>) => {
-                const val = safeNumber(datum.value);
+              key: (datum?: unknown) => String(getDatumRecord(datum).siteName ?? ''),
+              value: (datum?: unknown) => {
+                const row = getDatumRecord(datum);
+                const val = safeNumber(row.value);
                 return `$${val.toFixed(2)}`;
               },
             },
             {
               key: '占比',
-              value: (datum: Record<string, unknown>) => {
-                const pct = datum._percent_ as number;
+              value: (datum?: unknown) => {
+                const pct = getDatumRecord(datum)._percent_;
                 return `${safeNumber(pct).toFixed(1)}%`;
               },
             },
             {
               key: '账户数',
-              value: (datum: Record<string, unknown>) => `${datum.accountCount}`,
+              value: (datum?: unknown) => `${getDatumRecord(datum).accountCount ?? ''}`,
             },
           ],
         },
@@ -143,7 +150,7 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
       color: PIE_COLORS,
       animation: true,
       background: 'transparent',
-    };
+    } satisfies Partial<IPieChartSpec>;
   }, [chartData, hasData, labelColor]);
 
   const formatValue = (value: number): string => {
@@ -255,7 +262,11 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
       ) : (
         <div>
           <div style={{ width: '100%', height: 300 }}>
-            {spec && <VChart spec={spec} style={{ width: '100%', height: '100%' }} />}
+            {spec ? (
+              <Suspense fallback={<div className="skeleton" style={{ width: '100%', height: '100%', borderRadius: 'var(--radius-sm)' }} />}>
+                <PieChartRenderer spec={spec} style={{ width: '100%', height: '100%' }} />
+              </Suspense>
+            ) : null}
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: 10, padding: '0 4px' }}>
             {chartData.map((d, idx) => (

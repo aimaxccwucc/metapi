@@ -41,7 +41,6 @@ jobs:
               { label: 'area: db', include: ['src/server/db/', 'drizzle/'] },
               { label: 'area: server', include: ['src/server/'], exclude: ['src/server/db/'] },
               { label: 'area: web', include: ['src/web/'] },
-              { label: 'area: desktop', include: ['src/desktop/', 'electron-builder.yml', 'tsconfig.desktop.json'] },
               { label: 'area: docs', include: ['docs/', 'README.md', 'README_EN.md'] },
               { label: 'area: scripts', include: ['scripts/'] },
               { label: 'area: ci', include: ['.github/', 'docker/', 'render.yaml', 'zeabur-template.yaml'] },

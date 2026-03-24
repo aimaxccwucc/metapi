@@ -14,12 +14,11 @@
 |------|----------|----------|
 | 云服务器 / NAS / 家用主机长期运行 | Docker / Docker Compose | Docker 与 Docker Compose |
 | 免费云部署（24h 在线） | Render + TiDB + UptimeRobot | 注册 Render / TiDB Cloud / UptimeRobot 免费账号，详见 [Render 部署指南](./deployment.md#render-一键部署免费-24h-运行) |
-| 个人电脑本地使用 | 桌面版安装包 | 从 [Releases](https://github.com/cita-777/metapi/releases) 下载对应系统的桌面安装包 |
 | 二次开发 / 调试 | 本地开发 | Node.js 20+ 与 npm |
 
 > [!NOTE]
 > - 当前不再把 `Release` 压缩包 + Node.js 运行时作为独立部署路径。
-> - 想直接运行成品，请用 Docker 或桌面版；想改代码，请走本地开发流程。
+> - 想直接运行成品，请用 Docker；想改代码，请走本地开发流程。
 
 ## 方式一：Docker Compose 部署（推荐）
 
@@ -66,41 +65,10 @@ docker compose up -d
 
 > [!TIP]
 > 初始管理员令牌就是启动时配置的 `AUTH_TOKEN`。  
-> 如果未显式设置（非 Compose 场景），默认值为 `change-me-admin-token`（仅建议本地调试）。  
+> 如果未显式设置（非 Compose 场景），服务会在首次启动自动生成随机管理员令牌并写入当前运行数据库。  
 > 若你在后台「设置」里修改过管理员令牌，后续登录请使用新令牌。
 
-## 方式二：桌面版启动（Windows / macOS / Linux）
-
-如果你是在个人电脑上本地使用，请直接下载桌面版安装包：
-
-1. 打开 [Releases](https://github.com/cita-777/metapi/releases) 下载与你系统匹配的桌面安装包
-2. 安装并启动 Metapi Desktop
-3. 桌面壳会自动启动本地服务并保存数据，无需手动准备 Node.js 环境
-
-| 项目 | 说明 |
-|------|------|
-| 管理界面 | 应用启动后会直接打开桌面窗口，不需要假设固定的 `http://localhost:4000` |
-| 本地后端地址 | 桌面版内置服务默认监听 `0.0.0.0:4000`；桌面窗口和本机 curl 可继续使用 `http://127.0.0.1:4000`，局域网其他设备请使用当前机器的实际 IP + `4000`；如需改端口，可显式设置 `METAPI_DESKTOP_SERVER_PORT` |
-| 数据目录 | 保存在 `app.getPath('userData')/data`，不是仓库里的 `./data` |
-| 日志目录 | 保存在 `app.getPath('userData')/logs`；托盘菜单提供 `Open Logs Folder` |
-
-> [!IMPORTANT]
-> 桌面版首次启动时，如果你没有额外注入 `AUTH_TOKEN`，默认管理员令牌就是 `change-me-admin-token`。
-> 首次登录后建议立即到「设置」里改成你自己的强密码令牌。
-
-> [!TIP]
-> - Windows 下常见路径是 `%APPDATA%\Metapi\data` 和 `%APPDATA%\Metapi\logs`。
-> - 如果没有额外覆盖端口，本机其他客户端可以直接连接 `http://127.0.0.1:4000`。
-
-> [!WARNING]
-> **端口冲突排障：** 桌面版默认使用 `4000` 端口；如果该端口被其他应用占用：
-> - 设置环境变量 `METAPI_DESKTOP_SERVER_PORT=<指定端口>` 改到一个空闲端口
-> - 或关闭占用 `4000` 的应用后重启 Metapi Desktop
-
-> [!NOTE]
-> 服务器部署统一推荐 Docker / Docker Compose，不再提供裸 Node.js 的 Release 压缩包。
-
-## 方式三：本地开发启动
+## 方式二：本地开发启动
 
 ```bash
 git clone https://github.com/cita-777/metapi.git
@@ -200,7 +168,6 @@ npm run dev
 |----------|----------|----------------|
 | Docker / Docker Compose | `http://localhost:4000` | `http://localhost:4000` |
 | 本地开发 | `http://localhost:5173` | `http://localhost:4000` |
-| 桌面版 | 直接使用桌面窗口 | 默认 `http://127.0.0.1:4000`；如果设置了 `METAPI_DESKTOP_SERVER_PORT`，则按日志里的实际端口访问，局域网其他设备改用当前机器 IP + 同一端口 |
 
 ### Docker / 本地开发：直接用 curl 验证
 
@@ -215,26 +182,6 @@ curl -sS http://localhost:4000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
 ```
-
-### 桌面版：默认直接用 4000 验证
-
-打开托盘菜单的 `Open Logs Folder`，在最新日志里查找类似下面的启动信息：
-
-```text
-Dashboard: http://127.0.0.1:4000
-Proxy API: http://127.0.0.1:4000/v1/chat/completions
-```
-
-如果你没有覆盖端口，可直接执行：
-
-```bash
-curl -sS http://127.0.0.1:4000/v1/models \
-  -H "Authorization: Bearer your-proxy-sk-token"
-```
-
-如果你显式设置了 `METAPI_DESKTOP_SERVER_PORT`，再把上面的 `4000` 替换成日志里的实际端口。返回正常响应，说明代理链路已经可用。
-
-如果你要从同一局域网的其他设备访问桌面版，把上面的 `127.0.0.1` 替换成这台电脑的实际局域网 IP，并确认系统防火墙已放行对应端口。
 
 ## 下一步
 

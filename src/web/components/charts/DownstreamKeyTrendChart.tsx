@@ -1,5 +1,7 @@
-import React, { useMemo, useState } from 'react';
-import { VChart } from '@visactor/react-vchart';
+import React, { Suspense, lazy, useMemo, useState } from 'react';
+import type { IAreaChartSpec } from '@visactor/vchart';
+
+const AreaChartRenderer = lazy(() => import('./AreaChartRenderer.js'));
 
 type Metric = 'tokens' | 'requests' | 'cost';
 
@@ -8,6 +10,10 @@ const METRIC_OPTIONS: Array<{ key: Metric; label: string }> = [
   { key: 'requests', label: '请求数' },
   { key: 'cost', label: '成本' },
 ];
+
+function getDatumRecord(datum: unknown): Record<string, unknown> {
+  return datum && typeof datum === 'object' ? datum as Record<string, unknown> : {};
+}
 
 export type DownstreamKeyTrendBucket = {
   startUtc: string | null;
@@ -68,7 +74,7 @@ export default function DownstreamKeyTrendChart({
     );
   }
 
-  const spec: Record<string, unknown> = {
+  const spec: Partial<IAreaChartSpec> = {
     type: 'area' as const,
     data: [{ id: 'data', values: flatData }],
     xField: 'date',
@@ -102,12 +108,12 @@ export default function DownstreamKeyTrendChart({
     ],
     tooltip: {
       dimension: {
-        title: { value: (datum: Record<string, unknown>) => String(datum?.date || '') },
+        title: { value: (datum?: unknown) => String(getDatumRecord(datum).date || '') },
         content: [
           {
             key: () => METRIC_OPTIONS.find((opt) => opt.key === metric)?.label || 'Value',
-            value: (datum: Record<string, unknown>) => {
-              const value = Number(datum?.value ?? 0);
+            value: (datum?: unknown) => {
+              const value = Number(getDatumRecord(datum).value ?? 0);
               if (metric === 'cost') return `$${value.toFixed(6)}`;
               return value.toLocaleString();
             },
@@ -130,7 +136,9 @@ export default function DownstreamKeyTrendChart({
         <MetricToggle metric={metric} onChange={setMetric} />
       </div>
       <div style={{ width: '100%', height }}>
-        <VChart spec={spec as any} style={{ width: '100%', height: '100%' }} />
+        <Suspense fallback={<div className="skeleton" style={{ width: '100%', height: '100%', borderRadius: 'var(--radius-sm)' }} />}>
+          <AreaChartRenderer spec={spec} style={{ width: '100%', height: '100%' }} />
+        </Suspense>
       </div>
     </div>
   );

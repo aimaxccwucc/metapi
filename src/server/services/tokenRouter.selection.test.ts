@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
@@ -1030,5 +1030,53 @@ describe('TokenRouter selection scoring', () => {
     expect(preview?.channel.id).toBe(backupChannel.id);
     expect(otherModelPreview?.channel.id).toBeTruthy();
     expect(otherModelPreview?.channel.id).not.toBe(backupChannel.id);
+  });
+
+  it('persists model-unsupported failures into token model availability for token-backed channels', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-4o-persisted-unsupported');
+    const site = await createSite('persist-unsupported');
+    const account = await createAccount(site.id, 'persist-unsupported-user');
+    const token = await createToken(account.id, 'persist-unsupported-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'gpt-4o-persisted-unsupported',
+      available: true,
+    }).run();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, {
+      status: 400,
+      errorText: 'model not supported',
+      modelName: 'gpt-4o-persisted-unsupported',
+    });
+
+    const availability = await db.select().from(schema.tokenModelAvailability)
+      .where(
+        and(
+          eq(schema.tokenModelAvailability.tokenId, token.id),
+          eq(schema.tokenModelAvailability.modelName, 'gpt-4o-persisted-unsupported'),
+        ),
+      )
+      .get();
+
+    expect(availability?.available).toBe(false);
+    expect(typeof availability?.checkedAt).toBe('string');
   });
 });

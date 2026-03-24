@@ -1,5 +1,6 @@
 const AUTH_TOKEN_STORAGE_KEY = 'auth_token';
 const AUTH_TOKEN_EXPIRES_AT_STORAGE_KEY = 'auth_token_expires_at';
+export const COOKIE_AUTH_SESSION_SENTINEL = '__cookie_session__';
 export const AUTH_SESSION_DURATION_MS = 12 * 60 * 60 * 1000;
 
 type StorageLike = {
@@ -37,7 +38,7 @@ export function persistAuthSession(
   }
 
   const expiresAt = nowMs + Math.max(1, Math.trunc(ttlMs));
-  target.setItem(AUTH_TOKEN_STORAGE_KEY, cleanToken);
+  target.setItem(AUTH_TOKEN_STORAGE_KEY, COOKIE_AUTH_SESSION_SENTINEL);
   target.setItem(AUTH_TOKEN_EXPIRES_AT_STORAGE_KEY, String(expiresAt));
 }
 
@@ -50,8 +51,8 @@ export function getAuthToken(storage?: StorageLike | null, nowMs = Date.now()): 
 
   const expiresAtRaw = target.getItem(AUTH_TOKEN_EXPIRES_AT_STORAGE_KEY);
   if (!expiresAtRaw) {
-    // Legacy migration: set a default TTL the first time we read an old session.
-    persistAuthSession(target, token, AUTH_SESSION_DURATION_MS, nowMs);
+    const expiresAt = nowMs + AUTH_SESSION_DURATION_MS;
+    target.setItem(AUTH_TOKEN_EXPIRES_AT_STORAGE_KEY, String(expiresAt));
     return token;
   }
 
@@ -61,6 +62,12 @@ export function getAuthToken(storage?: StorageLike | null, nowMs = Date.now()): 
     return null;
   }
 
+  return token;
+}
+
+export function getBearerAuthToken(storage?: StorageLike | null, nowMs = Date.now()): string | null {
+  const token = getAuthToken(storage, nowMs);
+  if (!token || token === COOKIE_AUTH_SESSION_SENTINEL) return null;
   return token;
 }
 

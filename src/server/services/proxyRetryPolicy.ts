@@ -72,6 +72,33 @@ function matchesAnyPattern(patterns: RegExp[], rawMessage?: string | null): bool
   return patterns.some((pattern) => pattern.test(text));
 }
 
+export function classifyProxyFailureCategory(status?: number | null, upstreamErrorText?: string | null): RetryFailureCategory {
+  const normalizedStatus = typeof status === 'number' && Number.isFinite(status)
+    ? Math.trunc(status)
+    : 0;
+  const text = (upstreamErrorText || '').trim();
+
+  if (normalizedStatus === 0) return 'network';
+  if (normalizedStatus === 401 || normalizedStatus === 403) return 'auth';
+  if (normalizedStatus === 429 || /rate\s+limit|quota/i.test(text)) return 'rate_limit';
+  if (normalizedStatus === 413 || /payload\s+too\s+large|context\s+length|maximum\s+context/i.test(text)) {
+    return 'payload_too_large';
+  }
+  if (isModelUnsupportedErrorMessage(text)) return 'model_unsupported';
+  if (matchesAnyPattern(NON_RETRYABLE_REQUEST_PATTERNS, text)) return 'bad_request';
+  if (
+    normalizedStatus === 408
+    || normalizedStatus === 409
+    || normalizedStatus === 425
+    || /timeout|timed?\s*out|connection\s+reset|connection\s+refused|econnreset|econnrefused/i.test(text)
+  ) {
+    return 'network';
+  }
+  if (normalizedStatus >= 500) return 'server';
+  if (normalizedStatus >= 400) return 'bad_request';
+  return 'other';
+}
+
 export function shouldRetryProxyRequest(status: number, upstreamErrorText?: string | null): boolean {
   if (status >= 500) return true;
   if (status === 408 || status === 409 || status === 425 || status === 429) return true;

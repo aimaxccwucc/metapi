@@ -1,8 +1,16 @@
-import { useMemo, useState } from 'react';
-import { VChart } from '@visactor/react-vchart';
+import { Suspense, lazy, useMemo, useState } from 'react';
 import { InlineBrandIcon } from './BrandIcon.js';
 import { formatCompactTokenMetric } from '../numberFormat.js';
 import { useThemeLabelColor } from './useThemeLabelColor.js';
+import type {
+  IAreaChartSpec,
+  IBarChartSpec,
+  IPieChartSpec,
+} from '@visactor/vchart';
+
+const BarChartRenderer = lazy(() => import('./charts/BarChartRenderer.js'));
+const AreaChartRenderer = lazy(() => import('./charts/AreaChartRenderer.js'));
+const PieChartRenderer = lazy(() => import('./charts/PieChartRenderer.js'));
 
 type TabKey = 'spend' | 'trend' | 'calls' | 'rank';
 
@@ -46,12 +54,22 @@ function formatPercent(value: number): string {
   return `${toSafeNumber(value).toFixed(1)}%`;
 }
 
+function getDatumRecord(datum: unknown): Record<string, unknown> {
+  return datum && typeof datum === 'object' ? datum as Record<string, unknown> : {};
+}
+
 function EmptyBlock() {
   return (
     <div className="empty-state" style={{ padding: 28 }}>
       <div className="empty-state-title">暂无模型调用数据</div>
       <div className="empty-state-desc">等待代理流量进入后会自动生成统计图表</div>
     </div>
+  );
+}
+
+function ChartFallback({ height = 300 }: { height?: number }) {
+  return (
+    <div className="skeleton" style={{ width: '100%', height, borderRadius: 'var(--radius-md)' }} />
   );
 }
 
@@ -74,7 +92,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
     || spendDistribution.length > 0
     || spendTrend.some((item) => toSafeNumber(item.spend) > 0);
 
-  const spendBarSpec = useMemo(() => ({
+  const spendBarSpec = useMemo<Partial<IBarChartSpec>>(() => ({
     type: 'bar' as const,
     data: [{ id: 'data', values: spendDistribution.map(d => ({ model: d.model.length > 25 ? d.model.slice(0, 25) + '...' : d.model, value: toSafeNumber(d.spend) })).reverse() }],
     xField: 'value', yField: 'model', direction: 'horizontal' as const,
@@ -84,7 +102,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
     animation: true, background: 'transparent',
   }), [spendDistribution, labelColor]);
 
-  const trendSpec = useMemo(() => ({
+  const trendSpec = useMemo<Partial<IAreaChartSpec>>(() => ({
     type: 'area' as const,
     data: [{ id: 'data', values: spendTrend.map(d => ({ day: d.day, spend: toSafeNumber(d.spend) })) }],
     xField: 'day', yField: 'spend',
@@ -92,11 +110,18 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
     area: { style: { fill: { gradient: 'linear' as const, x0: 0, y0: 0, x1: 0, y1: 1, stops: [{ offset: 0, color: 'rgba(79,70,229,0.25)' }, { offset: 1, color: 'rgba(79,70,229,0.02)' }] }, curveType: 'monotone' as const } },
     point: { visible: true, style: { size: 7, fill: '#4f46e5', stroke: '#fff', lineWidth: 2 } },
     axes: [{ orient: 'bottom' as const, label: { style: { fontSize: 11, fill: labelColor } } }, { orient: 'left' as const, label: { style: { fontSize: 11, fill: labelColor } } }],
-    tooltip: { mark: { content: [{ key: () => '消耗', value: (datum: any) => formatCurrency(datum?.spend ?? 0) }] } },
+    tooltip: {
+      mark: {
+        content: [{
+          key: () => '消耗',
+          value: (datum?: unknown) => formatCurrency(toSafeNumber(getDatumRecord(datum).spend)),
+        }],
+      },
+    },
     animation: true, background: 'transparent',
   }), [spendTrend, labelColor]);
 
-  const callsPieSpec = useMemo(() => ({
+  const callsPieSpec = useMemo<Partial<IPieChartSpec>>(() => ({
     type: 'pie' as const,
     data: [{ id: 'data', values: callsDistribution.map(d => ({ model: d.model, calls: toSafeNumber(d.calls) })) }],
     valueField: 'calls', categoryField: 'model',
@@ -148,7 +173,9 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
       {activeTab === 'spend' && (
         <div>
           <div style={{ height: 300 }}>
-            <VChart spec={spendBarSpec} />
+            <Suspense fallback={<ChartFallback />}>
+              <BarChartRenderer spec={spendBarSpec} style={{ width: '100%', height: '100%' }} />
+            </Suspense>
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: 10, padding: '0 4px' }}>
             {spendDistribution.map(d => (
@@ -164,14 +191,18 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
 
       {activeTab === 'trend' && (
         <div style={{ height: 300 }}>
-          <VChart spec={trendSpec} />
+          <Suspense fallback={<ChartFallback />}>
+            <AreaChartRenderer spec={trendSpec} style={{ width: '100%', height: '100%' }} />
+          </Suspense>
         </div>
       )}
 
       {activeTab === 'calls' && (
         <div>
           <div style={{ height: 300 }}>
-            <VChart spec={callsPieSpec} />
+            <Suspense fallback={<ChartFallback />}>
+              <PieChartRenderer spec={callsPieSpec} style={{ width: '100%', height: '100%' }} />
+            </Suspense>
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: 10, padding: '0 4px' }}>
             {callsDistribution.map((d, idx) => {

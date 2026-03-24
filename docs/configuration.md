@@ -15,12 +15,12 @@
 
 ## 必填配置
 
-> ⚠️ 以下变量**必须修改**，不要使用默认值。
+> ⚠️ 生产环境请显式设置以下变量；如果留空，服务会在首次启动时自动生成随机值并写入当前运行数据库。
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| `AUTH_TOKEN` | 管理后台登录令牌 | `change-me-admin-token` |
-| `PROXY_TOKEN` | 代理接口 Bearer Token（下游客户端使用此值作为 API Key） | `change-me-proxy-sk-token` |
+| `AUTH_TOKEN` | 管理后台登录令牌 | 启动时自动生成 |
+| `PROXY_TOKEN` | 代理接口 Bearer Token（下游客户端使用此值作为 API Key） | 启动时自动生成 |
 
 ## 基础配置
 

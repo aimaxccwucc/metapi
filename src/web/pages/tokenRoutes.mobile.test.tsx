@@ -51,11 +51,36 @@ function collectText(node: ReactTestInstance): string {
 }
 
 function findButtonByText(root: ReactTestInstance, text: string): ReactTestInstance {
-  return root.find((node) => (
+  const matches = root.findAll((node) => (
     node.type === 'button'
     && typeof node.props.onClick === 'function'
     && collectText(node).includes(text)
   ));
+  if (matches.length === 0) {
+    throw new Error(`button not found: ${text}`);
+  }
+  return matches[0];
+}
+
+async function waitForText(root: ReactTestInstance, text: string) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (collectText(root).includes(text)) return;
+    await flushMicrotasks();
+  }
+}
+
+async function switchToAllRoutes(root: ReactTestInstance) {
+  const openFiltersButton = findButtonByText(root, '筛选');
+  await act(async () => {
+    openFiltersButton.props.onClick();
+  });
+  await flushMicrotasks();
+
+  const showAllRoutesButton = findButtonByText(root, '显示全部路由');
+  await act(async () => {
+    showAllRoutesButton.props.onClick();
+  });
+  await flushMicrotasks();
 }
 
 async function flushMicrotasks() {
@@ -138,6 +163,8 @@ describe('TokenRoutes mobile actions', () => {
         );
       });
       await flushMicrotasks();
+      await waitForText(root!.root, 'gpt-4o-mini');
+      await switchToAllRoutes(root!.root);
 
       expect(collectText(root!.root)).toContain('筛选');
       expect(collectText(root!.root)).toContain('详情');

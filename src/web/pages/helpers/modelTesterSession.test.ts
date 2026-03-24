@@ -18,8 +18,10 @@ import {
   createConversationUserMessage,
   extractConversationUploadedFilesFromMessage,
   filterModelTesterModelNames,
+  parseModelTesterHistory,
   parseCustomRequestBody,
   parseModelTesterSession,
+  serializeModelTesterHistory,
   serializeModelTesterSession,
   syncMessagesToCustomRequestBody,
   toApiMessages,
@@ -881,6 +883,7 @@ describe('modelTesterSession', () => {
       },
       [
         { modelPattern: 'BAAI/bge-large-en-v1.5', enabled: true },
+        { modelPattern: 'claude-opus-4-5', displayName: 'claude-opus-4-6', routeMode: 'explicit_group', enabled: true },
         { modelPattern: 'claude-*', enabled: true },
         { modelPattern: 'gemini-2.5-pro', enabled: false },
       ],
@@ -890,6 +893,56 @@ describe('modelTesterSession', () => {
       'gpt-4o-mini',
       'bge-large-en-v1.5',
       'BAAI/bge-large-en-v1.5',
+      'claude-opus-4-6',
+      'claude-opus-4-5',
+    ]);
+  });
+
+  it('serializes and parses model tester history entries', () => {
+    const serialized = serializeModelTesterHistory([
+      {
+        id: 'history-1',
+        createdAt: '2026-03-24T00:00:00.000Z',
+        mode: 'conversation',
+        protocol: 'openai',
+        model: 'gpt-4o-mini',
+        title: '问答测试',
+        requestPreview: '你好',
+        status: 'succeeded',
+        request: {
+          method: 'POST',
+          path: '/v1/chat/completions',
+          requestKind: 'json',
+          stream: false,
+          jobMode: true,
+          rawMode: false,
+          jsonBody: { model: 'gpt-4o-mini' },
+        },
+      },
+    ]);
+
+    expect(parseModelTesterHistory(serialized)).toEqual([
+      {
+        id: 'history-1',
+        createdAt: '2026-03-24T00:00:00.000Z',
+        mode: 'conversation',
+        protocol: 'openai',
+        model: 'gpt-4o-mini',
+        title: '问答测试',
+        requestPreview: '你好',
+        status: 'succeeded',
+        request: {
+          method: 'POST',
+          path: '/v1/chat/completions',
+          requestKind: 'json',
+          stream: false,
+          jobMode: true,
+          rawMode: false,
+          jsonBody: { model: 'gpt-4o-mini' },
+        },
+        jobId: null,
+        errorMessage: null,
+      },
     ]);
   });
 

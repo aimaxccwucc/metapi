@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { randomBytes } from 'node:crypto';
 import type { FastifyServerOptions } from 'fastify';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 
@@ -6,7 +7,15 @@ const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const DEFAULT_CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const DEFAULT_GEMINI_CLI_CLIENT_ID = '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
-const DEFAULT_GEMINI_CLI_CLIENT_SECRET = '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';
+
+function createGeneratedToken(prefix: string): string {
+  return `${prefix}${randomBytes(24).toString('base64url')}`;
+}
+
+function parseRequiredSecret(value: string | undefined, fallbackFactory: () => string): string {
+  const normalized = (value || '').trim();
+  return normalized || fallbackFactory();
+}
 
 function parseBoolean(value: string | undefined, fallback = false): boolean {
   if (value === undefined) return fallback;
@@ -55,17 +64,20 @@ function parseListenHost(env: NodeJS.ProcessEnv): string {
 
 export function buildConfig(env: NodeJS.ProcessEnv) {
   const dataDir = env.DATA_DIR || './data';
+  const authToken = parseRequiredSecret(env.AUTH_TOKEN, () => createGeneratedToken('admin-'));
+  const proxyToken = parseRequiredSecret(env.PROXY_TOKEN, () => createGeneratedToken('sk-'));
+  const accountCredentialSecret = parseRequiredSecret(env.ACCOUNT_CREDENTIAL_SECRET, () => authToken);
 
   return {
-    authToken: env.AUTH_TOKEN || 'change-me-admin-token',
-    proxyToken: env.PROXY_TOKEN || 'change-me-proxy-sk-token',
+    authToken,
+    proxyToken,
     codexClientId: parseOptionalSecret(env.CODEX_CLIENT_ID) || DEFAULT_CODEX_CLIENT_ID,
     claudeClientId: parseOptionalSecret(env.CLAUDE_CLIENT_ID) || DEFAULT_CLAUDE_CLIENT_ID,
     claudeClientSecret: parseOptionalSecret(env.CLAUDE_CLIENT_SECRET),
     geminiCliClientId: parseOptionalSecret(env.GEMINI_CLI_CLIENT_ID) || DEFAULT_GEMINI_CLI_CLIENT_ID,
-    geminiCliClientSecret: parseOptionalSecret(env.GEMINI_CLI_CLIENT_SECRET) || DEFAULT_GEMINI_CLI_CLIENT_SECRET,
+    geminiCliClientSecret: parseOptionalSecret(env.GEMINI_CLI_CLIENT_SECRET),
     systemProxyUrl: env.SYSTEM_PROXY_URL || '',
-    accountCredentialSecret: env.ACCOUNT_CREDENTIAL_SECRET || env.AUTH_TOKEN || 'change-me-admin-token',
+    accountCredentialSecret,
     checkinCron: env.CHECKIN_CRON || '0 8 * * *',
     checkinScheduleMode: (env.CHECKIN_SCHEDULE_MODE || 'cron').trim().toLowerCase() === 'interval'
       ? 'interval' as const
@@ -100,6 +112,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     smtpTo: env.SMTP_TO || '',
     notifyCooldownSec: Math.max(0, Math.trunc(parseNumber(env.NOTIFY_COOLDOWN_SEC, 300))),
     adminIpAllowlist: parseCsvList(env.ADMIN_IP_ALLOWLIST),
+    trustProxy: parseBoolean(env.TRUST_PROXY, false),
     port: Math.trunc(parseNumber(env.PORT, 4000)),
     listenHost: parseListenHost(env),
     dataDir,

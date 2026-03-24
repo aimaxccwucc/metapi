@@ -159,7 +159,7 @@ function resolveStoredProfile(): UserProfile {
   }
 }
 
-export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (text: string) => string }) {
+export function Login({ onLogin, t }: { onLogin: () => void; t: (text: string) => string }) {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -183,11 +183,14 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/stats/dashboard', {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await fetch('/api/auth/session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
       });
       if (res.ok) {
-        onLogin(token);
+        onLogin();
       } else {
         let reason = '';
         try {
@@ -706,8 +709,8 @@ function AppShell() {
   };
 
   if (!authed) {
-    return <Login t={t} onLogin={(token) => {
-      persistAuthSession(localStorage, token);
+    return <Login t={t} onLogin={() => {
+      persistAuthSession(localStorage, 'cookie-session');
       setAuthed(true);
     }} />;
   }
@@ -842,6 +845,7 @@ function AppShell() {
                 </button>
                 <button onClick={() => {
                   clearAuthSession(localStorage);
+                  void fetch('/api/auth/session', { method: 'DELETE', credentials: 'same-origin' });
                   setAuthed(false);
                 }} className="user-dropdown-item danger">
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>

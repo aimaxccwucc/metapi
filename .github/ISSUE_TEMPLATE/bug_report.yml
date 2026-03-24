@@ -29,7 +29,6 @@ body:
       options:
         - Docker Compose / Docker Compose 部署
         - Docker run / Docker 命令部署
-        - Desktop app / 桌面端
         - Local development / 本地源码开发
         - Zeabur deployment / Zeabur 部署
         - Render deployment / Render 部署
@@ -50,7 +49,6 @@ body:
         - Model Marketplace / 模型广场
         - Check-in / 签到
         - Notifications / 通知
-        - Desktop App / 桌面端
         - Deployment / Database / 部署或数据库
         - Other / 其他
     validations:

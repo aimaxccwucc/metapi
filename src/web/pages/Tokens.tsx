@@ -39,6 +39,10 @@ type AccountTokenSyncResult = {
   };
 };
 
+type TokenGroupResponse = {
+  groups?: unknown[];
+};
+
 const resolveAccountCredentialMode = (account: any): 'session' | 'apikey' => {
   const rawMode = String(account?.credentialMode || '').trim().toLowerCase();
   if (rawMode === 'apikey') return 'apikey';
@@ -117,6 +121,15 @@ function isTruthyFlag(input: string | null): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 }
 
+function normalizeTokenGroups(response: TokenGroupResponse | null | undefined): string[] {
+  const groups = Array.isArray(response?.groups)
+    ? response.groups
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+    : [];
+  return Array.from(new Set(groups));
+}
+
 export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: TokensPanelProps) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -185,7 +198,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       setAccounts(latestAccounts);
 
       const syncableAccounts = latestAccounts.filter(isAccountSyncable);
-      const hasCurrentSelected = syncableAccounts.some((account) => account.id === syncingAccountId);
+      const hasCurrentSelected = syncableAccounts.some((account: any) => account.id === syncingAccountId);
       if (!hasCurrentSelected) {
         setSyncingAccountId(syncableAccounts[0]?.id || 0);
       }
@@ -226,12 +239,9 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     let cancelled = false;
     setGroupLoading(true);
     api.getAccountTokenGroups(form.accountId)
-      .then((res: any) => {
+      .then((res: TokenGroupResponse) => {
         if (cancelled) return;
-        const groups = Array.isArray(res?.groups)
-          ? res.groups.map((item: any) => String(item || '').trim()).filter(Boolean)
-          : [];
-        const normalized = Array.from(new Set(groups));
+        const normalized = normalizeTokenGroups(res);
         const nextOptions = normalized.length > 0 ? normalized : ['default'];
         setGroupOptions(nextOptions);
         setForm((prev) => {
@@ -266,12 +276,9 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     let cancelled = false;
     setEditGroupLoading(true);
     api.getAccountTokenGroups(editingToken.accountId)
-      .then((res: any) => {
+      .then((res: TokenGroupResponse) => {
         if (cancelled) return;
-        const groups = Array.isArray(res?.groups)
-          ? res.groups.map((item: any) => String(item || '').trim()).filter(Boolean)
-          : [];
-        const normalized = Array.from(new Set(groups));
+        const normalized = normalizeTokenGroups(res);
         setEditGroupOptions((current) => {
           const next = normalized.length > 0 ? normalized : ['default'];
           if (next.includes(currentGroup)) return next;

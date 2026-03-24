@@ -22,7 +22,6 @@ import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
 const ROUTE_BRAND_ICON_PREFIX = 'brand:';
-const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
 const FACTORY_RESET_CONFIRM_SECONDS = 3;
 const CHECKIN_SCHEDULE_MODE_OPTIONS = [
   { value: 'cron', label: 'Cron' },
@@ -1627,7 +1626,7 @@ export default function Settings() {
             重新初始化系统会清空当前 metapi 使用中的全部数据库内容；若当前运行在外部 MySQL/Postgres，也会先清空该外部库中的 metapi 数据，然后切回默认 SQLite。
           </div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 14 }}>
-            完成后管理员 Token 会重置为 <code style={{ fontFamily: 'var(--font-mono)' }}>{FACTORY_RESET_ADMIN_TOKEN}</code>，当前会话会立即退出并刷新页面。
+            完成后当前管理员会话会立即失效并刷新页面，需使用现有管理员令牌重新登录。
           </div>
           <button onClick={() => setFactoryResetOpen(true)} className="btn btn-danger">
             重新初始化系统
@@ -1659,6 +1658,7 @@ export default function Settings() {
             <button
               onClick={() => {
                 clearAuthSession(localStorage);
+                void fetch('/api/auth/session', { method: 'DELETE', credentials: 'same-origin' });
                 window.location.reload();
               }}
               className="btn btn-danger"
@@ -1788,7 +1788,7 @@ export default function Settings() {
                 <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', lineHeight: 1.9 }}>
                   <div>• 当前若使用外部 MySQL/Postgres，也会先清空该外部库中的 metapi 数据。</div>
                   <div>• 系统随后会强制切回默认 SQLite。</div>
-                  <div>• 管理员 Token 将重置为 <code style={{ fontFamily: 'var(--font-mono)' }}>{FACTORY_RESET_ADMIN_TOKEN}</code>。</div>
+                  <div>• 当前管理员会话会立即失效，需要重新使用现有管理员令牌登录。</div>
                   <div>• 完成后会立即退出登录并刷新页面，回到当前首装初始状态。</div>
                 </div>
               </div>

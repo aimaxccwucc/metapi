@@ -1,4 +1,4 @@
-﻿import { eq, inArray } from 'drizzle-orm';
+﻿import { and, eq, inArray } from 'drizzle-orm';
 import { minimatch } from 'minimatch';
 import { db, schema } from '../db/index.js';
 import { upsertSetting } from '../db/upsertSetting.js';
@@ -944,6 +944,39 @@ function partitionRecentlyFailedCandidates<T extends { channel: FailureAwareChan
   const preferred = candidates.filter((candidate) => !isChannelRecentlyFailed(candidate.channel, nowMs, effectiveAvoidSec));
   const avoided = candidates.filter((candidate) => isChannelRecentlyFailed(candidate.channel, nowMs, effectiveAvoidSec));
   return { preferred, avoided };
+}
+
+async function markPersistedModelUnavailableForChannel(
+  channel: Pick<ChannelRow, 'tokenId'>,
+  accountId: number,
+  modelName?: string | null,
+): Promise<void> {
+  const normalizedModelName = (modelName || '').trim();
+  if (!normalizedModelName) return;
+  const checkedAt = new Date().toISOString();
+
+  if (typeof channel.tokenId === 'number' && Number.isFinite(channel.tokenId)) {
+    await db.update(schema.tokenModelAvailability).set({
+      available: false,
+      checkedAt,
+    }).where(
+      and(
+        eq(schema.tokenModelAvailability.tokenId, channel.tokenId),
+        eq(schema.tokenModelAvailability.modelName, normalizedModelName),
+      ),
+    ).run();
+    return;
+  }
+
+  await db.update(schema.modelAvailability).set({
+    available: false,
+    checkedAt,
+  }).where(
+    and(
+      eq(schema.modelAvailability.accountId, accountId),
+      eq(schema.modelAvailability.modelName, normalizedModelName),
+    ),
+  ).run();
 }
 
 export interface RouteDecisionCandidate {
@@ -2116,6 +2149,10 @@ export class TokenRouter {
       channel.consecutiveFailCount = consecutiveFailCount;
       channel.cooldownLevel = cooldownLevel;
     });
+
+    if (failureCategory === 'model_unsupported') {
+      await markPersistedModelUnavailableForChannel(ch, account.id, normalizedContext.modelName);
+    }
 
     if (normalizeModelAlias(normalizedContext.modelName || '')) {
       recordModelCircuitFailure(

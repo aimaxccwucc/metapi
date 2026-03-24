@@ -45,7 +45,6 @@ body:
         - Model Marketplace / 模型广场
         - Check-in / 签到
         - Notifications / 通知
-        - Desktop App / 桌面端
         - Deployment / Database / 部署或数据库
         - Other / 其他
     validations:

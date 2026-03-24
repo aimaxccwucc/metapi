@@ -137,16 +137,42 @@ describe('api proxy test timeout handling', () => {
     const getProxyFileContentDataUrl = (api as Record<string, any>).getProxyFileContentDataUrl;
     const result = await getProxyFileContentDataUrl?.('file-metapi-123');
 
-    expect(fetchMock).toHaveBeenCalledWith('/v1/files/file-metapi-123/content', expect.objectContaining({
+    expect(fetchMock).toHaveBeenCalledWith('/api/test/proxy/files/file-metapi-123/content', expect.objectContaining({
       method: 'GET',
-      headers: expect.objectContaining({
-        Authorization: 'Bearer token-1',
-      }),
+      credentials: 'same-origin',
+      headers: {},
     }));
     expect(result).toEqual({
       filename: 'brief.pdf',
       mimeType: 'application/pdf',
       data: 'data:application/pdf;base64,UERG',
     });
+  });
+
+  it('uses same-origin credentials for admin session APIs', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ success: true, active: true }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.createAdminSession('admin-token');
+    await api.getAdminSession();
+    await api.clearAdminSession();
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/auth/session', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: 'admin-token' }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/auth/session', expect.objectContaining({
+      method: 'GET',
+      credentials: 'same-origin',
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/auth/session', expect.objectContaining({
+      method: 'DELETE',
+      credentials: 'same-origin',
+    }));
   });
 });

@@ -52,6 +52,39 @@ function collectText(node: ReactTestInstance): string {
   }).join('');
 }
 
+function findButtonByText(root: ReactTestInstance, text: string): ReactTestInstance {
+  const matches = root.findAll((node) => (
+    node.type === 'button'
+    && typeof node.props.onClick === 'function'
+    && collectText(node).includes(text)
+  ));
+  if (matches.length === 0) {
+    throw new Error(`button not found: ${text}`);
+  }
+  return matches[0];
+}
+
+async function waitForText(root: ReactTestInstance, text: string) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (collectText(root).includes(text)) return;
+    await flushMicrotasks();
+  }
+}
+
+async function switchToAllRoutes(root: ReactTestInstance) {
+  const openFiltersButton = findButtonByText(root, '筛选');
+  await act(async () => {
+    openFiltersButton.props.onClick();
+  });
+  await flushMicrotasks();
+
+  const showAllRoutesButton = findButtonByText(root, '显示全部路由');
+  await act(async () => {
+    showAllRoutesButton.props.onClick();
+  });
+  await flushMicrotasks();
+}
+
 async function flushMicrotasks() {
   await act(async () => {
     await Promise.resolve();
@@ -150,17 +183,15 @@ describe('TokenRoutes mobile layout', () => {
         );
       });
       await flushMicrotasks();
+      await waitForText(root!.root, 'gpt-4o-mini');
+      await switchToAllRoutes(root!.root);
 
       const summaryText = collectText(root!.root);
       expect(summaryText).toContain('详情');
       expect(summaryText).toContain('禁用');
       expect(summaryText).toContain('添加通道');
 
-      const expandButton = root!.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node) === '详情'
-      ));
+      const expandButton = findButtonByText(root!.root, '详情');
 
       await act(async () => {
         await expandButton.props.onClick();
@@ -191,12 +222,10 @@ describe('TokenRoutes mobile layout', () => {
         );
       });
       await flushMicrotasks();
+      await waitForText(root!.root, 'gpt-4o-mini');
+      await switchToAllRoutes(root!.root);
 
-      const toggleButton = root!.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node) === '禁用'
-      ));
+      const toggleButton = findButtonByText(root!.root, '禁用');
 
       await act(async () => {
         await toggleButton.props.onClick();
@@ -204,7 +233,7 @@ describe('TokenRoutes mobile layout', () => {
       await flushMicrotasks();
 
       expect(apiMock.updateRoute).toHaveBeenCalledWith(1, { enabled: false });
-      expect(collectText(root!.root)).toContain('启用');
+      expect(findButtonByText(root!.root, '启用')).toBeTruthy();
     } finally {
       root?.unmount();
     }

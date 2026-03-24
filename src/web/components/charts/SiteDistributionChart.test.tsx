@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, create } from 'react-test-renderer';
 import SiteDistributionChart from './SiteDistributionChart.js';
 
-vi.mock('@visactor/react-vchart', () => ({
-  VChart: () => null,
+vi.mock('./PieChartRenderer.js', () => ({
+  default: () => null,
 }));
 
 describe('SiteDistributionChart', () => {

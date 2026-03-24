@@ -20,6 +20,7 @@ import { monitorRoutes } from './routes/api/monitor.js';
 import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { oauthRoutes } from './routes/api/oauth.js';
 import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
+import { systemRoutes } from './routes/system.js';
 import { proxyRoutes } from './routes/proxy/router.js';
 import { registerCustomRoutes } from './custom/register.js';
 import { startScheduler } from './services/checkinScheduler.js';
@@ -34,7 +35,7 @@ import { startOAuthLoopbackCallbackServers, stopOAuthLoopbackCallbackServers } f
 import { startSiteAnnouncementPolling } from './services/siteAnnouncementPollingService.js';
 import { reloadBackupWebdavScheduler } from './services/backupService.js';
 import { ensureRuntimeDatabaseReady } from './runtimeDatabaseBootstrap.js';
-import { isPublicApiRoute, registerDesktopRoutes } from './desktop.js';
+import { isPublicApiRoute } from './publicApiRoutes.js';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, normalize, resolve, sep } from 'path';
@@ -52,6 +53,7 @@ import {
   switchRuntimeDatabase,
   type RuntimeDbDialect,
 } from './db/index.js';
+import { upsertSetting } from './db/upsertSetting.js';
 
 function toSettingsMap(rows: Array<{ key: string; value: string }>) {
   return new Map(rows.map((row) => [row.key, row.value]));
@@ -65,6 +67,30 @@ function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): 
   } catch {
     return undefined;
   }
+}
+
+async function ensureBootstrapSecrets(settingsMap: Map<string, string>) {
+  const changedKeys: string[] = [];
+
+  if (!settingsMap.has('auth_token')) {
+    await upsertSetting('auth_token', config.authToken);
+    settingsMap.set('auth_token', JSON.stringify(config.authToken));
+    changedKeys.push('auth_token');
+  }
+
+  if (!settingsMap.has('proxy_token')) {
+    await upsertSetting('proxy_token', config.proxyToken);
+    settingsMap.set('proxy_token', JSON.stringify(config.proxyToken));
+    changedKeys.push('proxy_token');
+  }
+
+  if (!settingsMap.has('account_credential_secret')) {
+    await upsertSetting('account_credential_secret', config.accountCredentialSecret);
+    settingsMap.set('account_credential_secret', JSON.stringify(config.accountCredentialSecret));
+    changedKeys.push('account_credential_secret');
+  }
+
+  return changedKeys;
 }
 
 function toStringList(value: unknown): string[] {
@@ -325,6 +351,7 @@ try {
   await ensureProxyLogDownstreamApiKeyIdColumn();
   const finalRows = await db.select().from(schema.settings).all();
   const finalMap = toSettingsMap(finalRows);
+  await ensureBootstrapSecrets(finalMap);
   applyRuntimeSettings(finalMap);
   config.logCleanupConfigured = hasExplicitLogCleanupSettings(finalMap);
   if (!config.logCleanupConfigured && config.proxyLogRetentionDays > 0) {
@@ -344,6 +371,7 @@ try {
 }
 
 const app = Fastify(buildFastifyOptions(config));
+const serverStartedAt = new Date();
 
 await app.register(cors);
 
@@ -354,8 +382,9 @@ app.addHook('onRequest', async (request, reply) => {
   }
 });
 
+await app.register(systemRoutes, { startedAt: serverStartedAt });
+
 // Register API routes
-await app.register(registerDesktopRoutes);
 await app.register(sitesRoutes);
 await app.register(accountsRoutes);
 await app.register(checkinRoutes);
@@ -427,8 +456,6 @@ try {
   const summaryLines = buildStartupSummaryLines({
     port: config.port,
     host: config.listenHost,
-    authToken: config.authToken,
-    proxyToken: config.proxyToken,
   });
   for (const line of summaryLines) {
     console.log(line);

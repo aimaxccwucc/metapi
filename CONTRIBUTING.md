@@ -74,18 +74,9 @@ The app will be available at `http://localhost:4000` (backend) and `http://local
 ```bash
 npm run dev              # Start backend + frontend with hot reload / 启动后端 + 前端热更新
 npm run dev:server       # Start backend only / 仅启动后端
-npm run build            # Build all (web + server + desktop) / 构建全部
+npm run build            # Build all (web + server) / 构建全部
 npm run build:web        # Build frontend only / 仅构建前端
 npm run build:server     # Build backend only / 仅构建后端
-```
-
-### Desktop Application / 桌面应用
-
-```bash
-npm run dev:desktop              # Start desktop app in dev mode / 开发模式启动桌面应用
-npm run build:desktop            # Build desktop app / 构建桌面应用
-npm run dist:desktop             # Package desktop app / 打包桌面应用
-npm run dist:desktop:mac:intel   # Package for macOS Intel / 打包 macOS Intel 版本
 ```
 
 ### Documentation / 文档
@@ -125,7 +116,6 @@ metapi/
 │   │   ├── db/          # Database & ORM / 数据库与 ORM
 │   │   └── middleware/  # Middleware / 中间件
 │   ├── web/             # Frontend (React + Vite) / 前端（React + Vite）
-│   └── desktop/         # Electron desktop app / Electron 桌面应用
 ├── docs/                # VitePress documentation / VitePress 文档
 ├── drizzle/             # Database migrations / 数据库迁移
 └── scripts/             # Build & dev scripts / 构建与开发脚本

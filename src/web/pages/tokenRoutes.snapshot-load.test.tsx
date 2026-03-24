@@ -19,6 +19,10 @@ vi.mock('../api.js', () => ({
   api: apiMock,
 }));
 
+vi.mock('../components/useIsMobile.js', () => ({
+  useIsMobile: () => false,
+}));
+
 vi.mock('../components/BrandIcon.js', () => ({
   BrandGlyph: ({ brand, icon, model }: { brand?: { name?: string } | null; icon?: string | null; model?: string | null }) => (
     <span>{brand?.name || icon || model || ''}</span>
@@ -44,8 +48,19 @@ async function flushMicrotasks() {
 }
 
 describe('TokenRoutes cached snapshot load', () => {
+  const originalIntersectionObserver = globalThis.IntersectionObserver;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    globalThis.IntersectionObserver = class {
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+      takeRecords() { return []; }
+      readonly root = null;
+      readonly rootMargin = '0px';
+      readonly thresholds = [];
+    } as unknown as typeof IntersectionObserver;
     getBrandMock.mockReset();
     getBrandMock.mockReturnValue(null);
     apiMock.getModelTokenCandidates.mockResolvedValue({ models: {} });
@@ -57,6 +72,8 @@ describe('TokenRoutes cached snapshot load', () => {
         modelPattern: 'gpt-4o-mini',
         displayName: 'gpt-4o-mini',
         displayIcon: null,
+        routeMode: 'explicit_group',
+        sourceRouteIds: [101],
         modelMapping: null,
         enabled: true,
         channelCount: 1,
@@ -110,6 +127,7 @@ describe('TokenRoutes cached snapshot load', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    globalThis.IntersectionObserver = originalIntersectionObserver;
   });
 
   it('shows cached probabilities immediately from getRoutes snapshot data', async () => {
@@ -132,6 +150,16 @@ describe('TokenRoutes cached snapshot load', () => {
       );
       await act(async () => {
         expandBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const expandSourceGroupBtn = root.root.find((node) => (
+        node.type === 'button'
+        && node.props['aria-expanded'] === false
+        && collectText(node).includes('gpt-4o-mini')
+      ));
+      await act(async () => {
+        expandSourceGroupBtn.props.onClick();
       });
       await flushMicrotasks();
 

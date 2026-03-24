@@ -1,5 +1,7 @@
-import React, { useMemo, useState } from 'react';
-import { VChart } from '@visactor/react-vchart';
+import React, { Suspense, lazy, useMemo, useState } from 'react';
+import type { ILineChartSpec } from '@visactor/vchart';
+
+const LineChartRenderer = lazy(() => import('./LineChartRenderer.js'));
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -36,6 +38,10 @@ const COLOR_PALETTE = [
   '#ec4899',
   '#14b8a6',
 ];
+
+function getDatumRecord(datum: unknown): Record<string, unknown> {
+  return datum && typeof datum === 'object' ? datum as Record<string, unknown> : {};
+}
 
 /* ------------------------------------------------------------------ */
 /*  Component                                                          */
@@ -88,7 +94,7 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
 
   /* ---------- vchart spec ---------- */
 
-  const spec: Record<string, unknown> = {
+  const spec: Partial<ILineChartSpec> = {
     type: 'line' as const,
     data: [{ id: 'data', values: flatData }],
     xField: 'date',
@@ -112,24 +118,26 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
     },
     tooltip: {
       mark: {
-        title: { value: (datum: Record<string, unknown>) => datum?.date ?? '' },
+        title: { value: (datum?: unknown) => String(getDatumRecord(datum).date ?? '') },
         content: [
           {
-            key: (datum: Record<string, unknown>) => datum?.site ?? '',
-            value: (datum: Record<string, unknown>) => {
-              const v = Number(datum?.value ?? 0);
+            key: (datum?: unknown) => String(getDatumRecord(datum).site ?? ''),
+            value: (datum?: unknown) => {
+              const row = getDatumRecord(datum);
+              const v = Number(row.value ?? 0);
               return metric === 'spend' ? `$${v.toFixed(4)}` : String(v);
             },
           },
         ],
       },
       dimension: {
-        title: { value: (datum: Record<string, unknown>) => datum?.date ?? '' },
+        title: { value: (datum?: unknown) => String(getDatumRecord(datum).date ?? '') },
         content: [
           {
-            key: (datum: Record<string, unknown>) => datum?.site ?? '',
-            value: (datum: Record<string, unknown>) => {
-              const v = Number(datum?.value ?? 0);
+            key: (datum?: unknown) => String(getDatumRecord(datum).site ?? ''),
+            value: (datum?: unknown) => {
+              const row = getDatumRecord(datum);
+              const v = Number(row.value ?? 0);
               return metric === 'spend' ? `$${v.toFixed(4)}` : String(v);
             },
           },
@@ -170,7 +178,9 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
         <MetricToggle metric={metric} onChange={setMetric} />
       </div>
       <div style={{ width: '100%', height: 320 }}>
-        <VChart spec={spec as any} style={{ width: '100%', height: '100%' }} />
+        <Suspense fallback={<div className="skeleton" style={{ width: '100%', height: '100%', borderRadius: 'var(--radius-sm)' }} />}>
+          <LineChartRenderer spec={spec} style={{ width: '100%', height: '100%' }} />
+        </Suspense>
       </div>
     </div>
   );

@@ -63,7 +63,7 @@ type BrandDefinition = BrandInfo & {
   match: (context: InternalBrandMatchContext) => boolean;
 };
 
-function normalizeInput(value: string): string {
+function normalizeInput(value: string | null | undefined): string {
   return String(value || '').trim().toLowerCase();
 }
 

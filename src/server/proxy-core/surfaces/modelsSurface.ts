@@ -8,7 +8,7 @@ type ModelsSurfaceInput = {
   downstreamPolicy: unknown;
   responseFormat: 'openai' | 'claude';
   tokenRouter: {
-    getAvailableModels(): Promise<string[]>;
+    getAvailableModels(downstreamPolicy?: unknown): Promise<string[]>;
     explainSelection(modelName: string, excludeChannelIds: number[], downstreamPolicy: unknown): Promise<{
       selectedChannelId?: number | null;
     }>;
@@ -19,7 +19,7 @@ type ModelsSurfaceInput = {
 };
 
 async function readVisibleModels(input: ModelsSurfaceInput): Promise<string[]> {
-  const deduped = Array.from(new Set(await input.tokenRouter.getAvailableModels()))
+  const deduped = Array.from(new Set(await input.tokenRouter.getAvailableModels(input.downstreamPolicy)))
     .filter((modelName) => !isSearchPseudoModel(modelName))
     .sort();
   const allowed: string[] = [];

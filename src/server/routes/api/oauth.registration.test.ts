@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { oauthRoutes } from './oauth.js';
-import { isPublicApiRoute } from '../../desktop.js';
+import { isPublicApiRoute } from '../../publicApiRoutes.js';
 
 describe('oauth route registration', () => {
   const apps: Array<Awaited<ReturnType<typeof Fastify>>> = [];
@@ -24,7 +24,7 @@ describe('oauth route registration', () => {
     expect(routes).toContain('allback/');
   });
 
-  it('treats oauth callback route as a public desktop API route', () => {
+  it('treats oauth callback route as a public API route', () => {
     expect(isPublicApiRoute('/api/oauth/callback/codex')).toBe(true);
     expect(isPublicApiRoute('/api/oauth/callback/claude')).toBe(true);
     expect(isPublicApiRoute('/api/oauth/providers')).toBe(false);

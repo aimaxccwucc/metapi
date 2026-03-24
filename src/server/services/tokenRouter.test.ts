@@ -15,15 +15,19 @@ describe('filterRecentlyFailedCandidates', () => {
     expect(matchesModelPattern('aaaa', 're:^(a+)+$')).toBe(false);
   });
 
-  it('uses a short default recent-failure window', () => {
+  it('uses a stronger default recent-failure window', () => {
     const nowMs = Date.now();
     expect(isChannelRecentlyFailed({
       failCount: 1,
       lastFailAt: new Date(nowMs - 20 * 1000).toISOString(),
+    }, nowMs)).toBe(true);
+    expect(isChannelRecentlyFailed({
+      failCount: 1,
+      lastFailAt: new Date(nowMs - 100 * 1000).toISOString(),
     }, nowMs)).toBe(false);
   });
 
-  it('expands the avoidance window with fibonacci-style backoff', () => {
+  it('expands the avoidance window with stronger weighted backoff', () => {
     const nowMs = Date.now();
     expect(isChannelRecentlyFailed({
       failCount: 4,
@@ -31,7 +35,7 @@ describe('filterRecentlyFailedCandidates', () => {
     }, nowMs)).toBe(true);
     expect(isChannelRecentlyFailed({
       failCount: 4,
-      lastFailAt: new Date(nowMs - 50 * 1000).toISOString(),
+      lastFailAt: new Date(nowMs - 80 * 1000).toISOString(),
     }, nowMs)).toBe(false);
   });
 

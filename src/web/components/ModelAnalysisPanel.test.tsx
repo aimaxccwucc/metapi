@@ -2,8 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, create, type ReactTestInstance } from 'react-test-renderer';
 import ModelAnalysisPanel from './ModelAnalysisPanel.js';
 
-vi.mock('@visactor/react-vchart', () => ({
-  VChart: () => <div>mock-chart</div>,
+vi.mock('./charts/AreaChartRenderer.js', () => ({
+  default: () => <div>mock-chart</div>,
+}));
+
+vi.mock('./charts/BarChartRenderer.js', () => ({
+  default: () => <div>mock-chart</div>,
+}));
+
+vi.mock('./charts/PieChartRenderer.js', () => ({
+  default: () => <div>mock-chart</div>,
 }));
 
 vi.mock('./BrandIcon.js', () => ({

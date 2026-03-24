@@ -40,7 +40,6 @@ body:
         - Client Integration / 客户端接入
         - Routing / 路由
         - Site / Account / Token / 站点、账号或令牌
-        - Desktop App / 桌面端
         - Proxy API (/v1/*) / 代理接口
         - Other / 其他
     validations:

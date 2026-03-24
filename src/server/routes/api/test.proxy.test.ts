@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fetchMock = vi.fn();
+const getProxyFileByPublicIdMock = vi.fn();
 
 vi.mock('undici', async () => {
   const actual = await vi.importActual<typeof import('undici')>('undici');
@@ -10,6 +11,10 @@ vi.mock('undici', async () => {
     fetch: (...args: unknown[]) => fetchMock(...args),
   };
 });
+
+vi.mock('../../services/proxyFileStore.js', () => ({
+  getProxyFileByPublicId: (...args: unknown[]) => getProxyFileByPublicIdMock(...args),
+}));
 
 describe('testRoutes proxy tester transport', () => {
   let app: FastifyInstance;
@@ -22,6 +27,7 @@ describe('testRoutes proxy tester transport', () => {
 
   beforeEach(() => {
     fetchMock.mockReset();
+    getProxyFileByPublicIdMock.mockReset();
   });
 
   afterAll(async () => {
@@ -190,5 +196,24 @@ describe('testRoutes proxy tester transport', () => {
     const [url, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit & { body?: { constructor?: { name?: string } } }];
     expect(url).toMatch(/\/v1\/files$/);
     expect(requestInit.body?.constructor?.name).toBe('FormData');
+  });
+
+  it('serves replay hydration file content from the admin api surface', async () => {
+    getProxyFileByPublicIdMock.mockResolvedValue({
+      publicId: 'file-metapi-123',
+      filename: 'brief.pdf',
+      mimeType: 'application/pdf',
+      contentBase64: Buffer.from('PDF').toString('base64'),
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/test/proxy/files/file-metapi-123/content',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(getProxyFileByPublicIdMock).toHaveBeenCalledWith('file-metapi-123');
+    expect(response.headers['content-type']).toContain('application/pdf');
+    expect(response.body).toBe('PDF');
   });
 });

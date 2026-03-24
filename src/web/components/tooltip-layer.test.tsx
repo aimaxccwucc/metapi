@@ -11,7 +11,7 @@ describe('TooltipLayer component', () => {
     expect(source).toContain('[data-tooltip]');
     expect(source).toContain("position: 'fixed'");
     expect(source).toContain('document.body.dataset.tooltipPortal');
-    expect(appSource).toContain("import TooltipLayer from './components/TooltipLayer.js'");
+    expect(appSource).toContain("const TooltipLayer = lazy(() => import('./components/TooltipLayer.js'))");
     expect(appSource).toContain('<TooltipLayer />');
   });
 });

@@ -20,6 +20,18 @@ vi.mock('../api.js', () => ({
   api: apiMock,
 }));
 
+vi.mock('react-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-dom')>('react-dom');
+  return {
+    ...actual,
+    createPortal: (node: unknown) => node,
+  };
+});
+
+vi.mock('../components/useIsMobile.js', () => ({
+  useIsMobile: () => true,
+}));
+
 vi.mock('../components/BrandIcon.js', () => ({
   BrandGlyph: ({ brand, icon, model }: { brand?: { name?: string } | null; icon?: string | null; model?: string | null }) => (
     <span>{brand?.name || icon || model || ''}</span>
@@ -37,6 +49,39 @@ function collectText(node: ReactTestInstance): string {
   }).join('');
 }
 
+function findButtonByText(root: ReactTestInstance, text: string): ReactTestInstance {
+  const matches = root.findAll((node) => (
+    node.type === 'button'
+    && typeof node.props.onClick === 'function'
+    && collectText(node).includes(text)
+  ));
+  if (matches.length === 0) {
+    throw new Error(`button not found: ${text}`);
+  }
+  return matches[0];
+}
+
+async function waitForText(root: ReactTestInstance, text: string) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (collectText(root).includes(text)) return;
+    await flushMicrotasks();
+  }
+}
+
+async function switchToAllRoutes(root: ReactTestInstance) {
+  const openFiltersButton = findButtonByText(root, '筛选');
+  await act(async () => {
+    openFiltersButton.props.onClick();
+  });
+  await flushMicrotasks();
+
+  const showAllRoutesButton = findButtonByText(root, '显示全部路由');
+  await act(async () => {
+    showAllRoutesButton.props.onClick();
+  });
+  await flushMicrotasks();
+}
+
 async function flushMicrotasks() {
   await act(async () => {
     await Promise.resolve();
@@ -45,10 +90,21 @@ async function flushMicrotasks() {
 }
 
 describe('TokenRoutes routing strategy updates', () => {
+  const originalIntersectionObserver = globalThis.IntersectionObserver;
+
   beforeEach(() => {
     vi.clearAllMocks();
     getBrandMock.mockReset();
     getBrandMock.mockReturnValue(null);
+    globalThis.IntersectionObserver = class {
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+      takeRecords() { return []; }
+      readonly root = null;
+      readonly rootMargin = '0px';
+      readonly thresholds = [];
+    } as unknown as typeof IntersectionObserver;
     apiMock.getRoutesSummary
       .mockResolvedValueOnce([
         {
@@ -76,6 +132,7 @@ describe('TokenRoutes routing strategy updates', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    globalThis.IntersectionObserver = originalIntersectionObserver;
   });
 
   it('keeps the optimistic routing strategy when refresh fails after a successful save', async () => {
@@ -91,11 +148,10 @@ describe('TokenRoutes routing strategy updates', () => {
         );
       });
       await flushMicrotasks();
+      await waitForText(root.root, 'gpt-4o-mini');
+      await switchToAllRoutes(root.root);
 
-      const expandButton = root.root.find((node) => (
-        node.type === 'div'
-        && String(node.props.className || '').includes('route-card-collapsed')
-      ));
+      const expandButton = findButtonByText(root.root, '详情');
       await act(async () => {
         expandButton.props.onClick();
       });
@@ -141,11 +197,10 @@ describe('TokenRoutes routing strategy updates', () => {
         );
       });
       await flushMicrotasks();
+      await waitForText(root.root, 'gpt-4o-mini');
+      await switchToAllRoutes(root.root);
 
-      const expandButton = root.root.find((node) => (
-        node.type === 'div'
-        && String(node.props.className || '').includes('route-card-collapsed')
-      ));
+      const expandButton = findButtonByText(root.root, '详情');
       await act(async () => {
         expandButton.props.onClick();
       });

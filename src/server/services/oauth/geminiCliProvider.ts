@@ -23,17 +23,34 @@ export const GEMINI_CLI_AUTO_ONBOARD_MAX_ATTEMPTS = 15;
 export const GEMINI_CLI_ONBOARD_POLL_INTERVAL_MS = 5_000;
 export const GEMINI_CLI_ONBOARD_MAX_ATTEMPTS = 6;
 
-function requireGeminiCliOAuthConfig() {
+function requireGeminiCliClientId() {
   if (!GEMINI_CLI_CLIENT_ID) {
     throw new Error('GEMINI_CLI_CLIENT_ID is not configured');
   }
-  if (!GEMINI_CLI_CLIENT_SECRET) {
-    throw new Error('GEMINI_CLI_CLIENT_SECRET is not configured');
+  return GEMINI_CLI_CLIENT_ID;
+}
+
+function buildGeminiCliTokenRequestParams(input: {
+  code?: string;
+  redirectUri?: string;
+  refreshToken?: string;
+}) {
+  const params = new URLSearchParams({
+    client_id: requireGeminiCliClientId(),
+  });
+  if (GEMINI_CLI_CLIENT_SECRET) {
+    params.set('client_secret', GEMINI_CLI_CLIENT_SECRET);
   }
-  return {
-    clientId: GEMINI_CLI_CLIENT_ID,
-    clientSecret: GEMINI_CLI_CLIENT_SECRET,
-  };
+  if (input.code) {
+    params.set('code', input.code);
+  }
+  if (input.redirectUri) {
+    params.set('redirect_uri', input.redirectUri);
+  }
+  if (input.refreshToken) {
+    params.set('refresh_token', input.refreshToken);
+  }
+  return params;
 }
 
 const GEMINI_CLI_SCOPES = [
@@ -410,9 +427,9 @@ export const geminiCliOauthProvider: OAuthProviderDefinition = {
     redirectUri: GEMINI_CLI_LOOPBACK_REDIRECT_URI,
   },
   buildAuthorizationUrl: async ({ state, redirectUri }) => {
-    const oauthConfig = requireGeminiCliOAuthConfig();
+    const clientId = requireGeminiCliClientId();
     const params = new URLSearchParams({
-      client_id: oauthConfig.clientId,
+      client_id: clientId,
       redirect_uri: redirectUri,
       response_type: 'code',
       access_type: 'offline',
@@ -423,14 +440,12 @@ export const geminiCliOauthProvider: OAuthProviderDefinition = {
     return `${GEMINI_CLI_AUTH_URL}?${params.toString()}`;
   },
   exchangeAuthorizationCode: async ({ code, redirectUri, projectId }) => {
-    const oauthConfig = requireGeminiCliOAuthConfig();
-    const token = await postGeminiToken(new URLSearchParams({
+    const tokenRequest = buildGeminiCliTokenRequestParams({
       code,
-      client_id: oauthConfig.clientId,
-      client_secret: oauthConfig.clientSecret,
-      redirect_uri: redirectUri,
-      grant_type: 'authorization_code',
-    }));
+      redirectUri,
+    });
+    tokenRequest.set('grant_type', 'authorization_code');
+    const token = await postGeminiToken(tokenRequest);
     const resolvedProjectId = await ensureGeminiProjectAndOnboard(token.accessToken, projectId);
     await checkCloudAIAPIEnabled(token.accessToken, resolvedProjectId);
     const email = await fetchGeminiUserEmail(token.accessToken);
@@ -443,13 +458,11 @@ export const geminiCliOauthProvider: OAuthProviderDefinition = {
     };
   },
   refreshAccessToken: async ({ refreshToken, oauth }) => {
-    const oauthConfig = requireGeminiCliOAuthConfig();
-    const token = await postGeminiToken(new URLSearchParams({
-      client_id: oauthConfig.clientId,
-      client_secret: oauthConfig.clientSecret,
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-    }));
+    const tokenRequest = buildGeminiCliTokenRequestParams({
+      refreshToken,
+    });
+    tokenRequest.set('grant_type', 'refresh_token');
+    const token = await postGeminiToken(tokenRequest);
     const nextProjectId = oauth?.projectId
       ? oauth.projectId
       : await ensureGeminiProjectAndOnboard(token.accessToken);

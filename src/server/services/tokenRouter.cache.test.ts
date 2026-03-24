@@ -170,7 +170,7 @@ describe('TokenRouter runtime cache', () => {
     expect(storedAccount?.status).toBe('expired');
   });
 
-  it('uses fibonacci-style cooldown across repeated failures', async () => {
+  it('uses category-aware cooldown across repeated failures', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'cooldown-site',
       url: 'https://cooldown-site.example.com',
@@ -219,6 +219,8 @@ describe('TokenRouter runtime cache', () => {
     const firstCooldownMs = Date.parse(String(firstRecord?.cooldownUntil || '')) - firstStartedAt;
     expect(firstCooldownMs).toBeGreaterThanOrEqual(10_000);
     expect(firstCooldownMs).toBeLessThanOrEqual(20_000);
+    expect(firstRecord?.consecutiveFailCount).toBe(1);
+    expect(firstRecord?.cooldownLevel).toBe(0);
 
     const secondStartedAt = Date.now();
     await router.recordFailure(channel.id);
@@ -228,6 +230,8 @@ describe('TokenRouter runtime cache', () => {
     const secondCooldownMs = Date.parse(String(secondRecord?.cooldownUntil || '')) - secondStartedAt;
     expect(secondCooldownMs).toBeGreaterThanOrEqual(10_000);
     expect(secondCooldownMs).toBeLessThanOrEqual(20_000);
+    expect(secondRecord?.consecutiveFailCount).toBe(2);
+    expect(secondRecord?.cooldownLevel).toBe(1);
 
     const thirdStartedAt = Date.now();
     await router.recordFailure(channel.id);
@@ -236,7 +240,9 @@ describe('TokenRouter runtime cache', () => {
       .get();
     const thirdCooldownMs = Date.parse(String(thirdRecord?.cooldownUntil || '')) - thirdStartedAt;
     expect(thirdCooldownMs).toBeGreaterThanOrEqual(25_000);
-    expect(thirdCooldownMs).toBeLessThanOrEqual(35_000);
+    expect(thirdCooldownMs).toBeLessThanOrEqual(40_000);
+    expect(thirdRecord?.consecutiveFailCount).toBe(3);
+    expect(thirdRecord?.cooldownLevel).toBe(1);
   });
 
   it('round robins across all available channels regardless of priority', async () => {

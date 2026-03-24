@@ -154,13 +154,13 @@ curl -sS http://localhost:4000/v1/chat/completions \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'
 ```
 
-以上示例默认服务端部署监听 `localhost:4000`。Desktop 内置后端默认监听 `0.0.0.0:4000`；本机排查通常可直接使用 `127.0.0.1:4000`，如果显式设置了 `METAPI_DESKTOP_SERVER_PORT`，则按日志里的实际端口访问；局域网排查改用当前机器的实际 IP。
+以上示例默认服务端部署监听 `localhost:4000`。如果你把服务暴露到局域网或公网，请改用对应的实际地址并结合反向代理、访问控制和令牌策略一起检查。
 
 ### 自动化监控建议
 
 - 定时请求 `/v1/models`，检查返回状态码和模型数量
 - 定时抽样请求 `/v1/chat/completions`，检查端到端可用性
-- SQLite / Desktop：监控磁盘空间（SQLite WAL 日志可能增长）
+- SQLite：监控磁盘空间（SQLite WAL 日志可能增长）
 - MySQL / Postgres：监控外部数据库空间、连接数和慢查询
 - 监控 Docker 容器状态
 
@@ -221,7 +221,7 @@ curl -sS http://localhost:4000/v1/chat/completions \
 
 - 会清空当前 metapi 正在使用的全部业务数据
 - 如果当前运行在外部 MySQL / Postgres，会先清空该外部库中的 metapi 数据，再切回默认 SQLite
-- 管理员 Token 会重置为 `change-me-admin-token`
+- 当前管理员令牌与代理令牌会保留
 - 当前登录会话会立即退出，页面刷新后回到首装状态
 
 执行前建议先做一次导出或数据库备份。

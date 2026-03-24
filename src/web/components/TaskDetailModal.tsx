@@ -190,8 +190,10 @@ function extractTaskRows(result: unknown): TaskResultRow[] {
       ...buildResultRow(item),
       index,
     }))
-    .sort((left, right) => left.badge.rank - right.badge.rank || left.index - right.index)
-    .map(({ index: _index, ...item }) => item);
+    .sort((left: TaskResultRow & { index: number }, right: TaskResultRow & { index: number }) =>
+      left.badge.rank - right.badge.rank || left.index - right.index,
+    )
+    .map(({ index: _index, ...item }: TaskResultRow & { index: number }) => item);
 }
 
 async function copyText(text: string): Promise<boolean> {

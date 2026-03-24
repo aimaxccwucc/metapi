@@ -11,10 +11,9 @@ describe('buildConfig', () => {
     expect(config.dataDir).toBe('./data');
   });
 
-  it('aligns desktop deployments with server deployments for listen host', () => {
+  it('uses the same listen host and data dir rules for custom runtime environments', () => {
     const config = buildConfig({
       HOST: '0.0.0.0',
-      METAPI_DESKTOP: '1',
       PORT: '4312',
       DATA_DIR: '/tmp/metapi-data',
     });
@@ -24,7 +23,7 @@ describe('buildConfig', () => {
     expect(config.dataDir).toBe('/tmp/metapi-data');
   });
 
-  it('honors explicit loopback host outside desktop mode', () => {
+  it('honors explicit loopback host overrides', () => {
     const config = buildConfig({
       HOST: '127.0.0.1',
     });
@@ -55,7 +54,7 @@ describe('buildConfig', () => {
     expect(config.claudeClientId).toBe('9d1c250a-e61b-44d9-88ed-5944d1962f5e');
     expect(config.claudeClientSecret).toBe('');
     expect(config.geminiCliClientId).toBe('681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com');
-    expect(config.geminiCliClientSecret).toBe('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');
+    expect(config.geminiCliClientSecret).toBe('');
   });
 
   it('allows overriding the codex websocket beta gate from environment', () => {

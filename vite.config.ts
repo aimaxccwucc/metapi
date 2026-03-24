@@ -12,6 +12,46 @@ export default defineConfig(({ mode }) => {
   const resolvedFrontendPort = Number.isFinite(frontendPort) && frontendPort > 0 ? frontendPort : 5173;
   const frontendHost = (env.VITE_DEV_HOST || '127.0.0.1').trim() || '127.0.0.1';
 
+  function resolveVChartChunk(id: string) {
+    if (!id.includes('/node_modules/')) return undefined;
+
+    if (id.includes('/@visactor/vrender')) return 'vchart-render';
+
+    if (
+      id.includes('/@visactor/vdataset')
+      || id.includes('/@visactor/vgrammar')
+      || id.includes('/@visactor/vscale')
+      || id.includes('/@visactor/vutils')
+    ) {
+      return 'vchart-data';
+    }
+
+    if (
+      id.includes('/@visactor/react-vchart/esm/charts/BaseChart')
+      || id.includes('/@visactor/react-vchart/esm/containers/')
+      || id.includes('/@visactor/react-vchart/esm/context/')
+      || id.includes('/@visactor/react-vchart/esm/eventsUtils')
+      || id.includes('/@visactor/react-vchart/esm/constants')
+      || id.includes('/@visactor/react-vchart/esm/util')
+      || id.includes('/@visactor/react-vchart/esm/components/tooltip/')
+      || id.includes('/@visactor/vchart/esm/core/')
+      || id.includes('/@visactor/vchart/esm/compile/')
+      || id.includes('/@visactor/vchart/esm/plugin/')
+      || id.includes('/@visactor/vchart/esm/typings/')
+      || id.includes('/@visactor/vchart/esm/util/')
+      || id.includes('/@visactor/vchart/esm/theme/')
+      || id.includes('/@visactor/vchart/esm/animation/')
+      || id.includes('/@visactor/vchart/esm/env/')
+      || id.includes('/@visactor/vchart/esm/event/')
+      || id.includes('/@visactor/vchart/esm/constant/')
+      || id.includes('/@visactor/vchart/esm/data/transforms/')
+    ) {
+      return 'vchart-core';
+    }
+
+    return undefined;
+  }
+
   return {
     root: 'src/web',
     plugins: [react(), tailwindcss()],
@@ -21,10 +61,7 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks(id) {
-            if (id.includes('@visactor/react-vchart') || id.includes('/@visactor/')) {
-              return 'vchart-vendor';
-            }
-            return undefined;
+            return resolveVChartChunk(id);
           },
         },
       },

@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { fetch, File as UndiciFile, FormData as UndiciFormData } from 'undici';
 import { config } from '../../config.js';
+import { getProxyFileByPublicId } from '../../services/proxyFileStore.js';
 
 type UndiciRequestInit = Parameters<typeof fetch>[1];
 
@@ -776,6 +777,25 @@ export async function testRoutes(app: FastifyInstance) {
         createdAt: new Date(job.createdAt).toISOString(),
         expiresAt: new Date(job.expiresAt).toISOString(),
       });
+    },
+  );
+
+  app.get<{ Params: { fileId: string } }>(
+    '/api/test/proxy/files/:fileId/content',
+    async (request, reply) => {
+      const file = await getProxyFileByPublicId(request.params.fileId);
+      if (!file) {
+        return reply.code(404).send({
+          error: {
+            message: 'file not found',
+            type: 'not_found',
+          },
+        });
+      }
+
+      reply.type(file.mimeType);
+      reply.header('Content-Disposition', `inline; filename="${encodeURIComponent(file.filename)}"`);
+      return reply.send(Buffer.from(file.contentBase64, 'base64'));
     },
   );
 

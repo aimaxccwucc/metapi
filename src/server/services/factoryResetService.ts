@@ -6,8 +6,6 @@ import { ensureDefaultSitesSeeded } from './defaultSiteSeedService.js';
 import { startProxyLogRetentionService } from './proxyLogRetentionService.js';
 import { invalidateSiteProxyCache } from './siteProxy.js';
 
-export const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
-
 type FactoryResetDependencies = {
   switchRuntimeDatabase?: typeof switchRuntimeDatabase;
   runSqliteMigrations?: () => Promise<void> | void;
@@ -60,7 +58,7 @@ function shouldPreserveExternalRuntime(state: PreservedInfrastructureState): boo
 function resetRuntimeConfigToInitialState(preserved: PreservedInfrastructureState) {
   const baseline = buildConfig(process.env);
   Object.assign(config, baseline);
-  config.authToken = preserved.authToken || baseline.authToken || FACTORY_RESET_ADMIN_TOKEN;
+  config.authToken = preserved.authToken || baseline.authToken;
   config.proxyToken = preserved.proxyToken || baseline.proxyToken;
   config.systemProxyUrl = preserved.systemProxyUrl || baseline.systemProxyUrl;
   if (shouldPreserveExternalRuntime(preserved)) {
@@ -85,7 +83,7 @@ function resetRuntimeConfigToInitialState(preserved: PreservedInfrastructureStat
 }
 
 async function restoreInfrastructureSettings(preserved: PreservedInfrastructureState): Promise<void> {
-  await upsertSetting('auth_token', preserved.authToken || FACTORY_RESET_ADMIN_TOKEN);
+  await upsertSetting('auth_token', preserved.authToken || config.authToken);
   await upsertSetting('proxy_token', preserved.proxyToken);
   await upsertSetting('system_proxy_url', preserved.systemProxyUrl);
 

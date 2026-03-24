@@ -45,6 +45,47 @@ vi.mock('./components/TooltipLayer.js', () => ({
   default: () => null,
 }));
 
+vi.mock('./components/MobileDrawer.js', () => ({
+  MobileDrawer: ({
+    open,
+    onClose,
+    title,
+    closeLabel = '关闭导航',
+    children,
+  }: {
+    open: boolean;
+    onClose: () => void;
+    title?: ReactNode;
+    closeLabel?: string;
+    children: ReactNode;
+  }) => (open ? (
+    <div className="mobile-drawer-mock">
+      {title ? <div>{title}</div> : null}
+      <button type="button" aria-label={closeLabel} onClick={onClose}>×</button>
+      {children}
+    </div>
+  ) : null),
+  default: ({
+    open,
+    onClose,
+    title,
+    closeLabel = '关闭导航',
+    children,
+  }: {
+    open: boolean;
+    onClose: () => void;
+    title?: ReactNode;
+    closeLabel?: string;
+    children: ReactNode;
+  }) => (open ? (
+    <div className="mobile-drawer-mock">
+      {title ? <div>{title}</div> : null}
+      <button type="button" aria-label={closeLabel} onClick={onClose}>×</button>
+      {children}
+    </div>
+  ) : null),
+}));
+
 vi.mock('./components/useAnimatedVisibility.js', () => ({
   useAnimatedVisibility: (open: boolean) => ({
     shouldRender: open,
@@ -134,6 +175,13 @@ async function flushMicrotasks() {
   });
 }
 
+async function waitForText(root: ReactTestInstance, text: string) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (collectText(root).includes(text)) return;
+    await flushMicrotasks();
+  }
+}
+
 describe('App mobile sidebar', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -172,6 +220,7 @@ describe('App mobile sidebar', () => {
         openButton.props.onClick();
       });
       await flushMicrotasks();
+      await waitForText(root.root, '导航菜单');
 
       expect(collectText(root.root)).toContain('导航菜单');
 

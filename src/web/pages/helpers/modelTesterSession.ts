@@ -156,8 +156,24 @@ export type ModelTesterSessionState = {
 export type TestChatPayload = TesterProxyEnvelope;
 export type ProxyTestEnvelope = TesterProxyEnvelope;
 
+export type ModelTesterHistoryEntry = {
+  id: string;
+  createdAt: string;
+  mode: PlaygroundMode;
+  protocol: PlaygroundProtocol;
+  model: string;
+  title: string;
+  request: TesterProxyEnvelope;
+  requestPreview: string;
+  status: 'pending' | 'succeeded' | 'failed' | 'cancelled';
+  jobId?: string | null;
+  errorMessage?: string | null;
+};
+
 export const MODEL_TESTER_SESSION_VERSION = 5;
 export const MODEL_TESTER_STORAGE_KEY = 'metapi:model-tester:session:v5';
+export const MODEL_TESTER_HISTORY_STORAGE_KEY = 'metapi:model-tester:history:v1';
+export const MODEL_TESTER_HISTORY_LIMIT = 30;
 
 export const DEFAULT_INPUTS: ModelTesterInputs = {
   mode: 'conversation',
@@ -886,7 +902,7 @@ const parsePendingPayload = (
 
 export const collectModelTesterModelNames = (
   marketplace: { models?: Array<{ name?: unknown }>; } | null | undefined,
-  routes: Array<{ modelPattern?: unknown; enabled?: unknown; }> | null | undefined,
+  routes: Array<{ modelPattern?: unknown; displayName?: unknown; enabled?: unknown; routeMode?: unknown }> | null | undefined,
 ): string[] => {
   const result: string[] = [];
   const seen = new Set<string>();
@@ -905,6 +921,9 @@ export const collectModelTesterModelNames = (
 
   for (const route of routes || []) {
     if (!route || route.enabled === false) continue;
+    if (typeof route.displayName === 'string' && route.displayName.trim()) {
+      appendModel(route.displayName);
+    }
     if (typeof route.modelPattern !== 'string') continue;
     const modelPattern = route.modelPattern.trim();
     if (!modelPattern || !isExactModelPattern(modelPattern)) continue;
@@ -932,6 +951,69 @@ export const filterModelTesterModelNames = (models: string[], query: string): st
     })
     .map((item) => item.name);
 };
+
+function sanitizeHistoryEntry(value: unknown): ModelTesterHistoryEntry | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.id !== 'string' || !value.id.trim()) return null;
+  if (typeof value.createdAt !== 'string' || !value.createdAt.trim()) return null;
+  if (typeof value.model !== 'string') return null;
+  if (typeof value.title !== 'string') return null;
+  if (typeof value.requestPreview !== 'string') return null;
+  if (
+    typeof value.mode !== 'string'
+    || !VALID_MODES.has(value.mode)
+    || typeof value.protocol !== 'string'
+    || !VALID_PROTOCOLS.has(value.protocol)
+  ) {
+    return null;
+  }
+
+  const request = parsePendingPayload(
+    value.request,
+    DEFAULT_INPUTS,
+    DEFAULT_PARAMETER_ENABLED,
+  );
+  if (!request) return null;
+
+  const status = typeof value.status === 'string'
+    ? value.status
+    : 'failed';
+  if (!['pending', 'succeeded', 'failed', 'cancelled'].includes(status)) {
+    return null;
+  }
+
+  return {
+    id: value.id.trim(),
+    createdAt: value.createdAt.trim(),
+    mode: value.mode as PlaygroundMode,
+    protocol: value.protocol as PlaygroundProtocol,
+    model: value.model,
+    title: value.title,
+    request,
+    requestPreview: value.requestPreview,
+    status: status as ModelTesterHistoryEntry['status'],
+    jobId: typeof value.jobId === 'string' && value.jobId.trim() ? value.jobId.trim() : null,
+    errorMessage: typeof value.errorMessage === 'string' ? value.errorMessage : null,
+  };
+}
+
+export function parseModelTesterHistory(value: string | null | undefined): ModelTesterHistoryEntry[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => sanitizeHistoryEntry(item))
+      .filter((item): item is ModelTesterHistoryEntry => item !== null)
+      .slice(0, MODEL_TESTER_HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+export function serializeModelTesterHistory(entries: ModelTesterHistoryEntry[]): string {
+  return JSON.stringify(entries.slice(0, MODEL_TESTER_HISTORY_LIMIT));
+}
 
 export const createMessage = (role: ChatRole, content: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({
   id: createMessageId(),

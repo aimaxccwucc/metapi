@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   AUTH_SESSION_DURATION_MS,
+  COOKIE_AUTH_SESSION_SENTINEL,
   clearAuthSession,
   getAuthToken,
+  getBearerAuthToken,
   hasValidAuthSession,
   persistAuthSession,
 } from './authSession.js';
@@ -27,7 +29,8 @@ describe('authSession', () => {
     const storage = createMemoryStorage();
     persistAuthSession(storage, 'token-1', 60_000, 1_000);
 
-    expect(getAuthToken(storage, 10_000)).toBe('token-1');
+    expect(getAuthToken(storage, 10_000)).toBe(COOKIE_AUTH_SESSION_SENTINEL);
+    expect(getBearerAuthToken(storage, 10_000)).toBeNull();
     expect(hasValidAuthSession(storage, 10_000)).toBe(true);
   });
 
@@ -46,5 +49,15 @@ describe('authSession', () => {
     clearAuthSession(storage);
 
     expect(getAuthToken(storage, 2_000)).toBeNull();
+  });
+
+  it('clears session when persisting an empty token', () => {
+    const storage = createMemoryStorage();
+    persistAuthSession(storage, 'token-3', AUTH_SESSION_DURATION_MS, 1_000);
+
+    persistAuthSession(storage, '', AUTH_SESSION_DURATION_MS, 2_000);
+
+    expect(getAuthToken(storage, 3_000)).toBeNull();
+    expect(getBearerAuthToken(storage, 3_000)).toBeNull();
   });
 });

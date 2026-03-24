@@ -40,6 +40,7 @@ describe('settings and auth events', () => {
     await db.delete(schema.events).run();
     await db.delete(schema.settings).run();
 
+    config.trustProxy = false;
     config.authToken = 'old-admin-token-123';
     config.proxyToken = 'sk-old-proxy-token-123';
     config.systemProxyUrl = '';
@@ -164,9 +165,26 @@ describe('settings and auth events', () => {
 
     expect(response.statusCode).toBe(200);
     const body = response.json() as { currentAdminIp?: string; serverTimeZone?: string };
-    expect(body.currentAdminIp).toBe('203.0.113.5');
+    expect(body.currentAdminIp).toBe('10.0.0.8');
     expect(typeof body.serverTimeZone).toBe('string');
     expect((body.serverTimeZone || '').length).toBeGreaterThan(0);
+  });
+
+  it('uses forwarded admin ip only when trust proxy is enabled', async () => {
+    config.trustProxy = true;
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+      remoteAddress: '10.0.0.8',
+      headers: {
+        'x-forwarded-for': '203.0.113.5, 10.0.0.8',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { currentAdminIp?: string };
+    expect(body.currentAdminIp).toBe('203.0.113.5');
   });
 
   it('rejects proxy token that does not start with sk-', async () => {
@@ -601,6 +619,7 @@ describe('settings and auth events', () => {
     });
 
     expect(response.statusCode).toBe(200);
+    expect(response.headers['set-cookie']).toContain('metapi_admin_session=new-admin-token-456');
 
     const events = await db.select().from(schema.events).all();
     expect(events.length).toBe(1);
