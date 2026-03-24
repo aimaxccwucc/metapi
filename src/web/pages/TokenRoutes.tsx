@@ -268,7 +268,7 @@ export default function TokenRoutes() {
     }
     setDecisionByRoute(decisionPlaceholder);
     setDecisionAutoSkipped(
-      summaries.some((route) => isRouteExactModel(route) && !route.decisionSnapshot),
+      summaries.some((route) => isRouteExactModel(route) && !(route.decisionSnapshot || route.decisionSnapshotAvailable)),
     );
   };
 

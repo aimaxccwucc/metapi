@@ -921,7 +921,8 @@ export async function tokensRoutes(app: FastifyInstance) {
         channelCount: agg?.channelCount ?? 0,
         enabledChannelCount: agg?.enabledChannelCount ?? 0,
         siteNames: agg ? Array.from(agg.siteNames) : [],
-        decisionSnapshot: parseRouteDecisionSnapshot(route.decisionSnapshot),
+        decisionSnapshot: null,
+        decisionSnapshotAvailable: typeof route.decisionSnapshot === 'string' && route.decisionSnapshot.trim().length > 0,
         decisionRefreshedAt: route.decisionRefreshedAt ?? null,
       };
     });

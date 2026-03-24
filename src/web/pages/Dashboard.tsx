@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState, useCallback } from 'react';
+import { Suspense, lazy, useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useToast } from '../components/Toast.js';
@@ -30,6 +30,34 @@ function ChartFallback({ height = 280 }: { height?: number }) {
       <div className="skeleton" style={{ width: '100%', height: Math.max(120, height - 46), borderRadius: 10 }} />
     </div>
   );
+}
+
+function useDeferredSectionVisible() {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (visible) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      setVisible(true);
+      return;
+    }
+    const element = ref.current;
+    if (!element) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '240px 0px' },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [visible]);
+
+  return { ref, visible };
 }
 
 type SiteSpeedState =
@@ -174,6 +202,7 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
   const [showInactiveSites, setShowInactiveSites] = useState(false);
   const toast = useToast();
   const normalizedAdminName = (adminName || '').trim() || '\u7ba1\u7406\u5458';
+  const analyticsSection = useDeferredSectionVisible();
 
   const getSiteSpeedKey = (site: any, idx: number) => String(site?.id ?? idx);
 
@@ -224,8 +253,9 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
   }, [load]);
 
   useEffect(() => {
+    if (!analyticsSection.visible) return;
     loadSiteStats();
-  }, [loadSiteStats]);
+  }, [analyticsSection.visible, loadSiteStats]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;
@@ -561,6 +591,7 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
       </div>
 
       {/* 站点级分析 */}
+      <div ref={analyticsSection.ref} style={{ height: 1, width: '100%' }} />
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, marginTop: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 14, fontWeight: 600, color: 'var(--color-text-primary)' }}>
           <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>
@@ -583,14 +614,18 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
 
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 16, marginBottom: 24 }}>
         <div className="chart-panel-enter animate-slide-up stagger-6">
-          <Suspense fallback={<ChartFallback height={320} />}>
-            <SiteDistributionChart data={siteDistribution} loading={siteLoading} />
-          </Suspense>
+          {analyticsSection.visible ? (
+            <Suspense fallback={<ChartFallback height={320} />}>
+              <SiteDistributionChart data={siteDistribution} loading={siteLoading} />
+            </Suspense>
+          ) : <ChartFallback height={320} />}
         </div>
         <div className="chart-panel-enter animate-slide-up stagger-7">
-          <Suspense fallback={<ChartFallback height={320} />}>
-            <SiteTrendChart data={siteTrend} loading={siteLoading} />
-          </Suspense>
+          {analyticsSection.visible ? (
+            <Suspense fallback={<ChartFallback height={320} />}>
+              <SiteTrendChart data={siteTrend} loading={siteLoading} />
+            </Suspense>
+          ) : <ChartFallback height={320} />}
         </div>
       </div>
 
@@ -704,9 +739,11 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
               模型数据分析
             </div>
           </div>
-          <Suspense fallback={<ChartFallback height={260} />}>
-            <ModelAnalysisPanel data={data?.modelAnalysis} />
-          </Suspense>
+          {analyticsSection.visible ? (
+            <Suspense fallback={<ChartFallback height={260} />}>
+              <ModelAnalysisPanel data={data?.modelAnalysis} />
+            </Suspense>
+          ) : <ChartFallback height={260} />}
         </div>
 
         <div className="chart-container animate-slide-up stagger-9" style={{ display: 'flex', flexDirection: 'column' }}>

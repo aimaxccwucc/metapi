@@ -75,6 +75,7 @@ export type RouteSummaryRow = {
   enabledChannelCount: number;
   siteNames: string[];
   decisionSnapshot: RouteDecision | null;
+  decisionSnapshotAvailable?: boolean;
   decisionRefreshedAt: string | null;
   kind?: RouteRowKind;
   readOnly?: boolean;
