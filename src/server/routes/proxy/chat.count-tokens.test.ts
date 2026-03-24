@@ -43,7 +43,7 @@ vi.mock('../../services/alertService.js', () => ({
 }));
 
 vi.mock('../../services/alertRules.js', () => ({
-  isTokenExpiredError: () => false,
+  isTokenExpiredError: ({ status }: { status?: number }) => status === 401 || status === 403,
 }));
 
 vi.mock('../../services/modelPricingService.js', () => ({
@@ -53,7 +53,7 @@ vi.mock('../../services/modelPricingService.js', () => ({
 }));
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
-  shouldRetryProxyRequest: () => false,
+  shouldRetryProxyRequest: (status: number) => status === 401 || status === 403 || status >= 500,
 }));
 
 vi.mock('../../services/proxyUsageFallbackService.js', () => ({
@@ -195,5 +195,60 @@ describe('claude count_tokens proxy route', () => {
     expect(targetUrl).toBe('https://gateway.example.com/v1/messages/count_tokens?beta=true');
     expect(options.headers['x-api-key']).toBe('sk-gateway');
     expect(options.headers['anthropic-version']).toBe('2023-06-01');
+  });
+
+  it('switches count_tokens to the next channel after auth failure on the first source', async () => {
+    selectChannelMock.mockReturnValueOnce({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'bad-claude-site', url: 'https://bad-claude.example.com', platform: 'claude' },
+      account: { id: 33, username: 'bad-claude-user@example.com' },
+      tokenName: 'default',
+      tokenValue: 'sk-bad-claude',
+      actualModel: 'claude-opus-4-6',
+    });
+    selectNextChannelMock.mockReturnValueOnce({
+      channel: { id: 12, routeId: 22 },
+      site: { name: 'good-claude-site', url: 'https://good-claude.example.com', platform: 'claude' },
+      account: { id: 34, username: 'good-claude-user@example.com' },
+      tokenName: 'default',
+      tokenValue: 'sk-good-claude',
+      actualModel: 'claude-opus-4-6',
+    });
+    fetchMock
+      .mockResolvedValueOnce(new Response('invalid api key', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ input_tokens: 9 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/messages/count_tokens',
+      payload: {
+        model: 'claude-opus-4-6',
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: 'count again' }],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 401,
+      errorText: 'invalid api key',
+      modelName: 'claude-opus-4-6',
+    }));
+    expect(reportTokenExpiredMock).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: 33,
+      siteName: 'bad-claude-site',
+    }));
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectNextChannelMock.mock.calls[0]?.[0]).toBe('claude-opus-4-6');
+    expect(selectNextChannelMock.mock.calls[0]?.[1]).toEqual(expect.arrayContaining([11]));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://good-claude.example.com/v1/messages/count_tokens?beta=true');
   });
 });

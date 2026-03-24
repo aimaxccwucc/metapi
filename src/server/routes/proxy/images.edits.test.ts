@@ -43,15 +43,15 @@ vi.mock('../../services/alertService.js', () => ({
 }));
 
 vi.mock('../../services/alertRules.js', () => ({
-  isTokenExpiredError: () => false,
+  isTokenExpiredError: ({ status }: { status?: number }) => status === 401 || status === 403,
 }));
 
 vi.mock('../../services/modelPricingService.js', () => ({
-  estimateProxyCost: (arg: any) => estimateProxyCostMock(arg),
+  estimateProxyCost: (arg?: any) => (estimateProxyCostMock as any)(arg),
 }));
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
-  shouldRetryProxyRequest: () => false,
+  shouldRetryProxyRequest: (status: number) => status === 401 || status === 403 || status >= 500,
 }));
 
 vi.mock('../../db/index.js', () => ({
@@ -159,5 +159,56 @@ describe('/v1/images/edits route', () => {
         type: 'invalid_request_error',
       },
     });
+  });
+
+  it('switches to the next image channel after auth failure on the first source', async () => {
+    selectChannelMock.mockReturnValueOnce({
+      channel: { id: 11, routeId: 22 },
+      site: { id: 44, name: 'bad-image-site', url: 'https://bad-image.example.com', platform: 'openai' },
+      account: { id: 33, username: 'bad-image-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-bad-image',
+      actualModel: 'gpt-image-1',
+    });
+    selectNextChannelMock.mockReturnValueOnce({
+      channel: { id: 12, routeId: 22 },
+      site: { id: 45, name: 'good-image-site', url: 'https://good-image.example.com', platform: 'openai' },
+      account: { id: 34, username: 'good-image-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-good-image',
+      actualModel: 'gpt-image-1',
+    });
+    fetchMock
+      .mockResolvedValueOnce(new Response('invalid api key', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ created: 1, data: [{ b64_json: 'iVBORw0KGgo=' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/images/edits',
+      payload: {
+        model: 'gpt-image-1',
+        prompt: 'edit this',
+        image: 'ignored-for-json-mode',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 401,
+      errorText: 'invalid api key',
+      modelName: 'gpt-image-1',
+    }));
+    expect(reportTokenExpiredMock).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: 33,
+      siteName: 'bad-image-site',
+    }));
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectNextChannelMock.mock.calls[0]?.[0]).toBe('gpt-image-1');
+    expect(selectNextChannelMock.mock.calls[0]?.[1]).toEqual(expect.arrayContaining([11]));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://good-image.example.com/v1/images/edits');
   });
 });

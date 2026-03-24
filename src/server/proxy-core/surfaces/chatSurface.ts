@@ -982,6 +982,14 @@ export async function handleClaudeCountTokensSurfaceRequest(
           clientContext,
           downstreamApiKeyId,
         );
+        if (isTokenExpiredError({ status: upstream.status, message: typeof payload === 'string' ? payload : text })) {
+          await reportTokenExpired({
+            accountId: selected.account.id,
+            username: selected.account.username,
+            siteName: selected.site.name,
+            detail: `HTTP ${upstream.status}`,
+          });
+        }
         if (shouldRetryProxyRequest(upstream.status, typeof payload === 'string' ? payload : text) && retryCount < MAX_RETRIES) {
           retryCount += 1;
           continue;
