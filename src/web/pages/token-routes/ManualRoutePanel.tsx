@@ -1118,8 +1118,9 @@ export default function ManualRoutePanel({
                               </div>
                             ) : null}
                           </div>
-                          <button
-                            type="button"
+                          <span
+                            role="button"
+                            tabIndex={0}
                             data-testid={`source-route-probe-${route.id}`}
                             className="btn btn-ghost"
                             style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '4px 10px', flexShrink: 0 }}
@@ -1127,10 +1128,17 @@ export default function ManualRoutePanel({
                               event.stopPropagation();
                               void handleProbeSourceRoute(route);
                             }}
-                            disabled={probeState?.status === 'checking'}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                void handleProbeSourceRoute(route);
+                              }
+                            }}
+                            aria-disabled={probeState?.status === 'checking' ? 'true' : 'false'}
                           >
                             {probeState?.status === 'checking' ? tr('检测中...') : tr('检测可用性')}
-                          </button>
+                          </span>
                         </div>
                       </div>
                     </button>
