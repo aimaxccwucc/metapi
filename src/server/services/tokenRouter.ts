@@ -693,7 +693,7 @@ function filterSiteRuntimeBrokenCandidatesByModel(
   candidates: RouteChannelCandidate[];
   avoided: Array<{ candidate: RouteChannelCandidate; reason: string }>;
 } {
-  if (candidates.length <= 1) {
+  if (candidates.length === 0) {
     return {
       candidates,
       avoided: [],
@@ -723,7 +723,7 @@ function filterSiteRuntimeBrokenCandidatesByModel(
     }
     : {
       candidates,
-      avoided: [],
+      avoided,
     };
 }
 
@@ -1614,6 +1614,7 @@ export class TokenRouter {
         for (const item of breakerFiltered.avoided) {
           const target = candidateMap.get(item.candidate.channel.id);
           if (!target) continue;
+          target.eligible = false;
           target.reason = item.reason;
           target.circuitStatus = {
             state: 'open',
@@ -1698,6 +1699,7 @@ export class TokenRouter {
         for (const item of breakerFiltered.avoided) {
           const target = candidateMap.get(item.candidate.channel.id);
           if (!target) continue;
+          target.eligible = false;
           target.reason = item.reason;
           target.circuitStatus = {
             state: 'open',
@@ -1705,6 +1707,10 @@ export class TokenRouter {
             reason: item.reason,
           };
         }
+      }
+      if (breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length) {
+        degradedAcrossPriority = true;
+        continue;
       }
 
       const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
@@ -1774,8 +1780,11 @@ export class TokenRouter {
         const rawLayer = availableByPriority.get(priority) ?? [];
         if (rawLayer.length === 0) continue;
         const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
+        const fallbackCandidates = breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length
+          ? rawLayer
+          : breakerFiltered.candidates;
         const weighted = this.calculateWeightedSelection(
-          breakerFiltered.candidates,
+          fallbackCandidates,
           useChannelSourceModelForCost ? runtimeModelResolver : mappedModel,
           downstreamPolicy,
           nowMs,
@@ -2067,6 +2076,10 @@ export class TokenRouter {
     for (const priority of sortedPriorities) {
       const rawLayer = layers.get(priority) ?? [];
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
+      if (breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length) {
+        degradedAcrossPriority = true;
+        continue;
+      }
       const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
       const candidates = recentFailurePartition.preferred.length > 0
         ? recentFailurePartition.preferred
@@ -2115,15 +2128,18 @@ export class TokenRouter {
       for (const priority of sortedPriorities) {
         const rawLayer = layers.get(priority) ?? [];
         const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
+        const fallbackCandidates = breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length
+          ? rawLayer
+          : breakerFiltered.candidates;
         const selected = routeStrategy === 'stable_first'
           ? this.stableFirstSelect(
-            breakerFiltered.candidates,
+            fallbackCandidates,
             requestedByDisplayName ? runtimeModelResolver : mappedModel,
             downstreamPolicy,
             nowMs,
           )
           : this.weightedRandomSelect(
-            breakerFiltered.candidates,
+            fallbackCandidates,
             requestedByDisplayName ? runtimeModelResolver : mappedModel,
             downstreamPolicy,
             nowMs,

@@ -126,4 +126,88 @@ describe('TokenRouter model circuit breaker', () => {
     const otherModelSelection = await router.selectChannel('gpt-4o-mini');
     expect(otherModelSelection?.account.id).toBe(accountA.id);
   });
+
+  it('opens a site-level breaker for repeated auth failures so sibling channels are avoided temporarily', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'shared-auth-site',
+      url: 'https://shared-auth-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+    const backupSite = await db.insert(schema.sites).values({
+      name: 'backup-auth-site',
+      url: 'https://backup-auth-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const primaryAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'shared-auth-primary',
+      accessToken: 'access-primary',
+      apiToken: 'sk-primary',
+      status: 'active',
+      unitCost: 1,
+    }).returning().get();
+    const siblingAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'shared-auth-sibling',
+      accessToken: 'access-sibling',
+      apiToken: 'sk-sibling',
+      status: 'active',
+      unitCost: 1,
+    }).returning().get();
+    const backupAccount = await db.insert(schema.accounts).values({
+      siteId: backupSite.id,
+      username: 'shared-auth-backup',
+      accessToken: 'access-backup',
+      apiToken: 'sk-backup',
+      status: 'active',
+      unitCost: 1,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-auth-shared',
+      enabled: true,
+    }).returning().get();
+
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: primaryAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    const siblingChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: siblingAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    const backupChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: backupAccount.id,
+      tokenId: null,
+      priority: 10,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(primaryChannel.id, { status: 401, errorText: 'invalid api key', modelName: 'gpt-auth-shared' });
+    await router.recordFailure(primaryChannel.id, { status: 401, errorText: 'invalid api key', modelName: 'gpt-auth-shared' });
+
+    const decision = await router.explainSelection('gpt-auth-shared');
+    const siblingCandidate = decision.candidates.find((candidate) => candidate.channelId === siblingChannel.id);
+    const backupCandidate = decision.candidates.find((candidate) => candidate.channelId === backupChannel.id);
+
+    expect(decision.selectedChannelId).toBe(backupChannel.id);
+    expect(siblingCandidate?.eligible).toBe(false);
+    expect(siblingCandidate?.reason || '').toContain('站点熔断');
+    expect(siblingCandidate?.circuitStatus?.isOpen).toBe(true);
+    expect(backupCandidate?.eligible).toBe(true);
+  });
 });
