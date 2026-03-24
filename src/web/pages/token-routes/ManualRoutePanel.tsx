@@ -306,6 +306,12 @@ export default function ManualRoutePanel({
     }
 
     return list.sort((a, b) => {
+      const aSelected = sourcePickerSelection.includes(a.id);
+      const bSelected = sourcePickerSelection.includes(b.id);
+      if (aSelected !== bSelected) return aSelected ? -1 : 1;
+      const aProbed = !!sourceProbeStateByRouteId[a.id]?.status && sourceProbeStateByRouteId[a.id]?.status !== 'idle';
+      const bProbed = !!sourceProbeStateByRouteId[b.id]?.status && sourceProbeStateByRouteId[b.id]?.status !== 'idle';
+      if (aProbed !== bProbed) return aProbed ? -1 : 1;
       if (a.channelCount === b.channelCount) {
         return renderRouteOptionLabel(a).localeCompare(renderRouteOptionLabel(b), undefined, { sensitivity: 'base' });
       }
@@ -317,6 +323,8 @@ export default function ManualRoutePanel({
     activeSourceSite,
     exactSourceRouteOptions,
     sourceEndpointTypesByRouteId,
+    sourcePickerSelection,
+    sourceProbeStateByRouteId,
     sourceRouteBrandById,
     sourceSearch,
   ]);
@@ -379,6 +387,14 @@ export default function ManualRoutePanel({
         [route.id]: { status: 'error', message },
       }));
       toast.error(`${modelName}: ${message}`);
+    }
+  };
+
+  const handleProbeVisibleRoutes = async () => {
+    const targets = filteredSourceRoutes.slice(0, Math.min(filteredSourceRoutes.length, 10));
+    for (const route of targets) {
+      // eslint-disable-next-line no-await-in-loop
+      await handleProbeSourceRoute(route);
     }
   };
 
@@ -848,6 +864,14 @@ export default function ManualRoutePanel({
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                 {`候选 ${filteredSourceRoutes.length} / ${exactSourceRouteOptions.length}`}
               </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => setSourcePickerSelection((current) => [...current].sort((a, b) => a - b))}>
+                {tr('已选置顶')}
+              </button>
+              <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => { void handleProbeVisibleRoutes(); }}>
+                {`批量检测前 ${Math.min(filteredSourceRoutes.length, 10)} 个`}
+              </button>
             </div>
           </div>
 

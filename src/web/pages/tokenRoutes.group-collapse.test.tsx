@@ -1245,6 +1245,76 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 
+  it('pins selected source routes first and supports batch probing visible candidates', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        id: 1, modelPattern: 'gpt-1', displayName: null,
+        displayIcon: null, modelMapping: null, enabled: true,
+        routeMode: 'pattern', sourceRouteIds: [], channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+      {
+        id: 2, modelPattern: 'gpt-2', displayName: null,
+        displayIcon: null, modelMapping: null, enabled: true,
+        routeMode: 'pattern', sourceRouteIds: [], channelCount: 0, enabledChannelCount: 0, siteNames: ['site-b'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+    ]);
+    apiMock.getModelTokenCandidates.mockResolvedValue({
+      models: {
+        'gpt-1': [{ accountId: 301, tokenId: 401, tokenName: 'default', isDefault: true, username: 'tester', siteId: 11, siteName: 'site-a' }],
+        'gpt-2': [{ accountId: 302, tokenId: 402, tokenName: 'default', isDefault: true, username: 'tester2', siteId: 12, siteName: 'site-b' }],
+      },
+      modelsWithoutToken: {},
+      modelsMissingTokenGroups: {},
+      endpointTypesByModel: {},
+    });
+    apiMock.testMarketplaceModelAvailability.mockResolvedValue({ available: true, reason: '模型可用' });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '新建群组').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '选择来源模型').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, 'gpt-2').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '已选置顶').props.onClick();
+      });
+      await flushMicrotasks();
+      expect(collectText(root.root)).toContain('已选择 1 个来源模型');
+
+      await act(async () => {
+        findButtonByText(root.root, '批量检测前 2 个').props.onClick();
+      });
+      await flushMicrotasks();
+      expect(apiMock.testMarketplaceModelAvailability).toHaveBeenCalledTimes(2);
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('saves explicit groups with auto brand icon disabled as a no-icon sentinel', async () => {
     apiMock.getRoutesSummary.mockResolvedValue([
       {
