@@ -113,6 +113,8 @@ export default function TokenRoutes() {
   const [missingTokenModelsByName, setMissingTokenModelsByName] = useState<MissingTokenModelsByName>({});
   const [missingTokenGroupModelsByName, setMissingTokenGroupModelsByName] = useState<MissingTokenModelsByName>({});
   const [endpointTypesByModel, setEndpointTypesByModel] = useState<Record<string, string[]>>({});
+  const [routeCandidatesLoaded, setRouteCandidatesLoaded] = useState(false);
+  const [routeCandidatesLoading, setRouteCandidatesLoading] = useState(false);
 
   const [search, setSearch] = useState('');
   const [activeBrand, setActiveBrand] = useState<string | null>(null);
@@ -222,14 +224,7 @@ export default function TokenRoutes() {
     }
   };
 
-  const load = async () => {
-    const [summaryRows, candidateRows] = await Promise.all([
-      api.getRoutesSummary(),
-      api.getModelTokenCandidates(),
-    ]);
-
-    const summaries = (summaryRows || []) as RouteSummaryRow[];
-    setRouteSummaries(summaries);
+  const applyRouteCandidateRows = useCallback((candidateRows: any) => {
     setModelCandidates((candidateRows?.models || {}) as RouteModelCandidatesByModelName);
     setMissingTokenModelsByName(
       normalizeMissingTokenModels((candidateRows?.modelsWithoutToken || {}) as MissingTokenModelsByName),
@@ -238,6 +233,35 @@ export default function TokenRoutes() {
       normalizeMissingTokenModels((candidateRows?.modelsMissingTokenGroups || {}) as MissingTokenModelsByName),
     );
     setEndpointTypesByModel(candidateRows?.endpointTypesByModel || {});
+    setRouteCandidatesLoaded(true);
+  }, []);
+
+  const loadRouteCandidates = useCallback(async (force = false) => {
+    if (routeCandidatesLoading) return;
+    if (routeCandidatesLoaded && !force) return;
+    setRouteCandidatesLoading(true);
+    try {
+      const candidateRows = await api.getModelTokenCandidates();
+      applyRouteCandidateRows(candidateRows);
+    } finally {
+      setRouteCandidatesLoading(false);
+    }
+  }, [applyRouteCandidateRows, routeCandidatesLoaded, routeCandidatesLoading]);
+
+  const ensureRouteCandidatesLoaded = useCallback(() => {
+    if (!routeCandidatesLoaded && !routeCandidatesLoading) {
+      void loadRouteCandidates();
+    }
+  }, [loadRouteCandidates, routeCandidatesLoaded, routeCandidatesLoading]);
+
+  const load = async (options?: { includeCandidates?: boolean; forceCandidates?: boolean }) => {
+    const summaryRows = await api.getRoutesSummary();
+
+    const summaries = (summaryRows || []) as RouteSummaryRow[];
+    setRouteSummaries(summaries);
+    if (options?.includeCandidates) {
+      await loadRouteCandidates(options.forceCandidates === true);
+    }
     const decisionPlaceholder: Record<number, RouteDecision | null> = {};
     for (const route of summaries) {
       decisionPlaceholder[route.id] = route.decisionSnapshot || null;
@@ -258,19 +282,25 @@ export default function TokenRoutes() {
     })();
   }, []);
 
+  useEffect(() => {
+    if (showZeroChannelRoutes || showFilters || showManual || !filterCollapsed) {
+      ensureRouteCandidatesLoaded();
+    }
+  }, [ensureRouteCandidatesLoaded, filterCollapsed, showFilters, showManual, showZeroChannelRoutes]);
+
   const handleRebuild = async () => {
     try {
       setRebuilding(true);
       const res = await api.rebuildRoutes(true);
       if (res?.queued) {
         toast.info(res.message || '已开始重建路由，请稍后查看日志');
-        await load();
+        await load({ includeCandidates: routeCandidatesLoaded });
         return;
       }
       const createdRoutes = res?.rebuild?.createdRoutes ?? 0;
       const createdChannels = res?.rebuild?.createdChannels ?? 0;
       toast.success(`自动重建完成（新增 ${createdRoutes} 条路由 / ${createdChannels} 个通道）`);
-      await load();
+      await load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded });
     } catch (e: any) {
       toast.error(e.message || '重建路由失败');
     } finally {
@@ -384,7 +414,7 @@ export default function TokenRoutes() {
       }
       setShowManual(false);
       resetRouteForm();
-      await load();
+      await load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded });
     } catch (e: any) {
       toast.error(e.message || (editingRouteId ? tr('更新群组失败') : tr('创建群组失败')));
     } finally {
@@ -404,6 +434,7 @@ export default function TokenRoutes() {
       advancedOpen: routeMode === 'pattern',
     });
     setShowManual(true);
+    ensureRouteCandidatesLoaded();
   };
 
   const handleCancelEditRoute = () => {
@@ -415,7 +446,7 @@ export default function TokenRoutes() {
     try {
       await api.deleteRoute(routeId);
       toast.success('路由已删除');
-      await load();
+      await load({ includeCandidates: routeCandidatesLoaded });
     } catch (e: any) {
       toast.error(e.message || '删除路由失败');
     }
@@ -851,6 +882,7 @@ export default function TokenRoutes() {
     if (isCurrentlyExpanded) {
       setExpandedRouteIds((prev) => prev.filter((id) => id !== routeId));
     } else {
+      ensureRouteCandidatesLoaded();
       setExpandedRouteIds((prev) => [...prev, routeId]);
       // Load channels on demand
       const route = routeById.get(routeId) || null;
@@ -1006,7 +1038,7 @@ export default function TokenRoutes() {
     // Reload channels for this route
     await loadChannels(addChannelModalRouteId, true);
     // Refresh summary to update channel count
-    await load();
+    await load({ includeCandidates: routeCandidatesLoaded });
   };
 
   return (
@@ -1087,6 +1119,7 @@ export default function TokenRoutes() {
           <button
             onClick={() => {
               resetRouteForm();
+              ensureRouteCandidatesLoaded();
               setShowManual(true);
             }}
             className="btn btn-ghost"

@@ -565,6 +565,7 @@ describe('TokenRoutes grouped source models', () => {
         filterSummary.props.onClick();
       });
       await flushMicrotasks();
+      await flushMicrotasks();
 
       const text = collectText(root.root);
       expect(text).toContain('chatgpt');

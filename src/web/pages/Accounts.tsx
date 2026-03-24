@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import CenteredModal from '../components/CenteredModal.js';
@@ -6,6 +6,7 @@ import MobileBatchBar from '../components/MobileBatchBar.js';
 import MobileFilterSheet from '../components/MobileFilterSheet.js';
 import ResponsiveFormGrid from '../components/ResponsiveFormGrid.js';
 import { useToast } from '../components/Toast.js';
+import { getInitialVisibleCount, getNextVisibleCount } from './helpers/progressiveRender.js';
 import ModernSelect from '../components/ModernSelect.js';
 import { MobileCard, MobileField } from '../components/MobileCard.js';
 import { useIsMobile } from '../components/useIsMobile.js';
@@ -97,6 +98,7 @@ export default function Accounts() {
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [embeddedTokenActions, setEmbeddedTokenActions] = useState<React.ReactNode>(null);
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
+  const [visibleAccountCount, setVisibleAccountCount] = useState(60);
   const [batchActionLoading, setBatchActionLoading] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<null | {
     mode: 'single' | 'batch';
@@ -220,6 +222,16 @@ export default function Accounts() {
     if (activeSegment === 'tokens') return [];
     return sortedAccounts.filter((account) => resolveAccountCredentialMode(account) === activeSegment);
   }, [activeSegment, sortedAccounts]);
+  useEffect(() => {
+    setVisibleAccountCount(getInitialVisibleCount(visibleAccounts.length, 60));
+  }, [visibleAccounts.length, activeSegment]);
+  const renderedAccounts = useMemo(
+    () => visibleAccounts.slice(0, visibleAccountCount),
+    [visibleAccounts, visibleAccountCount],
+  );
+  const loadMoreAccounts = useCallback(() => {
+    setVisibleAccountCount((current) => getNextVisibleCount(current, visibleAccounts.length, 60));
+  }, [visibleAccounts.length]);
   const allVisibleAccountsSelected = visibleAccounts.length > 0 && visibleAccounts.every((account) => selectedAccountIds.includes(account.id));
   const verifyFailureHint = buildVerifyFailureHint(verifyResult);
   const addAccountPrereqHint = buildAddAccountPrereqHint(verifyResult);
@@ -1650,7 +1662,7 @@ export default function Accounts() {
             {visibleAccounts.length > 0 ? (
               isMobile ? (
                 <div className="mobile-card-list">
-                  {visibleAccounts.map((a: any) => {
+                  {renderedAccounts.map((a: any) => {
                     const capabilities = resolveAccountCapabilities(a);
                     const connectionMode = resolveAccountCredentialMode(a);
                     const health = resolveRuntimeHealth(a);
@@ -1863,7 +1875,7 @@ export default function Accounts() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleAccounts.map((a: any, i: number) => {
+                  {renderedAccounts.map((a: any, i: number) => {
                     const capabilities = resolveAccountCapabilities(a);
                     const connectionMode = resolveAccountCredentialMode(a);
                     return (
@@ -2038,6 +2050,13 @@ export default function Accounts() {
                 </div>
               </div>
             )}
+            {renderedAccounts.length < visibleAccounts.length ? (
+              <div style={{ display: 'flex', justifyContent: 'center', padding: 12 }}>
+                <button type="button" className="btn btn-secondary" onClick={loadMoreAccounts}>
+                  {`加载更多连接 (${renderedAccounts.length}/${visibleAccounts.length})`}
+                </button>
+              </div>
+            ) : null}
           </div>
         </>
       )}
