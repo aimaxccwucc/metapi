@@ -1132,6 +1132,17 @@ function hasCustomDisplayName(route: Pick<RouteRow, 'modelPattern' | 'displayNam
 }
 
 function buildVisibleEnabledRoutes(routes: RouteRow[]): RouteRow[] {
+  const explicitGroups = routes.filter((route: RouteRow) => (
+    route.enabled
+    && isExplicitGroupRoute(route)
+    && normalizeRouteDisplayName(route.displayName).length > 0
+    && route.sourceRouteIds.length > 0
+  ));
+
+  if (explicitGroups.length > 0) {
+    return explicitGroups;
+  }
+
   const exactModelNames = new Set(
     routes
       .filter((route) => !isExplicitGroupRoute(route) && isExactRouteModelPattern(route.modelPattern))

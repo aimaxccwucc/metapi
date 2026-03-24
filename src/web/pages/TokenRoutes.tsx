@@ -124,6 +124,7 @@ export default function TokenRoutes() {
   const [filterCollapsed, setFilterCollapsed] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
   const [showZeroChannelRoutes, setShowZeroChannelRoutes] = useState(false);
+  const [showOnlyManualRoutes, setShowOnlyManualRoutes] = useState(true);
   const [sortBy, setSortBy] = useState<RouteSortBy>('channelCount');
   const [sortDir, setSortDir] = useState<RouteSortDir>('desc');
 
@@ -684,6 +685,11 @@ export default function TokenRoutes() {
 
   const filteredRoutes = useMemo(() => {
     let list = sortedRoutes;
+    const hasManualRoutes = sortedRoutes.some((route) => isExplicitGroupRoute(route));
+
+    if (showOnlyManualRoutes && hasManualRoutes) {
+      list = list.filter((route) => isExplicitGroupRoute(route));
+    }
 
     if (activeGroupFilter === '__all__') {
       list = list.filter((route) => !isRouteExactModel(route));
@@ -728,6 +734,7 @@ export default function TokenRoutes() {
     activeBrand,
     activeSite,
     activeEndpointType,
+    showOnlyManualRoutes,
     search,
     routeBrandById,
     routeEndpointTypesByRouteId,
@@ -1126,6 +1133,16 @@ export default function TokenRoutes() {
             style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
           >
             {tr('新建群组')}
+          </button>
+
+          <button
+            type="button"
+            aria-pressed={showOnlyManualRoutes}
+            onClick={() => setShowOnlyManualRoutes((prev) => !prev)}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+          >
+            {showOnlyManualRoutes ? tr('只看我创建的') : tr('显示全部路由')}
           </button>
 
           <button
