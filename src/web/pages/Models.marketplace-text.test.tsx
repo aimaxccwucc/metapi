@@ -906,6 +906,17 @@ describe('Models marketplace text', () => {
       await flushMicrotasks();
       expect(collectText(root!.root)).toContain('该站点可能需要不同的请求方式（gemini-native）');
 
+      const detailToggle = root!.root.find((node) => (
+        node.type === 'button'
+        && collectText(node).includes('查看详情')
+      ));
+      await act(async () => {
+        detailToggle.props.onClick();
+      });
+      await flushMicrotasks();
+      expect(collectText(root!.root)).toContain('探测结果：请求协议可能不匹配');
+      expect(collectText(root!.root)).toContain('探测方式：gemini-native');
+
       await act(async () => {
         await checkButtons[0]!.props.onClick();
       });

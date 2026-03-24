@@ -77,6 +77,7 @@ interface ModelsMarketplaceResponse {
 type AvailabilityCheckState = {
   status: 'available' | 'unavailable' | 'error';
   message: string;
+  detail?: string | null;
   latencyMs?: number;
   probeEndpoint?: string | null;
   probeClassification?: string | null;
@@ -163,6 +164,37 @@ function summarizeAvailabilityMessage(input: {
   return reason;
 }
 
+function buildAvailabilityDetail(input: {
+  reason?: string | null;
+  probeEndpoint?: string | null;
+  probeClassification?: string | null;
+  autoKeyCreated?: boolean;
+  autoKeyName?: string | null;
+  autoKeyGroup?: string | null;
+}): string | null {
+  const parts: string[] = [];
+  if (input.probeClassification) {
+    const labelMap: Record<string, string> = {
+      supported: '探测结果：已支持',
+      model_unavailable: '探测结果：模型不可用',
+      credential: '探测结果：凭证权限不足',
+      protocol_mismatch: '探测结果：请求协议可能不匹配',
+      inconclusive: '探测结果：暂未确认',
+    };
+    parts.push(labelMap[input.probeClassification] || `探测结果：${input.probeClassification}`);
+  }
+  if (input.probeEndpoint) parts.push(`探测方式：${input.probeEndpoint}`);
+  if (input.autoKeyCreated) {
+    const autoKeyParts = ['已自动补 Key'];
+    if (input.autoKeyName) autoKeyParts.push(`名称 ${input.autoKeyName}`);
+    if (input.autoKeyGroup) autoKeyParts.push(`分组 ${input.autoKeyGroup}`);
+    parts.push(autoKeyParts.join('，'));
+  }
+  const reason = String(input.reason || '').trim();
+  if (reason) parts.push(`原始原因：${reason}`);
+  return parts.length > 0 ? parts.join('；') : null;
+}
+
 const PAGE_SIZES = [10, 20, 50];
 
 function compareModels(a: ModelRow, b: ModelRow, sortBy: SortColumn, sortDir: 'asc' | 'desc'): number {
@@ -210,6 +242,7 @@ export default function Models() {
   const [metadataHydrating, setMetadataHydrating] = useState(false);
   const [availabilityTesting, setAvailabilityTesting] = useState<Record<string, boolean>>({});
   const [availabilityChecks, setAvailabilityChecks] = useState<Record<string, AvailabilityCheckState>>({});
+  const [expandedCheckDetails, setExpandedCheckDetails] = useState<Record<string, boolean>>({});
   const isMobile = useIsMobile();
   const filterPanelPresence = useAnimatedVisibility(!isMobile && !filterCollapsed, 220);
   const latestPrimaryRequestRef = useRef(0);
@@ -530,6 +563,14 @@ export default function Models() {
           reason: res?.reason,
           probeClassification: res?.probeClassification,
           probeEndpoint: res?.probeEndpoint,
+        }),
+        detail: buildAvailabilityDetail({
+          reason: res?.reason,
+          probeClassification: res?.probeClassification,
+          probeEndpoint: res?.probeEndpoint,
+          autoKeyCreated: res?.autoKeyCreated === true,
+          autoKeyName: typeof res?.autoKeyName === 'string' ? res.autoKeyName : null,
+          autoKeyGroup: typeof res?.autoKeyGroup === 'string' ? res.autoKeyGroup : null,
         }),
         latencyMs: Number.isFinite(res?.latencyMs as number) ? Number(res?.latencyMs) : undefined,
         probeEndpoint: typeof res?.probeEndpoint === 'string' ? res.probeEndpoint : null,
@@ -1068,7 +1109,21 @@ export default function Models() {
                                       {tr('已自动补 Key')}
                                     </span>
                                   ) : null}
+                                  {check?.detail ? (
+                                    <button
+                                      className="btn btn-ghost"
+                                      style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
+                                      onClick={() => setExpandedCheckDetails((prev) => ({ ...prev, [rowKey]: !prev[rowKey] }))}
+                                    >
+                                      {expandedCheckDetails[rowKey] ? tr('收起详情') : tr('查看详情')}
+                                    </button>
+                                  ) : null}
                                 </div>
+                                {check?.detail && expandedCheckDetails[rowKey] ? (
+                                  <div style={{ marginTop: 6, fontSize: 11, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+                                    {check.detail}
+                                  </div>
+                                ) : null}
                               </td>
                               <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>${(a.balance || 0).toFixed(2)}</td>
                             </tr>
