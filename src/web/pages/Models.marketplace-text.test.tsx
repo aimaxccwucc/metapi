@@ -45,6 +45,11 @@ describe('Models marketplace text', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.assign(globalThis.navigator, {
+      clipboard: {
+        writeText: vi.fn().mockResolvedValue(undefined),
+      },
+    });
     globalThis.document = {
       documentElement: {
         getAttribute: () => 'light',
@@ -917,6 +922,16 @@ describe('Models marketplace text', () => {
       expect(collectText(root!.root)).toContain('探测结果：请求协议可能不匹配');
       expect(collectText(root!.root)).toContain('探测方式：Gemini 原生协议');
       expect(collectText(root!.root)).toContain('建议动作：检查该站点是否应使用 Gemini 原生协议');
+
+      const copyButton = root!.root.find((node) => (
+        node.type === 'button'
+        && collectText(node).includes('复制诊断')
+      ));
+      await act(async () => {
+        await copyButton.props.onClick();
+      });
+      await flushMicrotasks();
+      expect(globalThis.navigator.clipboard.writeText).toHaveBeenCalled();
 
       await act(async () => {
         await checkButtons[0]!.props.onClick();

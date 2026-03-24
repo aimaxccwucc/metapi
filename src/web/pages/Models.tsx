@@ -192,6 +192,21 @@ function buildAvailabilitySuggestion(input: {
   return null;
 }
 
+function getAvailabilityAccentColor(classification: string | null | undefined): string {
+  if (classification === 'credential') return 'var(--color-danger)';
+  if (classification === 'protocol_mismatch') return 'var(--color-warning)';
+  if (classification === 'model_unavailable') return 'color-mix(in srgb, var(--color-warning) 65%, var(--color-danger))';
+  if (classification === 'supported') return 'var(--color-success)';
+  return 'var(--color-text-muted)';
+}
+
+function buildDiagnosticClipboardText(input: {
+  summary: string;
+  detail?: string | null;
+}): string {
+  return [input.summary, input.detail].filter(Boolean).join('\n');
+}
+
 function buildAvailabilityDetail(input: {
   reason?: string | null;
   probeEndpoint?: string | null;
@@ -509,6 +524,17 @@ export default function Models() {
     navigator.clipboard.writeText(name).catch(() => { });
     setCopied(name);
     setTimeout(() => setCopied(null), 1500);
+  };
+
+  const copyDiagnostic = async (key: string, summary: string, detail?: string | null) => {
+    try {
+      await navigator.clipboard.writeText(buildDiagnosticClipboardText({ summary, detail }));
+      toast.success('诊断信息已复制');
+      setCopied(`diagnostic:${key}`);
+      setTimeout(() => setCopied((current) => (current === `diagnostic:${key}` ? null : current)), 1500);
+    } catch {
+      toast.error('复制诊断信息失败');
+    }
   };
 
   const toggleSort = (nextSortBy: SortColumn) => {
@@ -1066,6 +1092,7 @@ export default function Models() {
                                   ) : null}
                                   {availabilityChecks[accountModelKey(m.name, a.id)] ? (
                                     <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                      <span style={{ color: getAvailabilityAccentColor(availabilityChecks[accountModelKey(m.name, a.id)]!.probeClassification), fontWeight: 600, marginRight: 6 }}>●</span>
                                       {availabilityChecks[accountModelKey(m.name, a.id)]!.message}
                                     </span>
                                   ) : null}
@@ -1074,6 +1101,29 @@ export default function Models() {
                                   <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                                     {`自动补 Key: ${availabilityChecks[accountModelKey(m.name, a.id)]?.autoKeyGroup || 'default'} / ${availabilityChecks[accountModelKey(m.name, a.id)]?.autoKeyName || '-'}`}
                                   </span>
+                                ) : null}
+                                {availabilityChecks[accountModelKey(m.name, a.id)]?.detail ? (
+                                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                    <button
+                                      className="btn btn-ghost"
+                                      style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
+                                      onClick={() => setExpandedCheckDetails((prev) => ({ ...prev, [accountModelKey(m.name, a.id)]: !prev[accountModelKey(m.name, a.id)] }))}
+                                    >
+                                      {expandedCheckDetails[accountModelKey(m.name, a.id)] ? tr('收起详情') : tr('查看详情')}
+                                    </button>
+                                    <button
+                                      className="btn btn-ghost"
+                                      style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
+                                      onClick={() => { void copyDiagnostic(accountModelKey(m.name, a.id), availabilityChecks[accountModelKey(m.name, a.id)]!.message, availabilityChecks[accountModelKey(m.name, a.id)]!.detail); }}
+                                    >
+                                      {copied === `diagnostic:${accountModelKey(m.name, a.id)}` ? tr('已复制') : tr('复制诊断')}
+                                    </button>
+                                  </div>
+                                ) : null}
+                                {availabilityChecks[accountModelKey(m.name, a.id)]?.detail && expandedCheckDetails[accountModelKey(m.name, a.id)] ? (
+                                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+                                    {availabilityChecks[accountModelKey(m.name, a.id)]!.detail}
+                                  </div>
                                 ) : null}
                               </div>
                               <div style={{ display: 'grid', gap: 6 }}>
@@ -1141,6 +1191,7 @@ export default function Models() {
                                   ) : null}
                                   {check ? (
                                     <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                      <span style={{ color: getAvailabilityAccentColor(check.probeClassification), fontWeight: 600, marginRight: 6 }}>●</span>
                                       {check.message}
                                     </span>
                                   ) : null}
@@ -1156,6 +1207,15 @@ export default function Models() {
                                       onClick={() => setExpandedCheckDetails((prev) => ({ ...prev, [rowKey]: !prev[rowKey] }))}
                                     >
                                       {expandedCheckDetails[rowKey] ? tr('收起详情') : tr('查看详情')}
+                                    </button>
+                                  ) : null}
+                                  {check?.detail ? (
+                                    <button
+                                      className="btn btn-ghost"
+                                      style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
+                                      onClick={() => { void copyDiagnostic(rowKey, check.message, check.detail); }}
+                                    >
+                                      {copied === `diagnostic:${rowKey}` ? tr('已复制') : tr('复制诊断')}
                                     </button>
                                   ) : null}
                                 </div>
