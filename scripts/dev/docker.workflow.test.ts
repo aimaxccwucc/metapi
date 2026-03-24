@@ -23,7 +23,7 @@ describe('docker workflows', () => {
     expect(dockerfile).toContain('FROM node:22-bookworm-slim');
   });
 
-  it('keeps server docker builds isolated from desktop packaging dependencies', () => {
+  it('keeps server docker builds isolated from removed packaging dependencies', () => {
     const dockerfile = readFileSync(resolve(process.cwd(), 'docker/Dockerfile'), 'utf8');
 
     expect(dockerfile).toContain('npm ci --omit=peer --no-audit --no-fund');

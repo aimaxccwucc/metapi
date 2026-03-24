@@ -345,19 +345,18 @@ docker run -d --name metapi \
 
 > [!NOTE]
 > Docker 镜像支持 `amd64`、`arm64` 和 `armv7l`（`linux/arm/v7`）服务端部署。
-> 当前 `armv7l` 支持范围仅限服务端 / Docker 运行，不包含桌面安装包。
 
 <!-- markdownlint-disable-next-line MD028 -->
 > [!IMPORTANT]
-> 请务必修改 `AUTH_TOKEN` 和 `PROXY_TOKEN`，不要使用默认值。数据存储在 `./data` 目录，升级不会丢失。
+> 生产环境请务必显式设置 `AUTH_TOKEN` 和 `PROXY_TOKEN`。数据存储在 `./data` 目录，升级不会丢失。
 
 > [!TIP]
 > 初始管理员令牌即启动时配置的 `AUTH_TOKEN`。
-> 若在 Compose 外运行且未显式设置 `AUTH_TOKEN`，默认为 `change-me-admin-token`（仅用于本地调试）。
-> 桌面安装包首次启动也属于这类场景：如果你没有额外注入 `AUTH_TOKEN`，默认管理员令牌同样是 `change-me-admin-token`。
+> 若未显式设置 `AUTH_TOKEN` / `PROXY_TOKEN`，服务会在首次启动时自动生成随机值并写入当前运行数据库。
+> 生产环境与多实例场景请显式配置，避免重建或迁移后失去可追溯性。
 > 如果在「设置」面板中修改了管理员令牌，后续登录请使用新令牌。
 
-Docker Compose、桌面安装包、反向代理、升级与数据库选项等详见 [部署指南](https://metapi.cita777.me/deployment)。
+Docker Compose、反向代理、升级与数据库选项等详见 [部署指南](https://metapi.cita777.me/deployment)。
 
 📖 **[环境变量与配置](https://metapi.cita777.me/configuration)** · **[客户端接入指南](https://metapi.cita777.me/client-integration)** · **[常见问题](https://metapi.cita777.me/faq)**
 
@@ -396,7 +395,6 @@ npm run dev
 npm run build          # 构建前端 + 后端
 npm run build:web      # 仅构建前端（Vite）
 npm run build:server   # 仅构建后端（TypeScript）
-npm run dist:desktop:mac:intel # 构建 mac Intel (x64) 桌面安装包
 npm test               # 运行全部测试
 npm run test:watch     # 监听模式
 npm run db:generate    # 生成 Drizzle 迁移文件

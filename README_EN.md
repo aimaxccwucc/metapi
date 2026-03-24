@@ -346,19 +346,18 @@ After starting, visit `http://localhost:4000` and log in with your `AUTH_TOKEN`!
 
 > [!NOTE]
 > Docker images support `amd64`, `arm64`, and `armv7l` (`linux/arm/v7`) server deployments.
-> Current `armv7l` support is limited to server / Docker usage and does not include Electron desktop packaging support.
 
 <!-- markdownlint-disable-next-line MD028 -->
 > [!IMPORTANT]
-> Make sure to change `AUTH_TOKEN` and `PROXY_TOKEN` — do not use default values. Data is stored in the `./data` directory and persists across upgrades.
+> In production, set `AUTH_TOKEN` and `PROXY_TOKEN` explicitly. Data is stored in the `./data` directory and persists across upgrades.
 
 > [!TIP]
 > The initial admin token is the `AUTH_TOKEN` configured at startup.
-> If running outside Compose without explicitly setting `AUTH_TOKEN`, the default is `change-me-admin-token` (for local debugging only).
-> The desktop installer falls into this category on first launch too: if you do not inject `AUTH_TOKEN`, the default admin token is also `change-me-admin-token`.
+> If `AUTH_TOKEN` / `PROXY_TOKEN` are omitted, Metapi generates random secrets on first boot and persists them into the active runtime database.
+> For production or multi-instance deployments, set them explicitly so credentials remain predictable across rebuilds and migrations.
 > If you change the admin token in the Settings panel, use the new token for subsequent logins.
 
-For Docker Compose, desktop installers, reverse proxy, upgrades, and database options, see [Deployment Guide](docs/deployment.md).
+For Docker Compose, reverse proxy, upgrades, and database options, see [Deployment Guide](docs/deployment.md).
 
 ---
 
@@ -400,8 +399,8 @@ For Docker Compose, desktop installers, reverse proxy, upgrades, and database op
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `AUTH_TOKEN` | Admin panel login token (**must change**) | `change-me-admin-token` |
-| `PROXY_TOKEN` | Proxy API Bearer Token (**must change**) | `change-me-proxy-sk-token` |
+| `AUTH_TOKEN` | Admin panel login token (**set explicitly in production**) | Auto-generated on first boot if omitted |
+| `PROXY_TOKEN` | Proxy API Bearer Token (**set explicitly in production**) | Auto-generated on first boot if omitted |
 | `PORT` | Service listening port | `4000` |
 | `DATA_DIR` | Data directory for local runtime data | `./data` |
 | `TZ` | Timezone | `Asia/Shanghai` |
@@ -504,7 +503,6 @@ npm run dev
 npm run build          # Build frontend + backend
 npm run build:web      # Build frontend only (Vite)
 npm run build:server   # Build backend only (TypeScript)
-npm run dist:desktop:mac:intel # Build mac Intel (x64) desktop installer
 npm test               # Run all tests
 npm run test:watch     # Watch mode
 npm run db:generate    # Generate Drizzle migration files
