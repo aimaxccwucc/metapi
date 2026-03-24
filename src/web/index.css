@@ -3395,6 +3395,15 @@ textarea {
   animation: scale-in 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+.source-route-picker-card {
+  border-radius: var(--radius-md) !important;
+}
+
+.source-route-picker-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md) !important;
+}
+
 .modal-content.is-closing {
   animation: scale-out 0.22s cubic-bezier(0.4, 0, 0.2, 1) both;
 }

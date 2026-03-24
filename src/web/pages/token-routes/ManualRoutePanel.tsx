@@ -502,7 +502,9 @@ export default function ManualRoutePanel({
   );
 
   const sourcePickerBodyStyle: CSSProperties = {
-    width: 'min(1320px, 96vw)',
+    width: '100%',
+    maxWidth: '100%',
+    paddingTop: 8,
   };
 
   return (
@@ -995,8 +997,8 @@ export default function ManualRoutePanel({
                 className="source-route-picker-grid"
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
-                  gap: 10,
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+                  gap: 14,
                   alignItems: 'stretch',
                 }}
               >
@@ -1024,7 +1026,7 @@ export default function ManualRoutePanel({
                       onClick={() => setSourcePickerSelection((current) => toggleSourceRouteId(current, route.id))}
                       className="btn btn-ghost source-route-picker-card"
                       style={{
-                        minHeight: 184,
+                        minHeight: 208,
                         display: 'flex',
                         alignItems: 'stretch',
                         textAlign: 'left',
@@ -1038,7 +1040,7 @@ export default function ManualRoutePanel({
                           : 'none',
                       }}
                     >
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%', padding: '14px 15px' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, width: '100%', padding: '16px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
                           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, minWidth: 0, flex: 1 }}>
                             <input
