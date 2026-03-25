@@ -25,6 +25,7 @@ describe('oauth route registration', () => {
   });
 
   it('treats oauth callback route as a public API route', () => {
+    expect(isPublicApiRoute('/api/auth/session')).toBe(true);
     expect(isPublicApiRoute('/api/oauth/callback/codex')).toBe(true);
     expect(isPublicApiRoute('/api/oauth/callback/claude')).toBe(true);
     expect(isPublicApiRoute('/api/oauth/providers')).toBe(false);
