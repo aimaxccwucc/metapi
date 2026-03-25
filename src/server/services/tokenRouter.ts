@@ -20,9 +20,11 @@ import {
 import {
   canUseModelCircuit,
   getModelCircuitStatus,
+  openModelCircuitImmediately,
   recordModelCircuitFailure,
   recordModelCircuitSuccess,
   resetAllModelCircuits,
+  type ModelCircuitFailureCategory,
   type ModelCircuitStatusView,
 } from './modelCircuitBreaker.js';
 import { classifyProxyFailureCategory } from './proxyRetryPolicy.js';
@@ -390,6 +392,30 @@ function resolveAuthFailureCooldownSec(context: SiteRuntimeFailureContext = {}):
 
 function isDefinitiveTokenCredentialFailure(context: SiteRuntimeFailureContext = {}): boolean {
   return matchesAnyPattern(DEFINITIVE_TOKEN_AUTH_FAILURE_PATTERNS, context.errorText);
+}
+
+function shouldOpenImmediateModelCircuitForFailure(
+  context: SiteRuntimeFailureContext = {},
+): ModelCircuitFailureCategory | null {
+  const status = typeof context.status === 'number' ? context.status : 0;
+  const errorText = (context.errorText || '').trim();
+
+  if (matchesAnyPattern(SITE_PROTOCOL_FAILURE_PATTERNS, errorText)) {
+    return null;
+  }
+  if (status === 401 || status === 403 || isDefinitiveTokenCredentialFailure(context)) {
+    return 'auth';
+  }
+  if (matchesAnyPattern(SITE_MODEL_FAILURE_PATTERNS, errorText)) {
+    return 'model_unsupported';
+  }
+  return null;
+}
+
+function shouldSkipModelCircuitForFailure(
+  context: SiteRuntimeFailureContext = {},
+): boolean {
+  return matchesAnyPattern(SITE_PROTOCOL_FAILURE_PATTERNS, context.errorText);
 }
 
 function shouldApplyImmediateRoundRobinCooldown(category: ReturnType<typeof classifyProxyFailureCategory>): boolean {
@@ -2555,13 +2581,26 @@ export class TokenRouter {
       await disableDefinitivelyBrokenTokenForChannel(ch);
     }
 
-    if (normalizeModelAlias(normalizedContext.modelName || '')) {
-      recordModelCircuitFailure(
-        channelId,
-        normalizedContext.modelName || '',
-        failureCategory === 'other' ? 'unknown' : failureCategory,
-        nowMs,
-      );
+    const normalizedRuntimeModelName = normalizeModelAlias(normalizedContext.modelName || '');
+    if (normalizedRuntimeModelName) {
+      if (!shouldSkipModelCircuitForFailure(normalizedContext)) {
+        const immediateModelCircuitCategory = shouldOpenImmediateModelCircuitForFailure(normalizedContext);
+        if (immediateModelCircuitCategory) {
+          openModelCircuitImmediately(
+            channelId,
+            normalizedRuntimeModelName,
+            immediateModelCircuitCategory,
+            nowMs,
+          );
+        } else {
+          recordModelCircuitFailure(
+            channelId,
+            normalizedRuntimeModelName,
+            failureCategory === 'other' ? 'unknown' : failureCategory,
+            nowMs,
+          );
+        }
+      }
     }
     recordSiteRuntimeFailure(account.siteId, normalizedContext, nowMs);
   }

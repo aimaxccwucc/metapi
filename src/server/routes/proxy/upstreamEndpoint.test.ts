@@ -17,6 +17,10 @@ import {
   resetUpstreamEndpointRuntimeState,
   resolveUpstreamEndpointCandidates,
 } from './upstreamEndpoint.js';
+import {
+  resetSiteProtocolConfigState,
+  upsertSiteProtocolConfig,
+} from '../../services/siteProtocolConfigService.js';
 
 const baseContext = {
   site: {
@@ -37,6 +41,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
     fetchModelPricingCatalogMock.mockReset();
     fetchModelPricingCatalogMock.mockResolvedValue(null);
     resetUpstreamEndpointRuntimeState();
+    resetSiteProtocolConfigState();
     (config as any).codexHeaderDefaults = {
       userAgent: '',
       betaFeatures: '',
@@ -290,6 +295,26 @@ describe('resolveUpstreamEndpointCandidates', () => {
     );
 
     expect(order).toEqual(['responses', 'chat', 'messages']);
+  });
+
+  it('respects manual site protocol config before runtime preference learning', async () => {
+    await upsertSiteProtocolConfig(baseContext.site.id, {
+      mode: 'manual',
+      supportedEndpoints: ['responses', 'chat'],
+      preferredEndpoint: 'responses',
+      updatedAtMs: Date.now(),
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'openai',
+    );
+
+    expect(order).toEqual(['responses', 'chat']);
   });
 
   it('keeps remote-document-url requests on a separate runtime preference bucket from inline document requests', async () => {

@@ -1173,6 +1173,80 @@ describe('TokenRouter selection scoring', () => {
     expect(otherModelPreview?.channel.id).not.toBe(backupChannel.id);
   });
 
+  it('keeps a protocol-mismatched channel selectable after cooldown is manually cleared', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-5.2-codex-hard-protocol-skip');
+    const otherRoute = await createRoute('gpt-4o-mini-hard-protocol-skip');
+
+    const primarySite = await createSite('hard-protocol-primary');
+    const primaryAccount = await createAccount(primarySite.id, 'hard-protocol-user-primary');
+    const primaryToken = await createToken(primaryAccount.id, 'hard-protocol-token-primary');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: primaryAccount.id,
+      tokenId: primaryToken.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: otherRoute.id,
+      accountId: primaryAccount.id,
+      tokenId: primaryToken.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).run();
+
+    const backupSite = await createSite('hard-protocol-backup');
+    const backupAccount = await createAccount(backupSite.id, 'hard-protocol-user-backup');
+    const backupToken = await createToken(backupAccount.id, 'hard-protocol-token-backup');
+    const backupChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: backupAccount.id,
+      tokenId: backupToken.id,
+      priority: 0,
+      weight: 5,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(primaryChannel.id, {
+      status: 403,
+      errorText: 'This group does not allow /v1/messages dispatch',
+      modelName: 'gpt-5.2-codex-hard-protocol-skip',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).where(eq(schema.routeChannels.id, primaryChannel.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-5.2-codex-hard-protocol-skip');
+    const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+    const backupCandidate = decision.candidates.find((candidate) => candidate.channelId === backupChannel.id);
+    const preview = await router.previewSelectedChannel('gpt-5.2-codex-hard-protocol-skip');
+    const otherModelPreview = await router.previewSelectedChannel('gpt-4o-mini-hard-protocol-skip');
+
+    expect(decision.summary.join(' ')).not.toContain('模型熔断避让');
+    expect(primaryCandidate?.modelCircuitStatus?.isOpen).toBe(false);
+    expect(primaryCandidate?.reason || '').toContain('模型熔断=关闭');
+    expect(backupCandidate?.eligible).toBe(true);
+    expect(preview?.channel.id).toBeTruthy();
+    expect(otherModelPreview?.channel.id).toBeTruthy();
+    expect(otherModelPreview?.channel.id).not.toBe(backupChannel.id);
+  });
+
   it('persists model-unsupported failures into token model availability for token-backed channels', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,

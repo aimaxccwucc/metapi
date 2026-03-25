@@ -1,4 +1,13 @@
 export type ModelCircuitState = 'closed' | 'open' | 'half_open';
+export type ModelCircuitFailureCategory =
+  | 'network'
+  | 'server'
+  | 'rate_limit'
+  | 'payload_too_large'
+  | 'model_unsupported'
+  | 'auth'
+  | 'bad_request'
+  | 'unknown';
 
 export type ModelCircuitSnapshot = {
   channelId: number;
@@ -156,7 +165,7 @@ export function recordModelCircuitSuccess(channelId: number, modelName: string, 
 export function recordModelCircuitFailure(
   channelId: number,
   modelName: string,
-  category: 'network' | 'server' | 'rate_limit' | 'payload_too_large' | 'model_unsupported' | 'auth' | 'bad_request' | 'unknown',
+  category: ModelCircuitFailureCategory,
   nowMs = Date.now(),
 ): void {
   const entry = ensureEntry(channelId, modelName);
@@ -179,6 +188,23 @@ export function recordModelCircuitFailure(
     entry.openedAt = nowMs;
     entry.openUntil = nowMs + durationMs;
   }
+}
+
+export function openModelCircuitImmediately(
+  channelId: number,
+  modelName: string,
+  category: ModelCircuitFailureCategory,
+  nowMs = Date.now(),
+): void {
+  const entry = ensureEntry(channelId, modelName);
+  const threshold = FAILURE_THRESHOLDS[category] ?? 3;
+  const durationMs = OPEN_DURATIONS_MS[category] ?? 60_000;
+  entry.state = 'open';
+  entry.failCount = Math.max(entry.failCount + 1, threshold);
+  entry.openedAt = nowMs;
+  entry.openUntil = nowMs + durationMs;
+  entry.lastErrorAt = nowMs;
+  entry.probeInFlight = false;
 }
 
 export function resetModelCircuit(channelId: number, modelName: string): void {

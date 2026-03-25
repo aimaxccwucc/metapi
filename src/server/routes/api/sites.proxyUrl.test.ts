@@ -27,6 +27,7 @@ describe('sites proxy settings', () => {
   });
 
   beforeEach(async () => {
+    await db.delete(schema.settings).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
   });
@@ -34,6 +35,139 @@ describe('sites proxy settings', () => {
   afterAll(async () => {
     await app.close();
     delete process.env.DATA_DIR;
+  });
+
+  it('stores manual protocol config when creating a site', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'protocol-site',
+        url: 'https://protocol-site.example.com',
+        platform: 'new-api',
+        protocolConfig: {
+          mode: 'manual',
+          supportedEndpoints: ['responses', 'chat'],
+          preferredEndpoint: 'responses',
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as {
+      protocolConfig?: {
+        mode?: string;
+        supportedEndpoints?: string[];
+        preferredEndpoint?: string | null;
+      };
+    };
+    expect(payload.protocolConfig).toEqual({
+      mode: 'manual',
+      supportedEndpoints: ['responses', 'chat'],
+      preferredEndpoint: 'responses',
+      updatedAtMs: expect.any(Number),
+    });
+  });
+
+  it('resets protocol config to auto when updating a site', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'protocol-reset-site',
+        url: 'https://protocol-reset-site.example.com',
+        platform: 'new-api',
+        protocolConfig: {
+          mode: 'manual',
+          supportedEndpoints: ['messages'],
+          preferredEndpoint: 'messages',
+        },
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const site = created.json() as { id: number };
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: `/api/sites/${site.id}`,
+      payload: {
+        protocolConfig: {
+          mode: 'auto',
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as {
+      protocolConfig?: {
+        mode?: string;
+        supportedEndpoints?: string[];
+        preferredEndpoint?: string | null;
+      };
+    };
+    expect(payload.protocolConfig).toEqual({
+      mode: 'auto',
+      supportedEndpoints: [],
+      preferredEndpoint: null,
+      updatedAtMs: expect.any(Number),
+    });
+  });
+
+  it('rejects manual protocol config that is incompatible with the selected platform', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'codex-site',
+        url: 'https://codex.example.com',
+        platform: 'codex',
+        protocolConfig: {
+          mode: 'manual',
+          supportedEndpoints: ['messages'],
+          preferredEndpoint: 'messages',
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((response.json() as { error?: string }).error).toContain('unsupported endpoints');
+  });
+
+  it('sanitizes stored manual protocol config when the site platform changes', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'protocol-platform-switch-site',
+        url: 'https://protocol-platform-switch.example.com',
+        platform: 'new-api',
+        protocolConfig: {
+          mode: 'manual',
+          supportedEndpoints: ['responses', 'chat'],
+          preferredEndpoint: 'responses',
+        },
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const site = created.json() as { id: number };
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: `/api/sites/${site.id}`,
+      payload: {
+        platform: 'codex',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as {
+      protocolConfig?: { supportedEndpoints?: string[]; preferredEndpoint?: string | null };
+    }).protocolConfig).toEqual({
+      mode: 'manual',
+      supportedEndpoints: ['responses'],
+      preferredEndpoint: 'responses',
+      updatedAtMs: expect.any(Number),
+    });
   });
 
   it('stores proxy settings, external checkin url, and custom headers when creating a site', async () => {

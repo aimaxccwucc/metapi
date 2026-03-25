@@ -20,6 +20,7 @@ import {
   buildSiteSaveAction,
   emptySiteCustomHeader,
   emptySiteForm,
+  getAllowedProtocolEndpointsForPlatform,
   serializeSiteCustomHeaders,
   siteFormFromSite,
   type SiteEditorState,
@@ -55,6 +56,26 @@ type SiteRow = {
   totalBalance?: number;
   subscriptionSummary?: SiteSubscriptionSummary | null;
   createdAt?: string;
+  protocolConfig?: {
+    mode?: 'auto' | 'manual';
+    supportedEndpoints?: Array<'chat' | 'responses' | 'messages'>;
+    preferredEndpoint?: 'chat' | 'responses' | 'messages' | null;
+    updatedAtMs?: number;
+  } | null;
+};
+
+type SiteProtocolProbeResult = {
+  success: true;
+  siteId: number;
+  modelName: string;
+  preferredEndpoint: 'chat' | 'responses' | 'messages';
+  supportedEndpoints: Array<'chat' | 'responses' | 'messages'>;
+  protocolConfig?: {
+    mode?: 'auto' | 'manual';
+    supportedEndpoints?: Array<'chat' | 'responses' | 'messages'>;
+    preferredEndpoint?: 'chat' | 'responses' | 'messages' | null;
+    updatedAtMs?: number;
+  } | null;
 };
 
 function hasConfiguredCustomHeaders(customHeaders?: string | null): boolean {
@@ -202,6 +223,28 @@ const SITE_PLATFORM_OPTIONS = [
   { value: 'cliproxyapi', label: 'cliproxyapi' },
 ];
 
+const SITE_PROTOCOL_MODE_OPTIONS = [
+  { value: 'auto', label: '自动学习' },
+  { value: 'manual', label: '手动指定' },
+];
+
+const SITE_PROTOCOL_ENDPOINT_OPTIONS = [
+  { value: 'chat', label: '/v1/chat/completions' },
+  { value: 'responses', label: '/v1/responses' },
+  { value: 'messages', label: '/v1/messages' },
+] as const;
+
+function buildSiteProtocolSummary(site: SiteRow): string {
+  const config = site.protocolConfig;
+  if (!config || config.mode !== 'manual') return '自动';
+  const supported = Array.isArray(config.supportedEndpoints)
+    ? config.supportedEndpoints.filter(Boolean)
+    : [];
+  if (supported.length === 0) return '自动';
+  const preferred = config.preferredEndpoint ? `首选 ${config.preferredEndpoint}` : null;
+  return [supported.join(' / '), preferred].filter(Boolean).join(' · ');
+}
+
 export default function Sites() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -237,11 +280,20 @@ export default function Sites() {
   const [disabledModelInput, setDisabledModelInput] = useState('');
   const [disabledModelsLoading, setDisabledModelsLoading] = useState(false);
   const [disabledModelsSaving, setDisabledModelsSaving] = useState(false);
+  const [protocolProbing, setProtocolProbing] = useState(false);
 
   if (editor) lastEditorRef.current = editor;
   const activeEditor = editor || lastEditorRef.current;
   const isEditing = activeEditor?.mode === 'edit';
   const isAdding = editor?.mode === 'add';
+  const allowedProtocolEndpoints = useMemo(
+    () => getAllowedProtocolEndpointsForPlatform(form.platform),
+    [form.platform],
+  );
+  const allowedProtocolEndpointSet = useMemo(
+    () => new Set(allowedProtocolEndpoints),
+    [allowedProtocolEndpoints],
+  );
   const formInputStyle = {
     width: '100%',
     padding: '10px 14px',
@@ -449,6 +501,40 @@ export default function Sites() {
     }
   };
 
+  const handleProbeProtocol = async () => {
+    if (!editor || editor.mode !== 'edit') {
+      toast.info('请先保存站点后再自动探测协议');
+      return;
+    }
+    setProtocolProbing(true);
+    try {
+      const result = await api.probeSiteProtocol(editor.editingSiteId) as SiteProtocolProbeResult;
+      const nextSupported = Array.isArray(result?.supportedEndpoints)
+        ? result.supportedEndpoints.filter((endpoint): endpoint is 'chat' | 'responses' | 'messages' => (
+          (endpoint === 'chat' || endpoint === 'responses' || endpoint === 'messages')
+          && allowedProtocolEndpointSet.has(endpoint)
+        ))
+        : [];
+      const nextPreferred = result?.preferredEndpoint === 'chat'
+        || result?.preferredEndpoint === 'responses'
+        || result?.preferredEndpoint === 'messages'
+        ? result.preferredEndpoint
+        : '';
+      setForm((prev) => ({
+        ...prev,
+        protocolMode: 'manual',
+        supportedEndpoints: nextSupported,
+        preferredEndpoint: nextPreferred,
+      }));
+      toast.success(`已探测协议：${result.preferredEndpoint}，模型 ${result.modelName}`);
+      await load();
+    } catch (e: any) {
+      toast.error(e.message || '自动探测站点协议失败');
+    } finally {
+      setProtocolProbing(false);
+    }
+  };
+
   const handleSave = async () => {
     if (!editor) return;
     const parsedGlobalWeight = Number(form.globalWeight);
@@ -462,6 +548,7 @@ export default function Sites() {
       return;
     }
 
+    const filteredSupportedEndpoints = form.supportedEndpoints.filter((endpoint) => allowedProtocolEndpointSet.has(endpoint));
     const payload = {
       name: form.name.trim(),
       url: form.url.trim(),
@@ -471,9 +558,24 @@ export default function Sites() {
       useSystemProxy: !!form.useSystemProxy,
       customHeaders: serializedCustomHeaders.customHeaders,
       globalWeight: Number(parsedGlobalWeight.toFixed(3)),
+      protocolConfig: {
+        mode: form.protocolMode,
+        supportedEndpoints: form.protocolMode === 'manual' ? filteredSupportedEndpoints : [],
+        preferredEndpoint: (
+          form.protocolMode === 'manual'
+          && form.preferredEndpoint
+          && filteredSupportedEndpoints.includes(form.preferredEndpoint as 'chat' | 'responses' | 'messages')
+        )
+          ? form.preferredEndpoint as 'chat' | 'responses' | 'messages'
+          : null,
+      },
     };
     if (!payload.name || !payload.url) {
       toast.error('请填写站点名称和 URL');
+      return;
+    }
+    if (form.protocolMode === 'manual' && filteredSupportedEndpoints.length === 0) {
+      toast.error('手动协议模式下至少选择一个上游协议');
       return;
     }
 
@@ -945,7 +1047,19 @@ export default function Sites() {
             >
               <ModernSelect
                 value={form.platform}
-                onChange={(value) => setForm((prev) => ({ ...prev, platform: value }))}
+                onChange={(value) => setForm((prev) => {
+                  const nextAllowed = new Set(getAllowedProtocolEndpointsForPlatform(value));
+                  const nextSupported = prev.supportedEndpoints.filter((endpoint) => nextAllowed.has(endpoint));
+                  const nextPreferred = prev.preferredEndpoint && nextAllowed.has(prev.preferredEndpoint)
+                    ? prev.preferredEndpoint
+                    : '';
+                  return {
+                    ...prev,
+                    platform: value,
+                    supportedEndpoints: nextSupported,
+                    preferredEndpoint: nextPreferred,
+                  };
+                })}
                 options={platformOptions}
                 placeholder="平台类型（可自动检测）"
               />
@@ -957,6 +1071,124 @@ export default function Sites() {
               style={formInputStyle}
             />
           </ResponsiveFormGrid>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+              padding: 12,
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'color-mix(in srgb, var(--color-surface) 82%, transparent)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>
+                站点协议
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  仅支持单模型有限探测，不会扫描全站模型
+                </div>
+                <button
+                  type="button"
+                  onClick={handleProbeProtocol}
+                  disabled={protocolProbing || !isEditing}
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-border)', minWidth: 132 }}
+                >
+                  {protocolProbing ? <><span className="spinner spinner-sm" /> 探测中...</> : '自动探测协议'}
+                </button>
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(160px, 220px) 1fr', gap: 12, alignItems: 'start' }}>
+              <div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>模式</div>
+                <ModernSelect
+                  value={form.protocolMode}
+                  onChange={(value) => setForm((prev) => ({
+                    ...prev,
+                    protocolMode: value === 'manual' ? 'manual' : 'auto',
+                    supportedEndpoints: value === 'manual' ? prev.supportedEndpoints : [],
+                    preferredEndpoint: value === 'manual' ? prev.preferredEndpoint : '',
+                  }))}
+                  options={SITE_PROTOCOL_MODE_OPTIONS}
+                  placeholder="协议模式"
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>支持的上游协议</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {SITE_PROTOCOL_ENDPOINT_OPTIONS.filter((option) => allowedProtocolEndpointSet.has(option.value)).map((option) => {
+                    const checked = form.supportedEndpoints.includes(option.value);
+                    const disabled = form.protocolMode !== 'manual';
+                    return (
+                      <label
+                        key={option.value}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '8px 10px',
+                          borderRadius: '999px',
+                          border: '1px solid var(--color-border)',
+                          background: checked ? 'color-mix(in srgb, var(--color-primary) 12%, var(--color-bg))' : 'var(--color-bg)',
+                          color: disabled ? 'var(--color-text-muted)' : 'var(--color-text-primary)',
+                          cursor: disabled ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        <input
+                          data-testid={`site-protocol-endpoint-${option.value}`}
+                          type="checkbox"
+                          checked={checked}
+                          disabled={disabled}
+                          onChange={(e) => {
+                            const nextChecked = e.target.checked;
+                            setForm((prev) => {
+                              const nextSupported = nextChecked
+                                ? Array.from(new Set([...prev.supportedEndpoints, option.value]))
+                                : prev.supportedEndpoints.filter((endpoint) => endpoint !== option.value);
+                              const nextPreferred = nextSupported.includes(prev.preferredEndpoint as any)
+                                ? prev.preferredEndpoint
+                                : '';
+                              return {
+                                ...prev,
+                                supportedEndpoints: nextSupported,
+                                preferredEndpoint: nextPreferred,
+                              };
+                            });
+                          }}
+                        />
+                        <span style={{ fontSize: 12 }}>{option.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div style={{ maxWidth: 260 }}>
+                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>首选协议</div>
+                  <ModernSelect
+                    value={form.preferredEndpoint}
+                    onChange={(value) => setForm((prev) => ({
+                      ...prev,
+                      preferredEndpoint: value === 'chat' || value === 'responses' || value === 'messages'
+                        ? value
+                        : '',
+                    }))}
+                    options={[
+                      { value: '', label: '不指定，由顺序决定' },
+                      ...SITE_PROTOCOL_ENDPOINT_OPTIONS
+                        .filter((option) => allowedProtocolEndpointSet.has(option.value) && form.supportedEndpoints.includes(option.value))
+                        .map((option) => ({ value: option.value, label: option.label })),
+                    ]}
+                    placeholder="首选协议"
+                  />
+                </div>
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
+              自动模式下，系统只根据真实成功/失败被动学习，不会主动扫站点全部模型。点击“自动探测协议”时，也只会拿该站点一个已知可用模型做有限协议尝试。手动模式下，路由会优先限制在你勾选的协议范围内，再结合实时失败记忆与被动画像排序。
+            </div>
+          </div>
           <div
             style={{
               display: 'flex',
@@ -1209,6 +1441,10 @@ export default function Sites() {
                       )}
                     />
                     <MobileField
+                      label="站点协议"
+                      value={buildSiteProtocolSummary(site)}
+                    />
+                    <MobileField
                       label="余额"
                       value={(
                         <SiteBalanceDisplay
@@ -1338,6 +1574,7 @@ export default function Sites() {
                   <th>系统代理</th>
                   <th>权重</th>
                   <th>平台</th>
+                  <th>站点协议</th>
                   <th>创建时间</th>
                   <th className="sites-actions-col" style={{ textAlign: 'right' }}>操作</th>
                 </tr>
@@ -1432,6 +1669,9 @@ export default function Sites() {
                           {site.platform || '-'}
                         </span>
                       </a>
+                    </td>
+                    <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                      {buildSiteProtocolSummary(site)}
                     </td>
                     <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                       <a

@@ -76,8 +76,10 @@ async function createSiteAndCollectLocation(createdSite: { id: number; platform?
       node.type === 'input'
       && node.props.placeholder === '站点 URL (例如 https://api.example.com)'
     ));
-    const selects = root.root.findAllByType(ModernSelect);
-    const platformSelect = selects.at(-1);
+    const platformSelect = root.root.find((node) => (
+      node.type === ModernSelect
+      && node.props.placeholder === '平台类型（可自动检测）'
+    ));
     const saveButton = root.root.find((node) => (
       node.type === 'button'
       && typeof node.props.onClick === 'function'

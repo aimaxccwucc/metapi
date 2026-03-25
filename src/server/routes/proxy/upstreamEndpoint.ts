@@ -7,6 +7,13 @@ import { resolveProviderProfile } from '../../proxy-core/providers/registry.js';
 import { config } from '../../config.js';
 import { fetchModelPricingCatalog } from '../../services/modelPricingService.js';
 import { applyPayloadRules } from '../../services/payloadRules.js';
+import { applyManualSiteProtocolConfig } from '../../services/siteProtocolConfigService.js';
+import {
+  applyPersistedUpstreamEndpointPreference,
+  recordPersistedUpstreamEndpointFailure,
+  recordPersistedUpstreamEndpointSuccess,
+  resetUpstreamProtocolProfileState,
+} from '../../services/upstreamProtocolProfile.js';
 import type { DownstreamFormat } from '../../transformers/shared/normalized.js';
 import {
   convertOpenAiBodyToResponsesBody as convertOpenAiBodyToResponsesBodyViaTransformer,
@@ -878,6 +885,17 @@ function applyEndpointRuntimePreference(
 function inferSuggestedEndpointFromError(errorText?: string | null): UpstreamEndpoint | null {
   const text = (errorText || '').toLowerCase();
   if (!text) return null;
+  const explicitSuggestionPatterns: Array<{ endpoint: UpstreamEndpoint; pattern: RegExp }> = [
+    { endpoint: 'responses', pattern: /(?:please|try)\s+use\s+\/v1\/responses/i },
+    { endpoint: 'messages', pattern: /(?:please|try)\s+use\s+\/v1\/messages/i },
+    { endpoint: 'chat', pattern: /(?:please|try)\s+use\s+\/v1\/chat\/completions/i },
+    { endpoint: 'responses', pattern: /use\s+\/v1\/responses\s+instead/i },
+    { endpoint: 'messages', pattern: /use\s+\/v1\/messages\s+instead/i },
+    { endpoint: 'chat', pattern: /use\s+\/v1\/chat\/completions\s+instead/i },
+  ];
+  for (const candidate of explicitSuggestionPatterns) {
+    if (candidate.pattern.test(errorText || '')) return candidate.endpoint;
+  }
   if (text.includes('/v1/responses')) return 'responses';
   if (text.includes('/v1/messages')) return 'messages';
   if (text.includes('/v1/chat/completions')) return 'chat';
@@ -939,6 +957,7 @@ function shouldPersistFailureRuntimeMemory(input: {
 
 export function resetUpstreamEndpointRuntimeState(): void {
   endpointRuntimeStates.clear();
+  resetUpstreamProtocolProfileState();
 }
 
 export function recordUpstreamEndpointSuccess(input: {
@@ -974,6 +993,11 @@ export function recordUpstreamEndpointSuccess(input: {
   state.preferredEndpoint = input.endpoint;
   state.preferredUpdatedAtMs = nowMs;
   delete state.blockedUntilMsByEndpoint[input.endpoint];
+  recordPersistedUpstreamEndpointSuccess({
+    key,
+    endpoint: input.endpoint,
+    nowMs,
+  });
 }
 
 export function recordUpstreamEndpointFailure(input: {
@@ -1022,6 +1046,13 @@ export function recordUpstreamEndpointFailure(input: {
     state.preferredUpdatedAtMs = nowMs;
     delete state.blockedUntilMsByEndpoint[suggestedEndpoint];
   }
+  recordPersistedUpstreamEndpointFailure({
+    key,
+    endpoint: input.endpoint,
+    suggestedEndpoint,
+    blockTtlMs: ENDPOINT_RUNTIME_BLOCK_TTL_MS,
+    nowMs,
+  });
 }
 
 function preferredEndpointOrder(
@@ -1114,11 +1145,17 @@ export async function resolveUpstreamEndpointCandidates(
     downstreamFormat,
     capabilityProfile,
   });
-  const applyRuntimePreference = (candidates: UpstreamEndpoint[]) => (
-    shouldUseEndpointRuntimeMemory(capabilityProfile)
-      ? applyEndpointRuntimePreference(candidates, runtimeStateKey)
-      : candidates
-  );
+  const applyLearnedPreference = async (candidates: UpstreamEndpoint[]) => {
+    const manuallyConstrained = await applyManualSiteProtocolConfig(candidates, context.site.id, context.site.platform);
+    if (!shouldUseEndpointRuntimeMemory(capabilityProfile)) {
+      return manuallyConstrained.candidates;
+    }
+    const persistedCandidates = await applyPersistedUpstreamEndpointPreference(
+      manuallyConstrained.candidates,
+      runtimeStateKey,
+    );
+    return applyEndpointRuntimePreference(persistedCandidates, runtimeStateKey);
+  };
   const conversationFileSummary = requestCapabilities?.conversationFileSummary ?? {
     hasImage: false,
     hasAudio: false,
@@ -1128,14 +1165,14 @@ export async function resolveUpstreamEndpointCandidates(
   if (sitePlatform === 'anyrouter') {
     // anyrouter deployments are effectively anthropic-protocol first.
     if (hasNonImageFileInput) {
-      return applyRuntimePreference(downstreamFormat === 'responses'
+      return await applyLearnedPreference(downstreamFormat === 'responses'
         ? ['responses', 'messages', 'chat']
         : ['messages', 'responses', 'chat']);
     }
     if (downstreamFormat === 'responses') {
-      return applyRuntimePreference(['responses', 'messages', 'chat']);
+      return await applyLearnedPreference(['responses', 'messages', 'chat']);
     }
-    return applyRuntimePreference(['messages', 'chat', 'responses']);
+    return await applyLearnedPreference(['messages', 'chat', 'responses']);
   }
 
   const preferred = preferredEndpointOrder(
@@ -1194,20 +1231,20 @@ export async function resolveUpstreamEndpointCandidates(
     });
 
     if (!catalog || !Array.isArray(catalog.models) || catalog.models.length === 0) {
-      return applyRuntimePreference(prioritizedPreferredEndpoints);
+      return await applyLearnedPreference(prioritizedPreferredEndpoints);
     }
 
     const matched = catalog.models.find((item) =>
       asTrimmedString(item?.modelName).toLowerCase() === modelName.toLowerCase(),
     );
-    if (!matched) return applyRuntimePreference(prioritizedPreferredEndpoints);
+    if (!matched) return await applyLearnedPreference(prioritizedPreferredEndpoints);
 
     const shouldIgnoreCatalogOrderingForClaudeMessages = (
       preferMessagesForClaudeModel
       && (downstreamFormat !== 'responses' || sitePlatform !== 'openai')
     );
     if (shouldIgnoreCatalogOrderingForClaudeMessages) {
-      return applyRuntimePreference(prioritizedPreferredEndpoints);
+      return await applyLearnedPreference(prioritizedPreferredEndpoints);
     }
 
     const supportedRaw = Array.isArray(matched.supportedEndpointTypes) ? matched.supportedEndpointTypes : [];
@@ -1219,7 +1256,7 @@ export async function resolveUpstreamEndpointCandidates(
     if (forceMessagesFirstForClaudeModel && !hasConcreteCatalogHint) {
       // Generic labels like openai/anthropic are too coarse for Claude models;
       // keep messages-first order in this case.
-      return applyRuntimePreference(prioritizedPreferredEndpoints);
+      return await applyLearnedPreference(prioritizedPreferredEndpoints);
     }
 
     const supported = new Set<UpstreamEndpoint>();
@@ -1230,7 +1267,7 @@ export async function resolveUpstreamEndpointCandidates(
       }
     }
 
-    if (supported.size === 0) return applyRuntimePreference(prioritizedPreferredEndpoints);
+    if (supported.size === 0) return await applyLearnedPreference(prioritizedPreferredEndpoints);
 
     if (
       downstreamFormat === 'responses'
@@ -1239,7 +1276,7 @@ export async function resolveUpstreamEndpointCandidates(
       && !supported.has('chat')
       && !supported.has('responses')
     ) {
-      return applyRuntimePreference(['messages']);
+      return await applyLearnedPreference(['messages']);
     }
 
     const candidatePool = downstreamFormat === 'responses'
@@ -1259,21 +1296,21 @@ export async function resolveUpstreamEndpointCandidates(
       ];
       const concreteSupportedOrder = concreteCandidatePool.filter((endpoint) => supported.has(endpoint));
       if (concreteSupportedOrder.length > 0) {
-        return applyRuntimePreference(concreteSupportedOrder);
+        return await applyLearnedPreference(concreteSupportedOrder);
       }
     }
 
     const firstSupported = candidatePool.find((endpoint) => supported.has(endpoint));
-    if (!firstSupported) return applyRuntimePreference(candidatePool);
+    if (!firstSupported) return await applyLearnedPreference(candidatePool);
 
     // Catalog metadata can be incomplete/inaccurate, so only use coarse labels
     // to pick the first attempt. Keep downstream-driven fallback order unchanged.
-    return applyRuntimePreference([
+    return await applyLearnedPreference([
       firstSupported,
       ...candidatePool.filter((endpoint) => endpoint !== firstSupported),
     ]);
   } catch {
-    return applyRuntimePreference(prioritizedPreferredEndpoints);
+    return await applyLearnedPreference(prioritizedPreferredEndpoints);
   }
 }
 

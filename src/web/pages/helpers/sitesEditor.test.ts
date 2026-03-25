@@ -3,6 +3,7 @@ import {
   buildSiteSaveAction,
   emptySiteCustomHeader,
   emptySiteForm,
+  getAllowedProtocolEndpointsForPlatform,
   serializeSiteCustomHeaders,
   siteFormFromSite,
 } from './sitesEditor.js';
@@ -20,6 +21,11 @@ describe('buildSiteSaveAction', () => {
         customHeaders: '{"x-site-token":"alpha"}',
         useSystemProxy: false,
         globalWeight: 1.2,
+        protocolConfig: {
+          mode: 'manual',
+          supportedEndpoints: ['responses', 'chat'],
+          preferredEndpoint: 'responses',
+        },
       },
     );
 
@@ -34,6 +40,11 @@ describe('buildSiteSaveAction', () => {
         customHeaders: '{"x-site-token":"alpha"}',
         useSystemProxy: false,
         globalWeight: 1.2,
+        protocolConfig: {
+          mode: 'manual',
+          supportedEndpoints: ['responses', 'chat'],
+          preferredEndpoint: 'responses',
+        },
       },
     });
   });
@@ -50,6 +61,11 @@ describe('buildSiteSaveAction', () => {
         useSystemProxy: true,
         customHeaders: '',
         globalWeight: 0.8,
+        protocolConfig: {
+          mode: 'auto',
+          supportedEndpoints: [],
+          preferredEndpoint: null,
+        },
       },
     );
 
@@ -65,6 +81,11 @@ describe('buildSiteSaveAction', () => {
         useSystemProxy: true,
         customHeaders: '',
         globalWeight: 0.8,
+        protocolConfig: {
+          mode: 'auto',
+          supportedEndpoints: [],
+          preferredEndpoint: null,
+        },
       },
     });
   });
@@ -82,6 +103,11 @@ describe('buildSiteSaveAction', () => {
           useSystemProxy: false,
           customHeaders: '',
           globalWeight: 1,
+          protocolConfig: {
+            mode: 'auto',
+            supportedEndpoints: [],
+            preferredEndpoint: null,
+          },
         },
       ),
     ).toThrow('editingSiteId is required in edit mode');
@@ -91,6 +117,8 @@ describe('buildSiteSaveAction', () => {
     expect(emptySiteForm()).not.toHaveProperty('apiKey');
     expect(emptySiteForm().customHeaders).toEqual([emptySiteCustomHeader()]);
     expect(emptySiteForm().proxyUrl).toBe('');
+    expect(emptySiteForm().protocolMode).toBe('auto');
+    expect(emptySiteForm().supportedEndpoints).toEqual([]);
     expect(siteFormFromSite({
       name: 'site-d',
       url: 'https://d.example.com',
@@ -114,6 +142,41 @@ describe('buildSiteSaveAction', () => {
       { key: 'x-site-token', value: 'alpha' },
       { key: 'cf-access-client-id', value: 'beta' },
     ]);
+  });
+
+  it('parses manual protocol config into editor fields', () => {
+    expect(siteFormFromSite({
+      protocolConfig: {
+        mode: 'manual',
+        supportedEndpoints: ['chat', 'responses'],
+        preferredEndpoint: 'responses',
+      },
+    })).toMatchObject({
+      protocolMode: 'manual',
+      supportedEndpoints: ['chat', 'responses'],
+      preferredEndpoint: 'responses',
+    });
+  });
+
+  it('filters unsupported protocol endpoints from the editor when the platform changes', () => {
+    expect(siteFormFromSite({
+      platform: 'codex',
+      protocolConfig: {
+        mode: 'manual',
+        supportedEndpoints: ['chat', 'responses'],
+        preferredEndpoint: 'chat',
+      },
+    })).toMatchObject({
+      protocolMode: 'manual',
+      supportedEndpoints: ['responses'],
+      preferredEndpoint: '',
+    });
+  });
+
+  it('returns platform-aware allowed protocol endpoints', () => {
+    expect(getAllowedProtocolEndpointsForPlatform('codex')).toEqual(['responses']);
+    expect(getAllowedProtocolEndpointsForPlatform('claude')).toEqual(['messages']);
+    expect(getAllowedProtocolEndpointsForPlatform('gemini')).toEqual(['responses', 'chat']);
   });
 
   it('serializes key value rows into json', () => {

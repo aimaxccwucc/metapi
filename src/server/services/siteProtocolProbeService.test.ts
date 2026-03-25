@@ -1,0 +1,296 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const { dispatchRuntimeRequestMock } = vi.hoisted(() => ({
+  dispatchRuntimeRequestMock: vi.fn(),
+}));
+
+vi.mock('../routes/proxy/runtimeExecutor.js', () => ({
+  dispatchRuntimeRequest: (...args: unknown[]) => dispatchRuntimeRequestMock(...args),
+}));
+
+type DbModule = typeof import('../db/index.js');
+type SiteProtocolProbeServiceModule = typeof import('./siteProtocolProbeService.js');
+
+describe('siteProtocolProbeService', () => {
+  let db: DbModule['db'];
+  let schema: DbModule['schema'];
+  let probeSiteProtocol: SiteProtocolProbeServiceModule['probeSiteProtocol'];
+  let dataDir = '';
+
+  beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), 'metapi-site-protocol-probe-'));
+    process.env.DATA_DIR = dataDir;
+
+    await import('../db/migrate.js');
+    const dbModule = await import('../db/index.js');
+    const serviceModule = await import('./siteProtocolProbeService.js');
+    db = dbModule.db;
+    schema = dbModule.schema;
+    probeSiteProtocol = serviceModule.probeSiteProtocol;
+  });
+
+  beforeEach(async () => {
+    dispatchRuntimeRequestMock.mockReset();
+    await db.delete(schema.settings).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.accountTokens).run();
+    await db.delete(schema.accounts).run();
+    await db.delete(schema.sites).run();
+  });
+
+  afterAll(() => {
+    delete process.env.DATA_DIR;
+  });
+
+  it('detects responses after chat protocol mismatch for a direct api token account', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'probe-site',
+      url: 'https://probe.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'alice',
+      accessToken: 'session-token',
+      apiToken: 'sk-account-api',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+    }).run();
+
+    dispatchRuntimeRequestMock.mockImplementation(async ({ request }: { request: { path: string } }) => {
+      if (request.path.includes('/v1/chat/completions')) {
+        return new Response(JSON.stringify({
+          error: { message: 'Unsupported legacy protocol: /v1/chat/completions is not supported. Please use /v1/responses.' },
+        }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (request.path.includes('/v1/responses')) {
+        return new Response(JSON.stringify({ id: 'resp_ok' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ error: { message: 'unexpected' } }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const result = await probeSiteProtocol({ siteId: site.id });
+
+    expect(result.modelName).toBe('gpt-4.1');
+    expect(result.accountId).toBe(account.id);
+    expect(result.credentialSource).toBe('account_api_token');
+    expect(result.supportedEndpoints).toEqual(['responses', 'chat', 'messages']);
+    expect(result.preferredEndpoint).toBe('responses');
+    expect(result.protocolConfig).toMatchObject({
+      mode: 'manual',
+      supportedEndpoints: ['responses', 'chat', 'messages'],
+      preferredEndpoint: 'responses',
+    });
+    expect(result.attempts).toHaveLength(2);
+    expect(result.attempts[0]).toMatchObject({
+      endpoint: 'chat',
+      classification: 'protocol_mismatch',
+      statusCode: 400,
+      ok: false,
+    });
+    expect(result.attempts[1]).toMatchObject({
+      endpoint: 'responses',
+      classification: 'supported',
+      statusCode: 200,
+      ok: true,
+    });
+  });
+
+  it('prefers managed token credentials and messages for claude-family models', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'claude-site',
+      url: 'https://claude-gateway.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'bob',
+      accessToken: 'session-token',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-token-probe',
+      valueStatus: 'ready',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'claude-sonnet-4-5-20250929',
+      available: true,
+    }).run();
+
+    dispatchRuntimeRequestMock.mockImplementation(async ({ request }: { request: { path: string } }) => {
+      if (request.path.includes('/v1/messages')) {
+        return new Response(JSON.stringify({ id: 'msg_ok' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ error: { message: 'unexpected' } }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const result = await probeSiteProtocol({ siteId: site.id });
+
+    expect(result.modelName).toBe('claude-sonnet-4-5-20250929');
+    expect(result.credentialSource).toBe('preferred_token');
+    expect(result.supportedEndpoints).toEqual(['messages', 'chat', 'responses']);
+    expect(result.preferredEndpoint).toBe('messages');
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0]).toMatchObject({
+      endpoint: 'messages',
+      ok: true,
+      classification: 'supported',
+    });
+  });
+
+  it('falls back to the next candidate when the first candidate has a credential failure', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'fallback-site',
+      url: 'https://fallback.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const brokenAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'broken-user',
+      accessToken: 'session-broken',
+      apiToken: 'sk-broken',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+    const healthyAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'healthy-user',
+      accessToken: 'session-healthy',
+      apiToken: 'sk-healthy',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: brokenAccount.id,
+        modelName: 'gpt-4.1',
+        available: true,
+      },
+      {
+        accountId: healthyAccount.id,
+        modelName: 'gpt-4.1',
+        available: true,
+      },
+    ]).run();
+
+    dispatchRuntimeRequestMock.mockImplementation(async ({ request }: { request: { headers: Record<string, string>; path: string } }) => {
+      if (request.headers.Authorization === 'Bearer sk-broken') {
+        return new Response(JSON.stringify({
+          error: { message: 'invalid api key' },
+        }), {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (request.path.includes('/v1/chat/completions')) {
+        return new Response(JSON.stringify({
+          error: { message: 'Unsupported legacy protocol: /v1/chat/completions is not supported. Please use /v1/responses.' },
+        }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ id: 'resp_ok' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const result = await probeSiteProtocol({ siteId: site.id });
+
+    expect(result.accountId).toBe(healthyAccount.id);
+    expect(result.credentialSource).toBe('account_api_token');
+    expect(result.preferredEndpoint).toBe('responses');
+    expect(result.attempts.some((attempt) => attempt.classification === 'credential')).toBe(true);
+    expect(result.attempts.at(-1)).toMatchObject({
+      endpoint: 'responses',
+      ok: true,
+    });
+  });
+
+  it('ignores non-json success payloads and continues probing the next endpoint', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'non-json-site',
+      url: 'https://non-json.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'user-non-json',
+      accessToken: 'session-token',
+      apiToken: 'sk-non-json',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+    }).run();
+
+    dispatchRuntimeRequestMock.mockImplementation(async ({ request }: { request: { path: string } }) => {
+      if (request.path.includes('/v1/chat/completions')) {
+        return new Response('<html>ok</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        });
+      }
+      return new Response(JSON.stringify({ id: 'resp_ok' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const result = await probeSiteProtocol({ siteId: site.id });
+
+    expect(result.preferredEndpoint).toBe('responses');
+    expect(result.attempts[0]).toMatchObject({
+      endpoint: 'chat',
+      ok: false,
+      classification: 'inconclusive',
+    });
+  });
+});

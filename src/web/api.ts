@@ -607,6 +607,8 @@ export const api = {
     timeoutMs: data?.wait ? 150_000 : 30_000,
   }),
   detectSite: (url: string) => request('/api/sites/detect', { method: 'POST', body: JSON.stringify({ url }) }),
+  probeSiteProtocol: (siteId: number, data?: { modelName?: string }) =>
+    request(`/api/sites/${siteId}/protocol-probe`, { method: 'POST', body: JSON.stringify(data || {}) }),
   getSiteDisabledModels: (siteId: number) => request(`/api/sites/${siteId}/disabled-models`),
   updateSiteDisabledModels: (siteId: number, models: string[]) => request(`/api/sites/${siteId}/disabled-models`, { method: 'PUT', body: JSON.stringify({ models }) }),
 

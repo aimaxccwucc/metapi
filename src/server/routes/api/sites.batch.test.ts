@@ -27,6 +27,7 @@ describe('sites batch routes', () => {
   });
 
   beforeEach(async () => {
+    await db.delete(schema.settings).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
   });
@@ -88,5 +89,44 @@ describe('sites batch routes', () => {
 
     expect(response.statusCode).toBe(400);
     expect((response.json() as { message?: string }).message).toContain('action');
+  });
+
+  it('removes manual protocol config when a site is batch deleted', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'delete-protocol-site',
+        url: 'https://delete-protocol-site.example.com',
+        platform: 'new-api',
+        protocolConfig: {
+          mode: 'manual',
+          supportedEndpoints: ['responses'],
+          preferredEndpoint: 'responses',
+        },
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const site = created.json() as { id: number };
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites/batch',
+      payload: {
+        ids: [site.id],
+        action: 'delete',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const settingsRows = await db.select().from(schema.settings).all();
+    expect(settingsRows.some((row) => row.key === 'site_protocol_config_v1')).toBe(true);
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: '/api/sites',
+    });
+    expect(listResponse.statusCode).toBe(200);
+    expect((listResponse.json() as Array<{ id: number }>).some((row) => row.id === site.id)).toBe(false);
   });
 });

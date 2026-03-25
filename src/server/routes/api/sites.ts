@@ -7,6 +7,17 @@ import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
 import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
 import { getSub2ApiSubscriptionFromExtraConfig } from '../../services/accountExtraConfig.js';
+import {
+  deleteSiteProtocolConfig,
+  flushSiteProtocolConfigPersistence,
+  getSiteProtocolConfig,
+  listSiteProtocolConfigs,
+  normalizeSiteProtocolConfigInput,
+  sanitizeSiteProtocolConfigForPlatform,
+  resolveSiteProtocolConfig,
+  upsertSiteProtocolConfig,
+} from '../../services/siteProtocolConfigService.js';
+import { probeSiteProtocol } from '../../services/siteProtocolProbeService.js';
 
 function normalizeSiteStatus(input: unknown): 'active' | 'disabled' | null {
   if (input === undefined || input === null) return null;
@@ -208,6 +219,7 @@ export async function sitesRoutes(app: FastifyInstance) {
   // List all sites
   app.get('/api/sites', async () => {
     const siteRows = await db.select().from(schema.sites).all();
+    const protocolConfigs = await listSiteProtocolConfigs();
     const accountRows = await db.select({
       siteId: schema.accounts.siteId,
       balance: schema.accounts.balance,
@@ -225,6 +237,12 @@ export async function sitesRoutes(app: FastifyInstance) {
       ...site,
       totalBalance: Math.round((totalBalanceBySiteId[site.id] || 0) * 1_000_000) / 1_000_000,
       subscriptionSummary: subscriptionBySiteId[site.id] || null,
+      protocolConfig: sanitizeSiteProtocolConfigForPlatform(protocolConfigs[site.id] || {
+        mode: 'auto',
+        supportedEndpoints: [],
+        preferredEndpoint: null,
+        updatedAtMs: 0,
+      }, site.platform),
     }));
   });
 
@@ -237,12 +255,13 @@ export async function sitesRoutes(app: FastifyInstance) {
     useSystemProxy?: boolean;
     customHeaders?: string | null;
     externalCheckinUrl?: string | null;
+    protocolConfig?: unknown;
     status?: string;
     isPinned?: boolean;
     sortOrder?: number;
     globalWeight?: number;
   } }>('/api/sites', async (request, reply) => {
-    const { name, url, platform, proxyUrl, useSystemProxy, customHeaders, externalCheckinUrl, status, isPinned, sortOrder, globalWeight } = request.body;
+    const { name, url, platform, proxyUrl, useSystemProxy, customHeaders, externalCheckinUrl, protocolConfig, status, isPinned, sortOrder, globalWeight } = request.body;
     const normalizedStatus = normalizeSiteStatus(status);
     if (status !== undefined && !normalizedStatus) {
       return reply.code(400).send({ error: 'Invalid site status. Expected active or disabled.' });
@@ -274,6 +293,10 @@ export async function sitesRoutes(app: FastifyInstance) {
     const normalizedCustomHeaders = parseSiteCustomHeadersInput(customHeaders);
     if (!normalizedCustomHeaders.valid) {
       return reply.code(400).send({ error: normalizedCustomHeaders.error || 'Invalid customHeaders.' });
+    }
+    const normalizedProtocolConfig = normalizeSiteProtocolConfigInput(protocolConfig, platform);
+    if (!normalizedProtocolConfig.valid) {
+      return reply.code(400).send({ error: normalizedProtocolConfig.error || 'Invalid protocolConfig.' });
     }
 
     const existingSites = await db.select().from(schema.sites).all();
@@ -308,8 +331,15 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (!result) {
       return reply.code(500).send({ error: 'Create site failed' });
     }
+    if (normalizedProtocolConfig.present && normalizedProtocolConfig.config) {
+      await upsertSiteProtocolConfig(siteId, normalizedProtocolConfig.config);
+      await flushSiteProtocolConfigPersistence();
+    }
     invalidateSiteCaches();
-    return result;
+    return {
+      ...result,
+      protocolConfig: sanitizeSiteProtocolConfigForPlatform(await resolveSiteProtocolConfig(siteId), result.platform),
+    };
   });
 
   // Update a site
@@ -321,6 +351,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     useSystemProxy?: boolean;
     customHeaders?: string | null;
     externalCheckinUrl?: string | null;
+    protocolConfig?: unknown;
     status?: string;
     isPinned?: boolean;
     sortOrder?: number;
@@ -370,6 +401,11 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (!normalizedCustomHeaders.valid) {
       return reply.code(400).send({ error: normalizedCustomHeaders.error || 'Invalid customHeaders.' });
     }
+    const nextPlatform = body.platform !== undefined ? body.platform : existingSite.platform;
+    const normalizedProtocolConfig = normalizeSiteProtocolConfigInput(body.protocolConfig, nextPlatform);
+    if (!normalizedProtocolConfig.valid) {
+      return reply.code(400).send({ error: normalizedProtocolConfig.error || 'Invalid protocolConfig.' });
+    }
 
     if (body.name !== undefined) updates.name = body.name;
     if (body.url !== undefined) updates.url = normalizeSiteUrl(body.url);
@@ -384,6 +420,21 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.globalWeight !== undefined) updates.globalWeight = normalizedGlobalWeight;
     updates.updatedAt = new Date().toISOString();
     await db.update(schema.sites).set(updates).where(eq(schema.sites.id, id)).run();
+    if (normalizedProtocolConfig.present && normalizedProtocolConfig.config) {
+      await upsertSiteProtocolConfig(id, normalizedProtocolConfig.config);
+      await flushSiteProtocolConfigPersistence();
+    } else if (body.platform !== undefined) {
+      const sanitizedExistingProtocolConfig = sanitizeSiteProtocolConfigForPlatform(
+        await getSiteProtocolConfig(id),
+        nextPlatform,
+      );
+      if (!sanitizedExistingProtocolConfig || sanitizedExistingProtocolConfig.mode !== 'manual') {
+        await deleteSiteProtocolConfig(id);
+      } else {
+        await upsertSiteProtocolConfig(id, sanitizedExistingProtocolConfig);
+      }
+      await flushSiteProtocolConfigPersistence();
+    }
 
     if (body.status !== undefined && normalizedStatus) {
       await applySiteStatusSideEffects(id, existingSite.name, normalizedStatus);
@@ -391,13 +442,21 @@ export async function sitesRoutes(app: FastifyInstance) {
 
     invalidateSiteCaches();
 
-    return await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+    const updatedSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+    return updatedSite
+      ? {
+        ...updatedSite,
+        protocolConfig: sanitizeSiteProtocolConfigForPlatform(await resolveSiteProtocolConfig(id), updatedSite.platform),
+      }
+      : updatedSite;
   });
 
   // Delete a site
   app.delete<{ Params: { id: string } }>('/api/sites/:id', async (request) => {
     const id = parseInt(request.params.id);
     await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
+    await deleteSiteProtocolConfig(id);
+    await flushSiteProtocolConfigPersistence();
     invalidateSiteCaches();
     return { success: true };
   });
@@ -414,6 +473,7 @@ export async function sitesRoutes(app: FastifyInstance) {
 
     const successIds: number[] = [];
     const failedItems: Array<{ id: number; message: string }> = [];
+    let protocolConfigChanged = false;
 
     for (const id of ids) {
       const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
@@ -425,6 +485,8 @@ export async function sitesRoutes(app: FastifyInstance) {
       try {
         if (action === 'delete') {
           await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
+          await deleteSiteProtocolConfig(id);
+          protocolConfigChanged = true;
         } else if (action === 'enableSystemProxy') {
           await db.update(schema.sites)
             .set({ useSystemProxy: true, updatedAt: new Date().toISOString() })
@@ -449,12 +511,51 @@ export async function sitesRoutes(app: FastifyInstance) {
       }
     }
 
+    if (protocolConfigChanged) {
+      await flushSiteProtocolConfigPersistence();
+    }
     invalidateSiteCaches();
     return {
       success: true,
       successIds,
       failedItems,
     };
+  });
+
+  app.post<{ Params: { id: string }; Body?: { modelName?: string } }>('/api/sites/:id/protocol-probe', async (request, reply) => {
+    const id = parseInt(request.params.id, 10);
+    if (Number.isNaN(id)) {
+      return reply.code(400).send({ error: 'Invalid site id' });
+    }
+
+    const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
+    if (!existingSite) {
+      return reply.code(404).send({ error: 'Site not found' });
+    }
+    if (existingSite.status !== 'active') {
+      return reply.code(400).send({ error: '站点已禁用，无法自动探测协议' });
+    }
+
+    try {
+      const result = await probeSiteProtocol({
+        siteId: id,
+        modelName: request.body?.modelName,
+      });
+      await upsertSiteProtocolConfig(id, result.protocolConfig);
+      await flushSiteProtocolConfigPersistence();
+      invalidateSiteCaches();
+
+      return {
+        success: true,
+        ...result,
+        protocolConfig: sanitizeSiteProtocolConfigForPlatform(await resolveSiteProtocolConfig(id), existingSite.platform),
+      };
+    } catch (error: any) {
+      const message = typeof error?.message === 'string' && error.message.trim()
+        ? error.message.trim()
+        : '站点协议自动探测失败';
+      return reply.code(400).send({ error: message });
+    }
   });
 
   // Get disabled models for a site

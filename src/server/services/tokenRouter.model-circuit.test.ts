@@ -223,4 +223,90 @@ describe('TokenRouter model circuit breaker', () => {
     expect(siblingCandidate?.circuitStatus?.isOpen).toBe(false);
     expect(backupCandidate?.eligible).toBe(true);
   });
+
+  it('keeps protocol mismatch recoverable without opening a model circuit', async () => {
+    const primarySite = await db.insert(schema.sites).values({
+      name: 'protocol-primary',
+      url: 'https://protocol-primary.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+    const backupSite = await db.insert(schema.sites).values({
+      name: 'protocol-backup',
+      url: 'https://protocol-backup.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const primaryAccount = await db.insert(schema.accounts).values({
+      siteId: primarySite.id,
+      username: 'protocol-user-primary',
+      accessToken: 'access-protocol-primary',
+      apiToken: 'sk-protocol-primary',
+      status: 'active',
+      unitCost: 1,
+    }).returning().get();
+    const backupAccount = await db.insert(schema.accounts).values({
+      siteId: backupSite.id,
+      username: 'protocol-user-backup',
+      accessToken: 'access-protocol-backup',
+      apiToken: 'sk-protocol-backup',
+      status: 'active',
+      unitCost: 1,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.2-codex',
+      enabled: true,
+    }).returning().get();
+
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: primaryAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    const backupChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: backupAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const fallbackRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: fallbackRoute.id,
+      accountId: primaryAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    const router = new TokenRouter();
+    await router.recordFailure(primaryChannel.id, {
+      status: 400,
+      errorText: 'Unsupported legacy protocol: /v1/chat/completions is not supported. Please use /v1/responses.',
+      modelName: 'gpt-5.2-codex',
+    });
+
+    const decision = await router.explainSelection('gpt-5.2-codex');
+    const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+    const backupCandidate = decision.candidates.find((candidate) => candidate.channelId === backupChannel.id);
+
+    expect(primaryCandidate?.eligible).toBe(false);
+    expect(primaryCandidate?.reason || '').not.toContain('模型熔断');
+    expect(primaryCandidate?.modelCircuitStatus?.isOpen).toBe(false);
+    expect(backupCandidate?.eligible).toBe(true);
+
+    const otherModelSelection = await router.selectChannel('gpt-4o-mini');
+    expect(otherModelSelection?.account.id).toBe(primaryAccount.id);
+  });
 });

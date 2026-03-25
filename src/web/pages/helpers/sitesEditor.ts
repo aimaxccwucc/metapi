@@ -12,6 +12,9 @@ export type SiteForm = {
   useSystemProxy: boolean;
   customHeaders: SiteCustomHeaderField[];
   globalWeight: string;
+  protocolMode: 'auto' | 'manual';
+  supportedEndpoints: Array<'chat' | 'responses' | 'messages'>;
+  preferredEndpoint: '' | 'chat' | 'responses' | 'messages';
 };
 
 export type SiteEditorState =
@@ -27,11 +30,32 @@ export type SiteSavePayload = {
   useSystemProxy: boolean;
   customHeaders: string;
   globalWeight: number;
+  protocolConfig: {
+    mode: 'auto' | 'manual';
+    supportedEndpoints: Array<'chat' | 'responses' | 'messages'>;
+    preferredEndpoint: 'chat' | 'responses' | 'messages' | null;
+  };
 };
 
 type SiteSaveAction =
   | { kind: 'add'; payload: SiteSavePayload }
   | { kind: 'update'; id: number; payload: SiteSavePayload };
+
+function normalizeSiteProtocolPlatform(sitePlatform: unknown): string {
+  return typeof sitePlatform === 'string' ? sitePlatform.trim().toLowerCase() : '';
+}
+
+export function getAllowedProtocolEndpointsForPlatform(
+  sitePlatform?: string | null,
+): Array<'chat' | 'responses' | 'messages'> {
+  const platform = normalizeSiteProtocolPlatform(sitePlatform);
+  if (platform === 'codex') return ['responses'];
+  if (platform === 'claude') return ['messages'];
+  if (platform === 'gemini-cli' || platform === 'antigravity') return ['chat'];
+  if (platform === 'gemini') return ['responses', 'chat'];
+  if (platform === 'anyrouter') return ['messages', 'chat', 'responses'];
+  return ['chat', 'responses', 'messages'];
+}
 
 export function emptySiteCustomHeader(): SiteCustomHeaderField {
   return { key: '', value: '' };
@@ -51,6 +75,9 @@ export function emptySiteForm(): SiteForm {
     useSystemProxy: false,
     customHeaders: [emptySiteCustomHeader()],
     globalWeight: '1',
+    protocolMode: 'auto',
+    supportedEndpoints: [],
+    preferredEndpoint: '',
   };
 }
 
@@ -85,9 +112,28 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'customHeaders' | 
   useSystemProxy?: boolean | null;
   customHeaders?: string | null;
   globalWeight?: number | string | null;
+  protocolConfig?: {
+    mode?: 'auto' | 'manual';
+    supportedEndpoints?: Array<'chat' | 'responses' | 'messages'>;
+    preferredEndpoint?: 'chat' | 'responses' | 'messages' | null;
+  } | null;
 }): SiteForm {
   const globalWeightRaw = Number(site.globalWeight);
   const globalWeight = Number.isFinite(globalWeightRaw) && globalWeightRaw > 0 ? String(globalWeightRaw) : '1';
+  const allowedEndpoints = new Set(getAllowedProtocolEndpointsForPlatform(site.platform));
+  const protocolConfig = site.protocolConfig || null;
+  const protocolMode = protocolConfig?.mode === 'manual' ? 'manual' : 'auto';
+  const supportedEndpoints = Array.isArray(protocolConfig?.supportedEndpoints)
+    ? protocolConfig!.supportedEndpoints.filter((value): value is 'chat' | 'responses' | 'messages' => (
+      (value === 'chat' || value === 'responses' || value === 'messages')
+      && allowedEndpoints.has(value)
+    ))
+    : [];
+  const preferredEndpoint = protocolConfig?.preferredEndpoint === 'chat'
+    || protocolConfig?.preferredEndpoint === 'responses'
+    || protocolConfig?.preferredEndpoint === 'messages'
+    ? (allowedEndpoints.has(protocolConfig.preferredEndpoint) ? protocolConfig.preferredEndpoint : '')
+    : '';
   return {
     name: site.name ?? '',
     url: site.url ?? '',
@@ -97,6 +143,9 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'customHeaders' | 
     useSystemProxy: !!site.useSystemProxy,
     customHeaders: parseCustomHeadersForEditor(site.customHeaders),
     globalWeight,
+    protocolMode,
+    supportedEndpoints,
+    preferredEndpoint,
   };
 }
 
