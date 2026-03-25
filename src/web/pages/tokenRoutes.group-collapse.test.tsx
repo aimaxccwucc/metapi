@@ -913,6 +913,39 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 
+  it('shows automatic routes by default when no manual group route exists', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        id: 1, modelPattern: 'gpt-4o-mini', displayName: 'gpt-4o-mini',
+        displayIcon: null, modelMapping: null, enabled: true,
+        channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
+        decisionSnapshot: null, decisionRefreshedAt: null,
+      },
+    ]);
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const normalizedText = collectText(root.root).replace(/\s+/g, '');
+      expect(normalizedText).toContain('共1条路由');
+      expect(normalizedText).toContain('gpt-4o-mini');
+      expect(normalizedText).not.toContain('当前仅显示你手工创建的群组路由');
+      expect(normalizedText).not.toContain('当前没有手工群组');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('renders the source picker like the route page with brand, site, ability filters and a card grid', async () => {
     getBrandMock.mockImplementation((modelName: string) => {
       const model = String(modelName);

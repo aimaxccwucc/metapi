@@ -1255,6 +1255,40 @@ describe('TokenRouter selection scoring', () => {
     expect(typeof availability?.checkedAt).toBe('string');
   });
 
+  it('treats explicit 403 model denial as model unsupported and persists token-model isolation', async () => {
+    const route = await createRoute('gpt-5.2-model-denied');
+    const site = await createSite('model-denied');
+    const account = await createAccount(site.id, 'model-denied-user');
+    const token = await createToken(account.id, 'model-denied-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, {
+      status: 403,
+      errorText: 'you do not have access to the model gpt-5.2',
+      modelName: 'gpt-5.2-model-denied',
+    });
+
+    const availability = await db.select().from(schema.tokenModelAvailability)
+      .where(
+        and(
+          eq(schema.tokenModelAvailability.tokenId, token.id),
+          eq(schema.tokenModelAvailability.modelName, 'gpt-5.2-model-denied'),
+        ),
+      )
+      .get();
+
+    expect(availability?.available).toBe(false);
+    expect(typeof availability?.checkedAt).toBe('string');
+  });
+
   it('skips token channels that are persistently marked unavailable for the requested model', async () => {
     const route = await createRoute('gpt-4o-persisted-skip');
 

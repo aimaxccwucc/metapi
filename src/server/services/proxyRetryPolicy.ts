@@ -99,13 +99,13 @@ export function classifyProxyFailureCategory(status?: number | null, upstreamErr
   const text = (upstreamErrorText || '').trim();
 
   if (normalizedStatus === 0) return 'network';
+  if (isModelUnsupportedErrorMessage(text)) return 'model_unsupported';
   if (normalizedStatus === 401 || normalizedStatus === 403) return 'auth';
   if (matchesAnyPattern(AUTH_FAILURE_PATTERNS, text)) return 'auth';
   if (normalizedStatus === 429 || matchesAnyPattern(RATE_LIMIT_PATTERNS, text)) return 'rate_limit';
   if (normalizedStatus === 413 || /payload\s+too\s+large|context\s+length|maximum\s+context/i.test(text)) {
     return 'payload_too_large';
   }
-  if (isModelUnsupportedErrorMessage(text)) return 'model_unsupported';
   if (matchesAnyPattern(NON_RETRYABLE_REQUEST_PATTERNS, text)) return 'bad_request';
   if (
     normalizedStatus === 408

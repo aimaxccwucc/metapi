@@ -61,12 +61,14 @@ function FilterRow({ label, children }: { label: string; children: ReactNode }) 
 }
 
 function ActiveFilterSummary({
+  showOnlyManualRoutes,
   activeBrand,
   activeSite,
   activeGroupFilter,
   activeEndpointType,
-}: Pick<RouteFilterBarProps, 'activeBrand' | 'activeSite' | 'activeGroupFilter' | 'activeEndpointType'>) {
+}: Pick<RouteFilterBarProps, 'showOnlyManualRoutes' | 'activeBrand' | 'activeSite' | 'activeGroupFilter' | 'activeEndpointType'>) {
   const tags: string[] = [];
+  if (showOnlyManualRoutes) tags.push('视图=只看我创建的');
   if (activeBrand) tags.push(`品牌=${activeBrand === '__other__' ? '其他' : activeBrand}`);
   if (activeSite) tags.push(`站点=${activeSite}`);
   if (activeGroupFilter === '__all__') tags.push('群组=全部');
@@ -117,6 +119,7 @@ export default function RouteFilterBar(props: RouteFilterBarProps) {
         </svg>
         <span style={{ fontWeight: 500, fontSize: 13 }}>{tr('筛选')}:</span>
         <ActiveFilterSummary
+          showOnlyManualRoutes={showOnlyManualRoutes}
           activeBrand={activeBrand}
           activeSite={activeSite}
           activeGroupFilter={activeGroupFilter}

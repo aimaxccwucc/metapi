@@ -2343,52 +2343,6 @@ export class TokenRouter {
       break;
     }
 
-    if (!selected && degradedAcrossPriorityByRecentFailure) {
-      for (const priority of sortedPriorities) {
-        const rawLayer = availableByPriority.get(priority) ?? [];
-        if (rawLayer.length === 0) continue;
-        const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
-        const fullyBlockedByRuntimeBreaker =
-          breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length;
-        if (fullyBlockedByRuntimeBreaker) {
-          continue;
-        }
-        const fallbackCandidates = breakerFiltered.candidates;
-        const fallbackPartition = partitionRecentlyFailedCandidates(
-          fallbackCandidates,
-          nowMs,
-          Number.MAX_SAFE_INTEGER,
-        );
-        if (fallbackPartition.preferred.length === 0) {
-          continue;
-        }
-        const leasePartition = partitionChannelSelectionLeases(fallbackPartition.preferred, nowMs);
-        const fallbackPreferred = leasePartition.preferred.length > 0
-          ? leasePartition.preferred
-          : fallbackPartition.preferred;
-        const weighted = this.calculateWeightedSelection(
-          fallbackPreferred,
-          useChannelSourceModelForCost ? runtimeModelResolver : mappedModel,
-          downstreamPolicy,
-          nowMs,
-          routeStrategy === 'stable_first' ? 'stable_first' : 'weighted',
-        );
-        if (!weighted.selected) continue;
-        for (const detail of weighted.details) {
-          const target = candidateMap.get(detail.candidate.channel.id);
-          if (!target) continue;
-          if (target.eligible && !target.avoidedByRecentFailure) {
-            target.probability = Number((detail.probability * 100).toFixed(2));
-            target.reason = `${detail.reason}；高优先级均失败，退回较旧失败通道`;
-          }
-        }
-        selected = weighted.selected;
-        selectedPriority = priority;
-        summary.push(`优先级 P${priority}：高优先级均失败，退回较旧失败通道`);
-        break;
-      }
-    }
-
     if (!selected) {
       summary.push('本次未选出通道');
       return {
@@ -2721,7 +2675,6 @@ export class TokenRouter {
     }
 
     const sortedPriorities = Array.from(layers.keys()).sort((a, b) => a - b);
-    let degradedAcrossPriorityByRecentFailure = false;
     for (const priority of sortedPriorities) {
       const rawLayer = layers.get(priority) ?? [];
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
@@ -2735,7 +2688,6 @@ export class TokenRouter {
         ? recentFailurePartition.preferred
         : breakerFiltered.candidates;
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        degradedAcrossPriorityByRecentFailure = true;
         continue;
       }
       const leasePartition = partitionChannelSelectionLeases(candidates, nowMs);
@@ -2799,88 +2751,6 @@ export class TokenRouter {
         tokenName: selected.token?.name || 'default',
         actualModel,
       };
-    }
-
-    if (degradedAcrossPriorityByRecentFailure) {
-      for (const priority of sortedPriorities) {
-        const rawLayer = layers.get(priority) ?? [];
-        const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
-        const fullyBlockedByRuntimeBreaker =
-          breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length;
-        if (fullyBlockedByRuntimeBreaker) {
-          continue;
-        }
-        const fallbackCandidates = breakerFiltered.candidates;
-        const fallbackPartition = partitionRecentlyFailedCandidates(
-          fallbackCandidates,
-          nowMs,
-          Number.MAX_SAFE_INTEGER,
-        );
-        if (fallbackPartition.preferred.length === 0) {
-          continue;
-        }
-        const leasePartition = partitionChannelSelectionLeases(fallbackPartition.preferred, nowMs);
-        const fallbackPreferred = leasePartition.preferred.length > 0
-          ? leasePartition.preferred
-          : fallbackPartition.preferred;
-        const selected = routeStrategy === 'stable_first'
-          ? this.selectWithModelCircuitGuard(
-            fallbackPreferred,
-            (items) => this.stableFirstSelect(
-              items,
-              requestedByDisplayName ? runtimeModelResolver : mappedModel,
-              downstreamPolicy,
-              nowMs,
-            ),
-            (candidate) => (
-              requestedByDisplayName && typeof runtimeModelResolver === 'function'
-                ? runtimeModelResolver(candidate)
-                : mappedModel
-            ),
-            nowMs,
-            recordSelection,
-          )
-          : this.selectWithModelCircuitGuard(
-            fallbackPreferred,
-            (items) => this.weightedRandomSelect(
-              items,
-              requestedByDisplayName ? runtimeModelResolver : mappedModel,
-              downstreamPolicy,
-              nowMs,
-            ),
-            (candidate) => (
-              requestedByDisplayName && typeof runtimeModelResolver === 'function'
-                ? runtimeModelResolver(candidate)
-                : mappedModel
-            ),
-            nowMs,
-            recordSelection,
-          );
-        if (!selected) continue;
-
-        const tokenValue = this.resolveChannelTokenValue(selected);
-        if (!tokenValue) continue;
-        if (routeStrategy === 'stable_first' && recordSelection) {
-          await this.recordChannelSelection(selected.channel.id);
-        }
-        if (recordSelection) {
-          reserveChannelSelectionLease(selected.channel.id, nowMs);
-        }
-
-        const actualModel = resolveActualModelForSelectedChannel(
-          requestedModel,
-          match.route,
-          mappedModel,
-          selected.channel.sourceModel,
-        );
-
-        return {
-          ...selected,
-          tokenValue,
-          tokenName: selected.token?.name || 'default',
-          actualModel,
-        };
-      }
     }
 
     return null;

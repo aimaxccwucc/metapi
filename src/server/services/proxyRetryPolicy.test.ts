@@ -53,4 +53,10 @@ describe('proxyRetryPolicy', () => {
     expect(classifyProxyFailureCategory(400, 'quota exceeded')).toBe('rate_limit');
     expect(classifyProxyFailureCategory(400, 'too many requests')).toBe('rate_limit');
   });
+
+  it('classifies explicit 403 model denial as model_unsupported before generic auth', () => {
+    expect(
+      classifyProxyFailureCategory(403, '{"error":{"message":"you do not have access to the model gpt-5.2"}}'),
+    ).toBe('model_unsupported');
+  });
 });

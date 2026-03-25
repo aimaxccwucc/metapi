@@ -244,7 +244,7 @@ export default function TokenRoutes() {
   const [filterCollapsed, setFilterCollapsed] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
   const [showZeroChannelRoutes, setShowZeroChannelRoutes] = useState(false);
-  const [showOnlyManualRoutes, setShowOnlyManualRoutes] = useState(true);
+  const [showOnlyManualRoutes, setShowOnlyManualRoutes] = useState(false);
   const [sortBy, setSortBy] = useState<RouteSortBy>('channelCount');
   const [sortDir, setSortDir] = useState<RouteSortDir>('desc');
 
@@ -1651,11 +1651,17 @@ export default function TokenRoutes() {
                 d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
               />
             </svg>
-            <div className="empty-state-title">{routeSummaries.length === 0 ? '暂无路由' : '没有匹配的路由'}</div>
+            <div className="empty-state-title">
+              {routeSummaries.length === 0
+                ? '暂无路由'
+                : (showOnlyManualRoutes ? '当前没有手工群组' : '没有匹配的路由')}
+            </div>
             <div className="empty-state-desc">
               {routeSummaries.length === 0
                 ? '点击"自动重建"可按当前模型可用性生成路由。'
-                : '请调整品牌筛选、搜索词或排序条件。'}
+                : (showOnlyManualRoutes
+                  ? '当前视图仅显示你手工创建的群组路由；切换到“显示全部路由”可查看系统自动生成的精确路由。'
+                  : '请调整品牌筛选、搜索词或排序条件。')}
             </div>
           </div>
         </div>
