@@ -2121,6 +2121,83 @@ describe('chat proxy stream behavior', () => {
     expect(fourthUrl).toContain('/v1/responses');
   });
 
+  it('does not stick generic /v1/responses traffic to /v1/messages after a redirect-driven 405 failure', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'Method Not Allowed. Please use /v1/messages.', type: 'invalid_request_error' },
+      }), {
+        status: 405,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'messages is required', type: 'upstream_error' },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'Method Not Allowed', type: 'invalid_request_error' },
+      }), {
+        status: 405,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_recovered_after_405',
+        object: 'response',
+        model: 'upstream-gpt',
+        status: 'completed',
+        output_text: 'ok after redirect failure',
+        usage: { input_tokens: 6, output_tokens: 2, total_tokens: 8 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'gpt-5.4',
+        input: 'hello',
+      },
+    });
+
+    expect(firstResponse.statusCode).toBe(405);
+    expect(firstResponse.json()?.error?.message).toContain('[upstream:/v1/messages]');
+    expect(firstResponse.json()?.error?.message).toContain('Method Not Allowed');
+
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'gpt-5.4',
+        input: 'hello again',
+      },
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(secondResponse.json().output_text).toContain('ok after redirect failure');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
+    const [thirdUrl] = fetchMock.mock.calls[2] as [string, any];
+    const [fourthUrl] = fetchMock.mock.calls[3] as [string, any];
+    expect(firstUrl).toContain('/v1/responses');
+    expect(secondUrl).toContain('/v1/chat/completions');
+    expect(thirdUrl).toContain('/v1/messages');
+    expect(fourthUrl).toContain('/v1/responses');
+  });
+
   it('prefers native /v1/responses for claude-family /v1/responses requests that explicitly ask for encrypted reasoning', async () => {
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },

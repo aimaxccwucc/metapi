@@ -865,6 +865,24 @@ function shouldRememberSuccessfulEndpoint(input: {
   return input.endpoint === 'responses';
 }
 
+function shouldPersistFailureRuntimeMemory(input: {
+  endpoint: UpstreamEndpoint;
+  suggestedEndpoint: UpstreamEndpoint | null;
+  downstreamFormat: EndpointPreference;
+  capabilityProfile: EndpointCapabilityProfile;
+}): boolean {
+  if (
+    input.downstreamFormat === 'responses'
+    && !input.capabilityProfile.preferMessagesForClaudeModel
+    && input.suggestedEndpoint === 'messages'
+    && input.endpoint !== 'messages'
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 export function resetUpstreamEndpointRuntimeState(): void {
   endpointRuntimeStates.clear();
 }
@@ -923,6 +941,16 @@ export function recordUpstreamEndpointFailure(input: {
   if (!shouldUseEndpointRuntimeMemory(capabilityProfile)) return;
   if (!shouldBlockEndpointByError(input.status, input.errorText)) return;
 
+  const suggestedEndpoint = inferSuggestedEndpointFromError(input.errorText);
+  if (!shouldPersistFailureRuntimeMemory({
+    endpoint: input.endpoint,
+    suggestedEndpoint,
+    downstreamFormat: input.downstreamFormat,
+    capabilityProfile,
+  })) {
+    return;
+  }
+
   const nowMs = Date.now();
   const key = buildEndpointRuntimeStateKey({
     siteId: input.siteId,
@@ -932,7 +960,6 @@ export function recordUpstreamEndpointFailure(input: {
   const state = getOrCreateEndpointRuntimeState(key, nowMs);
   state.blockedUntilMsByEndpoint[input.endpoint] = nowMs + ENDPOINT_RUNTIME_BLOCK_TTL_MS;
 
-  const suggestedEndpoint = inferSuggestedEndpointFromError(input.errorText);
   if (suggestedEndpoint && suggestedEndpoint !== input.endpoint) {
     state.preferredEndpoint = suggestedEndpoint;
     state.preferredUpdatedAtMs = nowMs;

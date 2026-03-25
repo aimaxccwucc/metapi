@@ -373,6 +373,50 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(order).toEqual(['responses', 'chat', 'messages']);
   });
 
+  it('does not persist generic /v1/responses runtime memory from redirect-to-messages failures', async () => {
+    recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      endpoint: 'responses',
+      downstreamFormat: 'responses',
+      modelName: 'gpt-5.3',
+      status: 405,
+      errorText: 'Method Not Allowed. Please use /v1/messages.',
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'responses',
+    );
+
+    expect(order).toEqual(['responses', 'chat', 'messages']);
+  });
+
+  it('keeps failed /v1/messages blocked for later generic /v1/responses requests', async () => {
+    recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      endpoint: 'messages',
+      downstreamFormat: 'responses',
+      modelName: 'gpt-5.3',
+      status: 405,
+      errorText: 'Method Not Allowed',
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'responses',
+    );
+
+    expect(order).toEqual(['responses', 'chat']);
+  });
+
   it('learns a better endpoint from explicit upstream protocol errors', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
