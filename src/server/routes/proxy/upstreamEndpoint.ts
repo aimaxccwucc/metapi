@@ -704,6 +704,58 @@ function normalizeEndpointTypes(value: unknown): UpstreamEndpoint[] {
   return Array.from(normalized);
 }
 
+function hasConcreteEndpointHint(rawValues: string[]): boolean {
+  return rawValues.some((raw) => (
+    raw.includes('/v1/messages')
+    || raw.includes('/v1/chat/completions')
+    || raw.includes('/v1/responses')
+    || raw === 'messages'
+    || raw === 'chat'
+    || raw === 'chat_completions'
+    || raw === 'completions'
+    || raw === 'responses'
+  ));
+}
+
+function hasMessagesFamilyHint(rawValues: string[]): boolean {
+  return rawValues.some((raw) => (
+    raw.includes('/v1/messages')
+    || raw === 'messages'
+    || raw.includes('anthropic')
+    || raw.includes('claude')
+  ));
+}
+
+function extendResponsesCandidatesWithMessages(
+  candidates: UpstreamEndpoint[],
+  input: {
+    sitePlatform: string;
+    supported: Set<UpstreamEndpoint>;
+    hasMessagesFamilyHint: boolean;
+  },
+): UpstreamEndpoint[] {
+  if (candidates.includes('messages')) return candidates;
+
+  const shouldAllowMessages = (
+    input.sitePlatform === 'claude'
+    || input.sitePlatform === 'anyrouter'
+    || input.hasMessagesFamilyHint
+    || input.supported.has('messages')
+  );
+  if (!shouldAllowMessages) return candidates;
+
+  const onlyMessagesSupported = (
+    input.supported.has('messages')
+    && !input.supported.has('chat')
+    && !input.supported.has('responses')
+  );
+  if (onlyMessagesSupported) {
+    return ['messages', ...candidates];
+  }
+
+  return [...candidates, 'messages'];
+}
+
 function buildEndpointCapabilityProfile(input?: {
   modelName?: string;
   requestedModelHint?: string;
@@ -997,9 +1049,12 @@ function preferredEndpointOrder(
       // Keep chat/responses as fallbacks when messages is unavailable.
       return ['messages', 'chat', 'responses'];
     }
+    if (preferMessagesForClaudeModel && downstreamFormat === 'responses') {
+      return ['responses', 'chat', 'messages'];
+    }
     return downstreamFormat === 'responses'
-      ? ['responses', 'chat', 'messages']
-      : ['chat', 'responses', 'messages'];
+      ? ['responses', 'chat']
+      : ['chat', 'responses'];
   }
 
   if (platform === 'claude') {
@@ -1014,7 +1069,7 @@ function preferredEndpointOrder(
       // messages-first even when downstream API is /v1/responses.
       return ['messages', 'chat', 'responses'];
     }
-    return ['responses', 'chat', 'messages'];
+    return ['responses', 'chat'];
   }
 
   if (downstreamFormat === 'claude') {
@@ -1154,17 +1209,9 @@ export async function resolveUpstreamEndpointCandidates(
     const normalizedSupportedRaw = supportedRaw
       .map((item) => asTrimmedString(item).toLowerCase())
       .filter((item) => item.length > 0);
-    const hasConcreteEndpointHint = normalizedSupportedRaw.some((raw) => (
-      raw.includes('/v1/messages')
-      || raw.includes('/v1/chat/completions')
-      || raw.includes('/v1/responses')
-      || raw === 'messages'
-      || raw === 'chat'
-      || raw === 'chat_completions'
-      || raw === 'completions'
-      || raw === 'responses'
-    ));
-    if (forceMessagesFirstForClaudeModel && !hasConcreteEndpointHint) {
+    const hasConcreteCatalogHint = hasConcreteEndpointHint(normalizedSupportedRaw);
+    const hasMessagesCatalogHint = hasMessagesFamilyHint(normalizedSupportedRaw);
+    if (forceMessagesFirstForClaudeModel && !hasConcreteCatalogHint) {
       // Generic labels like openai/anthropic are too coarse for Claude models;
       // keep messages-first order in this case.
       return applyRuntimePreference(prioritizedPreferredEndpoints);
@@ -1180,14 +1227,35 @@ export async function resolveUpstreamEndpointCandidates(
 
     if (supported.size === 0) return applyRuntimePreference(prioritizedPreferredEndpoints);
 
-    const firstSupported = prioritizedPreferredEndpoints.find((endpoint) => supported.has(endpoint));
-    if (!firstSupported) return applyRuntimePreference(prioritizedPreferredEndpoints);
+    const candidatePool = downstreamFormat === 'responses'
+      ? extendResponsesCandidatesWithMessages(prioritizedPreferredEndpoints, {
+        sitePlatform,
+        supported,
+        hasMessagesFamilyHint: hasMessagesCatalogHint,
+      })
+      : prioritizedPreferredEndpoints;
 
-    // Catalog metadata can be incomplete/inaccurate, so only use it to pick
-    // the first attempt. Keep downstream-driven fallback order unchanged.
+    if (hasConcreteCatalogHint) {
+      const concreteCandidatePool: UpstreamEndpoint[] = [
+        ...candidatePool,
+        ...(['responses', 'chat', 'messages'] as UpstreamEndpoint[]).filter(
+          (endpoint) => !candidatePool.includes(endpoint),
+        ),
+      ];
+      const concreteSupportedOrder = concreteCandidatePool.filter((endpoint) => supported.has(endpoint));
+      if (concreteSupportedOrder.length > 0) {
+        return applyRuntimePreference(concreteSupportedOrder);
+      }
+    }
+
+    const firstSupported = candidatePool.find((endpoint) => supported.has(endpoint));
+    if (!firstSupported) return applyRuntimePreference(candidatePool);
+
+    // Catalog metadata can be incomplete/inaccurate, so only use coarse labels
+    // to pick the first attempt. Keep downstream-driven fallback order unchanged.
     return applyRuntimePreference([
       firstSupported,
-      ...prioritizedPreferredEndpoints.filter((endpoint) => endpoint !== firstSupported),
+      ...candidatePool.filter((endpoint) => endpoint !== firstSupported),
     ]);
   } catch {
     return applyRuntimePreference(prioritizedPreferredEndpoints);

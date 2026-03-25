@@ -79,7 +79,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'gpt-5.3',
       'responses',
     );
-    expect(responsesOrder).toEqual(['responses', 'chat', 'messages']);
+    expect(responsesOrder).toEqual(['responses', 'chat']);
 
     const claudeResponsesOrder = await resolveUpstreamEndpointCandidates(
       {
@@ -136,7 +136,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'gpt-5.3',
       'openai',
     );
-    expect(openaiOrder).toEqual(['chat', 'responses', 'messages']);
+    expect(openaiOrder).toEqual(['chat', 'responses']);
 
     const openaiResponsesOrder = await resolveUpstreamEndpointCandidates(
       {
@@ -146,7 +146,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'gpt-5.3',
       'responses',
     );
-    expect(openaiResponsesOrder).toEqual(['responses', 'chat', 'messages']);
+    expect(openaiResponsesOrder).toEqual(['responses', 'chat']);
 
     const openaiClaudeOrder = await resolveUpstreamEndpointCandidates(
       {
@@ -348,7 +348,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'responses',
     );
 
-    expect(order).toEqual(['responses', 'chat', 'messages']);
+    expect(order).toEqual(['responses', 'chat']);
   });
 
   it('does not block generic /v1/responses endpoints on transient upstream errors', async () => {
@@ -370,7 +370,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'responses',
     );
 
-    expect(order).toEqual(['responses', 'chat', 'messages']);
+    expect(order).toEqual(['responses', 'chat']);
   });
 
   it('does not persist generic /v1/responses runtime memory from redirect-to-messages failures', async () => {
@@ -392,7 +392,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'responses',
     );
 
-    expect(order).toEqual(['responses', 'chat', 'messages']);
+    expect(order).toEqual(['responses', 'chat']);
   });
 
   it('keeps failed /v1/messages blocked for later generic /v1/responses requests', async () => {
