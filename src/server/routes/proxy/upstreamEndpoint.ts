@@ -912,9 +912,11 @@ function shouldBlockEndpointByError(status: number, errorText?: string | null): 
 function shouldRememberSuccessfulEndpoint(input: {
   endpoint: UpstreamEndpoint;
   downstreamFormat: EndpointPreference;
+  capabilityProfile: EndpointCapabilityProfile;
 }): boolean {
   if (input.downstreamFormat !== 'responses') return true;
-  return input.endpoint === 'responses';
+  if (input.endpoint === 'responses') return true;
+  return input.capabilityProfile.preferMessagesForClaudeModel;
 }
 
 function shouldPersistFailureRuntimeMemory(input: {
@@ -957,7 +959,10 @@ export function recordUpstreamEndpointSuccess(input: {
     requestCapabilities: input.requestCapabilities,
   });
   if (!shouldUseEndpointRuntimeMemory(capabilityProfile)) return;
-  if (!shouldRememberSuccessfulEndpoint(input)) return;
+  if (!shouldRememberSuccessfulEndpoint({
+    ...input,
+    capabilityProfile,
+  })) return;
 
   const nowMs = Date.now();
   const key = buildEndpointRuntimeStateKey({
@@ -1226,6 +1231,16 @@ export async function resolveUpstreamEndpointCandidates(
     }
 
     if (supported.size === 0) return applyRuntimePreference(prioritizedPreferredEndpoints);
+
+    if (
+      downstreamFormat === 'responses'
+      && !prioritizedPreferredEndpoints.includes('messages')
+      && supported.has('messages')
+      && !supported.has('chat')
+      && !supported.has('responses')
+    ) {
+      return applyRuntimePreference(['messages']);
+    }
 
     const candidatePool = downstreamFormat === 'responses'
       ? extendResponsesCandidatesWithMessages(prioritizedPreferredEndpoints, {
