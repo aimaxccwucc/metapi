@@ -40,6 +40,20 @@ async function extractResponseErrorMessage(res: Response): Promise<string> {
   return message;
 }
 
+async function isAdminSessionStillActive(): Promise<boolean> {
+  try {
+    const response = await fetch('/api/auth/session', {
+      method: 'GET',
+      credentials: 'same-origin',
+    });
+    if (!response.ok) return false;
+    const payload = await response.json().catch(() => null) as { active?: unknown } | null;
+    return payload?.active === true;
+  } catch {
+    return false;
+  }
+}
+
 function parseContentDispositionFilename(headerValue: string | null): string | null {
   if (!headerValue) return null;
   const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(headerValue);
@@ -107,12 +121,17 @@ async function fetchAuthenticatedResponse(url: string, options: RequestOptions =
       },
     });
     if (res.status === 401 || res.status === 403) {
-      const hadToken = !!getAuthToken(localStorage);
-      clearAuthSession(localStorage);
-      if (hadToken && typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
-        window.location.reload();
+      const message = await extractResponseErrorMessage(res.clone());
+      const sessionActive = await isAdminSessionStillActive();
+      if (!sessionActive) {
+        const hadToken = !!getAuthToken(localStorage);
+        clearAuthSession(localStorage);
+        if (hadToken && typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+          window.location.reload();
+        }
+        throw new Error('Session expired');
       }
-      throw new Error('Session expired');
+      throw new Error(message);
     }
     return res;
   } catch (error: any) {

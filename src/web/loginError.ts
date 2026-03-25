@@ -7,7 +7,13 @@ export function resolveLoginErrorMessage(status: number, reason: string): string
   if (status === 403 && normalizedReason.includes('ip not allowed')) {
     return '当前 IP 不在管理白名单中';
   }
-  if (status === 401 || (status === 403 && normalizedReason.includes('invalid token'))) {
+  if (
+    status === 401
+    || (status === 403 && (
+      normalizedReason.includes('invalid token')
+      || normalizedReason.includes('管理员令牌无效')
+    ))
+  ) {
     return '登录令牌无效';
   }
   if (status >= 500) {

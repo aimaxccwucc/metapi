@@ -59,9 +59,13 @@ function parseCookies(rawCookieHeader: string | undefined): Record<string, strin
     const index = entry.indexOf('=');
     if (index <= 0) continue;
     const key = entry.slice(0, index).trim();
-    const value = entry.slice(index + 1).trim();
+    const rawValue = entry.slice(index + 1).trim();
     if (!key) continue;
-    cookies[key] = value;
+    try {
+      cookies[key] = decodeURIComponent(rawValue);
+    } catch {
+      cookies[key] = rawValue;
+    }
   }
   return cookies;
 }
