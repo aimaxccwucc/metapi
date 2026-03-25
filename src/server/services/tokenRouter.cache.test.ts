@@ -394,4 +394,55 @@ describe('TokenRouter runtime cache', () => {
     expect(current?.cooldownLevel).toBe(0);
     expect(current?.cooldownUntil).toBeNull();
   });
+
+  it('skips recently failed round-robin channels before recycling them', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'round-robin-recent-failure-site',
+      url: 'https://round-robin-recent-failure-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'round-robin-recent-failure-user',
+      accessToken: 'round-robin-recent-failure-access-token',
+      apiToken: 'round-robin-recent-failure-api-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'round-robin-recent-failure-token',
+      token: 'sk-round-robin-recent-failure-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-round-robin-recent-failure',
+      routingStrategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+
+    const channels = await db.insert(schema.routeChannels).values([
+      { routeId: route.id, accountId: account.id, tokenId: token.id, priority: 0, weight: 10, enabled: true },
+      { routeId: route.id, accountId: account.id, tokenId: token.id, priority: 5, weight: 10, enabled: true },
+    ]).returning().all();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channels[0].id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-4o-round-robin-recent-failure',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+    }).where(eq(schema.routeChannels.id, channels[0].id)).run();
+    invalidateTokenRouterCache();
+
+    const selected = await router.previewSelectedChannel('gpt-4o-round-robin-recent-failure');
+
+    expect(selected?.channel.id).toBe(channels[1].id);
+  });
 });

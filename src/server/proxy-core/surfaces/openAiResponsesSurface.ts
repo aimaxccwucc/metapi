@@ -410,7 +410,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           const status = endpointResult.status || 502;
           const errText = endpointResult.errText || 'unknown error';
           const rawErrText = endpointResult.rawErrText || errText;
-          tokenRouter.recordFailure(selected.channel.id, {
+          await tokenRouter.recordFailure(selected.channel.id, {
             status,
             errorText: rawErrText,
             modelName,
@@ -506,7 +506,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         }
 
         try {
-          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+          await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
           recordDownstreamCostUsage(request, estimatedCost);
           logProxy(
             selected, requestedModel, 'success', 200, latency, null, retryCount, downstreamPath,
@@ -569,7 +569,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               );
               const latency = Date.now() - startTime;
               if (streamResult.status === 'failed') {
-                tokenRouter.recordFailure(selected.channel.id, {
+                await tokenRouter.recordFailure(selected.channel.id, {
                   status: 502,
                   errorText: streamResult.errorMessage,
                   modelName,
@@ -612,7 +612,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             const latency = Date.now() - startTime;
             const failure = detectProxyFailure({ rawText, usage: parsedUsage });
             if (failure) {
-              tokenRouter.recordFailure(selected.channel.id, {
+              await tokenRouter.recordFailure(selected.channel.id, {
                 status: failure.status,
                 errorText: failure.reason,
                 modelName,
@@ -651,7 +651,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             startSseResponse();
             const streamResult = streamSession.consumeUpstreamFinalPayload(upstreamData, rawText, reply.raw);
             if (streamResult.status === 'failed') {
-              tokenRouter.recordFailure(selected.channel.id, {
+              await tokenRouter.recordFailure(selected.channel.id, {
                 status: 502,
                 errorText: streamResult.errorMessage,
                 modelName,
@@ -711,7 +711,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 
           const latency = Date.now() - startTime;
           if (streamResult.status === 'failed') {
-            tokenRouter.recordFailure(selected.channel.id, {
+            await tokenRouter.recordFailure(selected.channel.id, {
               status: 502,
               errorText: streamResult.errorMessage,
               modelName,
@@ -779,7 +779,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         const parsedUsage = parseProxyUsage(upstreamData);
         const failure = detectProxyFailure({ rawText, usage: parsedUsage });
         if (failure) {
-          tokenRouter.recordFailure(selected.channel.id, {
+          await tokenRouter.recordFailure(selected.channel.id, {
             status: failure.status,
             errorText: failure.reason,
             modelName,
@@ -847,7 +847,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           resolvedUsage,
         });
 
-        tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+        await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected, requestedModel, 'success', 200, latency, null, retryCount, downstreamPath,
@@ -858,7 +858,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         );
         return reply.send(downstreamData);
       } catch (err: any) {
-        tokenRouter.recordFailure(selected.channel.id, {
+        await tokenRouter.recordFailure(selected.channel.id, {
           errorText: err?.message,
           modelName,
         });

@@ -249,4 +249,66 @@ describe('/v1/search route', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1]?.[0]).toBe('https://good.example.com/v1/search');
   });
+
+  it('waits for failure tracking before selecting the failover channel', async () => {
+    let resolveFailure: (() => void) | null = null;
+    let failureRecorded = false;
+    let markFailureStarted: (() => void) | null = null;
+    const failureStarted = new Promise<void>((resolve) => {
+      markFailureStarted = resolve;
+    });
+
+    selectChannelMock.mockReturnValueOnce({
+      channel: { id: 11, routeId: 22 },
+      site: { id: 44, name: 'bad-site', url: 'https://bad.example.com', platform: 'openai' },
+      account: { id: 33, username: 'bad-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-bad',
+      actualModel: '__search',
+    });
+    selectNextChannelMock.mockImplementationOnce(() => {
+      expect(failureRecorded).toBe(true);
+      return {
+        channel: { id: 12, routeId: 22 },
+        site: { id: 45, name: 'good-site', url: 'https://good.example.com', platform: 'openai' },
+        account: { id: 34, username: 'good-user' },
+        tokenName: 'default',
+        tokenValue: 'sk-good',
+        actualModel: '__search',
+      };
+    });
+    recordFailureMock.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      markFailureStarted?.();
+      resolveFailure = () => {
+        failureRecorded = true;
+        resolve();
+      };
+    }));
+    fetchMock
+      .mockResolvedValueOnce(new Response('invalid api key', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ object: 'search.result', data: [{ title: 'ok' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const responsePromise = app.inject({
+      method: 'POST',
+      url: '/v1/search',
+      headers: {
+        authorization: 'Bearer sk-demo',
+      },
+      payload: {
+        query: 'axonhub',
+      },
+    });
+
+    await failureStarted;
+    expect(selectNextChannelMock).not.toHaveBeenCalled();
+
+    resolveFailure?.();
+    const response = await responsePromise;
+
+    expect(response.statusCode).toBe(200);
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+  });
 });

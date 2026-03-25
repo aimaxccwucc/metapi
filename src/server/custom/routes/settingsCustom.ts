@@ -5,6 +5,7 @@ import { performFactoryReset } from '../../services/factoryResetService.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { sendNotification } from '../../services/notifyService.js';
+import { clearRoutingRuntimeState } from '../../services/tokenRouter.js';
 
 async function appendSettingsEvent(input: {
   type: 'checkin' | 'balance' | 'proxy' | 'status' | 'token';
@@ -93,6 +94,23 @@ export async function registerSettingsCustomRoutes(app: FastifyInstance) {
       success: true,
       message: '占用统计已清理',
       deletedProxyLogs,
+    };
+  });
+
+  app.post('/api/settings/maintenance/reset-routing-runtime', async () => {
+    const result = await clearRoutingRuntimeState();
+
+    await appendSettingsEvent({
+      type: 'status',
+      title: '路由运行时状态已清理',
+      message: `已清理 ${result.updatedChannels} 个通道的临时故障状态，模型熔断 ${result.clearedModelCircuits} 条，站点运行时状态${result.clearedPersistedSiteRuntimeState ? '已清空' : '无缓存'}`,
+      level: 'warning',
+    });
+
+    return {
+      success: true,
+      message: '路由运行时状态已清理',
+      ...result,
     };
   });
 

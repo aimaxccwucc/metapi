@@ -311,7 +311,7 @@ export async function handleChatSurfaceRequest(
         const status = endpointResult.status || 502;
         const errText = endpointResult.errText || 'unknown error';
         const rawErrText = endpointResult.rawErrText || errText;
-        tokenRouter.recordFailure(selected.channel.id, {
+        await tokenRouter.recordFailure(selected.channel.id, {
           status,
           errorText: rawErrText,
           modelName,
@@ -418,7 +418,7 @@ export async function handleChatSurfaceRequest(
             );
             const latency = Date.now() - startTime;
             if (streamResult.status === 'failed') {
-              tokenRouter.recordFailure(selected.channel.id, {
+              await tokenRouter.recordFailure(selected.channel.id, {
                 status: 502,
                 errorText: streamResult.errorMessage,
                 modelName,
@@ -458,7 +458,7 @@ export async function handleChatSurfaceRequest(
           const latency = Date.now() - startTime;
           const failure = detectProxyFailure({ rawText, usage: parsedUsage });
           if (failure) {
-            tokenRouter.recordFailure(selected.channel.id, {
+            await tokenRouter.recordFailure(selected.channel.id, {
               status: failure.status,
               errorText: failure.reason,
               modelName,
@@ -500,7 +500,7 @@ export async function handleChatSurfaceRequest(
           startSseResponse();
           const streamResult = streamSession.consumeUpstreamFinalPayload(fallbackData, fallbackText, reply.raw);
           if (streamResult.status === 'failed') {
-            tokenRouter.recordFailure(selected.channel.id, {
+            await tokenRouter.recordFailure(selected.channel.id, {
               status: 502,
               errorText: streamResult.errorMessage,
               modelName,
@@ -554,7 +554,7 @@ export async function handleChatSurfaceRequest(
 
           const latency = Date.now() - startTime;
           if (streamResult.status === 'failed') {
-            tokenRouter.recordFailure(selected.channel.id, {
+            await tokenRouter.recordFailure(selected.channel.id, {
               status: 502,
               errorText: streamResult.errorMessage,
               modelName,
@@ -611,7 +611,7 @@ export async function handleChatSurfaceRequest(
           resolvedUsage,
         });
 
-        tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+        await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected,
@@ -662,7 +662,7 @@ export async function handleChatSurfaceRequest(
       const parsedUsage = parseProxyUsage(upstreamData);
       const failure = detectProxyFailure({ rawText, usage: parsedUsage });
       if (failure) {
-        tokenRouter.recordFailure(selected.channel.id, {
+        await tokenRouter.recordFailure(selected.channel.id, {
           status: failure.status,
           errorText: failure.reason,
           modelName,
@@ -727,7 +727,7 @@ export async function handleChatSurfaceRequest(
         resolvedUsage,
       });
 
-      tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+      await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
       recordDownstreamCostUsage(request, estimatedCost);
       logProxy(
         selected,
@@ -750,7 +750,7 @@ export async function handleChatSurfaceRequest(
 
       return reply.send(downstreamResponse);
     } catch (err: any) {
-      tokenRouter.recordFailure(selected.channel.id, {
+      await tokenRouter.recordFailure(selected.channel.id, {
         errorText: err?.message,
         modelName,
       });
@@ -963,7 +963,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
       }
 
       if (!upstream.ok) {
-        tokenRouter.recordFailure(selected.channel.id, {
+        await tokenRouter.recordFailure(selected.channel.id, {
           status: upstream.status,
           errorText: typeof payload === 'string' ? payload : text,
           modelName,
@@ -1001,7 +1001,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
         return reply.code(upstream.status).type(contentType).send(payload);
       }
 
-      tokenRouter.recordSuccess(selected.channel.id, latency, 0, modelName);
+      await tokenRouter.recordSuccess(selected.channel.id, latency, 0, modelName);
       recordDownstreamCostUsage(request, 0);
       logProxy(
         selected,
@@ -1023,7 +1023,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
       );
       return reply.code(upstream.status).type(contentType).send(payload);
     } catch (error: any) {
-      tokenRouter.recordFailure(selected.channel.id, {
+      await tokenRouter.recordFailure(selected.channel.id, {
         errorText: error?.message,
         modelName,
       });

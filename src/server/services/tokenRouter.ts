@@ -22,6 +22,7 @@ import {
   getModelCircuitStatus,
   recordModelCircuitFailure,
   recordModelCircuitSuccess,
+  resetAllModelCircuits,
   type ModelCircuitStatusView,
 } from './modelCircuitBreaker.js';
 import { classifyProxyFailureCategory } from './proxyRetryPolicy.js';
@@ -51,6 +52,7 @@ interface SelectedChannel {
 type FailureAwareChannel = {
   failCount?: number | null;
   lastFailAt?: string | null;
+  consecutiveFailCount?: number | null;
 };
 
 type SiteRuntimeFailureContext = {
@@ -654,6 +656,35 @@ export async function flushSiteRuntimeHealthPersistence(): Promise<void> {
   }
 }
 
+export async function clearRoutingRuntimeState(): Promise<{
+  updatedChannels: number;
+  clearedModelCircuits: number;
+  clearedPersistedSiteRuntimeState: boolean;
+}> {
+  await ensureSiteRuntimeHealthStateLoaded();
+
+  const updatedChannels = (await db.update(schema.routeChannels).set({
+    lastFailAt: null,
+    consecutiveFailCount: 0,
+    cooldownLevel: 0,
+    cooldownUntil: null,
+  }).run()).changes;
+
+  const clearedPersistedSiteRuntimeState = (await db.delete(schema.settings)
+    .where(eq(schema.settings.key, SITE_RUNTIME_HEALTH_SETTING_KEY))
+    .run()).changes > 0;
+
+  resetSiteRuntimeHealthState();
+  const clearedModelCircuits = resetAllModelCircuits();
+  invalidateTokenRouterCache();
+
+  return {
+    updatedChannels,
+    clearedModelCircuits,
+    clearedPersistedSiteRuntimeState,
+  };
+}
+
 export function getSiteRuntimeHealthMultiplier(siteId: number, nowMs = Date.now()): number {
   const state = siteRuntimeHealthStates.get(siteId);
   return getRuntimeHealthMultiplier(state, nowMs);
@@ -889,13 +920,7 @@ function isSiteDisabled(status?: string | null): boolean {
 export function isChannelRecentlyFailed(
   channel: FailureAwareChannel,
   nowMs = Date.now(),
-  avoidSec = Math.max(
-    60,
-    Math.trunc(resolveWeightedFailureCooldownMs(
-      Math.max(1, Math.trunc((channel.failCount ?? 0) || 1)),
-      'server',
-    ) / 1000),
-  ),
+  avoidSec = resolveRecentFailureAvoidWindowSec(channel),
 ): boolean {
   if (avoidSec <= 0) return false;
   if ((channel.failCount ?? 0) <= 0) return false;
@@ -905,6 +930,16 @@ export function isChannelRecentlyFailed(
   if (Number.isNaN(failTs)) return false;
 
   return nowMs - failTs < avoidSec * 1000;
+}
+
+function resolveRecentFailureAvoidWindowSec(channel: FailureAwareChannel): number {
+  return Math.max(
+    60,
+    Math.trunc(resolveWeightedFailureCooldownMs(
+      Math.max(1, Math.trunc((channel.consecutiveFailCount ?? channel.failCount ?? 0) || 1)),
+      'server',
+    ) / 1000),
+  );
 }
 
 export function filterRecentlyFailedCandidates<T extends { channel: FailureAwareChannel }>(
@@ -932,11 +967,8 @@ function partitionRecentlyFailedCandidates<T extends { channel: FailureAwareChan
     return { preferred: [], avoided: [] };
   }
   const effectiveAvoidSec = avoidSec ?? Math.max(
+    ...candidates.map((candidate) => resolveRecentFailureAvoidWindowSec(candidate.channel)),
     60,
-    Math.trunc(resolveWeightedFailureCooldownMs(
-      Math.max(...candidates.map((candidate) => candidate.channel.failCount ?? 0), 1),
-      'server',
-    ) / 1000),
   );
   if (effectiveAvoidSec <= 0) {
     return { preferred: candidates, avoided: [] };
@@ -1772,6 +1804,8 @@ export class TokenRouter {
         return !!target?.eligible;
       }));
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawOrdered, runtimeModelResolver, nowMs);
+      const fullyBlockedByRuntimeBreaker =
+        breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawOrdered.length;
       if (breakerFiltered.avoided.length > 0) {
         for (const item of breakerFiltered.avoided) {
           const target = candidateMap.get(item.candidate.channel.id);
@@ -1789,7 +1823,47 @@ export class TokenRouter {
           : '站点熔断避让';
         summary.push(`${breakerSummaryLabel} ${breakerFiltered.avoided.length}`);
       }
-      const ordered = breakerFiltered.candidates;
+      if (fullyBlockedByRuntimeBreaker) {
+        summary.push('本次未选出通道');
+        return {
+          requestedModel,
+          actualModel: mappedModel,
+          matched: true,
+          routeId: match.route.id,
+          modelPattern: match.route.modelPattern,
+          summary,
+          candidates,
+        };
+      }
+
+      const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
+      if (recentFailurePartition.avoided.length > 0) {
+        for (const row of recentFailurePartition.avoided) {
+          const target = candidateMap.get(row.channel.id);
+          if (!target) continue;
+          target.avoidedByRecentFailure = true;
+          target.reason = `最近失败，轮询优先避让（${resolveRecentFailureAvoidWindowSec(row.channel)} 秒窗口）`;
+        }
+        summary.push(`轮询最近失败避让 ${recentFailurePartition.avoided.length}`);
+      }
+      if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
+        summary.push('本次未选出通道');
+        return {
+          requestedModel,
+          actualModel: mappedModel,
+          matched: true,
+          routeId: match.route.id,
+          modelPattern: match.route.modelPattern,
+          summary,
+          candidates,
+        };
+      }
+
+      const ordered = this.getRoundRobinCandidates(
+        recentFailurePartition.preferred.length > 0
+          ? recentFailurePartition.preferred
+          : breakerFiltered.candidates,
+      );
       let selected: RouteChannelCandidate | null = null;
 
       for (let index = 0; index < ordered.length; index += 1) {
@@ -2243,8 +2317,17 @@ export class TokenRouter {
 
     if (routeStrategy === 'round_robin') {
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(available, runtimeModelResolver, nowMs);
+      const fullyBlockedByRuntimeBreaker =
+        breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === available.length;
+      if (fullyBlockedByRuntimeBreaker) return null;
+      const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
+      if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
+        return null;
+      }
       const selected = this.selectWithModelCircuitGuard(
-        breakerFiltered.candidates,
+        recentFailurePartition.preferred.length > 0
+          ? recentFailurePartition.preferred
+          : breakerFiltered.candidates,
         (items) => this.selectRoundRobinCandidate(items),
         (candidate) => (
           typeof runtimeModelResolver === 'function'

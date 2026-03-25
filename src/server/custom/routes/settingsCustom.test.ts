@@ -175,6 +175,98 @@ describe('settings custom routes', () => {
     expect(events.some((event) => event.title === '占用统计与使用日志已清理')).toBe(true);
   });
 
+  it('clears routing runtime state without deleting historical counters', async () => {
+    const tokenRouterModule = await import('../../services/tokenRouter.js');
+    const modelCircuitModule = await import('../../services/modelCircuitBreaker.js');
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Runtime Site',
+      url: 'https://runtime.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'runtime-access',
+      apiToken: 'runtime-api',
+      status: 'active',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4.1',
+      enabled: true,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      enabled: true,
+      successCount: 7,
+      failCount: 2,
+      totalLatencyMs: 1800,
+      totalCost: 3.5,
+      lastFailAt: '2026-03-15T00:00:00.000Z',
+      consecutiveFailCount: 2,
+      cooldownLevel: 2,
+      cooldownUntil: '2026-03-16T00:00:00.000Z',
+    }).returning().get();
+
+    const router = new tokenRouterModule.TokenRouter();
+    await router.recordFailure(channel.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-4.1',
+    });
+    await router.recordFailure(channel.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-4.1',
+    });
+    await router.recordFailure(channel.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-4.1',
+    });
+
+    expect(tokenRouterModule.getSiteRuntimeHealthMultiplier(site.id)).toBeLessThan(1);
+    expect(modelCircuitModule.getModelCircuitStatus(channel.id, 'gpt-4.1').isOpen).toBe(true);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/settings/maintenance/reset-routing-runtime',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      success: boolean;
+      message: string;
+      updatedChannels: number;
+      clearedModelCircuits: number;
+      clearedPersistedSiteRuntimeState: boolean;
+    };
+    expect(body.success).toBe(true);
+    expect(body.message).toBe('路由运行时状态已清理');
+    expect(body.updatedChannels).toBe(1);
+    expect(body.clearedModelCircuits).toBeGreaterThanOrEqual(1);
+
+    const refreshedChannel = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).get();
+    expect(refreshedChannel).toMatchObject({
+      successCount: 7,
+      failCount: 5,
+      totalLatencyMs: 1800,
+      totalCost: 3.5,
+      lastFailAt: null,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+      cooldownUntil: null,
+    });
+    expect(tokenRouterModule.getSiteRuntimeHealthMultiplier(site.id)).toBe(1);
+    expect(modelCircuitModule.getModelCircuitStatus(channel.id, 'gpt-4.1').isOpen).toBe(false);
+
+    const events = await db.select().from(schema.events).all();
+    expect(events.some((event) => event.title === '路由运行时状态已清理')).toBe(true);
+  });
+
   it('sends test notification through custom settings route', async () => {
     sendNotificationMock.mockResolvedValue({
       throttled: false,

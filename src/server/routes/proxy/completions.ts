@@ -80,7 +80,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
 
         if (!upstream.ok) {
           const errText = await upstream.text().catch(() => 'unknown error');
-          tokenRouter.recordFailure(selected.channel.id, {
+          await tokenRouter.recordFailure(selected.channel.id, {
             status: upstream.status,
             errorText: errText,
             modelName: selected.actualModel,
@@ -199,7 +199,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             parsedUsage,
             resolvedUsage,
           });
-          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
+          await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
           recordDownstreamCostUsage(request, estimatedCost);
           logProxy(
             selected,
@@ -233,7 +233,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         const failure = detectProxyFailure({ rawText, usage: parsedUsage });
         if (failure) {
           const errText = failure.reason;
-          tokenRouter.recordFailure(selected.channel.id, {
+          await tokenRouter.recordFailure(selected.channel.id, {
             status: failure.status,
             errorText: errText,
             modelName: selected.actualModel,
@@ -294,7 +294,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           resolvedUsage,
         });
 
-        tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
+        await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected,
@@ -315,7 +315,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         );
         return reply.send(data);
       } catch (err: any) {
-        tokenRouter.recordFailure(selected.channel.id, {
+        await tokenRouter.recordFailure(selected.channel.id, {
           status: 0,
           errorText: err.message,
           modelName: selected.actualModel,

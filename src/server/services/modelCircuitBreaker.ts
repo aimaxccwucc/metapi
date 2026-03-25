@@ -186,6 +186,25 @@ export function resetModelCircuit(channelId: number, modelName: string): void {
   circuitEntries.delete(key);
 }
 
-export function resetAllModelCircuits(): void {
+export function resetModelCircuitsForChannels(channelIds: number[]): number {
+  const normalizedIds = new Set(
+    channelIds
+      .map((channelId) => Math.trunc(channelId))
+      .filter((channelId) => Number.isFinite(channelId) && channelId > 0),
+  );
+  if (normalizedIds.size === 0) return 0;
+
+  let cleared = 0;
+  for (const [key, entry] of circuitEntries.entries()) {
+    if (!normalizedIds.has(entry.channelId)) continue;
+    circuitEntries.delete(key);
+    cleared += 1;
+  }
+  return cleared;
+}
+
+export function resetAllModelCircuits(): number {
+  const cleared = circuitEntries.size;
   circuitEntries.clear();
+  return cleared;
 }

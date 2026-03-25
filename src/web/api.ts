@@ -831,6 +831,7 @@ export const api = {
     }),
   clearRuntimeCache: () => request('/api/settings/maintenance/clear-cache', { method: 'POST' }),
   clearUsageData: () => request('/api/settings/maintenance/clear-usage', { method: 'POST' }),
+  resetRoutingRuntimeState: () => request('/api/settings/maintenance/reset-routing-runtime', { method: 'POST' }),
   factoryReset: () => request('/api/settings/maintenance/factory-reset', { method: 'POST' }),
   testNotification: () => request('/api/settings/notify/test', { method: 'POST' }),
 

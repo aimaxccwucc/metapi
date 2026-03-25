@@ -271,6 +271,7 @@ export default function Settings() {
   const factoryResetPresence = useAnimatedVisibility(factoryResetOpen, 220);
   const [factoryResetting, setFactoryResetting] = useState(false);
   const [factoryResetSecondsLeft, setFactoryResetSecondsLeft] = useState(FACTORY_RESET_CONFIRM_SECONDS);
+  const [resettingRoutingRuntime, setResettingRoutingRuntime] = useState(false);
   const [selectorLoading, setSelectorLoading] = useState(false);
   const [selectorRoutes, setSelectorRoutes] = useState<RouteSelectorItem[]>([]);
   const [selectorModelSearch, setSelectorModelSearch] = useState('');
@@ -868,6 +869,19 @@ export default function Settings() {
       toast.error(err?.message || '清理占用失败');
     } finally {
       setClearingUsage(false);
+    }
+  };
+
+  const handleResetRoutingRuntime = async () => {
+    if (!window.confirm('确认清理路由运行时状态？这会清除通道冷却、连续失败计数、站点运行时惩罚和模型熔断，但不会删除历史统计。')) return;
+    setResettingRoutingRuntime(true);
+    try {
+      const res = await api.resetRoutingRuntimeState();
+      toast.success(`路由运行时状态已清理（通道 ${res.updatedChannels || 0} 个，模型熔断 ${res.clearedModelCircuits || 0} 条）`);
+    } catch (err: any) {
+      toast.error(err?.message || '清理路由运行时状态失败');
+    } finally {
+      setResettingRoutingRuntime(false);
     }
   };
 
@@ -1613,6 +1627,9 @@ export default function Settings() {
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button onClick={handleClearCache} disabled={clearingCache} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
               {clearingCache ? <><span className="spinner spinner-sm" /> 清理中...</> : '清除缓存并重建路由'}
+            </button>
+            <button onClick={handleResetRoutingRuntime} disabled={resettingRoutingRuntime} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+              {resettingRoutingRuntime ? <><span className="spinner spinner-sm" /> 清理中...</> : '清理路由运行时状态'}
             </button>
             <button onClick={handleClearUsage} disabled={clearingUsage} className="btn btn-link btn-link-warning">
               {clearingUsage ? <><span className="spinner spinner-sm" /> 清理中...</> : '清除占用与使用日志'}
