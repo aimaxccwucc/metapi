@@ -270,6 +270,13 @@ function resolveAuthFailureCooldownSec(context: SiteRuntimeFailureContext = {}):
   return isAuthLikeFailure(context) ? 30 * 60 : 0;
 }
 
+function shouldApplyImmediateRoundRobinCooldown(category: ReturnType<typeof classifyProxyFailureCategory>): boolean {
+  return category === 'auth'
+    || category === 'model_unsupported'
+    || category === 'payload_too_large'
+    || category === 'rate_limit';
+}
+
 function shouldApplySiteWideFailureTracking(context: SiteRuntimeFailureContext = {}): boolean {
   const category = classifyProxyFailureCategory(context.status, context.errorText);
   return category === 'network' || category === 'server' || category === 'rate_limit';
@@ -2216,7 +2223,14 @@ export class TokenRouter {
     const failureCategory = classifyProxyFailureCategory(normalizedContext.status, normalizedContext.errorText);
 
     if (routeStrategy === 'round_robin') {
-      if (consecutiveFailCount >= ROUND_ROBIN_FAILURE_THRESHOLD) {
+      if (shouldApplyImmediateRoundRobinCooldown(failureCategory)) {
+        cooldownLevel = Math.max(
+          cooldownLevel,
+          resolveWeightedFailureCooldownLevel(consecutiveFailCount, failureCategory),
+        );
+        const cooldownMs = resolveWeightedFailureCooldownMs(consecutiveFailCount, failureCategory);
+        cooldownUntil = cooldownMs > 0 ? new Date(nowMs + cooldownMs).toISOString() : null;
+      } else if (consecutiveFailCount >= ROUND_ROBIN_FAILURE_THRESHOLD) {
         cooldownLevel = Math.min(cooldownLevel + 1, 3);
         const cooldownMs = resolveRoundRobinCooldownMs(cooldownLevel);
         cooldownUntil = cooldownMs > 0 ? new Date(nowMs + cooldownMs).toISOString() : null;

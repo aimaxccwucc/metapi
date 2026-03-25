@@ -232,6 +232,7 @@ export default function TokenRoutes() {
   const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
+  const [resettingRoutingRuntime, setResettingRoutingRuntime] = useState(false);
 
   const [channelTokenDraft, setChannelTokenDraft] = useState<Record<number, number>>({});
   const [updatingChannel, setUpdatingChannel] = useState<Record<number, boolean>>({});
@@ -418,6 +419,21 @@ export default function TokenRoutes() {
       toast.success('路由选择概率已刷新');
     } catch {
       toast.error('刷新路由选择概率失败');
+    }
+  };
+
+  const handleResetRoutingRuntime = async () => {
+    if (!window.confirm('确认清理路由运行时状态？这会清除通道冷却、连续失败计数、站点运行时惩罚和模型熔断，但不会删除历史统计。')) return;
+    setResettingRoutingRuntime(true);
+    try {
+      const res = await api.resetRoutingRuntimeState();
+      toast.success(`路由运行时状态已清理（通道 ${res.updatedChannels || 0} 个，模型熔断 ${res.clearedModelCircuits || 0} 条）`);
+      const refreshed = await load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded });
+      await loadRouteDecisions(refreshed.summaries, { force: true, refreshPricingCatalog: true, persistSnapshots: true });
+    } catch (e: any) {
+      toast.error(e.message || '清理路由运行时状态失败');
+    } finally {
+      setResettingRoutingRuntime(false);
     }
   };
 
@@ -1256,6 +1272,19 @@ export default function TokenRoutes() {
           </button>
 
           <button
+            onClick={handleResetRoutingRuntime}
+            disabled={resettingRoutingRuntime}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+          >
+            {resettingRoutingRuntime ? (
+              <><span className="spinner spinner-sm" /> {tr('清理中...')}</>
+            ) : (
+              tr('清理运行时故障')
+            )}
+          </button>
+
+          <button
             onClick={() => {
               resetRouteForm();
               ensureRouteCandidatesLoaded();
@@ -1346,6 +1375,10 @@ export default function TokenRoutes() {
       {/* Info tip */}
       <div className="info-tip" style={{ marginBottom: 12 }}>
         {tr('系统会根据模型可用性自动生成路由。精确模型路由会自动过滤只支持该模型的账号和令牌。优先级 P0 最高，数字越大优先级越低。选中概率表示请求到达时该通道被选中的概率。成本来源优先级为：实测成本 → 账号配置成本 → 目录参考价 → 默认回退单价。')}
+      </div>
+
+      <div className="info-tip" style={{ marginBottom: 12 }}>
+        {tr('如果某批通道因令牌失效、模型不支持或限流被持续避让，可先修正账号配置，再使用“清理运行时故障”快速清掉临时冷却、模型熔断和站点运行时惩罚。')}
       </div>
 
       {/* Manual route panel */}

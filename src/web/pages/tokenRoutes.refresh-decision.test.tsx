@@ -11,6 +11,7 @@ const { apiMock, getBrandMock } = vi.hoisted(() => ({
     getModelTokenCandidates: vi.fn(),
     getRouteDecisionsBatch: vi.fn(),
     getRouteWideDecisionsBatch: vi.fn(),
+    resetRoutingRuntimeState: vi.fn(),
   },
   getBrandMock: vi.fn(),
 }));
@@ -74,6 +75,20 @@ describe('TokenRoutes refresh decision action', () => {
     apiMock.getModelTokenCandidates.mockResolvedValue({ models: {} });
     apiMock.getRouteDecisionsBatch.mockResolvedValue({ decisions: {} });
     apiMock.getRouteWideDecisionsBatch.mockResolvedValue({ decisions: {} });
+    apiMock.resetRoutingRuntimeState.mockResolvedValue({
+      success: true,
+      updatedChannels: 2,
+      clearedModelCircuits: 1,
+      clearedPersistedSiteRuntimeState: true,
+    });
+    Object.defineProperty(globalThis, 'window', {
+      value: {
+        confirm: vi.fn(() => true),
+        location: { reload: vi.fn() },
+      },
+      configurable: true,
+      writable: true,
+    });
   });
 
   afterEach(() => {
@@ -102,6 +117,35 @@ describe('TokenRoutes refresh decision action', () => {
 
       expect(apiMock.getRouteDecisionsBatch).toHaveBeenCalledWith(['gpt-4o-mini'], { refreshPricingCatalog: true, persistSnapshots: true });
       expect(apiMock.getRouteWideDecisionsBatch).toHaveBeenCalledWith([2], { refreshPricingCatalog: true, persistSnapshots: true });
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('resets routing runtime state and reloads decisions when user clicks runtime recovery', async () => {
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const resetButton = findButtonByText(root.root, '清理运行时故障');
+      await act(async () => {
+        await resetButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.resetRoutingRuntimeState).toHaveBeenCalledTimes(1);
+      expect(apiMock.getRoutesSummary).toHaveBeenCalledTimes(2);
+      expect(apiMock.getRouteDecisionsBatch).toHaveBeenLastCalledWith(['gpt-4o-mini'], { refreshPricingCatalog: true, persistSnapshots: true });
+      expect(apiMock.getRouteWideDecisionsBatch).toHaveBeenLastCalledWith([2], { refreshPricingCatalog: true, persistSnapshots: true });
     } finally {
       root?.unmount();
     }

@@ -395,6 +395,64 @@ describe('TokenRouter runtime cache', () => {
     expect(current?.cooldownUntil).toBeNull();
   });
 
+  it('applies immediate cooldown for auth-like failures under round robin', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'round-robin-auth-site',
+      url: 'https://round-robin-auth-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'round-robin-auth-user',
+      accessToken: 'round-robin-auth-access-token',
+      apiToken: 'round-robin-auth-api-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'round-robin-auth-token',
+      token: 'sk-round-robin-auth-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-auth-round-robin',
+      routingStrategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const startedAt = Date.now();
+    await router.recordFailure(channel.id, {
+      status: 401,
+      errorText: 'invalid api key',
+      modelName: 'gpt-4o-auth-round-robin',
+    });
+
+    const current = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    const cooldownMs = Date.parse(String(current?.cooldownUntil || '')) - startedAt;
+
+    expect(current?.consecutiveFailCount).toBe(1);
+    expect(current?.cooldownLevel).toBe(3);
+    expect(cooldownMs).toBeGreaterThanOrEqual(29 * 60 * 1000);
+    expect(cooldownMs).toBeLessThanOrEqual(31 * 60 * 1000);
+  });
+
   it('skips recently failed round-robin channels before recycling them', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'round-robin-recent-failure-site',
