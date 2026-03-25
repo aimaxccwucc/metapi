@@ -46,47 +46,6 @@ vi.mock('./components/TooltipLayer.js', () => ({
   default: () => null,
 }));
 
-vi.mock('./components/MobileDrawer.js', () => ({
-  MobileDrawer: ({
-    open,
-    onClose,
-    title,
-    closeLabel = '关闭导航',
-    children,
-  }: {
-    open: boolean;
-    onClose: () => void;
-    title?: ReactNode;
-    closeLabel?: string;
-    children: ReactNode;
-  }) => (open ? (
-    <div className="mobile-drawer-mock">
-      {title ? <div>{title}</div> : null}
-      <button type="button" aria-label={closeLabel} onClick={onClose}>×</button>
-      {children}
-    </div>
-  ) : null),
-  default: ({
-    open,
-    onClose,
-    title,
-    closeLabel = '关闭导航',
-    children,
-  }: {
-    open: boolean;
-    onClose: () => void;
-    title?: ReactNode;
-    closeLabel?: string;
-    children: ReactNode;
-  }) => (open ? (
-    <div className="mobile-drawer-mock">
-      {title ? <div>{title}</div> : null}
-      <button type="button" aria-label={closeLabel} onClick={onClose}>×</button>
-      {children}
-    </div>
-  ) : null),
-}));
-
 vi.mock('./components/useAnimatedVisibility.js', () => ({
   useAnimatedVisibility: (open: boolean) => ({
     shouldRender: open,
@@ -104,7 +63,7 @@ vi.mock('./i18n.js', () => ({
 }));
 
 vi.mock('./pages/Dashboard.js', () => ({
-  default: () => <div>Dashboard</div>,
+  default: ({ adminName }: { adminName?: string }) => <div>{adminName || 'Dashboard'}</div>,
 }));
 
 function createLocalStorage() {
@@ -176,24 +135,36 @@ async function flushMicrotasks() {
   });
 }
 
-async function waitForText(root: ReactTestInstance, text: string) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    if (collectText(root).includes(text)) return;
-    await flushMicrotasks();
-  }
+function buildOverview(input: {
+  databaseReady?: boolean;
+  failedTasks?: number;
+  runningTasks?: number;
+  unreadEvents?: number;
+  proxyFailures24h?: number;
+  proxyRequests24h?: number;
+}) {
+  return {
+    database: { ready: input.databaseReady ?? true, dialect: 'sqlite' },
+    backgroundTasks: {
+      total: (input.failedTasks ?? 0) + (input.runningTasks ?? 0),
+      pending: 0,
+      running: input.runningTasks ?? 0,
+      failed: input.failedTasks ?? 0,
+    },
+    recentActivity: {
+      proxyRequests24h: input.proxyRequests24h ?? 0,
+      proxyFailures24h: input.proxyFailures24h ?? 0,
+      unreadEvents: input.unreadEvents ?? 0,
+    },
+  };
 }
 
-describe('App mobile sidebar', () => {
+describe('App runtime banner', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
-    apiMock.getEvents.mockResolvedValue([]);
-    apiMock.getRuntimeOverview.mockResolvedValue({
-      database: { ready: true, dialect: 'sqlite' },
-      backgroundTasks: { total: 0, pending: 0, running: 0, failed: 0 },
-      recentActivity: { proxyRequests24h: 0, proxyFailures24h: 0, unreadEvents: 0 },
-    });
     authSessionMock.hasValidAuthSession.mockReturnValue(true);
+    apiMock.getEvents.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -203,10 +174,17 @@ describe('App mobile sidebar', () => {
     vi.clearAllMocks();
   });
 
-  it('opens the mobile drawer from the hamburger trigger and exposes the close affordance', async () => {
-    setupRuntime(768);
-    let root: ReturnType<typeof create> | null = null;
+  it('prioritizes database readiness over all other runtime warnings', async () => {
+    setupRuntime(1280);
+    apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({
+      databaseReady: false,
+      failedTasks: 3,
+      unreadEvents: 8,
+      proxyFailures24h: 90,
+      proxyRequests24h: 200,
+    }));
 
+    let root: ReturnType<typeof create> | null = null;
     try {
       await act(async () => {
         root = create(
@@ -217,33 +195,112 @@ describe('App mobile sidebar', () => {
       });
       await flushMicrotasks();
 
-      const openButton = root.root.find((node) => (
-        node.type === 'button'
-        && node.props['aria-label'] === '打开导航'
+      const banner = root.root.find((node) => (
+        typeof node.props?.['data-testid'] === 'string'
+        && node.props['data-testid'] === 'app-runtime-banner'
       ));
 
+      expect(collectText(banner)).toContain('数据库尚未就绪');
+      expect(collectText(banner)).toContain('后台失败 3');
+      expect(collectText(banner)).toContain('未读事件 8');
+    } finally {
+      if (root) {
+        await act(async () => {
+          root.unmount();
+        });
+      }
+    }
+  });
+
+  it('shows the failed background task banner before unread events and elevated proxy failures', async () => {
+    setupRuntime(1280);
+    apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({
+      failedTasks: 2,
+      runningTasks: 1,
+      unreadEvents: 6,
+      proxyFailures24h: 35,
+      proxyRequests24h: 140,
+    }));
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
       await act(async () => {
-        openButton.props.onClick();
+        root = create(
+          <MemoryRouter initialEntries={['/']}>
+            <App />
+          </MemoryRouter>,
+        );
       });
       await flushMicrotasks();
-      await waitForText(root.root, '导航菜单');
 
-      expect(collectText(root.root)).toContain('导航菜单');
+      const pageText = collectText(root.root);
+      expect(pageText).toContain('后台任务存在失败');
+      expect(pageText).not.toContain('存在未读状态事件');
+      expect(pageText).toContain('运行中 1');
+    } finally {
+      if (root) {
+        await act(async () => {
+          root.unmount();
+        });
+      }
+    }
+  });
 
-      const closeButton = root.root.find((node) => (
-        node.type === 'button'
-        && node.props['aria-label'] === '关闭导航'
+  it('renders the runtime banner on mobile when unread events need attention', async () => {
+    setupRuntime(768);
+    apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({
+      unreadEvents: 4,
+    }));
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/']}>
+            <App />
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const banner = root.root.find((node) => (
+        typeof node.props?.className === 'string'
+        && node.props.className.includes('app-runtime-banner')
       ));
 
+      expect(collectText(banner)).toContain('存在未读状态事件');
+      expect(collectText(banner)).toContain('4 条未读状态事件待处理');
+    } finally {
+      if (root) {
+        await act(async () => {
+          root.unmount();
+        });
+      }
+    }
+  });
+
+  it('surfaces elevated 24 hour proxy failures when no higher priority issue exists', async () => {
+    setupRuntime(1280);
+    apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({
+      proxyFailures24h: 24,
+      proxyRequests24h: 120,
+    }));
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
       await act(async () => {
-        closeButton.props.onClick();
-      });
-      await act(async () => {
-        vi.advanceTimersByTime(300);
+        root = create(
+          <MemoryRouter initialEntries={['/']}>
+            <App />
+          </MemoryRouter>,
+        );
       });
       await flushMicrotasks();
 
-      expect(collectText(root.root)).not.toContain('导航菜单');
+      const pageText = collectText(root.root);
+      expect(pageText).toContain('24 小时请求失败偏高');
+      expect(pageText).toContain('24/120');
+      expect(pageText).toContain('失败率约 20%');
     } finally {
       if (root) {
         await act(async () => {

@@ -7,6 +7,7 @@ import App from './App.js';
 const { apiMock, authSessionMock } = vi.hoisted(() => ({
   apiMock: {
     getEvents: vi.fn(),
+    getRuntimeOverview: vi.fn(),
   },
   authSessionMock: {
     hasValidAuthSession: vi.fn(),
@@ -137,6 +138,11 @@ describe('App mobile layout', () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     apiMock.getEvents.mockResolvedValue([]);
+    apiMock.getRuntimeOverview.mockResolvedValue({
+      database: { ready: true, dialect: 'sqlite' },
+      backgroundTasks: { total: 0, pending: 0, running: 0, failed: 0 },
+      recentActivity: { proxyRequests24h: 0, proxyFailures24h: 0, unreadEvents: 0 },
+    });
     authSessionMock.hasValidAuthSession.mockReturnValue(true);
   });
 

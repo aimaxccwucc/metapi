@@ -1,7 +1,7 @@
 import { clearAuthSession, getAuthToken, getBearerAuthToken } from './authSession.js';
 
 type RequestOptions = RequestInit & {
-  timeoutMs?: number;
+  timeoutMs?: number | null;
 };
 
 function ensureAuthSession(): void {
@@ -87,9 +87,14 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 async function fetchAuthenticatedResponse(url: string, options: RequestOptions = {}): Promise<Response> {
   const { timeoutMs = 30_000, signal: externalSignal, ...fetchOptions } = options;
   const controller = new AbortController();
-  let timeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
+  const effectiveTimeoutMs = typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : null;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = effectiveTimeoutMs
+    ? setTimeout(() => {
+      controller.abort();
+    }, effectiveTimeoutMs)
+    : null;
   let cleanupExternalSignal = () => { };
 
   if (externalSignal) {
@@ -137,7 +142,8 @@ async function fetchAuthenticatedResponse(url: string, options: RequestOptions =
   } catch (error: any) {
     if (error?.name === 'AbortError') {
       if (externalSignal?.aborted) throw error;
-      throw new Error(`请求超时（${Math.max(1, Math.round(timeoutMs / 1000))}s）`);
+      const timeoutSeconds = effectiveTimeoutMs ? Math.max(1, Math.round(effectiveTimeoutMs / 1000)) : 30;
+      throw new Error(`请求超时（${timeoutSeconds}s）`);
     }
     throw error;
   } finally {
@@ -929,57 +935,27 @@ export const api = {
   testChat: (data: TestChatRequestPayload) =>
     request('/api/test/chat', { method: 'POST', body: JSON.stringify(data) }),
   testProxyStream: async (data: ProxyTestRequestEnvelope, signal?: AbortSignal) => {
-    const token = getAuthToken(localStorage);
-    if (!token) {
-      clearAuthSession(localStorage);
-      throw new Error('Session expired');
-    }
-    const bearerToken = getBearerAuthToken(localStorage);
-    return fetch('/api/test/proxy/stream', {
+    return fetchAuthenticatedResponse('/api/test/proxy/stream', {
       method: 'POST',
       signal,
-      credentials: 'same-origin',
-      headers: {
-        ...(bearerToken ? { 'Authorization': `Bearer ${bearerToken}` } : {}),
-        'Content-Type': 'application/json',
-      },
       body: JSON.stringify(data),
+      timeoutMs: null,
     });
   },
   proxyTestStream: async (data: ProxyTestRequestEnvelope, signal?: AbortSignal) => {
-    const token = getAuthToken(localStorage);
-    if (!token) {
-      clearAuthSession(localStorage);
-      throw new Error('Session expired');
-    }
-    const bearerToken = getBearerAuthToken(localStorage);
-    return fetch('/api/test/proxy/stream', {
+    return fetchAuthenticatedResponse('/api/test/proxy/stream', {
       method: 'POST',
       signal,
-      credentials: 'same-origin',
-      headers: {
-        ...(bearerToken ? { 'Authorization': `Bearer ${bearerToken}` } : {}),
-        'Content-Type': 'application/json',
-      },
       body: JSON.stringify(data),
+      timeoutMs: null,
     });
   },
   testChatStream: async (data: TestChatRequestPayload, signal?: AbortSignal) => {
-    const token = getAuthToken(localStorage);
-    if (!token) {
-      clearAuthSession(localStorage);
-      throw new Error('Session expired');
-    }
-    const bearerToken = getBearerAuthToken(localStorage);
-    return fetch('/api/test/chat/stream', {
+    return fetchAuthenticatedResponse('/api/test/chat/stream', {
       method: 'POST',
       signal,
-      credentials: 'same-origin',
-      headers: {
-        ...(bearerToken ? { 'Authorization': `Bearer ${bearerToken}` } : {}),
-        'Content-Type': 'application/json',
-      },
       body: JSON.stringify(data),
+      timeoutMs: null,
     });
   },
 };

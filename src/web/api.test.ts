@@ -221,4 +221,58 @@ describe('api proxy test timeout handling', () => {
     expect(getAuthToken(globalThis.localStorage as Storage)).toBeNull();
     expect(reloadMock).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps the local session for stream requests when a forbidden response does not invalidate the admin session', async () => {
+    const reloadMock = vi.fn();
+    vi.stubGlobal('window', {
+      location: {
+        reload: reloadMock,
+      },
+    } as unknown as Window & typeof globalThis);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'IP not allowed' }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ success: true, active: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.proxyTestStream({
+      method: 'POST',
+      path: '/v1/responses',
+      requestKind: 'json',
+      jsonBody: { model: 'gpt-5', input: 'hello' },
+    })).rejects.toThrow('IP not allowed');
+    expect(getAuthToken(globalThis.localStorage as Storage)).toBeTruthy();
+    expect(reloadMock).not.toHaveBeenCalled();
+  });
+
+  it('clears the local session for stream requests only after the admin session probe confirms expiry', async () => {
+    const reloadMock = vi.fn();
+    vi.stubGlobal('window', {
+      location: {
+        reload: reloadMock,
+      },
+    } as unknown as Window & typeof globalThis);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Invalid token' }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ success: false, active: false }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.testChatStream({
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'hello' }],
+    })).rejects.toThrow('Session expired');
+    expect(getAuthToken(globalThis.localStorage as Storage)).toBeNull();
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
 });

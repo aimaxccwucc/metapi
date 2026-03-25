@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
 import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { ToastProvider, useToast } from './components/Toast.js';
 import { api } from './api.js';
+import type { RuntimeOverview } from './api.js';
 import { clearAuthSession, hasValidAuthSession, persistAuthSession } from './authSession.js';
 import {
   FIRST_USE_DOC_REMINDER_KEY,
@@ -61,12 +62,154 @@ const routePreloaders = {
 
 const preloadedRouteSet = new Set<string>();
 
+const RUNTIME_OVERVIEW_POLL_MS = 60_000;
+const HIGH_PROXY_FAILURE_COUNT_THRESHOLD = 20;
+const EXTREME_PROXY_FAILURE_COUNT_THRESHOLD = 50;
+const HIGH_PROXY_FAILURE_RATE_THRESHOLD = 0.12;
+
 function preloadRoute(path: string) {
   if (preloadedRouteSet.has(path)) return;
   const loader = routePreloaders[path as keyof typeof routePreloaders];
   if (!loader) return;
   preloadedRouteSet.add(path);
   void loader();
+}
+
+type RuntimeBannerTone = 'info' | 'warning' | 'error';
+
+type RuntimeBannerNotice = {
+  tone: RuntimeBannerTone;
+  title: string;
+  detail: string;
+  tags: string[];
+};
+
+function summarizeRecentProxyFailures(overview: RuntimeOverview): {
+  tone: RuntimeBannerTone;
+  failures: number;
+  requests: number;
+  rate: number;
+} | null {
+  const failures = Math.max(0, overview.recentActivity.proxyFailures24h || 0);
+  const requests = Math.max(
+    failures,
+    Math.max(0, overview.recentActivity.proxyRequests24h || 0),
+  );
+  if (failures <= 0 || requests <= 0) return null;
+
+  const rate = failures / requests;
+  const isElevated = failures >= HIGH_PROXY_FAILURE_COUNT_THRESHOLD && rate >= HIGH_PROXY_FAILURE_RATE_THRESHOLD;
+  const isSevere = failures >= EXTREME_PROXY_FAILURE_COUNT_THRESHOLD || (failures >= 30 && rate >= 0.2);
+
+  if (!isElevated && !isSevere) return null;
+
+  return {
+    tone: isSevere ? 'error' : 'warning',
+    failures,
+    requests,
+    rate,
+  };
+}
+
+function formatPercent(rate: number): string {
+  return `${Math.round(rate * 100)}%`;
+}
+
+function buildRuntimeBannerNotice(
+  overview: RuntimeOverview | null,
+  t: (text: string) => string,
+): RuntimeBannerNotice | null {
+  if (!overview) return null;
+
+  const tags: string[] = [];
+  const pushTag = (value: string | null) => {
+    if (!value) return;
+    if (!tags.includes(value)) tags.push(value);
+  };
+
+  const taskFailures = Math.max(0, overview.backgroundTasks.failed || 0);
+  const unreadEvents = Math.max(0, overview.recentActivity.unreadEvents || 0);
+  const proxyFailureSummary = summarizeRecentProxyFailures(overview);
+
+  if (!overview.database.ready) {
+    pushTag(taskFailures > 0 ? `${t('后台失败')} ${taskFailures}` : null);
+    pushTag(unreadEvents > 0 ? `${t('未读事件')} ${unreadEvents}` : null);
+    pushTag(proxyFailureSummary ? `${t('24h 失败')} ${proxyFailureSummary.failures}` : null);
+    return {
+      tone: 'error',
+      title: t('数据库尚未就绪'),
+      detail: t('当前服务仍在等待数据库初始化完成，部分页面与写操作可能不可用。'),
+      tags,
+    };
+  }
+
+  if (taskFailures > 0) {
+    pushTag(overview.backgroundTasks.running > 0 ? `${t('运行中')} ${overview.backgroundTasks.running}` : null);
+    pushTag(unreadEvents > 0 ? `${t('未读事件')} ${unreadEvents}` : null);
+    pushTag(proxyFailureSummary ? `${t('24h 失败')} ${proxyFailureSummary.failures}` : null);
+    return {
+      tone: 'error',
+      title: t('后台任务存在失败'),
+      detail: `${taskFailures}${t(' 个后台任务已失败，建议优先查看程序日志与任务详情。')}`,
+      tags,
+    };
+  }
+
+  if (unreadEvents > 0) {
+    pushTag(proxyFailureSummary ? `${t('24h 失败')} ${proxyFailureSummary.failures}` : null);
+    return {
+      tone: 'warning',
+      title: t('存在未读状态事件'),
+      detail: `${unreadEvents}${t(' 条未读状态事件待处理，可能包含失败告警或任务结果。')}`,
+      tags,
+    };
+  }
+
+  if (proxyFailureSummary) {
+    return {
+      tone: proxyFailureSummary.tone,
+      title: t('24 小时请求失败偏高'),
+      detail: `${proxyFailureSummary.failures}/${proxyFailureSummary.requests}${t(' 次请求失败，失败率约 ')}${formatPercent(proxyFailureSummary.rate)}。${t('建议检查网关路由、站点健康和上游配额。')}`,
+      tags,
+    };
+  }
+
+  return null;
+}
+
+function RuntimeStatusBanner({
+  notice,
+  t,
+}: {
+  notice: RuntimeBannerNotice;
+  t: (text: string) => string;
+}) {
+  const alertClassName = notice.tone === 'error'
+    ? 'alert-error'
+    : (notice.tone === 'warning' ? 'alert-warning' : 'alert-info');
+
+  return (
+    <div className="app-runtime-banner-wrap">
+      <div
+        className={`alert ${alertClassName} app-runtime-banner`.trim()}
+        data-testid="app-runtime-banner"
+        role={notice.tone === 'error' ? 'alert' : 'status'}
+      >
+        <div className={`app-runtime-banner-mark app-runtime-banner-mark-${notice.tone}`} aria-hidden="true" />
+        <div className="app-runtime-banner-copy">
+          <div className="alert-title app-runtime-banner-title">{notice.title}</div>
+          <div className="app-runtime-banner-detail">{notice.detail}</div>
+          {notice.tags.length > 0 ? (
+            <div className="app-runtime-banner-tags" aria-label={t('全局状态摘要')}>
+              {notice.tags.map((tag) => (
+                <span key={tag} className="app-runtime-banner-tag">{tag}</span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 type ThemeMode = 'system' | 'light' | 'dark';
@@ -515,6 +658,7 @@ function AppShell() {
   const themeMenuPresence = useAnimatedVisibility(showThemeMenu, 160);
   const userMenuPresence = useAnimatedVisibility(showUserMenu, 160);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [runtimeOverview, setRuntimeOverview] = useState<RuntimeOverview | null>(null);
   const notifBtnRef = useRef<HTMLButtonElement>(null);
   const latestTaskEventIdRef = useRef(0);
   const toast = useToast();
@@ -526,6 +670,7 @@ function AppShell() {
   const displayName = rawDisplayName ? (rawDisplayName === '管理员' ? t('管理员') : rawDisplayName) : t('管理员');
   const resolvedThemeLabel = resolvedTheme === 'dark' ? t('深色') : t('浅色');
   const avatarUrl = buildDicebearAvatarUrl(userProfile.avatarStyle, userProfile.avatarSeed);
+  const runtimeBannerNotice = buildRuntimeBannerNotice(runtimeOverview, t);
 
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -674,6 +819,35 @@ function AppShell() {
     localStorage.setItem(FIRST_USE_DOC_REMINDER_KEY, '1');
     toast.info(`${t('首次使用建议先阅读站点文档：')}${SITE_DOCS_URL}`);
   }, [authed, t, toast]);
+
+  useEffect(() => {
+    if (!authed) {
+      setRuntimeOverview(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const pollRuntimeOverview = async () => {
+      try {
+        const overview = await api.getRuntimeOverview();
+        if (cancelled) return;
+        setRuntimeOverview(overview);
+      } catch {
+        if (cancelled) return;
+      }
+    };
+
+    void pollRuntimeOverview();
+    const timer = setInterval(() => {
+      void pollRuntimeOverview();
+    }, RUNTIME_OVERVIEW_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [authed]);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -856,6 +1030,10 @@ function AppShell() {
           </div>
         </div>
       </header>
+
+      {runtimeBannerNotice ? (
+        <RuntimeStatusBanner notice={runtimeBannerNotice} t={t} />
+      ) : null}
 
       <div className="app-layout">
         {isMobile ? (

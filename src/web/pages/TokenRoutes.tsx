@@ -205,6 +205,27 @@ function getRouteRoutingStrategySuccessMessage(value: RouteRoutingStrategy): str
   return '已切换为权重随机策略';
 }
 
+function hasModelCircuitIssue(candidate: NonNullable<RouteDecision['candidates']>[number]): boolean {
+  return candidate.modelCircuitStatus?.isOpen === true
+    || candidate.modelCircuitStatus?.state === 'open';
+}
+
+function hasSiteRuntimeIssue(candidate: NonNullable<RouteDecision['candidates']>[number]): boolean {
+  const siteRuntimeState = candidate.siteRuntimeState;
+  if (!siteRuntimeState) return false;
+  if (siteRuntimeState.globalBreakerOpen || siteRuntimeState.modelBreakerOpen) return true;
+  const multipliers = [
+    siteRuntimeState.globalMultiplier,
+    siteRuntimeState.modelMultiplier,
+    siteRuntimeState.combinedMultiplier,
+  ];
+  return multipliers.some((value) => typeof value === 'number' && Number.isFinite(value) && value < 0.999);
+}
+
+function hasActiveCooldown(candidate: NonNullable<RouteDecision['candidates']>[number], nowIso: string): boolean {
+  return !!candidate.cooldownUntil && candidate.cooldownUntil > nowIso;
+}
+
 export default function TokenRoutes() {
   const navigate = useNavigate();
   const [routeSummaries, setRouteSummaries] = useState<RouteSummaryRow[]>([]);
@@ -416,9 +437,9 @@ export default function TokenRoutes() {
   const handleRefreshRouteDecisions = async () => {
     try {
       await loadRouteDecisions(routeSummaries, { force: true, refreshPricingCatalog: true, persistSnapshots: true });
-      toast.success('路由选择概率已刷新');
+      toast.success(tr('路由决策已刷新'));
     } catch {
-      toast.error('刷新路由选择概率失败');
+      toast.error(tr('刷新路由决策失败'));
     }
   };
 
@@ -928,6 +949,57 @@ export default function TokenRoutes() {
     return result;
   }, [endpointTypesByModel, missingTokenGroupModelsByName, missingTokenModelsByName, modelCandidates, routeSummaries, visibleRouteRows]);
 
+  const routeFaultOverview = useMemo(() => {
+    const nowIso = new Date().toISOString();
+    let routesWithDecisions = 0;
+    let cooldownChannels = 0;
+    let avoidedChannels = 0;
+    let modelCircuitChannels = 0;
+    let siteRuntimeChannels = 0;
+    let zeroChannelRoutes = 0;
+    let sourceIssueRoutes = 0;
+
+    for (const route of filteredRoutes) {
+      if ((route.channelCount || 0) === 0 || route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true) {
+        zeroChannelRoutes += 1;
+      }
+
+      if (isExplicitGroupRoute(route)) {
+        const sourceHealth = explicitGroupSourceHealthByRouteId[route.id];
+        if (
+          sourceHealth
+          && (
+            sourceHealth.zeroChannelRoutes.length > 0
+            || sourceHealth.missingTokenRoutes.length > 0
+            || sourceHealth.missingGroupRoutes.length > 0
+          )
+        ) {
+          sourceIssueRoutes += 1;
+        }
+      }
+
+      const decision = decisionByRoute[route.id];
+      const candidates = decision?.candidates || [];
+      if (candidates.length === 0) continue;
+      routesWithDecisions += 1;
+      cooldownChannels += candidates.filter((candidate) => hasActiveCooldown(candidate, nowIso)).length;
+      avoidedChannels += candidates.filter((candidate) => candidate.avoidedByRecentFailure).length;
+      modelCircuitChannels += candidates.filter(hasModelCircuitIssue).length;
+      siteRuntimeChannels += candidates.filter(hasSiteRuntimeIssue).length;
+    }
+
+    return {
+      totalRoutes: filteredRoutes.length,
+      routesWithDecisions,
+      cooldownChannels,
+      avoidedChannels,
+      modelCircuitChannels,
+      siteRuntimeChannels,
+      zeroChannelRoutes,
+      sourceIssueRoutes,
+    };
+  }, [decisionByRoute, explicitGroupSourceHealthByRouteId, filteredRoutes]);
+
   const getRouteCandidateView = (routeId: number): RouteCandidateView => {
     return routeModelCandidateIndex[routeId] || EMPTY_ROUTE_CANDIDATE_VIEW;
   };
@@ -1254,7 +1326,7 @@ export default function TokenRoutes() {
             {loadingDecision ? (
               <><span className="spinner spinner-sm" /> {tr('刷新中...')}</>
             ) : (
-              tr('刷新选中概率')
+              tr('刷新路由决策')
             )}
           </button>
 
@@ -1317,6 +1389,23 @@ export default function TokenRoutes() {
           {tr('当前仅显示你手工创建的群组路由；如需排查系统自动生成的精确路由，请到筛选面板切换为“显示全部路由”。')}
         </div>
       ) : null}
+
+      <div className="info-tip" style={{ marginBottom: 12, display: 'grid', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="badge badge-info" style={{ fontSize: 11 }}>{tr('当前故障总览')}</span>
+          <span className="badge badge-warning" style={{ fontSize: 11 }}>{tr('冷却中')} {routeFaultOverview.cooldownChannels}</span>
+          <span className="badge badge-warning" style={{ fontSize: 11 }}>{tr('失败避让')} {routeFaultOverview.avoidedChannels}</span>
+          <span className={`badge ${routeFaultOverview.modelCircuitChannels > 0 ? 'badge-error' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('模型熔断')} {routeFaultOverview.modelCircuitChannels}</span>
+          <span className={`badge ${routeFaultOverview.siteRuntimeChannels > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('站点惩罚')} {routeFaultOverview.siteRuntimeChannels}</span>
+          <span className={`badge ${routeFaultOverview.zeroChannelRoutes > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('0 通道路由')} {routeFaultOverview.zeroChannelRoutes}</span>
+          <span className={`badge ${routeFaultOverview.sourceIssueRoutes > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('来源异常群组')} {routeFaultOverview.sourceIssueRoutes}</span>
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+          {routeFaultOverview.routesWithDecisions > 0
+            ? `已加载 ${routeFaultOverview.routesWithDecisions}/${routeFaultOverview.totalRoutes} 条路由的决策快照，可直接查看冷却、失败避让、模型熔断和站点运行时惩罚。`
+            : '当前筛选结果还没有可用的决策快照；点击“刷新路由决策”可拉取最新的路由故障解释。'}
+        </div>
+      </div>
 
       {/* Collapsible filter panel */}
       {isMobile ? (

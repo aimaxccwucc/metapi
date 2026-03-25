@@ -448,6 +448,76 @@ body {
   background: rgba(20, 20, 20, 0.85);
 }
 
+.app-runtime-banner-wrap {
+  position: sticky;
+  top: var(--topbar-height);
+  z-index: calc(var(--z-topbar) - 1);
+  padding: 8px 24px 0;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--color-bg) 94%, transparent), transparent);
+}
+
+.app-runtime-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0;
+  box-shadow: var(--shadow-sm);
+}
+
+.app-runtime-banner-mark {
+  width: 8px;
+  min-width: 8px;
+  align-self: stretch;
+  border-radius: 999px;
+  opacity: 0.92;
+}
+
+.app-runtime-banner-mark-info {
+  background: color-mix(in srgb, var(--color-info) 78%, white);
+}
+
+.app-runtime-banner-mark-warning {
+  background: color-mix(in srgb, var(--color-warning) 78%, white);
+}
+
+.app-runtime-banner-mark-error {
+  background: color-mix(in srgb, var(--color-danger) 80%, white);
+}
+
+.app-runtime-banner-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.app-runtime-banner-title {
+  margin-bottom: 2px;
+}
+
+.app-runtime-banner-detail {
+  font-size: 12px;
+}
+
+.app-runtime-banner-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.app-runtime-banner-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .topbar-logo {
   display: flex;
   align-items: center;
@@ -4845,6 +4915,31 @@ textarea {
   .main-content {
     padding: 14px;
     padding-bottom: 96px;
+  }
+
+  .app-runtime-banner-wrap {
+    top: var(--topbar-height);
+    padding: 8px 14px 0;
+  }
+
+  .app-runtime-banner {
+    gap: 10px;
+    padding: 10px;
+  }
+
+  .app-runtime-banner-mark {
+    width: 6px;
+    min-width: 6px;
+  }
+
+  .app-runtime-banner-tags {
+    gap: 5px;
+  }
+
+  .app-runtime-banner-tag {
+    min-height: 20px;
+    padding: 0 8px;
+    font-size: 10px;
   }
 
   .page-header {

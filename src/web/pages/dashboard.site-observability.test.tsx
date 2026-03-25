@@ -7,6 +7,7 @@ import Dashboard from './Dashboard.js';
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getDashboard: vi.fn(),
+    getRuntimeOverview: vi.fn(),
     getSiteDistribution: vi.fn(),
     getSiteTrend: vi.fn(),
     getSites: vi.fn(),
@@ -36,6 +37,33 @@ describe('Dashboard site observability panel', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    apiMock.getRuntimeOverview.mockResolvedValue({
+      service: {
+        name: 'metapi',
+        version: '1.2.3',
+        uptimeSec: 7_560,
+        startedAt: '2026-03-24T21:54:00.000Z',
+        now: '2026-03-25T00:00:00.000Z',
+        environment: {
+          port: 3000,
+          host: '0.0.0.0',
+          dbDialect: 'sqlite',
+          dataDir: '/tmp/metapi',
+        },
+      },
+      database: { ready: false, dialect: 'sqlite' },
+      oauthLoopback: { total: 3, ready: 1, attempted: 2, states: [] },
+      backgroundTasks: { total: 4, pending: 1, running: 2, failed: 1 },
+      notifications: {
+        webhookEnabled: false,
+        barkEnabled: false,
+        telegramEnabled: true,
+        serverChanEnabled: false,
+        smtpEnabled: false,
+        cooldownSec: 60,
+      },
+      recentActivity: { proxyRequests24h: 20, proxyFailures24h: 6, unreadEvents: 5 },
+    });
     apiMock.getDashboard.mockResolvedValue({
       totalBalance: 0,
       totalUsed: 0,
@@ -128,6 +156,13 @@ describe('Dashboard site observability panel', () => {
       expect(String(cells[0]?.props['data-tooltip'] || '')).toContain('可用性：100%');
       expect(String(cells[0]?.props['data-tooltip'] || '')).toContain('成功/失败：1/0');
       expect(String(logLink.props.href || logLink.props.to || '')).toContain('/logs?siteId=1');
+      expect(collectText(root!.root)).toContain('运行时概览');
+      expect(collectText(root!.root)).toContain('数据库未就绪，配置与统计可能异常。');
+      expect(collectText(root!.root)).toContain('后台任务失败 1 个，请尽快排查。');
+      expect(collectText(root!.root)).toContain('存在 5 条未读状态事件。');
+      expect(collectText(root!.root)).toContain('状态事件');
+      expect(collectText(root!.root)).toContain('路由策略');
+      expect(collectText(root!.root)).toContain('系统设置');
     } finally {
       root?.unmount();
     }

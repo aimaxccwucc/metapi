@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../api.js';
+import { api, type RuntimeOverview } from '../api.js';
 import { useToast } from '../components/Toast.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import { formatCompactTokenMetric } from '../numberFormat.js';
@@ -187,11 +187,38 @@ function buildAvailabilityBucketLogsRoute(siteId: number, bucket: SiteAvailabili
   return buildSiteLogsRoute(siteId, { from: start, to: end });
 }
 
+type RuntimeSignalTone = 'success' | 'warning' | 'error';
+
+type RuntimeSignal = {
+  tone: RuntimeSignalTone;
+  text: string;
+};
+
+function formatRuntimeUptime(seconds: number): string {
+  const total = Math.max(0, Math.trunc(seconds || 0));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+function resolveRuntimeSignalClassName(tone: RuntimeSignalTone): string {
+  if (tone === 'error') return 'badge-error';
+  if (tone === 'warning') return 'badge-warning';
+  return 'badge-success';
+}
+
 export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminName?: string }) {
   const isMobile = useIsMobile();
   const [data, setData] = useState<any>(null);
+  const [runtimeOverview, setRuntimeOverview] = useState<RuntimeOverview | null>(null);
   const [loading, setLoading] = useState(true);
+  const [runtimeLoading, setRuntimeLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [siteDistribution, setSiteDistribution] = useState<any[]>([]);
   const [siteTrend, setSiteTrend] = useState<any[]>([]);
@@ -228,6 +255,21 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
     }
   }, [toast]);
 
+  const loadRuntimeOverview = useCallback(async (silent = false) => {
+    if (!silent) setRuntimeLoading(true);
+    try {
+      const result = await api.getRuntimeOverview();
+      setRuntimeOverview(result);
+      setRuntimeError(null);
+    } catch (err: any) {
+      const message = err?.message || '加载运行时概览失败';
+      setRuntimeError(message);
+      if (silent) toast.error(message);
+    } finally {
+      setRuntimeLoading(false);
+    }
+  }, [toast]);
+
   const loadSiteStats = useCallback(async () => {
     setSiteLoading(true);
     try {
@@ -253,6 +295,10 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
   }, [load]);
 
   useEffect(() => {
+    loadRuntimeOverview();
+  }, [loadRuntimeOverview]);
+
+  useEffect(() => {
     if (!analyticsSection.visible) return;
     loadSiteStats();
   }, [analyticsSection.visible, loadSiteStats]);
@@ -271,9 +317,26 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
       }
     };
 
+    const pollRuntimeOverview = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      try {
+        const next = await api.getRuntimeOverview();
+        if (!disposed) {
+          setRuntimeOverview(next);
+          setRuntimeError(null);
+          setRuntimeLoading(false);
+        }
+      } catch {
+        // ignore polling errors
+      }
+    };
+
     const start = () => {
       if (timer) return;
-      timer = setInterval(() => { void pollDashboard(); }, 30000);
+      timer = setInterval(() => {
+        void pollDashboard();
+        void pollRuntimeOverview();
+      }, 30000);
     };
 
     const stop = () => {
@@ -285,6 +348,7 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
     const handleVisibilityChange = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
         void pollDashboard();
+        void pollRuntimeOverview();
         start();
       } else {
         stop();
@@ -368,6 +432,45 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
   const performanceWindowSeconds = Math.max(1, safeNumber(data?.performance?.windowSeconds) || 60);
   const requestsPerMinute = safeNumber(data?.performance?.requestsPerMinute);
   const tokensPerMinute = safeNumber(data?.performance?.tokensPerMinute);
+  const runtimeUptimeSec = safeNumber(runtimeOverview?.service.uptimeSec);
+  const runtimeProxyRequests24h = safeNumber(runtimeOverview?.recentActivity.proxyRequests24h);
+  const runtimeProxyFailures24h = safeNumber(runtimeOverview?.recentActivity.proxyFailures24h);
+  const runtimeUnreadEvents = safeNumber(runtimeOverview?.recentActivity.unreadEvents);
+  const runtimeFailedTasks = safeNumber(runtimeOverview?.backgroundTasks.failed);
+  const runtimeRunningTasks = safeNumber(runtimeOverview?.backgroundTasks.running);
+  const runtimePendingTasks = safeNumber(runtimeOverview?.backgroundTasks.pending);
+  const runtimeOauthTotal = safeNumber(runtimeOverview?.oauthLoopback.total);
+  const runtimeOauthReady = safeNumber(runtimeOverview?.oauthLoopback.ready);
+  const runtimeOauthAttempted = safeNumber(runtimeOverview?.oauthLoopback.attempted);
+  const runtimeProxyFailureRatio = runtimeProxyRequests24h > 0 ? runtimeProxyFailures24h / runtimeProxyRequests24h : 0;
+  const runtimeSignals: RuntimeSignal[] = [];
+  if (runtimeOverview) {
+    if (!runtimeOverview.database.ready) {
+      runtimeSignals.push({ tone: 'error', text: '数据库未就绪，配置与统计可能异常。' });
+    }
+    if (runtimeFailedTasks > 0) {
+      runtimeSignals.push({ tone: 'error', text: `后台任务失败 ${runtimeFailedTasks} 个，请尽快排查。` });
+    } else if (runtimeRunningTasks > 0 || runtimePendingTasks > 0) {
+      runtimeSignals.push({ tone: 'warning', text: `后台任务运行中 ${runtimeRunningTasks} 个，排队 ${runtimePendingTasks} 个。` });
+    }
+    if (runtimeOauthAttempted > runtimeOauthReady) {
+      runtimeSignals.push({ tone: 'warning', text: `OAuth 回环监听仅 ${runtimeOauthReady}/${runtimeOauthAttempted} 已就绪。` });
+    }
+    if (runtimeUnreadEvents > 0) {
+      runtimeSignals.push({ tone: 'warning', text: `存在 ${runtimeUnreadEvents} 条未读状态事件。` });
+    }
+    if (runtimeProxyRequests24h > 0 && runtimeProxyFailureRatio >= 0.2) {
+      runtimeSignals.push({ tone: 'warning', text: `最近 24 小时代理失败 ${runtimeProxyFailures24h}/${runtimeProxyRequests24h}。` });
+    }
+    if (runtimeSignals.length === 0) {
+      runtimeSignals.push({ tone: 'success', text: '运行时状态稳定，最近没有明显故障信号。' });
+    }
+  }
+  const runtimeSummaryTone: RuntimeSignalTone = runtimeSignals.some((signal) => signal.tone === 'error')
+    ? 'error'
+    : runtimeSignals.some((signal) => signal.tone === 'warning')
+      ? 'warning'
+      : 'success';
   const rawSiteAvailability: SiteAvailabilitySummary[] = Array.isArray(data?.siteAvailability)
     ? data.siteAvailability
     : [];
@@ -431,7 +534,7 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <h2 className="greeting">{getGreeting() + '\uFF0C' + normalizedAdminName}</h2>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => { load(true); loadSiteStats(); }} disabled={refreshing} className="topbar-icon-btn" data-tooltip="刷新" aria-label="刷新">
+          <button onClick={() => { load(true); loadRuntimeOverview(true); loadSiteStats(); }} disabled={refreshing} className="topbar-icon-btn" data-tooltip="刷新" aria-label="刷新">
             <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ animation: refreshing ? 'spin 1s linear infinite' : 'none' }}>
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
@@ -588,6 +691,109 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
             </div>
           </div>
         </div>
+      </div>
+
+      <div className="chart-container animate-slide-up stagger-6" style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', alignItems: isMobile ? 'flex-start' : 'center', justifyContent: 'space-between', gap: 12, flexDirection: isMobile ? 'column' : 'row', marginBottom: 16 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 14, fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 4 }}>
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-4m3 4V7m3 10v-7m3 11H6a2 2 0 01-2-2V5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2z" /></svg>
+              运行时概览
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
+              数据库、后台任务、OAuth 回环与最近 24 小时运行信号。
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span className={`badge ${resolveRuntimeSignalClassName(runtimeSummaryTone)}`}>
+              {runtimeSummaryTone === 'error' ? '存在告警' : runtimeSummaryTone === 'warning' ? '需要关注' : '运行稳定'}
+            </span>
+            {runtimeOverview ? (
+              <span className="badge badge-muted">
+                已运行 {formatRuntimeUptime(runtimeUptimeSec)}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        {runtimeLoading && !runtimeOverview ? (
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 12 }}>
+            {[...Array(3)].map((_, index) => (
+              <div key={index} style={{ padding: 14, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border-light)', background: 'var(--color-bg)' }}>
+                <div className="skeleton" style={{ width: 96, height: 12, marginBottom: 12 }} />
+                <div className="skeleton" style={{ width: '55%', height: 22, marginBottom: 8 }} />
+                <div className="skeleton" style={{ width: '75%', height: 10 }} />
+              </div>
+            ))}
+          </div>
+        ) : runtimeOverview ? (
+          <>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+              {runtimeSignals.map((signal) => (
+                <span key={signal.text} className={`badge ${resolveRuntimeSignalClassName(signal.tone)}`} style={{ fontSize: 12, padding: '6px 10px' }}>
+                  {signal.text}
+                </span>
+              ))}
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 12 }}>
+              <div style={{ padding: 14, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border-light)', background: 'var(--color-bg)' }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>数据库状态</div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: runtimeOverview.database.ready ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                  {runtimeOverview.database.ready ? '已就绪' : '未就绪'}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginTop: 6 }}>
+                  {runtimeOverview.database.dialect.toUpperCase()}
+                </div>
+              </div>
+
+              <div style={{ padding: 14, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border-light)', background: 'var(--color-bg)' }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>后台任务</div>
+                <div style={{ fontSize: 20, fontWeight: 700 }}>{runtimeRunningTasks} 运行中</div>
+                <div style={{ fontSize: 12, color: runtimeFailedTasks > 0 ? 'var(--color-danger)' : 'var(--color-text-secondary)', marginTop: 6 }}>
+                  失败 {runtimeFailedTasks} · 排队 {runtimePendingTasks}
+                </div>
+              </div>
+
+              <div style={{ padding: 14, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border-light)', background: 'var(--color-bg)' }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>OAuth 回环</div>
+                <div style={{ fontSize: 20, fontWeight: 700 }}>{runtimeOauthReady}/{runtimeOauthTotal}</div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginTop: 6 }}>
+                  已尝试 {runtimeOauthAttempted} 个监听端点
+                </div>
+              </div>
+
+              <div style={{ padding: 14, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border-light)', background: 'var(--color-bg)' }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>24h 代理失败</div>
+                <div style={{ fontSize: 20, fontWeight: 700 }}>{runtimeProxyFailures24h}</div>
+                <div style={{ fontSize: 12, color: runtimeProxyFailures24h > 0 ? 'var(--color-warning)' : 'var(--color-text-secondary)', marginTop: 6 }}>
+                  总请求 {runtimeProxyRequests24h}
+                </div>
+              </div>
+
+              <div style={{ padding: 14, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border-light)', background: 'var(--color-bg)' }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>未读状态事件</div>
+                <div style={{ fontSize: 20, fontWeight: 700 }}>{runtimeUnreadEvents}</div>
+                <div style={{ fontSize: 12, color: runtimeUnreadEvents > 0 ? 'var(--color-warning)' : 'var(--color-text-secondary)', marginTop: 6 }}>
+                  建议及时查看状态事件
+                </div>
+              </div>
+
+              <div style={{ padding: 14, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border-light)', background: 'var(--color-bg)' }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>快捷入口</div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <Link to="/events" className="btn btn-ghost" style={{ fontSize: 12, padding: '6px 10px', border: '1px solid var(--color-border)' }}>状态事件</Link>
+                  <Link to="/routes" className="btn btn-ghost" style={{ fontSize: 12, padding: '6px 10px', border: '1px solid var(--color-border)' }}>路由策略</Link>
+                  <Link to="/settings" className="btn btn-ghost" style={{ fontSize: 12, padding: '6px 10px', border: '1px solid var(--color-border)' }}>系统设置</Link>
+                </div>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div style={{ padding: '14px 16px', borderRadius: 'var(--radius-md)', border: '1px solid color-mix(in srgb, var(--color-warning) 40%, var(--color-border))', background: 'color-mix(in srgb, var(--color-warning) 10%, var(--color-bg-card))', fontSize: 13, color: 'var(--color-text-secondary)' }}>
+            运行时概览暂不可用：{runtimeError || '未知错误'}
+          </div>
+        )}
       </div>
 
       {/* 站点级分析 */}

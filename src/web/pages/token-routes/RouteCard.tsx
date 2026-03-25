@@ -87,6 +87,97 @@ function getRoutingStrategyLabel(value?: RouteRoutingStrategy | null): string {
   return tr('权重随机');
 }
 
+function hasModelCircuitIssue(candidate: RouteDecisionCandidate): boolean {
+  return candidate.modelCircuitStatus?.isOpen === true
+    || candidate.modelCircuitStatus?.state === 'open';
+}
+
+function hasSiteRuntimeIssue(candidate: RouteDecisionCandidate): boolean {
+  const siteRuntimeState = candidate.siteRuntimeState;
+  if (!siteRuntimeState) return false;
+  if (siteRuntimeState.globalBreakerOpen || siteRuntimeState.modelBreakerOpen) return true;
+  const multipliers = [
+    siteRuntimeState.globalMultiplier,
+    siteRuntimeState.modelMultiplier,
+    siteRuntimeState.combinedMultiplier,
+  ];
+  return multipliers.some((value) => typeof value === 'number' && Number.isFinite(value) && value < 0.999);
+}
+
+function hasActiveCooldown(candidate: RouteDecisionCandidate, nowIso: string): boolean {
+  return !!candidate.cooldownUntil && candidate.cooldownUntil > nowIso;
+}
+
+function buildExplicitGroupFaultSummary(summary?: ExplicitGroupSourceHealthSummary | null): {
+  tone: 'badge-success' | 'badge-warning' | 'badge-error';
+  badges: string[];
+  detail: string;
+} | null {
+  if (!summary) return null;
+
+  const badges: string[] = [];
+  if (summary.zeroChannelRoutes.length > 0) badges.push(`无通道 ${summary.zeroChannelRoutes.length}`);
+  if (summary.missingTokenRoutes.length > 0) badges.push(`缺少 Key ${summary.missingTokenRoutes.length}`);
+  if (summary.missingGroupRoutes.length > 0) badges.push(`缺少分组 ${summary.missingGroupRoutes.length}`);
+
+  if (badges.length === 0) {
+    return {
+      tone: 'badge-success',
+      badges: ['来源可直接转发'],
+      detail: `来源模型 ${summary.readyCount}/${summary.totalCount} 已具备可用通道`,
+    };
+  }
+
+  return {
+    tone: summary.readyCount > 0 ? 'badge-warning' : 'badge-error',
+    badges,
+    detail: `来源模型 ${summary.readyCount}/${summary.totalCount} 已就绪，剩余来源需要补通道或配置后才能稳定接管流量`,
+  };
+}
+
+function buildRouteDecisionFaultSummary(routeDecision?: RouteDecision | null): {
+  tone: 'badge-success' | 'badge-warning' | 'badge-error';
+  badges: string[];
+  detail: string;
+} | null {
+  const candidates = routeDecision?.candidates || [];
+  if (candidates.length === 0) return null;
+  const nowIso = new Date().toISOString();
+
+  const cooldownCount = candidates.filter((candidate) => hasActiveCooldown(candidate, nowIso)).length;
+  const avoidedCount = candidates.filter((candidate) => candidate.avoidedByRecentFailure).length;
+  const modelCircuitCount = candidates.filter(hasModelCircuitIssue).length;
+  const siteRuntimeCount = candidates.filter(hasSiteRuntimeIssue).length;
+  const ineligibleCount = candidates.filter((candidate) => !candidate.eligible).length;
+
+  const badges: string[] = [];
+  if (cooldownCount > 0) badges.push(`冷却 ${cooldownCount}`);
+  if (avoidedCount > 0) badges.push(`失败避让 ${avoidedCount}`);
+  if (modelCircuitCount > 0) badges.push(`模型熔断 ${modelCircuitCount}`);
+  if (siteRuntimeCount > 0) badges.push(`站点惩罚 ${siteRuntimeCount}`);
+  if (badges.length === 0 && ineligibleCount > 0) badges.push(`暂不可用 ${ineligibleCount}`);
+
+  if (badges.length === 0) {
+    return {
+      tone: 'badge-success',
+      badges: ['运行时正常'],
+      detail: routeDecision?.selectedLabel
+        ? `当前决策可正常转发，优先命中 ${routeDecision.selectedLabel}`
+        : '当前决策未发现明显的冷却、熔断或站点运行时惩罚',
+    };
+  }
+
+  const primaryReason = typeof routeDecision?.summary?.[0] === 'string'
+    ? routeDecision.summary[0]
+    : '';
+
+  return {
+    tone: modelCircuitCount > 0 ? 'badge-error' : 'badge-warning',
+    badges,
+    detail: primaryReason || '当前决策已识别到运行时故障，建议结合候选通道原因和最近失败记录继续排查',
+  };
+}
+
 function AnimatedCollapseSection({ open, children }: { open: boolean; children: ReactNode }) {
   const presence = useAnimatedVisibility(open, 220);
   if (!presence.shouldRender) return null;
@@ -147,7 +238,7 @@ function RouteCardInner({
     {
       value: 'round_robin',
       label: tr('轮询'),
-      description: tr('按全局顺序轮流调用，忽略优先级，连续失败 3 次后进入分级冷却'),
+      description: tr('按全局顺序轮流调用，失败通道会按运行时状态临时降权、避让或冷却'),
     },
     {
       value: 'stable_first',
@@ -174,6 +265,17 @@ function RouteCardInner({
   const decisionMap = new Map<number, RouteDecisionCandidate>(
     (routeDecision?.candidates || []).map((c) => [c.channelId, c]),
   );
+  const explicitGroupFaultSummary = buildExplicitGroupFaultSummary(explicitGroupSourceHealth);
+  const routeDecisionFaultSummary = buildRouteDecisionFaultSummary(routeDecision);
+  const routeFaultSummary = explicitGroupFaultSummary
+    || routeDecisionFaultSummary
+    || (readOnlyRoute
+      ? {
+        tone: 'badge-warning' as const,
+        badges: [tr('当前无通道')],
+        detail: tr('该路由暂未生成可用通道，通常需要补充 Key、模型支持或执行自动重建'),
+      }
+      : null);
 
   const channelGroups = (() => {
     if (!channels || channels.length === 0) return [];
@@ -472,6 +574,34 @@ function RouteCardInner({
       ) : !exactRoute ? (
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
           {tr('通配符路由按请求实时决策；概率解释在当前路由内统一估算。')}
+        </div>
+      ) : null}
+
+      {routeFaultSummary ? (
+        <div
+          style={{
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-sm)',
+            padding: '10px 12px',
+            background: 'var(--color-bg-card)',
+            display: 'grid',
+            gap: 6,
+            marginBottom: 12,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span className={`badge ${routeFaultSummary.tone}`} style={{ fontSize: 10 }}>
+              {explicitGroupRoute ? tr('来源故障摘要') : tr('故障摘要')}
+            </span>
+            {routeFaultSummary.badges.map((badge) => (
+              <span key={badge} className="badge badge-muted" style={{ fontSize: 10 }}>
+                {badge}
+              </span>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+            {routeFaultSummary.detail}
+          </div>
         </div>
       ) : null}
 

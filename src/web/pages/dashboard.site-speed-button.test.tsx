@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, create, type ReactTestInstance } from 'react-test-renderer';
+import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast.js';
 import Dashboard from './Dashboard.js';
 
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getDashboard: vi.fn(),
+    getRuntimeOverview: vi.fn(),
     getSiteDistribution: vi.fn(),
     getSiteTrend: vi.fn(),
     getSites: vi.fn(),
@@ -47,6 +49,33 @@ describe('Dashboard site speed buttons', () => {
       proxy24h: { success: 0, total: 0, totalTokens: 0 },
       modelAnalysis: null,
     });
+    apiMock.getRuntimeOverview.mockResolvedValue({
+      service: {
+        name: 'metapi',
+        version: '1.2.3',
+        uptimeSec: 120,
+        startedAt: '2026-03-25T00:00:00.000Z',
+        now: '2026-03-25T00:02:00.000Z',
+        environment: {
+          port: 3000,
+          host: '0.0.0.0',
+          dbDialect: 'sqlite',
+          dataDir: '/tmp/metapi',
+        },
+      },
+      database: { ready: true, dialect: 'sqlite' },
+      oauthLoopback: { total: 1, ready: 1, attempted: 1, states: [] },
+      backgroundTasks: { total: 0, pending: 0, running: 0, failed: 0 },
+      notifications: {
+        webhookEnabled: false,
+        barkEnabled: false,
+        telegramEnabled: false,
+        serverChanEnabled: false,
+        smtpEnabled: false,
+        cooldownSec: 0,
+      },
+      recentActivity: { proxyRequests24h: 0, proxyFailures24h: 0, unreadEvents: 0 },
+    });
     apiMock.getSiteDistribution.mockResolvedValue({ distribution: [] });
     apiMock.getSiteTrend.mockResolvedValue({ trend: [] });
     apiMock.getSites.mockResolvedValue([
@@ -74,9 +103,11 @@ describe('Dashboard site speed buttons', () => {
     try {
       await act(async () => {
         root = create(
-          <ToastProvider>
-            <Dashboard />
-          </ToastProvider>,
+          <MemoryRouter>
+            <ToastProvider>
+              <Dashboard />
+            </ToastProvider>
+          </MemoryRouter>,
         );
       });
       await flushMicrotasks();
@@ -104,9 +135,11 @@ describe('Dashboard site speed buttons', () => {
     try {
       await act(async () => {
         root = create(
-          <ToastProvider>
-            <Dashboard />
-          </ToastProvider>,
+          <MemoryRouter>
+            <ToastProvider>
+              <Dashboard />
+            </ToastProvider>
+          </MemoryRouter>,
         );
       });
       await flushMicrotasks();

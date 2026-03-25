@@ -95,7 +95,7 @@ describe('TokenRoutes refresh decision action', () => {
     vi.clearAllMocks();
   });
 
-  it('passes refreshPricingCatalog and persistSnapshots when user clicks refresh selection probability', async () => {
+  it('passes refreshPricingCatalog and persistSnapshots when user clicks refresh route decisions', async () => {
     let root: ReturnType<typeof create> | null = null;
     try {
       await act(async () => {
@@ -109,7 +109,7 @@ describe('TokenRoutes refresh decision action', () => {
       });
       await flushMicrotasks();
 
-      const refreshButton = findButtonByText(root.root, '刷新选中概率');
+      const refreshButton = findButtonByText(root.root, '刷新路由决策');
       await act(async () => {
         await refreshButton.props.onClick();
       });
@@ -146,6 +146,120 @@ describe('TokenRoutes refresh decision action', () => {
       expect(apiMock.getRoutesSummary).toHaveBeenCalledTimes(2);
       expect(apiMock.getRouteDecisionsBatch).toHaveBeenLastCalledWith(['gpt-4o-mini'], { refreshPricingCatalog: true, persistSnapshots: true });
       expect(apiMock.getRouteWideDecisionsBatch).toHaveBeenLastCalledWith([2], { refreshPricingCatalog: true, persistSnapshots: true });
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('renders route fault overview badges after decision snapshot is available', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        id: 1,
+        modelPattern: 'claude-sonnet-4-6',
+        displayName: 'claude-sonnet-4-6',
+        displayIcon: null,
+        modelMapping: null,
+        enabled: true,
+        channelCount: 0,
+        enabledChannelCount: 0,
+        siteNames: ['Demo Site'],
+        decisionSnapshot: null,
+        decisionRefreshedAt: null,
+      },
+      {
+        id: 2,
+        modelPattern: 'claude-opus-4-6',
+        displayName: 'claude-opus-4-6',
+        displayIcon: null,
+        modelMapping: null,
+        enabled: true,
+        channelCount: 1,
+        enabledChannelCount: 1,
+        siteNames: ['Demo Site'],
+        decisionSnapshot: null,
+        decisionRefreshedAt: null,
+      },
+      {
+        id: 9,
+        routeMode: 'explicit_group',
+        modelPattern: 'claude-group',
+        displayName: 'claude-group',
+        displayIcon: null,
+        modelMapping: null,
+        enabled: true,
+        channelCount: 2,
+        enabledChannelCount: 2,
+        siteNames: ['Demo Site'],
+        decisionSnapshot: {
+          requestedModel: 'claude-group',
+          actualModel: 'claude-group',
+          matched: true,
+          summary: ['最近失败导致部分通道被临时避让'],
+          candidates: [
+            {
+              channelId: 101,
+              accountId: 1,
+              username: 'demo-a',
+              siteName: 'Demo Site',
+              tokenName: 'token-a',
+              priority: 0,
+              weight: 1,
+              eligible: false,
+              recentlyFailed: true,
+              avoidedByRecentFailure: true,
+              cooldownUntil: '2099-01-01T00:00:00.000Z',
+              probability: 0,
+              reason: 'cooldown',
+              modelCircuitStatus: { isOpen: true, state: 'open', reason: 'recent failures' },
+              siteRuntimeState: { combinedMultiplier: 0.4, modelBreakerOpen: false, globalBreakerOpen: false },
+            },
+            {
+              channelId: 102,
+              accountId: 2,
+              username: 'demo-b',
+              siteName: 'Demo Site',
+              tokenName: 'token-b',
+              priority: 1,
+              weight: 1,
+              eligible: true,
+              recentlyFailed: false,
+              avoidedByRecentFailure: false,
+              probability: 1,
+              reason: 'ok',
+            },
+          ],
+        },
+        decisionRefreshedAt: '2026-03-25T00:00:00.000Z',
+        sourceRouteIds: [1, 2],
+      },
+    ]);
+    apiMock.getModelTokenCandidates.mockResolvedValue({
+      models: {},
+      modelsWithoutToken: {
+        'claude-sonnet-4-6': [{ siteId: 1, siteName: 'Demo Site', accountId: 1, username: 'demo-a' }],
+      },
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const pageText = collectText(root.root);
+      expect(pageText).toContain('当前故障总览');
+      expect(pageText).toContain('冷却中 1');
+      expect(pageText).toContain('失败避让 1');
+      expect(pageText).toContain('模型熔断 1');
+      expect(pageText).toContain('站点惩罚 1');
+      expect(pageText).toContain('来源异常群组 1');
     } finally {
       root?.unmount();
     }
