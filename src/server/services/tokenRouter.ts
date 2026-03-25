@@ -1,6 +1,6 @@
 ﻿import { and, eq, inArray } from 'drizzle-orm';
 import { minimatch } from 'minimatch';
-import { db, schema } from '../db/index.js';
+import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { config } from '../config.js';
 import { getCachedModelRoutingReferenceCost, refreshModelPricingCatalog } from './modelPricingService.js';
@@ -53,6 +53,11 @@ type FailureAwareChannel = {
   failCount?: number | null;
   lastFailAt?: string | null;
   consecutiveFailCount?: number | null;
+};
+
+type PersistedUnavailableModelSnapshot = {
+  tokenModels: Map<number, Set<string>>;
+  accountModels: Map<number, Set<string>>;
 };
 
 type SiteRuntimeFailureContext = {
@@ -135,6 +140,18 @@ const SITE_VALIDATION_FAILURE_PATTERNS: RegExp[] = [
   /unsupported\s+media\s+type/i,
 ];
 
+const DEFINITIVE_TOKEN_AUTH_FAILURE_PATTERNS: RegExp[] = [
+  /invalid\s+api\s+key/i,
+  /invalid[_\s-]?api[_\s-]?key/i,
+  /api\s+key\s+not\s+found/i,
+  /invalid\s+access\s+token/i,
+  /access\s+token\s+has\s+expired/i,
+  /expired\s+access\s+token/i,
+  /expired\s+token/i,
+  /jwt\s+expired/i,
+  /token\s+expired/i,
+];
+
 const SITE_TRANSIENT_FAILURE_PATTERNS: RegExp[] = [
   /bad\s+gateway/i,
   /gateway\s+time-?out/i,
@@ -178,6 +195,102 @@ let siteRuntimeHealthLoaded = false;
 let siteRuntimeHealthLoadPromise: Promise<void> | null = null;
 let siteRuntimeHealthSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let siteRuntimeHealthPersistInFlight: Promise<void> | null = null;
+
+function createEmptyPersistedUnavailableModelSnapshot(): PersistedUnavailableModelSnapshot {
+  return {
+    tokenModels: new Map<number, Set<string>>(),
+    accountModels: new Map<number, Set<string>>(),
+  };
+}
+
+function appendUnavailableModel(target: Map<number, Set<string>>, ownerId: number, modelName: string): void {
+  if (!Number.isFinite(ownerId) || ownerId <= 0) return;
+  const normalizedModelName = normalizeModelAlias(modelName);
+  if (!normalizedModelName) return;
+  if (!target.has(ownerId)) {
+    target.set(ownerId, new Set<string>());
+  }
+  target.get(ownerId)!.add(normalizedModelName);
+}
+
+async function loadPersistedUnavailableModelsForCandidates(
+  candidates: RouteChannelCandidate[],
+): Promise<PersistedUnavailableModelSnapshot> {
+  const snapshot = createEmptyPersistedUnavailableModelSnapshot();
+  if (candidates.length === 0) return snapshot;
+
+  const tokenIds = Array.from(new Set(
+    candidates
+      .map((candidate) => (
+        typeof candidate.channel.tokenId === 'number' && candidate.channel.tokenId > 0
+          ? candidate.channel.tokenId
+          : null
+      ))
+      .filter((value): value is number => typeof value === 'number'),
+  ));
+  const accountIds = Array.from(new Set(
+    candidates
+      .map((candidate) => Math.trunc(candidate.account.id))
+      .filter((value) => Number.isFinite(value) && value > 0),
+  ));
+
+  if (tokenIds.length > 0) {
+    const tokenRows = await db.select({
+      tokenId: schema.tokenModelAvailability.tokenId,
+      modelName: schema.tokenModelAvailability.modelName,
+    }).from(schema.tokenModelAvailability)
+      .where(
+        and(
+          inArray(schema.tokenModelAvailability.tokenId, tokenIds),
+          eq(schema.tokenModelAvailability.available, false),
+        ),
+      )
+      .all();
+    for (const row of tokenRows) {
+      const normalizedModelName = normalizeModelAlias(String(row.modelName || ''));
+      appendUnavailableModel(snapshot.tokenModels, row.tokenId, normalizedModelName);
+    }
+  }
+
+  if (accountIds.length > 0) {
+    const accountRows = await db.select({
+      accountId: schema.modelAvailability.accountId,
+      modelName: schema.modelAvailability.modelName,
+    }).from(schema.modelAvailability)
+      .where(
+        and(
+          inArray(schema.modelAvailability.accountId, accountIds),
+          eq(schema.modelAvailability.available, false),
+        ),
+      )
+      .all();
+    for (const row of accountRows) {
+      const normalizedModelName = normalizeModelAlias(String(row.modelName || ''));
+      appendUnavailableModel(snapshot.accountModels, row.accountId, normalizedModelName);
+    }
+  }
+
+  return snapshot;
+}
+
+function isCandidatePersistentlyUnavailableForModel(
+  candidate: RouteChannelCandidate,
+  runtimeModelName: string | null | undefined,
+  snapshot?: PersistedUnavailableModelSnapshot,
+): boolean {
+  if (!snapshot) return false;
+  const normalizedModelName = normalizeModelAlias(runtimeModelName || '');
+  if (!normalizedModelName) return false;
+
+  const tokenId = typeof candidate.channel.tokenId === 'number' && candidate.channel.tokenId > 0
+    ? candidate.channel.tokenId
+    : null;
+  if (tokenId != null && snapshot.tokenModels.get(tokenId)?.has(normalizedModelName)) {
+    return true;
+  }
+
+  return snapshot.accountModels.get(candidate.account.id)?.has(normalizedModelName) ?? false;
+}
 
 function resolveSiteRuntimeBreakerMs(level: number): number {
   const normalizedLevel = Math.max(0, Math.min(SITE_RUNTIME_BREAKER_LEVELS_MS.length - 1, Math.trunc(level)));
@@ -273,6 +386,10 @@ function isAuthLikeFailure(context: SiteRuntimeFailureContext = {}): boolean {
 
 function resolveAuthFailureCooldownSec(context: SiteRuntimeFailureContext = {}): number {
   return isAuthLikeFailure(context) ? 30 * 60 : 0;
+}
+
+function isDefinitiveTokenCredentialFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  return matchesAnyPattern(DEFINITIVE_TOKEN_AUTH_FAILURE_PATTERNS, context.errorText);
 }
 
 function shouldApplyImmediateRoundRobinCooldown(category: ReturnType<typeof classifyProxyFailureCategory>): boolean {
@@ -1067,27 +1184,115 @@ async function markPersistedModelUnavailableForChannel(
   const checkedAt = new Date().toISOString();
 
   if (typeof channel.tokenId === 'number' && Number.isFinite(channel.tokenId)) {
-    await db.update(schema.tokenModelAvailability).set({
-      available: false,
-      checkedAt,
-    }).where(
-      and(
-        eq(schema.tokenModelAvailability.tokenId, channel.tokenId),
-        eq(schema.tokenModelAvailability.modelName, normalizedModelName),
-      ),
-    ).run();
+    if (runtimeDbDialect === 'mysql') {
+      const existing = await db.select({ id: schema.tokenModelAvailability.id })
+        .from(schema.tokenModelAvailability)
+        .where(
+          and(
+            eq(schema.tokenModelAvailability.tokenId, channel.tokenId),
+            eq(schema.tokenModelAvailability.modelName, normalizedModelName),
+          ),
+        )
+        .get();
+      if (existing) {
+        await db.update(schema.tokenModelAvailability).set({
+          available: false,
+          checkedAt,
+        }).where(eq(schema.tokenModelAvailability.id, existing.id)).run();
+      } else {
+        await db.insert(schema.tokenModelAvailability).values({
+          tokenId: channel.tokenId,
+          modelName: normalizedModelName,
+          available: false,
+          checkedAt,
+        }).run();
+      }
+    } else {
+      await (db.insert(schema.tokenModelAvailability).values({
+        tokenId: channel.tokenId,
+        modelName: normalizedModelName,
+        available: false,
+        checkedAt,
+      }) as any)
+        .onConflictDoUpdate({
+          target: [schema.tokenModelAvailability.tokenId, schema.tokenModelAvailability.modelName],
+          set: {
+            available: false,
+            checkedAt,
+          },
+        })
+        .run();
+    }
     return;
   }
 
-  await db.update(schema.modelAvailability).set({
+  if (runtimeDbDialect === 'mysql') {
+    const existing = await db.select({ id: schema.modelAvailability.id })
+      .from(schema.modelAvailability)
+      .where(
+        and(
+          eq(schema.modelAvailability.accountId, accountId),
+          eq(schema.modelAvailability.modelName, normalizedModelName),
+        ),
+      )
+      .get();
+    if (existing) {
+      await db.update(schema.modelAvailability).set({
+        available: false,
+        checkedAt,
+      }).where(eq(schema.modelAvailability.id, existing.id)).run();
+    } else {
+      await db.insert(schema.modelAvailability).values({
+        accountId,
+        modelName: normalizedModelName,
+        available: false,
+        checkedAt,
+      }).run();
+    }
+    return;
+  }
+
+  await (db.insert(schema.modelAvailability).values({
+    accountId,
+    modelName: normalizedModelName,
     available: false,
     checkedAt,
-  }).where(
-    and(
-      eq(schema.modelAvailability.accountId, accountId),
-      eq(schema.modelAvailability.modelName, normalizedModelName),
-    ),
-  ).run();
+  }) as any)
+    .onConflictDoUpdate({
+      target: [schema.modelAvailability.accountId, schema.modelAvailability.modelName],
+      set: {
+        available: false,
+        checkedAt,
+      },
+    })
+    .run();
+}
+
+async function disableDefinitivelyBrokenTokenForChannel(
+  channel: Pick<ChannelRow, 'id' | 'tokenId'>,
+): Promise<void> {
+  const tokenId = typeof channel.tokenId === 'number' && channel.tokenId > 0
+    ? channel.tokenId
+    : null;
+  if (tokenId == null) return;
+
+  const nowIso = new Date().toISOString();
+  await db.update(schema.accountTokens).set({
+    enabled: false,
+    isDefault: false,
+    updatedAt: nowIso,
+  }).where(eq(schema.accountTokens.id, tokenId)).run();
+
+  for (const entry of routeMatchCache.values()) {
+    for (const candidate of entry.match.channels) {
+      if (candidate.channel.tokenId !== tokenId) continue;
+      if (candidate.token) {
+        candidate.token.enabled = false;
+        candidate.token.isDefault = false;
+        candidate.token.updatedAt = nowIso;
+      }
+    }
+  }
 }
 
 export interface RouteDecisionCandidate {
@@ -1165,6 +1370,7 @@ type CandidateEligibilityOptions = {
   nowIso?: string;
   nowMs?: number;
   runtimeModelName?: string | null;
+  persistedUnavailableModels?: PersistedUnavailableModelSnapshot;
 };
 
 type CostSignal = {
@@ -1694,7 +1900,7 @@ export class TokenRouter {
   ): Promise<RouteDecisionExplanation> {
     await ensureSiteRuntimeHealthStateLoaded();
     const match = await this.findRoute(requestedModel, downstreamPolicy);
-    return this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
+    return await this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
   }
 
   async explainSelectionForRoute(
@@ -1705,14 +1911,14 @@ export class TokenRouter {
   ): Promise<RouteDecisionExplanation> {
     await ensureSiteRuntimeHealthStateLoaded();
     const match = await this.findRouteById(routeId, downstreamPolicy);
-    return this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
+    return await this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
   }
 
   async explainSelectionRouteWide(routeId: number, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<RouteDecisionExplanation> {
     await ensureSiteRuntimeHealthStateLoaded();
     const match = await this.findRouteById(routeId, downstreamPolicy);
     const fallbackRequestedModel = match?.route.modelPattern || `route:${routeId}`;
-    return this.explainSelectionFromMatch(match, fallbackRequestedModel, {
+    return await this.explainSelectionFromMatch(match, fallbackRequestedModel, {
       bypassSourceModelCheck: true,
       useChannelSourceModelForCost: true,
       downstreamPolicy,
@@ -1751,11 +1957,11 @@ export class TokenRouter {
     });
   }
 
-  private explainSelectionFromMatch(
+  private async explainSelectionFromMatch(
     match: RouteMatch | null,
     requestedModel: string,
     options: ExplainSelectionOptions = {},
-  ): RouteDecisionExplanation {
+  ): Promise<RouteDecisionExplanation> {
     const excludeChannelIds = options.excludeChannelIds ?? [];
     const downstreamPolicy = options.downstreamPolicy ?? DEFAULT_DOWNSTREAM_POLICY;
 
@@ -1777,6 +1983,7 @@ export class TokenRouter {
     const runtimeModelResolver = requestedByDisplayName
       ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
       : mappedModel;
+    const persistedUnavailableModels = await loadPersistedUnavailableModelsForCandidates(match.channels);
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
@@ -1805,6 +2012,7 @@ export class TokenRouter {
         nowIso,
         nowMs,
         runtimeModelName,
+        persistedUnavailableModels,
       });
       const modelCircuitStatus = getCandidateModelCircuitStatus(row.channel.id, runtimeModelName, nowMs);
       const runtimeHealthDetails = getSiteRuntimeHealthDetails(row.site.id, runtimeModelName, nowMs);
@@ -2389,6 +2597,10 @@ export class TokenRouter {
       await markPersistedModelUnavailableForChannel(ch, account.id, normalizedContext.modelName);
     }
 
+    if (failureCategory === 'auth' && isDefinitiveTokenCredentialFailure(normalizedContext)) {
+      await disableDefinitivelyBrokenTokenForChannel(ch);
+    }
+
     if (normalizeModelAlias(normalizedContext.modelName || '')) {
       recordModelCircuitFailure(
         channelId,
@@ -2427,6 +2639,7 @@ export class TokenRouter {
     const runtimeModelResolver = requestedByDisplayName
       ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
       : mappedModel;
+    const persistedUnavailableModels = await loadPersistedUnavailableModelsForCandidates(match.channels);
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
@@ -2440,6 +2653,7 @@ export class TokenRouter {
         runtimeModelName: typeof runtimeModelResolver === 'function'
           ? runtimeModelResolver(candidate)
           : runtimeModelResolver,
+        persistedUnavailableModels,
       }).length === 0
     ));
 
@@ -2751,6 +2965,14 @@ export class TokenRouter {
 
     if (!bypassSourceModelCheck && !channelSupportsRequestedModel(candidate.channel.sourceModel, options.requestedModel)) {
       reasonParts.push(`来源模型不匹配=${candidate.channel.sourceModel || ''}`);
+    }
+
+    if (isCandidatePersistentlyUnavailableForModel(
+      candidate,
+      options.runtimeModelName,
+      options.persistedUnavailableModels,
+    )) {
+      reasonParts.push('模型能力已标记不可用');
     }
 
     if (!candidate.channel.enabled) reasonParts.push('通道禁用');

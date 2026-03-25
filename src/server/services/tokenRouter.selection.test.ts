@@ -67,6 +67,8 @@ describe('TokenRouter selection scoring', () => {
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.settings).run();
+    await db.delete(schema.tokenModelAvailability).run();
+    await db.delete(schema.modelAvailability).run();
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
@@ -1143,7 +1145,7 @@ describe('TokenRouter selection scoring', () => {
     const router = new TokenRouter();
     await router.recordFailure(primaryChannel.id, {
       status: 401,
-      errorText: 'invalid api key',
+      errorText: 'unauthorized',
       modelName: 'gpt-4o-hard-skip',
     });
     await db.update(schema.routeChannels).set({
@@ -1217,5 +1219,134 @@ describe('TokenRouter selection scoring', () => {
 
     expect(availability?.available).toBe(false);
     expect(typeof availability?.checkedAt).toBe('string');
+  });
+
+  it('creates an unavailable token-model record when a model-unsupported failure was not previously tracked', async () => {
+    const route = await createRoute('gpt-4o-create-unsupported');
+    const site = await createSite('create-unsupported');
+    const account = await createAccount(site.id, 'create-unsupported-user');
+    const token = await createToken(account.id, 'create-unsupported-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, {
+      status: 400,
+      errorText: 'model not supported',
+      modelName: 'gpt-4o-create-unsupported',
+    });
+
+    const availability = await db.select().from(schema.tokenModelAvailability)
+      .where(
+        and(
+          eq(schema.tokenModelAvailability.tokenId, token.id),
+          eq(schema.tokenModelAvailability.modelName, 'gpt-4o-create-unsupported'),
+        ),
+      )
+      .get();
+
+    expect(availability?.available).toBe(false);
+    expect(typeof availability?.checkedAt).toBe('string');
+  });
+
+  it('skips token channels that are persistently marked unavailable for the requested model', async () => {
+    const route = await createRoute('gpt-4o-persisted-skip');
+
+    const siteBlocked = await createSite('persisted-blocked');
+    const accountBlocked = await createAccount(siteBlocked.id, 'persisted-blocked-user');
+    const tokenBlocked = await createToken(accountBlocked.id, 'persisted-blocked-token');
+    const blockedChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountBlocked.id,
+      tokenId: tokenBlocked.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteHealthy = await createSite('persisted-healthy');
+    const accountHealthy = await createAccount(siteHealthy.id, 'persisted-healthy-user');
+    const tokenHealthy = await createToken(accountHealthy.id, 'persisted-healthy-token');
+    const healthyChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountHealthy.id,
+      tokenId: tokenHealthy.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: tokenBlocked.id,
+      modelName: 'gpt-4o-persisted-skip',
+      available: false,
+    }).run();
+
+    const router = new TokenRouter();
+    const selected = await router.selectChannel('gpt-4o-persisted-skip');
+    const decision = await router.explainSelection('gpt-4o-persisted-skip');
+
+    expect(selected?.channel.id).toBe(healthyChannel.id);
+    const blockedCandidate = decision.candidates.find((candidate) => candidate.channelId === blockedChannel.id);
+    const healthyCandidate = decision.candidates.find((candidate) => candidate.channelId === healthyChannel.id);
+    expect(blockedCandidate?.eligible).toBe(false);
+    expect(blockedCandidate?.reason || '').toContain('模型能力已标记不可用');
+    expect(healthyCandidate?.eligible).toBe(true);
+  });
+
+  it('disables a definitively broken explicit token after auth failures so it is no longer routable', async () => {
+    const route = await createRoute('gpt-4o-broken-token');
+
+    const siteBroken = await createSite('broken-token');
+    const accountBroken = await createAccount(siteBroken.id, 'broken-token-user');
+    const tokenBroken = await createToken(accountBroken.id, 'broken-token-value');
+    const brokenChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountBroken.id,
+      tokenId: tokenBroken.id,
+      priority: 0,
+      weight: 15,
+      enabled: true,
+    }).returning().get();
+
+    const siteHealthy = await createSite('healthy-token');
+    const accountHealthy = await createAccount(siteHealthy.id, 'healthy-token-user');
+    const tokenHealthy = await createToken(accountHealthy.id, 'healthy-token-value');
+    const healthyChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountHealthy.id,
+      tokenId: tokenHealthy.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(brokenChannel.id, {
+      status: 401,
+      errorText: 'invalid api key',
+      modelName: 'gpt-4o-broken-token',
+    });
+
+    const storedToken = await db.select().from(schema.accountTokens)
+      .where(eq(schema.accountTokens.id, tokenBroken.id))
+      .get();
+    expect(storedToken?.enabled).toBe(false);
+
+    const selected = await router.selectChannel('gpt-4o-broken-token');
+    const decision = await router.explainSelection('gpt-4o-broken-token');
+    const brokenCandidate = decision.candidates.find((candidate) => candidate.channelId === brokenChannel.id);
+    const healthyCandidate = decision.candidates.find((candidate) => candidate.channelId === healthyChannel.id);
+
+    expect(selected?.channel.id).toBe(healthyChannel.id);
+    expect(brokenCandidate?.eligible).toBe(false);
+    expect(brokenCandidate?.reason || '').toContain('令牌不可用');
+    expect(healthyCandidate?.eligible).toBe(true);
   });
 });
