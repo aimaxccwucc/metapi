@@ -16,6 +16,7 @@ import { SITE_DOCS_URL, SITE_GITHUB_URL } from './docsLink.js';
 import { useAnimatedVisibility } from './components/useAnimatedVisibility.js';
 import { useIsMobile } from './components/useIsMobile.js';
 import CenteredModal from './components/CenteredModal.js';
+import RouteErrorBoundary from './components/RouteErrorBoundary.js';
 const SearchModal = lazy(() => import('./components/SearchModal.js'));
 const NotificationPanel = lazy(() => import('./components/NotificationPanel.js'));
 const TooltipLayer = lazy(() => import('./components/TooltipLayer.js'));
@@ -642,6 +643,7 @@ function navLinkPreloadProps(path: string) {
 
 function AppShell() {
   const { language, toggleLanguage, t } = useI18n();
+  const location = useLocation();
   const [authed, setAuthed] = useState(() => hasValidAuthSession(localStorage));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -1118,29 +1120,31 @@ function AppShell() {
 
         <main className="main-content">
           <PageTransition>
-            <Suspense fallback={<RouteLoadingFallback />}>
-              <Routes>
-                <Route path="/" element={<Dashboard adminName={displayName} />} />
-                <Route path="/sites" element={<Sites />} />
-                <Route path="/site-announcements" element={<SiteAnnouncements />} />
-                <Route path="/accounts" element={<Accounts />} />
-                <Route path="/oauth" element={<OAuthManagement />} />
-                <Route path="/tokens" element={<Tokens />} />
-                <Route path="/checkin" element={<CheckinLog />} />
-                <Route path="/routes" element={<TokenRoutes />} />
-                <Route path="/logs" element={<ProxyLogs />} />
-                <Route path="/monitor" element={<Monitors />} />
-                <Route path="/settings" element={<Settings />} />
-                <Route path="/downstream-keys" element={<DownstreamKeys />} />
-                <Route path="/events" element={<ProgramLogs />} />
-                <Route path="/settings/import-export" element={<ImportExport />} />
-                <Route path="/settings/notify" element={<NotificationSettings />} />
-                <Route path="/models" element={<Models />} />
-                <Route path="/playground" element={<ModelTester />} />
-                <Route path="/about" element={<About />} />
-                <Route path="*" element={<Navigate to="/" />} />
-              </Routes>
-            </Suspense>
+            <RouteErrorBoundary resetKey={location.pathname} t={t}>
+              <Suspense fallback={<RouteLoadingFallback />}>
+                <Routes>
+                  <Route path="/" element={<Dashboard adminName={displayName} />} />
+                  <Route path="/sites" element={<Sites />} />
+                  <Route path="/site-announcements" element={<SiteAnnouncements />} />
+                  <Route path="/accounts" element={<Accounts />} />
+                  <Route path="/oauth" element={<OAuthManagement />} />
+                  <Route path="/tokens" element={<Tokens />} />
+                  <Route path="/checkin" element={<CheckinLog />} />
+                  <Route path="/routes" element={<TokenRoutes />} />
+                  <Route path="/logs" element={<ProxyLogs />} />
+                  <Route path="/monitor" element={<Monitors />} />
+                  <Route path="/settings" element={<Settings />} />
+                  <Route path="/downstream-keys" element={<DownstreamKeys />} />
+                  <Route path="/events" element={<ProgramLogs />} />
+                  <Route path="/settings/import-export" element={<ImportExport />} />
+                  <Route path="/settings/notify" element={<NotificationSettings />} />
+                  <Route path="/models" element={<Models />} />
+                  <Route path="/playground" element={<ModelTester />} />
+                  <Route path="/about" element={<About />} />
+                  <Route path="*" element={<Navigate to="/" />} />
+                </Routes>
+              </Suspense>
+            </RouteErrorBoundary>
           </PageTransition>
         </main>
       </div>

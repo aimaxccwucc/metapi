@@ -926,6 +926,62 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.summary.join(' ')).toContain('本次未选出通道');
   });
 
+  it('temporarily avoids channels that were just selected by another request', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-selection-lease');
+
+    const sitePrimary = await createSite('lease-primary');
+    const accountPrimary = await createAccount(sitePrimary.id, 'lease-user-primary');
+    const tokenPrimary = await createToken(accountPrimary.id, 'lease-token-primary');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountPrimary.id,
+      tokenId: tokenPrimary.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+
+    const siteFallback = await createSite('lease-fallback');
+    const accountFallback = await createAccount(siteFallback.id, 'lease-user-fallback');
+    const tokenFallback = await createToken(accountFallback.id, 'lease-token-fallback');
+    const fallbackChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountFallback.id,
+      tokenId: tokenFallback.id,
+      priority: 0,
+      weight: 5,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const first = await router.selectChannel('gpt-selection-lease');
+      const second = await router.previewSelectedChannel('gpt-selection-lease');
+      const decision = await router.explainSelection('gpt-selection-lease');
+      const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+      const fallbackCandidate = decision.candidates.find((candidate) => candidate.channelId === fallbackChannel.id);
+
+      expect(first?.channel.id).toBe(primaryChannel.id);
+      expect(second?.channel.id).toBe(fallbackChannel.id);
+      expect(primaryCandidate?.avoidedByInflightLease).toBe(true);
+      expect(primaryCandidate?.reason || '').toContain('通道忙碌中');
+      expect(primaryCandidate?.leasedUntil).toBeTruthy();
+      expect(fallbackCandidate?.probability || 0).toBeGreaterThan(0);
+      expect(decision.summary.join(' ')).toContain('并发占用避让');
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
+
   it('does not fall back to a runtime-breaker-blocked layer when only lower priorities are recently failed', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shouldRetryProxyRequest } from './proxyRetryPolicy.js';
+import { classifyProxyFailureCategory, shouldRetryProxyRequest } from './proxyRetryPolicy.js';
 
 describe('proxyRetryPolicy', () => {
   it('retries on rate limit and server errors', () => {
@@ -42,5 +42,15 @@ describe('proxyRetryPolicy', () => {
     expect(
       shouldRetryProxyRequest(400, 'Unsupported legacy protocol: /v1/chat/completions is not supported. Please use /v1/responses.'),
     ).toBe(true);
+  });
+
+  it('classifies auth-like 400 responses as auth failures for stronger channel避让', () => {
+    expect(classifyProxyFailureCategory(400, 'invalid api key')).toBe('auth');
+    expect(classifyProxyFailureCategory(400, 'Access token has expired')).toBe('auth');
+  });
+
+  it('classifies text-based quota failures as rate_limit', () => {
+    expect(classifyProxyFailureCategory(400, 'quota exceeded')).toBe('rate_limit');
+    expect(classifyProxyFailureCategory(400, 'too many requests')).toBe('rate_limit');
   });
 });

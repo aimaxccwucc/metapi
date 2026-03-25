@@ -242,8 +242,10 @@ export type RouteDecisionCandidate = {
   eligible: boolean;
   recentlyFailed: boolean;
   avoidedByRecentFailure: boolean;
+  avoidedByInflightLease?: boolean;
   cooldownUntil?: string | null;
   lastFailAt?: string | null;
+  leasedUntil?: string | null;
   consecutiveFailCount?: number;
   cooldownLevel?: number;
   probability: number;

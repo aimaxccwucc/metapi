@@ -24,6 +24,26 @@ const MODEL_UNSUPPORTED_PATTERNS: RegExp[] = [
   /you\s+do\s+not\s+have\s+access\s+to\s+the\s+model/i,
 ];
 
+const AUTH_FAILURE_PATTERNS: RegExp[] = [
+  /invalid\s+api\s+key/i,
+  /invalid[_\s-]?api[_\s-]?key/i,
+  /api\s+key\s+not\s+found/i,
+  /invalid\s+access\s+token/i,
+  /access\s+token\s+has\s+expired/i,
+  /expired\s+access\s+token/i,
+  /expired\s+token/i,
+  /authentication\s+failed/i,
+  /unauthorized/i,
+  /forbidden/i,
+];
+
+const RATE_LIMIT_PATTERNS: RegExp[] = [
+  /rate\s+limit/i,
+  /too\s+many\s+requests/i,
+  /quota/i,
+  /retry\s+after/i,
+];
+
 const RETRYABLE_CHANNEL_LOCAL_PATTERNS: RegExp[] = [
   /unsupported\s+legacy\s+protocol/i,
   /please\s+use\s+\/v1\/responses/i,
@@ -80,7 +100,8 @@ export function classifyProxyFailureCategory(status?: number | null, upstreamErr
 
   if (normalizedStatus === 0) return 'network';
   if (normalizedStatus === 401 || normalizedStatus === 403) return 'auth';
-  if (normalizedStatus === 429 || /rate\s+limit|quota/i.test(text)) return 'rate_limit';
+  if (matchesAnyPattern(AUTH_FAILURE_PATTERNS, text)) return 'auth';
+  if (normalizedStatus === 429 || matchesAnyPattern(RATE_LIMIT_PATTERNS, text)) return 'rate_limit';
   if (normalizedStatus === 413 || /payload\s+too\s+large|context\s+length|maximum\s+context/i.test(text)) {
     return 'payload_too_large';
   }

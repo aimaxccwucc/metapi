@@ -95,6 +95,7 @@ const SITE_RUNTIME_HEALTH_PERSIST_DEBOUNCE_MS = 500;
 const SITE_RUNTIME_HEALTH_PERSIST_STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SITE_RUNTIME_HEALTH_PERSIST_IDLE_TTL_MS = 12 * 60 * 60 * 1000;
 const SITE_RUNTIME_HEALTH_PERSIST_MIN_PENALTY = 0.02;
+const CHANNEL_SELECTION_LEASE_MS = 8_000;
 
 const SITE_PROTOCOL_FAILURE_PATTERNS: RegExp[] = [
   /unsupported\s+legacy\s+protocol/i,
@@ -166,9 +167,13 @@ type SiteRuntimeHealthDetails = {
 };
 
 type WeightedSelectionMode = 'weighted' | 'stable_first';
+type ChannelSelectionLease = {
+  expiresAtMs: number;
+};
 
 const siteRuntimeHealthStates = new Map<number, SiteRuntimeHealthState>();
 const siteModelRuntimeHealthStates = new Map<number, Map<string, SiteRuntimeHealthState>>();
+const channelSelectionLeases = new Map<number, ChannelSelectionLease>();
 let siteRuntimeHealthLoaded = false;
 let siteRuntimeHealthLoadPromise: Promise<void> | null = null;
 let siteRuntimeHealthSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -803,6 +808,72 @@ let routeCacheSnapshot: RouteCacheSnapshot = {
 
 const routeMatchCache = new Map<number, RouteMatchCacheSnapshot>();
 
+function pruneChannelSelectionLeases(nowMs = Date.now()): void {
+  for (const [channelId, lease] of channelSelectionLeases.entries()) {
+    if (lease.expiresAtMs <= nowMs) {
+      channelSelectionLeases.delete(channelId);
+    }
+  }
+}
+
+function getChannelSelectionLease(channelId: number, nowMs = Date.now()): ChannelSelectionLease | null {
+  pruneChannelSelectionLeases(nowMs);
+  return channelSelectionLeases.get(channelId) ?? null;
+}
+
+function getChannelSelectionLeaseUntil(channelId: number, nowMs = Date.now()): string | null {
+  const lease = getChannelSelectionLease(channelId, nowMs);
+  if (!lease) return null;
+  return new Date(lease.expiresAtMs).toISOString();
+}
+
+function reserveChannelSelectionLease(channelId: number, nowMs = Date.now()): string {
+  const expiresAtMs = nowMs + CHANNEL_SELECTION_LEASE_MS;
+  channelSelectionLeases.set(channelId, { expiresAtMs });
+  return new Date(expiresAtMs).toISOString();
+}
+
+function releaseChannelSelectionLease(channelId: number): void {
+  channelSelectionLeases.delete(channelId);
+}
+
+function partitionChannelSelectionLeases<T extends { channel: { id: number } }>(
+  candidates: T[],
+  nowMs = Date.now(),
+): {
+  preferred: T[];
+  avoided: Array<{ candidate: T; leaseUntil: string }>;
+} {
+  if (candidates.length <= 1) {
+    return {
+      preferred: candidates,
+      avoided: [],
+    };
+  }
+
+  const preferred: T[] = [];
+  const avoided: Array<{ candidate: T; leaseUntil: string }> = [];
+  for (const candidate of candidates) {
+    const leaseUntil = getChannelSelectionLeaseUntil(candidate.channel.id, nowMs);
+    if (!leaseUntil) {
+      preferred.push(candidate);
+      continue;
+    }
+    avoided.push({ candidate, leaseUntil });
+  }
+
+  return {
+    preferred,
+    avoided,
+  };
+}
+
+function resolveLeaseAvoidWindowSec(leaseUntil: string, nowMs = Date.now()): number {
+  const expiresAtMs = Date.parse(leaseUntil);
+  if (Number.isNaN(expiresAtMs)) return 1;
+  return Math.max(1, Math.ceil((expiresAtMs - nowMs) / 1000));
+}
+
 function resolveTokenRouterCacheTtlMs(): number {
   const raw = Math.trunc(config.tokenRouterCacheTtlMs || 0);
   return Math.max(100, raw);
@@ -918,6 +989,7 @@ export function invalidateTokenRouterCache(): void {
     routes: [],
   };
   routeMatchCache.clear();
+  channelSelectionLeases.clear();
 }
 
 function isSiteDisabled(status?: string | null): boolean {
@@ -1029,8 +1101,10 @@ export interface RouteDecisionCandidate {
   eligible: boolean;
   recentlyFailed: boolean;
   avoidedByRecentFailure: boolean;
+  avoidedByInflightLease?: boolean;
   cooldownUntil?: string | null;
   lastFailAt?: string | null;
+  leasedUntil?: string | null;
   consecutiveFailCount?: number;
   cooldownLevel?: number;
   probability: number;
@@ -1761,8 +1835,10 @@ export class TokenRouter {
         eligible,
         recentlyFailed,
         avoidedByRecentFailure: false,
+        avoidedByInflightLease: false,
         cooldownUntil: row.channel.cooldownUntil ?? null,
         lastFailAt: row.channel.lastFailAt ?? null,
+        leasedUntil: getChannelSelectionLeaseUntil(row.channel.id, nowMs),
         consecutiveFailCount: Math.max(0, row.channel.consecutiveFailCount ?? 0),
         cooldownLevel: Math.max(0, row.channel.cooldownLevel ?? 0),
         probability: 0,
@@ -1866,10 +1942,28 @@ export class TokenRouter {
         };
       }
 
-      const ordered = this.getRoundRobinCandidates(
+      const leasePartition = partitionChannelSelectionLeases(
         recentFailurePartition.preferred.length > 0
           ? recentFailurePartition.preferred
           : breakerFiltered.candidates,
+        nowMs,
+      );
+      if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
+        for (const item of leasePartition.avoided) {
+          const target = candidateMap.get(item.candidate.channel.id);
+          if (!target) continue;
+          target.avoidedByInflightLease = true;
+          target.reason = `通道忙碌中，优先避让（${resolveLeaseAvoidWindowSec(item.leaseUntil, nowMs)} 秒租约）`;
+        }
+        summary.push(`并发占用避让 ${leasePartition.avoided.length}`);
+      }
+
+      const ordered = this.getRoundRobinCandidates(
+        leasePartition.preferred.length > 0
+          ? leasePartition.preferred
+          : (recentFailurePartition.preferred.length > 0
+            ? recentFailurePartition.preferred
+            : breakerFiltered.candidates),
       );
       let selected: RouteChannelCandidate | null = null;
 
@@ -1989,8 +2083,21 @@ export class TokenRouter {
         continue;
       }
 
+      const leasePartition = partitionChannelSelectionLeases(filteredLayer, nowMs);
+      if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
+        for (const item of leasePartition.avoided) {
+          const target = candidateMap.get(item.candidate.channel.id);
+          if (!target) continue;
+          target.avoidedByInflightLease = true;
+          target.reason = `通道忙碌中，优先避让（${resolveLeaseAvoidWindowSec(item.leaseUntil, nowMs)} 秒租约）`;
+        }
+      }
+      const candidateLayer = leasePartition.preferred.length > 0
+        ? leasePartition.preferred
+        : filteredLayer;
+
       const weighted = this.calculateWeightedSelection(
-        filteredLayer,
+        candidateLayer,
         useChannelSourceModelForCost ? runtimeModelResolver : mappedModel,
         downstreamPolicy,
         nowMs,
@@ -2018,6 +2125,9 @@ export class TokenRouter {
       if (avoided.length > 0) {
         layerSummaryParts.push(`最近失败避让 ${avoided.length}`);
       }
+      if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
+        layerSummaryParts.push(`并发占用避让 ${leasePartition.avoided.length}`);
+      }
       if (degradedAcrossPriorityByRecentFailure) {
         layerSummaryParts.push('上层最近失败，已自动降级');
       }
@@ -2044,8 +2154,12 @@ export class TokenRouter {
         if (fallbackPartition.preferred.length === 0) {
           continue;
         }
+        const leasePartition = partitionChannelSelectionLeases(fallbackPartition.preferred, nowMs);
+        const fallbackPreferred = leasePartition.preferred.length > 0
+          ? leasePartition.preferred
+          : fallbackPartition.preferred;
         const weighted = this.calculateWeightedSelection(
-          fallbackPartition.preferred,
+          fallbackPreferred,
           useChannelSourceModelForCost ? runtimeModelResolver : mappedModel,
           downstreamPolicy,
           nowMs,
@@ -2187,6 +2301,7 @@ export class TokenRouter {
       channel.consecutiveFailCount = 0;
       channel.cooldownLevel = 0;
     });
+    releaseChannelSelectionLease(channelId);
 
     if (normalizeModelAlias(modelName || '')) {
       recordModelCircuitSuccess(channelId, modelName || '', nowMs);
@@ -2268,6 +2383,7 @@ export class TokenRouter {
       channel.consecutiveFailCount = consecutiveFailCount;
       channel.cooldownLevel = cooldownLevel;
     });
+    releaseChannelSelectionLease(channelId);
 
     if (failureCategory === 'model_unsupported') {
       await markPersistedModelUnavailableForChannel(ch, account.id, normalizedContext.modelName);
@@ -2338,10 +2454,18 @@ export class TokenRouter {
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
         return null;
       }
-      const selected = this.selectWithModelCircuitGuard(
+      const leasePartition = partitionChannelSelectionLeases(
         recentFailurePartition.preferred.length > 0
           ? recentFailurePartition.preferred
           : breakerFiltered.candidates,
+        nowMs,
+      );
+      const selected = this.selectWithModelCircuitGuard(
+        leasePartition.preferred.length > 0
+          ? leasePartition.preferred
+          : (recentFailurePartition.preferred.length > 0
+            ? recentFailurePartition.preferred
+            : breakerFiltered.candidates),
         (items) => this.selectRoundRobinCandidate(items),
         (candidate) => (
           typeof runtimeModelResolver === 'function'
@@ -2357,6 +2481,7 @@ export class TokenRouter {
       if (!tokenValue) return null;
       if (recordSelection) {
         await this.recordChannelSelection(selected.channel.id);
+        reserveChannelSelectionLease(selected.channel.id, nowMs);
       }
 
       const actualModel = resolveActualModelForSelectedChannel(
@@ -2399,9 +2524,13 @@ export class TokenRouter {
         degradedAcrossPriorityByRecentFailure = true;
         continue;
       }
+      const leasePartition = partitionChannelSelectionLeases(candidates, nowMs);
+      const candidateLayer = leasePartition.preferred.length > 0
+        ? leasePartition.preferred
+        : candidates;
       const selected = routeStrategy === 'stable_first'
         ? this.selectWithModelCircuitGuard(
-          candidates,
+          candidateLayer,
           (items) => this.stableFirstSelect(
             items,
             requestedByDisplayName ? runtimeModelResolver : mappedModel,
@@ -2417,7 +2546,7 @@ export class TokenRouter {
           recordSelection,
         )
         : this.selectWithModelCircuitGuard(
-          candidates,
+          candidateLayer,
           (items) => this.weightedRandomSelect(
             items,
             requestedByDisplayName ? runtimeModelResolver : mappedModel,
@@ -2438,6 +2567,9 @@ export class TokenRouter {
       if (!tokenValue) continue;
       if (routeStrategy === 'stable_first' && recordSelection) {
         await this.recordChannelSelection(selected.channel.id);
+      }
+      if (recordSelection) {
+        reserveChannelSelectionLease(selected.channel.id, nowMs);
       }
 
       const actualModel = resolveActualModelForSelectedChannel(
@@ -2473,9 +2605,13 @@ export class TokenRouter {
         if (fallbackPartition.preferred.length === 0) {
           continue;
         }
+        const leasePartition = partitionChannelSelectionLeases(fallbackPartition.preferred, nowMs);
+        const fallbackPreferred = leasePartition.preferred.length > 0
+          ? leasePartition.preferred
+          : fallbackPartition.preferred;
         const selected = routeStrategy === 'stable_first'
           ? this.selectWithModelCircuitGuard(
-            fallbackPartition.preferred,
+            fallbackPreferred,
             (items) => this.stableFirstSelect(
               items,
               requestedByDisplayName ? runtimeModelResolver : mappedModel,
@@ -2491,7 +2627,7 @@ export class TokenRouter {
             recordSelection,
           )
           : this.selectWithModelCircuitGuard(
-            fallbackPartition.preferred,
+            fallbackPreferred,
             (items) => this.weightedRandomSelect(
               items,
               requestedByDisplayName ? runtimeModelResolver : mappedModel,
@@ -2512,6 +2648,9 @@ export class TokenRouter {
         if (!tokenValue) continue;
         if (routeStrategy === 'stable_first' && recordSelection) {
           await this.recordChannelSelection(selected.channel.id);
+        }
+        if (recordSelection) {
+          reserveChannelSelectionLease(selected.channel.id, nowMs);
         }
 
         const actualModel = resolveActualModelForSelectedChannel(
