@@ -114,6 +114,17 @@ describe('GET /api/routes/diagnostics', () => {
           source: 'checkin',
           checkedAt: '2026-03-25T00:00:00.000Z',
         },
+        checkinSnapshot: {
+          version: 1,
+          status: 'manual_required',
+          reasonCode: 'manual_turnstile_required',
+          retryable: false,
+          requiresManual: true,
+          unsupported: false,
+          lastAttemptAt: '2026-03-25T00:00:00.000Z',
+          message: '站点开启了 Turnstile 校验，需要人工签到',
+          source: 'checkin',
+        },
       }),
     }).returning().get();
 
@@ -205,9 +216,23 @@ describe('GET /api/routes/diagnostics', () => {
       persistedEndpointProfiles: { total: number };
       modelCircuits: { total: number; openCount: number };
       siteRuntimeHealth: { total: number };
+      accountRuntimeHealth: {
+        total: number;
+        busyCount: number;
+        stickyActiveCount: number;
+        items: Array<{ accountId: number; successEma: number; inflightCount: number; concurrencyBudget: number }>;
+      };
       unavailableModels: { total: number; blockingCount: number };
       siteProfiles: { total: number; manualConfiguredCount: number };
-      checkinTodo: { attentionCount: number; manualRequiredCount: number; sites: Array<{ siteId: number; attentionCount: number }> };
+      checkinTodo: {
+        attentionCount: number;
+        manualRequiredCount: number;
+        sites: Array<{
+          siteId: number;
+          attentionCount: number;
+          sampleAccounts: Array<{ checkinSnapshot?: { status?: string; reasonCode?: string } | null }>;
+        }>;
+      };
     };
 
     expect(body.success).toBe(true);
@@ -218,6 +243,9 @@ describe('GET /api/routes/diagnostics', () => {
     expect(body.modelCircuits.total).toBeGreaterThanOrEqual(1);
     expect(body.modelCircuits.openCount).toBeGreaterThanOrEqual(1);
     expect(body.siteRuntimeHealth.total).toBeGreaterThanOrEqual(1);
+    expect(body.accountRuntimeHealth.total).toBeGreaterThanOrEqual(1);
+    expect(body.accountRuntimeHealth.items[0]?.accountId).toBe(account.id);
+    expect(body.accountRuntimeHealth.items[0]?.successEma).toBeGreaterThanOrEqual(0);
     expect(body.unavailableModels.total).toBeGreaterThanOrEqual(1);
     expect(body.unavailableModels.blockingCount).toBeGreaterThanOrEqual(1);
     expect(body.siteProfiles.total).toBeGreaterThanOrEqual(1);
@@ -225,5 +253,7 @@ describe('GET /api/routes/diagnostics', () => {
     expect(body.checkinTodo.attentionCount).toBeGreaterThanOrEqual(1);
     expect(body.checkinTodo.manualRequiredCount).toBeGreaterThanOrEqual(1);
     expect(body.checkinTodo.sites.some((item) => item.siteId === site.id && item.attentionCount > 0)).toBe(true);
+    expect(body.checkinTodo.sites[0]?.sampleAccounts[0]?.checkinSnapshot?.status).toBe('manual_required');
+    expect(body.checkinTodo.sites[0]?.sampleAccounts[0]?.checkinSnapshot?.reasonCode).toBe('manual_turnstile_required');
   });
 });

@@ -466,6 +466,20 @@ export type RouteDiagnosticsResponse = {
         requiresManual: boolean;
         unsupported: boolean;
         failedRecent: boolean;
+        checkinSnapshot: {
+          status: string;
+          reasonCode: string;
+          retryable: boolean;
+          requiresManual: boolean;
+          unsupported: boolean;
+          lastAttemptAt: string;
+          lastSuccessAt?: string | null;
+          nextRetryAt?: string | null;
+          message: string;
+          reward?: string | null;
+          scheduleMode?: 'cron' | 'interval';
+          source: 'checkin';
+        } | null;
         runtimeHealth: {
           state: string;
           reason: string;

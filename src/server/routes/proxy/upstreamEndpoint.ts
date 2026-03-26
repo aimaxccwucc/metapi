@@ -1072,6 +1072,30 @@ function maybeDeleteEndpointRuntimeState(key: string, nowMs = Date.now()): void 
   }
 }
 
+function selectHalfOpenRuntimeEndpoint(
+  candidates: UpstreamEndpoint[],
+  state: EndpointRuntimeState,
+  nowMs: number,
+): UpstreamEndpoint | null {
+  if (candidates.length === 0) return null;
+
+  const preferredFresh = (
+    !!state.preferredEndpoint
+    && (state.preferredUpdatedAtMs + ENDPOINT_RUNTIME_PREFERRED_TTL_MS) > nowMs
+    && candidates.includes(state.preferredEndpoint)
+  );
+  if (preferredFresh && state.preferredEndpoint) {
+    return state.preferredEndpoint;
+  }
+
+  const ranked = [...candidates].sort((left, right) => {
+    const leftUntilMs = state.blockedUntilMsByEndpoint[left] ?? Number.MAX_SAFE_INTEGER;
+    const rightUntilMs = state.blockedUntilMsByEndpoint[right] ?? Number.MAX_SAFE_INTEGER;
+    return leftUntilMs - rightUntilMs;
+  });
+  return ranked[0] || null;
+}
+
 function applyEndpointRuntimePreference(
   candidates: UpstreamEndpoint[],
   key: string,
@@ -1090,7 +1114,8 @@ function applyEndpointRuntimePreference(
 
   let next = candidates.filter((endpoint) => !blocked.has(endpoint));
   if (next.length === 0) {
-    next = [...candidates];
+    const halfOpenEndpoint = selectHalfOpenRuntimeEndpoint(candidates, state, nowMs);
+    next = halfOpenEndpoint ? [halfOpenEndpoint] : [...candidates];
   }
 
   const preferredFresh = (
@@ -1337,6 +1362,11 @@ export function recordUpstreamEndpointFailure(input: {
   });
   const state = getOrCreateEndpointRuntimeState(key, nowMs);
   state.blockedUntilMsByEndpoint[input.endpoint] = nowMs + ENDPOINT_RUNTIME_BLOCK_TTL_MS;
+  if (suggestedEndpoint && suggestedEndpoint !== input.endpoint) {
+    state.preferredEndpoint = suggestedEndpoint;
+    state.preferredUpdatedAtMs = nowMs;
+    delete state.blockedUntilMsByEndpoint[suggestedEndpoint];
+  }
   recordPersistedUpstreamEndpointFailure({
     key,
     endpoint: input.endpoint,

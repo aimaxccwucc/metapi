@@ -212,10 +212,6 @@ function buildDiagnosticClipboardText(input: {
   return [input.summary, input.detail].filter(Boolean).join('\n');
 }
 
-function getAvailabilityCopyLabel(check: AvailabilityCheckState): string {
-  return check.autoKeyCreated ? '复制补 Key 结果' : '复制结果';
-}
-
 function buildAvailabilityDetail(input: {
   reason?: string | null;
   probeEndpoint?: string | null;
@@ -556,25 +552,32 @@ export default function Models() {
     key: string,
     summary: string,
     detail?: string | null,
-    autoKeyTokenId?: number | null,
   ) => {
     try {
-      if (typeof autoKeyTokenId === 'number' && Number.isFinite(autoKeyTokenId) && autoKeyTokenId > 0) {
-        const res = await api.getAccountTokenValue(autoKeyTokenId) as { token?: string };
-        const tokenValue = typeof res?.token === 'string' ? res.token.trim() : '';
-        if (tokenValue) {
-          await navigator.clipboard.writeText(tokenValue);
-          toast.success('已复制自动补齐的令牌');
-        } else {
-          await navigator.clipboard.writeText(buildDiagnosticClipboardText({ summary, detail }));
-          toast.success('诊断信息已复制');
-        }
-      } else {
-        await navigator.clipboard.writeText(buildDiagnosticClipboardText({ summary, detail }));
-        toast.success('诊断信息已复制');
-      }
+      await navigator.clipboard.writeText(buildDiagnosticClipboardText({ summary, detail }));
+      toast.success('诊断信息已复制');
       setCopied(`diagnostic:${key}`);
       setTimeout(() => setCopied((current) => (current === `diagnostic:${key}` ? null : current)), 1500);
+    } catch (error: any) {
+      toast.error(error?.message || '复制失败');
+    }
+  };
+
+  const copyResolvedToken = async (key: string, autoKeyTokenId?: number | null) => {
+    if (!(typeof autoKeyTokenId === 'number' && Number.isFinite(autoKeyTokenId) && autoKeyTokenId > 0)) {
+      toast.error('未找到可复制的自动补齐 Key');
+      return;
+    }
+    try {
+      const res = await api.getAccountTokenValue(autoKeyTokenId) as { token?: string };
+      const tokenValue = typeof res?.token === 'string' ? res.token.trim() : '';
+      if (!tokenValue) {
+        throw new Error('自动补齐的令牌为空');
+      }
+      await navigator.clipboard.writeText(tokenValue);
+      toast.success('已复制自动补齐的令牌');
+      setCopied(`token:${key}`);
+      setTimeout(() => setCopied((current) => (current === `token:${key}` ? null : current)), 1500);
     } catch (error: any) {
       toast.error(error?.message || '复制失败');
     }
@@ -659,18 +662,33 @@ export default function Models() {
                 {expandedDetail ? tr('收起详情') : tr('查看详情')}
               </button>
             ) : null}
+            {check.autoKeyCreated ? (
+              <button
+                className="btn btn-ghost"
+                style={actionButtonStyle}
+                onClick={() => { void copyResolvedToken(key, check.autoKeyTokenId); }}
+              >
+                {copied === `token:${key}` ? tr('已复制') : tr('复制成功 Key')}
+              </button>
+            ) : null}
             <button
               className="btn btn-ghost"
               style={actionButtonStyle}
-              onClick={() => { void copyDiagnostic(key, check.message, check.detail, check.autoKeyTokenId); }}
+              onClick={() => { void copyDiagnostic(key, check.message, check.detail); }}
             >
-              {copied === `diagnostic:${key}` ? tr('已复制') : tr(getAvailabilityCopyLabel(check))}
+              {copied === `diagnostic:${key}` ? tr('已复制') : tr('复制诊断摘要')}
             </button>
           </div>
         ) : null}
         {check?.detail && expandedDetail ? (
-          <div style={detailStyle}>
-            {check.detail}
+          <details style={detailStyle}>
+            <summary style={{ cursor: 'pointer', color: 'var(--color-text-secondary)' }}>异常详情</summary>
+            <div style={{ marginTop: 6 }}>{check.detail}</div>
+          </details>
+        ) : null}
+        {!dense && check?.detail && !expandedDetail ? (
+          <div style={{ ...detailStyle, color: 'var(--color-text-muted)' }}>
+            {check.detail.slice(0, 80)}{check.detail.length > 80 ? '…' : ''}
           </div>
         ) : null}
       </div>

@@ -20,12 +20,35 @@ type FailureReasonCode =
   | 'upstream_error'
   | 'unknown_error';
 
-type FailureReason = {
+export type FailureReason = {
   code: FailureReasonCode;
   category: FailureReasonCategory;
   title: string;
   actionHint: string;
   detailHint: string;
+};
+
+export type CheckinSnapshotStatus =
+  | 'success'
+  | 'already_checked'
+  | 'manual_required'
+  | 'unsupported'
+  | 'retryable_failed'
+  | 'terminal_failed'
+  | 'site_disabled';
+
+export type CheckinResolution = FailureReason & {
+  lifecycle: 'completed' | 'skipped' | 'failed';
+  normalizedStatus: 'success' | 'skipped' | 'failed';
+  checkinSnapshotStatus: CheckinSnapshotStatus;
+  retryable: boolean;
+  requiresManual: boolean;
+  unsupported: boolean;
+  advanceLastCheckinAt: boolean;
+  refreshBalance: boolean;
+  healthState: 'healthy' | 'degraded' | 'unhealthy' | 'disabled';
+  logMessage: string;
+  eventLevel: 'info' | 'error';
 };
 
 function includesAny(text: string, keywords: string[]): boolean {
@@ -51,6 +74,8 @@ export function classifyFailureReason(
   }
 
   if (includesAny(text, [
+    'invalid url (post /api/user/checkin)',
+    'http 404: {"error":{"message":"invalid url (post /api/user/checkin)"}}',
     'checkin endpoint not found',
     '签到端点不存在',
     '站点不支持签到',
@@ -147,4 +172,148 @@ export function classifyFailureReason(
       ? '任务已成功完成。'
       : '暂未识别到明确错误类型，可根据原始信息进一步排查。',
   };
+}
+
+export function resolveCheckinExecution(input: {
+  success?: boolean;
+  message?: string | null;
+  status?: string | null;
+  httpStatus?: number | null;
+  scheduleMode?: 'cron' | 'interval';
+}): CheckinResolution {
+  const base = classifyFailureReason(input);
+  const rawMessage = String(input.message || '').trim();
+  const normalizedMessage = rawMessage || base.title;
+  const directSuccess = input.success === true;
+  const scheduleMode = input.scheduleMode === 'interval' ? 'interval' : 'cron';
+
+  switch (base.code) {
+    case 'site_disabled':
+      return {
+        ...base,
+        lifecycle: 'skipped',
+        normalizedStatus: 'skipped',
+        checkinSnapshotStatus: 'site_disabled',
+        retryable: false,
+        requiresManual: false,
+        unsupported: false,
+        advanceLastCheckinAt: false,
+        refreshBalance: false,
+        healthState: 'disabled',
+        logMessage: 'site disabled',
+        eventLevel: 'info',
+      };
+    case 'already_checked_in':
+      return {
+        ...base,
+        lifecycle: 'completed',
+        normalizedStatus: 'success',
+        checkinSnapshotStatus: 'already_checked',
+        retryable: false,
+        requiresManual: false,
+        unsupported: false,
+        advanceLastCheckinAt: scheduleMode !== 'interval',
+        refreshBalance: true,
+        healthState: 'healthy',
+        logMessage: normalizedMessage,
+        eventLevel: 'info',
+      };
+    case 'checkin_not_supported':
+      return {
+        ...base,
+        lifecycle: 'skipped',
+        normalizedStatus: 'skipped',
+        checkinSnapshotStatus: 'unsupported',
+        retryable: false,
+        requiresManual: false,
+        unsupported: true,
+        advanceLastCheckinAt: false,
+        refreshBalance: false,
+        healthState: 'degraded',
+        logMessage: normalizedMessage,
+        eventLevel: 'info',
+      };
+    case 'manual_turnstile_required':
+    case 'cloudflare_challenge':
+      return {
+        ...base,
+        lifecycle: 'skipped',
+        normalizedStatus: 'skipped',
+        checkinSnapshotStatus: 'manual_required',
+        retryable: false,
+        requiresManual: true,
+        unsupported: false,
+        advanceLastCheckinAt: false,
+        refreshBalance: false,
+        healthState: 'degraded',
+        logMessage: base.code === 'manual_turnstile_required'
+          ? '站点开启了 Turnstile 校验，需要人工签到'
+          : normalizedMessage,
+        eventLevel: 'info',
+      };
+    case 'token_expired':
+      return {
+        ...base,
+        lifecycle: 'failed',
+        normalizedStatus: directSuccess ? 'success' : 'failed',
+        checkinSnapshotStatus: directSuccess ? 'success' : 'retryable_failed',
+        retryable: !directSuccess,
+        requiresManual: false,
+        unsupported: false,
+        advanceLastCheckinAt: directSuccess,
+        refreshBalance: directSuccess,
+        healthState: directSuccess ? 'healthy' : 'unhealthy',
+        logMessage: normalizedMessage,
+        eventLevel: directSuccess ? 'info' : 'error',
+      };
+    case 'network_timeout':
+    case 'cloudflare_tunnel_unavailable':
+    case 'upstream_error':
+      return {
+        ...base,
+        lifecycle: directSuccess ? 'completed' : 'failed',
+        normalizedStatus: directSuccess ? 'success' : 'failed',
+        checkinSnapshotStatus: directSuccess ? 'success' : 'retryable_failed',
+        retryable: !directSuccess,
+        requiresManual: false,
+        unsupported: false,
+        advanceLastCheckinAt: directSuccess,
+        refreshBalance: directSuccess,
+        healthState: directSuccess ? 'healthy' : 'unhealthy',
+        logMessage: normalizedMessage,
+        eventLevel: directSuccess ? 'info' : 'error',
+      };
+    case 'unknown_error':
+    default:
+      if (directSuccess) {
+        return {
+          ...base,
+          lifecycle: 'completed',
+          normalizedStatus: 'success',
+          checkinSnapshotStatus: 'success',
+          retryable: false,
+          requiresManual: false,
+          unsupported: false,
+          advanceLastCheckinAt: true,
+          refreshBalance: true,
+          healthState: 'healthy',
+          logMessage: normalizedMessage,
+          eventLevel: 'info',
+        };
+      }
+      return {
+        ...base,
+        lifecycle: 'failed',
+        normalizedStatus: 'failed',
+        checkinSnapshotStatus: 'terminal_failed',
+        retryable: false,
+        requiresManual: false,
+        unsupported: false,
+        advanceLastCheckinAt: false,
+        refreshBalance: false,
+        healthState: 'unhealthy',
+        logMessage: normalizedMessage,
+        eventLevel: 'error',
+      };
+  }
 }

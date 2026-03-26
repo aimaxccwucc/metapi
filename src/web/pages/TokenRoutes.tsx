@@ -1504,6 +1504,7 @@ export default function TokenRoutes() {
                       <th>应执行</th>
                       <th>人工验证</th>
                       <th>失败</th>
+                      <th>快照</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1514,6 +1515,11 @@ export default function TokenRoutes() {
                         <td>{site.dueNowCount}</td>
                         <td>{site.manualRequiredCount}</td>
                         <td>{site.failedRecentCount}</td>
+                        <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                          {site.sampleAccounts[0]?.checkinSnapshot
+                            ? `${site.sampleAccounts[0].checkinSnapshot.status} / ${site.sampleAccounts[0].checkinSnapshot.reasonCode}`
+                            : '-'}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

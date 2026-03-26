@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyFailureReason } from './failureReasonService.js';
+import { classifyFailureReason, resolveCheckinExecution } from './failureReasonService.js';
 
 describe('failureReasonService', () => {
   it('classifies turnstile requirement as manual verification', () => {
@@ -57,5 +57,44 @@ describe('failureReasonService', () => {
     });
     expect(result.code).toBe('checkin_not_supported');
     expect(result.category).toBe('site');
+  });
+
+  it('resolves turnstile checkin into manual-required skipped status', () => {
+    const result = resolveCheckinExecution({
+      success: false,
+      message: 'Turnstile token 为空',
+      status: 'failed',
+      scheduleMode: 'cron',
+    });
+    expect(result.checkinSnapshotStatus).toBe('manual_required');
+    expect(result.normalizedStatus).toBe('skipped');
+    expect(result.requiresManual).toBe(true);
+    expect(result.advanceLastCheckinAt).toBe(false);
+  });
+
+  it('resolves already-checked responses as completed without advancing interval timestamp', () => {
+    const result = resolveCheckinExecution({
+      success: false,
+      message: '今天已经签到过啦',
+      status: 'failed',
+      scheduleMode: 'interval',
+    });
+    expect(result.checkinSnapshotStatus).toBe('already_checked');
+    expect(result.normalizedStatus).toBe('success');
+    expect(result.advanceLastCheckinAt).toBe(false);
+    expect(result.refreshBalance).toBe(true);
+  });
+
+  it('resolves upstream failures into retryable failed snapshots', () => {
+    const result = resolveCheckinExecution({
+      success: false,
+      message: 'HTTP 503 upstream unavailable',
+      status: 'failed',
+      httpStatus: 503,
+      scheduleMode: 'cron',
+    });
+    expect(result.checkinSnapshotStatus).toBe('retryable_failed');
+    expect(result.retryable).toBe(true);
+    expect(result.normalizedStatus).toBe('failed');
   });
 });

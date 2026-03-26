@@ -135,6 +135,30 @@ function maybeDeleteEndpointProfileState(key: string, nowMs = Date.now()): void 
   }
 }
 
+function selectHalfOpenEndpoint(
+  candidates: UpstreamEndpoint[],
+  state: EndpointProfileState,
+  nowMs: number,
+): UpstreamEndpoint | null {
+  if (candidates.length === 0) return null;
+
+  const preferredFresh = (
+    !!state.preferredEndpoint
+    && (state.preferredUpdatedAtMs + PREFERRED_ENDPOINT_TTL_MS) > nowMs
+    && candidates.includes(state.preferredEndpoint)
+  );
+  if (preferredFresh && state.preferredEndpoint) {
+    return state.preferredEndpoint;
+  }
+
+  const ranked = [...candidates].sort((left, right) => {
+    const leftUntilMs = state.blockedUntilMsByEndpoint[left] ?? Number.MAX_SAFE_INTEGER;
+    const rightUntilMs = state.blockedUntilMsByEndpoint[right] ?? Number.MAX_SAFE_INTEGER;
+    return leftUntilMs - rightUntilMs;
+  });
+  return ranked[0] || null;
+}
+
 function buildEndpointProfilePersistencePayload(nowMs = Date.now()): EndpointProfilePersistencePayload {
   const entries: Record<string, EndpointProfileState> = {};
   for (const [key, state] of endpointProfiles.entries()) {
@@ -256,7 +280,8 @@ export async function applyPersistedUpstreamEndpointPreference(
 
   let next = candidates.filter((endpoint) => !blocked.has(endpoint));
   if (next.length === 0) {
-    next = [...candidates];
+    const halfOpenEndpoint = selectHalfOpenEndpoint(candidates, state, nowMs);
+    next = halfOpenEndpoint ? [halfOpenEndpoint] : [...candidates];
   }
 
   const preferredFresh = (
@@ -297,6 +322,11 @@ export function recordPersistedUpstreamEndpointFailure(input: {
   const nowMs = input.nowMs ?? Date.now();
   const state = getOrCreateEndpointProfileState(input.key, nowMs);
   state.blockedUntilMsByEndpoint[input.endpoint] = nowMs + input.blockTtlMs;
+  if (input.suggestedEndpoint && input.suggestedEndpoint !== input.endpoint) {
+    state.preferredEndpoint = input.suggestedEndpoint;
+    state.preferredUpdatedAtMs = nowMs;
+    delete state.blockedUntilMsByEndpoint[input.suggestedEndpoint];
+  }
 
   scheduleEndpointProfilePersistence();
 }

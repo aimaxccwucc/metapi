@@ -19,6 +19,7 @@ import { openAiResponsesTransformer } from '../../transformers/openai/responses/
 import { detectDownstreamClientContext, type DownstreamClientContext } from './downstreamClientContext.js';
 import { composeProxyLogMessage } from './logPathMeta.js';
 import { buildUpstreamEndpointRequest } from './upstreamEndpoint.js';
+import type { DownstreamRoutingPolicy } from '../../services/downstreamPolicyTypes.js';
 
 const installedApps = new WeakSet<FastifyInstance>();
 const WS_TURN_STATE_HEADER = 'x-codex-turn-state';
@@ -537,12 +538,13 @@ async function supportsResponsesWebsocketIncrementalInput(
   parsed: Record<string, unknown>,
   lastRequest: Record<string, unknown> | null,
   authContext: ResponsesWebsocketAuthContext,
+  routingPolicy: DownstreamRoutingPolicy,
 ): Promise<boolean> {
   const requestModel = asTrimmedString(parsed.model) || asTrimmedString(lastRequest?.model);
   if (!requestModel) return false;
 
   try {
-    const selected = await tokenRouter.previewSelectedChannel(requestModel, authContext.policy);
+    const selected = await tokenRouter.previewSelectedChannel(requestModel, routingPolicy);
     return selectedChannelSupportsIncrementalInput(selected, requestModel);
   } catch {
     return false;
@@ -558,6 +560,11 @@ async function handleResponsesWebsocketConnection(
   const websocketSessionId = headerValueToTrimmedString(request.headers['session_id'])
     || headerValueToTrimmedString(request.headers['session-id'])
     || randomUUID();
+  const stickySessionKey = `${authContext.source === 'managed' ? `mk:${authContext.key?.id ?? authContext.token}` : 'global:responses-ws'}:/v1/responses:${websocketSessionId}`;
+  const routingPolicy: DownstreamRoutingPolicy = {
+    ...authContext.policy,
+    stickySessionKey,
+  };
   let lastRequest: Record<string, unknown> | null = null;
   let lastResponseOutput: unknown[] = [];
   let selectedChannel: SelectedChannel | null = null;
@@ -579,12 +586,12 @@ async function handleResponsesWebsocketConnection(
           }
 
           const requestModel = asTrimmedString(parsed.model) || asTrimmedString(lastRequest?.model);
-          if (requestModel && !await isModelAllowedByPolicyOrAllowedRoutes(requestModel, authContext.policy)) {
+          if (requestModel && !await isModelAllowedByPolicyOrAllowedRoutes(requestModel, routingPolicy)) {
             writeResponsesWebsocketError(socket, 403, 'model is not allowed for this downstream key');
             return;
           }
           const supportsIncrementalInput = selectedChannelSupportsIncrementalInput(selectedChannel, requestModel)
-            || await supportsResponsesWebsocketIncrementalInput(parsed, lastRequest, authContext);
+            || await supportsResponsesWebsocketIncrementalInput(parsed, lastRequest, authContext, routingPolicy);
           const shouldHandleLocalPrewarm = shouldHandleResponsesWebsocketPrewarmLocally(
             parsed,
             lastRequest,
@@ -622,7 +629,7 @@ async function handleResponsesWebsocketConnection(
 
           if (!shouldReuseSelectedChannel(selectedChannel, requestModel)) {
             selectedChannel = requestModel
-              ? await tokenRouter.selectChannel(requestModel, authContext.policy)
+              ? await tokenRouter.selectChannel(requestModel, routingPolicy)
               : null;
           }
 

@@ -345,10 +345,16 @@ describe('checkinService auto relogin', () => {
 
     expect(result.success).toBe(true);
     expect(result.status).toBe('skipped');
+    expect(result.reasonCode).toBe('checkin_not_supported');
+    expect(result.checkinSnapshotStatus).toBe('unsupported');
     const firstInsertPayload = insertValuesMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(firstInsertPayload?.status).toBe('skipped');
     expect(refreshBalanceMock).not.toHaveBeenCalled();
     expect(notifyMock).not.toHaveBeenCalled();
+    expect(updateSetMock.mock.calls.some((call) => (
+      typeof call?.[0]?.extraConfig === 'string'
+      && call[0].extraConfig.includes('"checkinSnapshot"')
+    ))).toBe(true);
   });
 
   it('skips account updates when unsupported checkin responses do not change account state', async () => {
@@ -380,7 +386,9 @@ describe('checkinService auto relogin', () => {
 
     expect(result.success).toBe(true);
     expect(result.status).toBe('skipped');
-    expect(updateSetMock).not.toHaveBeenCalled();
+    expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({
+      extraConfig: expect.stringContaining('"checkinSnapshot"'),
+    }));
     const firstInsertPayload = insertValuesMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(firstInsertPayload?.status).toBe('skipped');
   });
@@ -449,6 +457,8 @@ describe('checkinService auto relogin', () => {
 
     expect(result.success).toBe(true);
     expect(result.status).toBe('skipped');
+    expect(result.reasonCode).toBe('manual_turnstile_required');
+    expect(result.checkinSnapshotStatus).toBe('manual_required');
     const firstInsertPayload = insertValuesMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(firstInsertPayload?.status).toBe('skipped');
     expect(firstInsertPayload?.message).toBe('站点开启了 Turnstile 校验，需要人工签到');

@@ -102,6 +102,67 @@ describe('checkinScheduler', () => {
     ], 6, now)).toEqual([1, 2]);
   });
 
+  it('suppresses manual-required snapshots and respects nextRetryAt for retryable failures', async () => {
+    const scheduler = await import('./checkinScheduler.js');
+    const now = new Date('2026-03-20T12:00:00.000Z');
+
+    expect(scheduler.selectDueIntervalCheckinAccountIds([
+      {
+        id: 1,
+        lastCheckinAt: null,
+        extraConfig: JSON.stringify({
+          checkinSnapshot: {
+            version: 1,
+            status: 'manual_required',
+            reasonCode: 'manual_turnstile_required',
+            retryable: false,
+            requiresManual: true,
+            unsupported: false,
+            lastAttemptAt: '2026-03-20T01:00:00.000Z',
+            message: 'manual',
+            source: 'checkin',
+          },
+        }),
+      },
+      {
+        id: 2,
+        lastCheckinAt: null,
+        extraConfig: JSON.stringify({
+          checkinSnapshot: {
+            version: 1,
+            status: 'retryable_failed',
+            reasonCode: 'upstream_error',
+            retryable: true,
+            requiresManual: false,
+            unsupported: false,
+            lastAttemptAt: '2026-03-20T01:00:00.000Z',
+            nextRetryAt: '2026-03-20T13:00:00.000Z',
+            message: 'retry later',
+            source: 'checkin',
+          },
+        }),
+      },
+      {
+        id: 3,
+        lastCheckinAt: null,
+        extraConfig: JSON.stringify({
+          checkinSnapshot: {
+            version: 1,
+            status: 'retryable_failed',
+            reasonCode: 'upstream_error',
+            retryable: true,
+            requiresManual: false,
+            unsupported: false,
+            lastAttemptAt: '2026-03-20T01:00:00.000Z',
+            nextRetryAt: '2026-03-20T11:30:00.000Z',
+            message: 'retry now',
+            source: 'checkin',
+          },
+        }),
+      },
+    ], 6, now)).toEqual([3]);
+  });
+
   it('reschedules site health refresh cron and validates cron expression', async () => {
     const scheduler = await import('./checkinScheduler.js');
 

@@ -75,7 +75,7 @@ describe('upstream endpoint persisted protocol profile', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('does not persist unverified suggested endpoint preferences after runtime reset', async () => {
+  it('persists explicit suggested endpoint preferences after runtime reset', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
       accountId: baseContext.account.id,
@@ -97,10 +97,10 @@ describe('upstream endpoint persisted protocol profile', () => {
       'openai',
     );
 
-    expect(order).toEqual(['messages', 'responses']);
+    expect(order).toEqual(['responses', 'messages']);
   });
 
-  it('does not persist generic responses-to-messages redirect hints across runtime reset', async () => {
+  it('still avoids persisting generic responses-to-messages redirect hints across runtime reset', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
       accountId: baseContext.account.id,
@@ -264,5 +264,54 @@ describe('upstream endpoint persisted protocol profile', () => {
 
     expect(sameModelOrder).toEqual(['responses', 'chat', 'messages']);
     expect(otherModelOrder).toEqual(['chat', 'messages', 'responses']);
+  });
+
+  it('returns a single half-open endpoint from persisted profile when all candidates are blocked', async () => {
+    recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'chat',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+      status: 400,
+      errorText: 'Unsupported legacy protocol: /v1/chat/completions is not supported. Please use /v1/responses.',
+    });
+    recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'responses',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+      status: 405,
+      errorText: 'Method Not Allowed',
+    });
+    recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'messages',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+      status: 405,
+      errorText: 'Method Not Allowed',
+    });
+    await flushUpstreamProtocolProfilePersistence();
+    resetUpstreamEndpointRuntimeState();
+
+    const order = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'openai',
+    );
+
+    expect(order).toEqual(['responses']);
   });
 });

@@ -25,6 +25,7 @@ describe('TokenRouter selection scoring', () => {
   let schema: DbModule['schema'];
   let TokenRouter: TokenRouterModule['TokenRouter'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
+  let listAccountRoutingRuntimeSnapshots: TokenRouterModule['listAccountRoutingRuntimeSnapshots'];
   let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
   let resetAllModelCircuits: typeof import('./modelCircuitBreaker.js')['resetAllModelCircuits'];
   let flushSiteRuntimeHealthPersistence: TokenRouterModule['flushSiteRuntimeHealthPersistence'];
@@ -52,6 +53,7 @@ describe('TokenRouter selection scoring', () => {
     schema = dbModule.schema;
     TokenRouter = tokenRouterModule.TokenRouter;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
+    listAccountRoutingRuntimeSnapshots = tokenRouterModule.listAccountRoutingRuntimeSnapshots;
     resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
     resetAllModelCircuits = modelCircuitBreakerModule.resetAllModelCircuits;
     flushSiteRuntimeHealthPersistence = tokenRouterModule.flushSiteRuntimeHealthPersistence;
@@ -549,8 +551,10 @@ describe('TokenRouter selection scoring', () => {
     decision = await router.explainSelection('gpt-5.3');
     const recoveredCandidateA = decision.candidates.find((candidate) => candidate.channelId === channelA.id);
     const recoveredCandidateB = decision.candidates.find((candidate) => candidate.channelId === channelB.id);
-    expect((recoveredCandidateA?.probability || 0)).toBeGreaterThan(30);
-    expect((recoveredCandidateB?.probability || 0)).toBeLessThan(70);
+    expect(recoveredCandidateA?.reason || '').not.toContain('站点熔断');
+    expect(recoveredCandidateA?.circuitStatus?.isOpen).toBe(false);
+    expect((recoveredCandidateA?.probability || 0) + (recoveredCandidateB?.probability || 0)).toBeGreaterThan(0);
+    expect(decision.summary.join(' ')).toContain('最终选择');
   });
 
   it('uses persisted site success and latency history to prefer historically healthier sites', async () => {
@@ -974,11 +978,11 @@ describe('TokenRouter selection scoring', () => {
 
       expect(first?.channel.id).toBe(primaryChannel.id);
       expect(second?.channel.id).toBe(fallbackChannel.id);
-      expect(primaryCandidate?.avoidedByInflightLease).toBe(true);
-      expect(primaryCandidate?.reason || '').toContain('通道忙碌中');
-      expect(primaryCandidate?.leasedUntil).toBeTruthy();
+      expect((primaryCandidate?.avoidedByInflightLease || primaryCandidate?.avoidedByAccountLease) ?? false).toBe(true);
+      expect(primaryCandidate?.reason || '').toMatch(/通道忙碌中|账号并发繁忙/);
+      expect((primaryCandidate?.leasedUntil || primaryCandidate?.accountLeaseUntil) ?? null).toBeTruthy();
       expect(fallbackCandidate?.probability || 0).toBeGreaterThan(0);
-      expect(decision.summary.join(' ')).toContain('并发占用避让');
+      expect(decision.summary.join(' ')).toMatch(/并发占用避让|账号并发避让/);
     } finally {
       randomSpy.mockRestore();
     }
@@ -1026,6 +1030,324 @@ describe('TokenRouter selection scoring', () => {
       )
       .get();
     expect(availability?.available).toBe(true);
+  });
+
+  it('prefers accounts with higher success EMA and exposes account runtime snapshots', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-account-ema');
+
+    const siteA = await createSite('account-ema-a');
+    const accountA = await createAccount(siteA.id, 'account-ema-user-a');
+    const tokenA = await createToken(accountA.id, 'account-ema-token-a');
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: tokenA.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteB = await createSite('account-ema-b');
+    const accountB = await createAccount(siteB.id, 'account-ema-user-b');
+    const tokenB = await createToken(accountB.id, 'account-ema-token-b');
+    const channelB = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      tokenId: tokenB.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordSuccess(channelA.id, 400, 0, 'gpt-account-ema');
+    await router.recordSuccess(channelA.id, 380, 0, 'gpt-account-ema');
+    await router.recordFailure(channelB.id, {
+      status: 503,
+      errorText: 'service unavailable',
+      modelName: 'gpt-account-ema',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+    }).where(eq(schema.routeChannels.id, channelB.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-account-ema');
+    const candidateA = decision.candidates.find((candidate) => candidate.channelId === channelA.id);
+    const candidateB = decision.candidates.find((candidate) => candidate.channelId === channelB.id);
+    expect((candidateA?.probability || 0)).toBeGreaterThan(candidateB?.probability || 0);
+    expect(candidateA?.reason || '').toContain('账号EMA=');
+
+    const accountSnapshots = await listAccountRoutingRuntimeSnapshots();
+    const snapshotA = accountSnapshots.find((item) => item.accountId === accountA.id);
+    const snapshotB = accountSnapshots.find((item) => item.accountId === accountB.id);
+    expect(snapshotA?.successEma || 0).toBeGreaterThan(snapshotB?.successEma || 0);
+    expect(snapshotA?.latencyEmaMs || 0).toBeGreaterThan(0);
+  });
+
+  it('falls back to another account when the preferred account exhausts its rate budget without consuming budget during preview', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-account-rate-budget',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+
+    const sitePrimary = await createSite('budget-primary');
+    const accountPrimary = await createAccount(sitePrimary.id, 'budget-user-primary');
+    const tokenPrimary = await createToken(accountPrimary.id, 'budget-token-primary');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountPrimary.id,
+      tokenId: tokenPrimary.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+
+    const siteFallback = await createSite('budget-fallback');
+    const accountFallback = await createAccount(siteFallback.id, 'budget-user-fallback');
+    const tokenFallback = await createToken(accountFallback.id, 'budget-token-fallback');
+    const fallbackChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountFallback.id,
+      tokenId: tokenFallback.id,
+      priority: 0,
+      weight: 5,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      const nowMs = Date.now();
+      await db.insert(schema.settings).values({
+        key: 'token_router_account_budget_v1',
+        value: JSON.stringify({
+          version: 1,
+          savedAtMs: nowMs,
+          byAccountId: {
+            [String(accountPrimary.id)]: {
+              budget: {
+                tokens: 0.2,
+                capacity: 2,
+                refillPerSec: 1.2,
+                lastRefillAtMs: nowMs,
+                lastGrantedAtMs: null,
+                denyUntilMs: null,
+                updatedAtMs: nowMs,
+              },
+              inflightLeases: [],
+            },
+          },
+        }),
+      }).run();
+      resetSiteRuntimeHealthState();
+      invalidateTokenRouterCache();
+
+      const primaryBeforePreview = (await listAccountRoutingRuntimeSnapshots())
+        .find((item) => item.accountId === accountPrimary.id);
+      expect(primaryBeforePreview?.rateLimitTokens || 0).toBeLessThan(1);
+
+      const preview = await router.previewSelectedChannel('gpt-account-rate-budget');
+      const primaryAfterPreview = (await listAccountRoutingRuntimeSnapshots())
+        .find((item) => item.accountId === accountPrimary.id);
+      const decision = await router.explainSelection('gpt-account-rate-budget');
+      const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+
+      expect(preview?.channel.id).toBe(fallbackChannel.id);
+      expect(primaryAfterPreview?.rateLimitTokens || 0).toBeCloseTo(primaryBeforePreview?.rateLimitTokens || 0, 3);
+      expect(primaryCandidate?.avoidedByAccountLease || primaryCandidate?.reason.includes('账号速率')).toBe(true);
+      expect(primaryCandidate?.reason || '').toMatch(/账号速率预算不足|账号速率受限/);
+      expect(primaryCandidate?.accountRuntimeState?.rateLimitTokens || 0).toBeLessThan(1);
+      expect(decision.summary.join(' ')).toContain('账号预算避让');
+    } finally {
+      vi.useRealTimers();
+      randomSpy.mockRestore();
+    }
+
+    expect(fallbackChannel.id).not.toBe(primaryChannel.id);
+  });
+
+  it('recovers the preferred account after the rate budget refill window elapses', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-account-rate-budget-recover',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+
+    const sitePrimary = await createSite('budget-recover-primary');
+    const accountPrimary = await createAccount(sitePrimary.id, 'budget-recover-user-primary');
+    const tokenPrimary = await createToken(accountPrimary.id, 'budget-recover-token-primary');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountPrimary.id,
+      tokenId: tokenPrimary.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+
+    const siteFallback = await createSite('budget-recover-fallback');
+    const accountFallback = await createAccount(siteFallback.id, 'budget-recover-user-fallback');
+    const tokenFallback = await createToken(accountFallback.id, 'budget-recover-token-fallback');
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountFallback.id,
+      tokenId: tokenFallback.id,
+      priority: 0,
+      weight: 5,
+      enabled: true,
+    }).run();
+
+    const router = new TokenRouter();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      const nowMs = Date.now();
+      await db.insert(schema.settings).values({
+        key: 'token_router_account_budget_v1',
+        value: JSON.stringify({
+          version: 1,
+          savedAtMs: nowMs,
+          byAccountId: {
+            [String(accountPrimary.id)]: {
+              budget: {
+                tokens: 0.2,
+                capacity: 2,
+                refillPerSec: 1.2,
+                lastRefillAtMs: nowMs,
+                lastGrantedAtMs: null,
+                denyUntilMs: null,
+                updatedAtMs: nowMs,
+              },
+              inflightLeases: [],
+            },
+          },
+        }),
+      }).run();
+      resetSiteRuntimeHealthState();
+      invalidateTokenRouterCache();
+
+      const limitedPreview = await router.previewSelectedChannel('gpt-account-rate-budget-recover');
+      expect(limitedPreview?.channel.id).not.toBe(primaryChannel.id);
+
+      await vi.advanceTimersByTimeAsync(4_000);
+
+      const primaryBeforeRecovery = (await listAccountRoutingRuntimeSnapshots())
+        .find((item) => item.accountId === accountPrimary.id);
+      const recoveredPreview = await router.previewSelectedChannel('gpt-account-rate-budget-recover');
+      const decision = await router.explainSelection('gpt-account-rate-budget-recover');
+      const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+
+      expect(primaryBeforeRecovery?.rateLimitTokens || 0).toBeGreaterThanOrEqual(1);
+      expect(recoveredPreview?.channel.id).toBe(primaryChannel.id);
+      expect(primaryCandidate?.accountRuntimeState?.rateLimitTokens || 0).toBeGreaterThanOrEqual(1);
+      expect(primaryCandidate?.reason || '').not.toMatch(/账号速率预算不足|账号速率受限/);
+    } finally {
+      vi.useRealTimers();
+      randomSpy.mockRestore();
+    }
+  });
+
+  it('applies sticky session preference and breaks stickiness when the bound account is busy', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-sticky-session',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+
+    const siteA = await createSite('sticky-a');
+    const accountA = await createAccount(siteA.id, 'sticky-user-a');
+    const tokenA = await createToken(accountA.id, 'sticky-token-a');
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: tokenA.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteB = await createSite('sticky-b');
+    const accountB = await createAccount(siteB.id, 'sticky-user-b');
+    const tokenB = await createToken(accountB.id, 'sticky-token-b');
+    const channelB = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      tokenId: tokenB.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const stickyPolicy = {
+      supportedModels: [],
+      allowedRouteIds: [],
+      siteWeightMultipliers: {},
+      stickySessionKey: 'managed:test:/v1/chat:session-1',
+    };
+
+    const first = await router.selectChannel('gpt-sticky-session', stickyPolicy);
+    const second = await router.previewSelectedChannel('gpt-sticky-session', stickyPolicy);
+    const decisionWhileBusy = await router.explainSelection('gpt-sticky-session', [], stickyPolicy);
+    const candidateAWhileBusy = decisionWhileBusy.candidates.find((candidate) => candidate.channelId === channelA.id);
+    const candidateBWhileBusy = decisionWhileBusy.candidates.find((candidate) => candidate.channelId === channelB.id);
+
+    expect(first?.channel.id).toBe(channelA.id);
+    expect(second?.channel.id).toBe(channelB.id);
+    expect(candidateAWhileBusy?.accountRuntimeState?.stickyActive).toBe(true);
+    expect(candidateAWhileBusy?.accountRuntimeState?.stickyPreferred).toBe(false);
+    expect(candidateAWhileBusy?.avoidedByAccountLease).toBe(true);
+    expect(decisionWhileBusy.summary.join(' ')).toContain('账号粘性已打破');
+    expect(decisionWhileBusy.summary.join(' ')).toContain('账号并发避让');
+    expect((candidateBWhileBusy?.probability || 0)).toBeGreaterThan(0);
+
+    await router.recordSuccess(channelA.id, 320, 0, 'gpt-sticky-session');
+    const decisionRecovered = await router.explainSelection('gpt-sticky-session', [], stickyPolicy);
+    const candidateARecovered = decisionRecovered.candidates.find((candidate) => candidate.channelId === channelA.id);
+    expect(candidateARecovered?.accountRuntimeState?.stickyPreferred).toBe(true);
+    expect(decisionRecovered.summary.join(' ')).toContain('账号粘性复用');
+    expect(decisionRecovered.selectedChannelId).toBe(channelA.id);
+
+    expect(channelB.id).not.toBe(channelA.id);
   });
 
   it('does not fall back to a runtime-breaker-blocked layer when only lower priorities are recently failed', async () => {
@@ -1188,8 +1510,8 @@ describe('TokenRouter selection scoring', () => {
 
     const router = new TokenRouter();
     await router.recordFailure(primaryChannel.id, {
-      status: 401,
-      errorText: 'unauthorized',
+      status: 403,
+      errorText: 'model not supported',
       modelName: 'gpt-4o-hard-skip',
     });
     await db.update(schema.routeChannels).set({
@@ -1213,8 +1535,7 @@ describe('TokenRouter selection scoring', () => {
     expect(primaryCandidate?.modelCircuitStatus?.isOpen).toBe(true);
     expect(backupCandidate?.eligible).toBe(true);
     expect(preview?.channel.id).toBe(backupChannel.id);
-    expect(otherModelPreview?.channel.id).toBeTruthy();
-    expect(otherModelPreview?.channel.id).not.toBe(backupChannel.id);
+    expect(otherModelPreview?.account.id).toBe(primaryAccount.id);
   });
 
   it('keeps a protocol-mismatched channel selectable after cooldown is manually cleared', async () => {

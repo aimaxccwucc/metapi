@@ -4,6 +4,7 @@ import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { refreshAllBalances } from './balanceService.js';
 import { checkinAll, isSchedulableCheckinAccountStatus } from './checkinService.js';
+import { extractCheckinSnapshot } from './accountExtraConfig.js';
 import { refreshModelsAndRebuildRoutes } from './modelService.js';
 import { sendNotification } from './notifyService.js';
 import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dailySummaryService.js';
@@ -76,6 +77,7 @@ function createCheckinTask(cronExpr: string) {
 type IntervalCheckinCandidate = {
   id: number;
   lastCheckinAt?: string | null;
+  extraConfig?: string | null;
 };
 
 type IntervalCheckinResult = {
@@ -98,6 +100,14 @@ export function selectDueIntervalCheckinAccountIds(
 
   return rows
     .filter((row) => {
+      const snapshot = extractCheckinSnapshot(row.extraConfig);
+      const nextRetryAtMs = snapshot?.nextRetryAt ? Date.parse(snapshot.nextRetryAt) : Number.NaN;
+      if (snapshot?.status === 'manual_required' || snapshot?.status === 'unsupported' || snapshot?.status === 'site_disabled') {
+        return false;
+      }
+      if (Number.isFinite(nextRetryAtMs) && nextRetryAtMs > nowMs) {
+        return false;
+      }
       const lastCheckinMs = row.lastCheckinAt ? Date.parse(row.lastCheckinAt) : Number.NaN;
       const lastAttemptMs = attemptState.get(row.id);
       if (Number.isFinite(lastCheckinMs)) {
@@ -136,6 +146,7 @@ async function runIntervalCheckinPass(now = new Date()) {
         .map((row: any) => ({
           id: row.accounts.id,
           lastCheckinAt: row.accounts.lastCheckinAt,
+          extraConfig: row.accounts.extraConfig ?? null,
         })),
       config.checkinIntervalHours,
       now,

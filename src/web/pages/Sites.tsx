@@ -70,6 +70,17 @@ type SiteProtocolProbeResult = {
   modelName: string;
   preferredEndpoint: 'chat' | 'responses' | 'messages';
   supportedEndpoints: Array<'chat' | 'responses' | 'messages'>;
+  probeSource?: 'live' | 'cache' | 'cooldown_cache';
+  cacheHit?: boolean;
+  cooldownUntilMs?: number | null;
+  cooldownRemainingMs?: number;
+  attemptSummary?: string[];
+  attempts?: Array<{
+    endpoint: 'chat' | 'responses' | 'messages';
+    ok: boolean;
+    classification: string;
+    reason: string;
+  }>;
   protocolConfig?: {
     mode?: 'auto' | 'manual';
     supportedEndpoints?: Array<'chat' | 'responses' | 'messages'>;
@@ -281,6 +292,7 @@ export default function Sites() {
   const [disabledModelsLoading, setDisabledModelsLoading] = useState(false);
   const [disabledModelsSaving, setDisabledModelsSaving] = useState(false);
   const [protocolProbing, setProtocolProbing] = useState(false);
+  const [lastProbeResult, setLastProbeResult] = useState<SiteProtocolProbeResult | null>(null);
 
   if (editor) lastEditorRef.current = editor;
   const activeEditor = editor || lastEditorRef.current;
@@ -509,6 +521,7 @@ export default function Sites() {
     setProtocolProbing(true);
     try {
       const result = await api.probeSiteProtocol(editor.editingSiteId) as SiteProtocolProbeResult;
+      setLastProbeResult(result);
       const nextSupported = Array.isArray(result?.supportedEndpoints)
         ? result.supportedEndpoints.filter((endpoint): endpoint is 'chat' | 'responses' | 'messages' => (
           (endpoint === 'chat' || endpoint === 'responses' || endpoint === 'messages')
@@ -526,7 +539,12 @@ export default function Sites() {
         supportedEndpoints: nextSupported,
         preferredEndpoint: nextPreferred,
       }));
-      toast.success(`已探测协议：${result.preferredEndpoint}，模型 ${result.modelName}`);
+      const sourceLabel = result.probeSource === 'cache'
+        ? '缓存命中'
+        : result.probeSource === 'cooldown_cache'
+          ? '冷却缓存'
+          : '实时探测';
+      toast.success(`已探测协议：${result.preferredEndpoint}，模型 ${result.modelName}（${sourceLabel}）`);
       await load();
     } catch (e: any) {
       toast.error(e.message || '自动探测站点协议失败');
@@ -1188,6 +1206,43 @@ export default function Sites() {
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
               自动模式下，系统只根据真实成功/失败被动学习，不会主动扫站点全部模型。点击“自动探测协议”时，也只会拿该站点一个已知可用模型做有限协议尝试。手动模式下，路由会优先限制在你勾选的协议范围内，再结合实时失败记忆与被动画像排序。
             </div>
+            {lastProbeResult ? (
+              <div
+                style={{
+                  display: 'grid',
+                  gap: 8,
+                  padding: 10,
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--color-border-light)',
+                  background: 'color-mix(in srgb, var(--color-primary) 4%, var(--color-bg))',
+                }}
+              >
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                  <span className="badge badge-info" style={{ fontSize: 11 }}>
+                    {lastProbeResult.probeSource === 'cache'
+                      ? '缓存命中'
+                      : lastProbeResult.probeSource === 'cooldown_cache'
+                        ? '冷却缓存'
+                        : '实时探测'}
+                  </span>
+                  <span style={{ fontSize: 12 }}>模型 {lastProbeResult.modelName}</span>
+                  <span style={{ fontSize: 12 }}>首选 {lastProbeResult.preferredEndpoint}</span>
+                  {typeof lastProbeResult.cooldownRemainingMs === 'number' && lastProbeResult.cooldownRemainingMs > 0 ? (
+                    <span style={{ fontSize: 12, color: 'var(--color-warning)' }}>
+                      冷却剩余 {Math.max(1, Math.ceil(lastProbeResult.cooldownRemainingMs / 1000))} 秒
+                    </span>
+                  ) : null}
+                </div>
+                {Array.isArray(lastProbeResult.attemptSummary) && lastProbeResult.attemptSummary.length > 0 ? (
+                  <div style={{ display: 'grid', gap: 4 }}>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>最近探测摘要</div>
+                    <div style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--color-text-secondary)' }}>
+                      {lastProbeResult.attemptSummary.join(' ｜ ')}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           <div
             style={{

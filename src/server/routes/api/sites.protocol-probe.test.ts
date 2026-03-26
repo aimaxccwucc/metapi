@@ -82,7 +82,16 @@ describe('sites protocol probe routes', () => {
           reason: 'ok',
         },
       ],
+      attemptSummary: [
+        '1. chat protocol_mismatch: Unsupported legacy protocol',
+        '2. responses success: ok',
+      ],
       latencyMs: 123,
+      probeSource: 'live',
+      cacheHit: false,
+      cachedAtMs: null,
+      cooldownUntilMs: null,
+      cooldownRemainingMs: 0,
       protocolConfig: {
         mode: 'manual',
         supportedEndpoints: ['responses', 'chat', 'messages'],
@@ -101,11 +110,15 @@ describe('sites protocol probe routes', () => {
       success?: boolean;
       modelName?: string;
       preferredEndpoint?: string;
+      attemptSummary?: string[];
+      probeSource?: string;
       protocolConfig?: { mode?: string; supportedEndpoints?: string[]; preferredEndpoint?: string | null };
     };
     expect(payload.success).toBe(true);
     expect(payload.modelName).toBe('gpt-4.1');
     expect(payload.preferredEndpoint).toBe('responses');
+    expect(payload.probeSource).toBe('live');
+    expect(payload.attemptSummary).toHaveLength(2);
     expect(payload.protocolConfig).toEqual({
       mode: 'manual',
       supportedEndpoints: ['responses', 'chat', 'messages'],

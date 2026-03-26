@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,8 @@ describe('TokenRouter runtime cache', () => {
   let TokenRouter: TokenRouterModule['TokenRouter'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
   let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
+  let flushSiteRuntimeHealthPersistence: TokenRouterModule['flushSiteRuntimeHealthPersistence'];
+  let listAccountRoutingRuntimeSnapshots: TokenRouterModule['listAccountRoutingRuntimeSnapshots'];
   let reportTokenExpired: typeof import('./alertService.js')['reportTokenExpired'];
   let config: ConfigModule['config'];
   let dataDir = '';
@@ -33,6 +35,8 @@ describe('TokenRouter runtime cache', () => {
     TokenRouter = tokenRouterModule.TokenRouter;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
     resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
+    flushSiteRuntimeHealthPersistence = tokenRouterModule.flushSiteRuntimeHealthPersistence;
+    listAccountRoutingRuntimeSnapshots = tokenRouterModule.listAccountRoutingRuntimeSnapshots;
     reportTokenExpired = alertServiceModule.reportTokenExpired;
     config = configModule.config;
     originalCacheTtlMs = config.tokenRouterCacheTtlMs;
@@ -170,6 +174,126 @@ describe('TokenRouter runtime cache', () => {
     expect(storedAccount?.status).toBe('expired');
   });
 
+  it('restores persisted account rate budget after runtime reset and reloads it in a new router instance', async () => {
+    const primarySite = await db.insert(schema.sites).values({
+      name: 'account-budget-primary-site',
+      url: 'https://account-budget-primary-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const primaryAccount = await db.insert(schema.accounts).values({
+      siteId: primarySite.id,
+      username: 'account-budget-primary-user',
+      accessToken: 'account-budget-primary-access-token',
+      apiToken: 'account-budget-primary-api-token',
+      status: 'active',
+    }).returning().get();
+
+    const primaryToken = await db.insert(schema.accountTokens).values({
+      accountId: primaryAccount.id,
+      name: 'account-budget-primary-token',
+      token: 'sk-account-budget-primary-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const fallbackSite = await db.insert(schema.sites).values({
+      name: 'account-budget-fallback-site',
+      url: 'https://account-budget-fallback-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const fallbackAccount = await db.insert(schema.accounts).values({
+      siteId: fallbackSite.id,
+      username: 'account-budget-fallback-user',
+      accessToken: 'account-budget-fallback-access-token',
+      apiToken: 'account-budget-fallback-api-token',
+      status: 'active',
+    }).returning().get();
+
+    const fallbackToken = await db.insert(schema.accountTokens).values({
+      accountId: fallbackAccount.id,
+      name: 'account-budget-fallback-token',
+      token: 'sk-account-budget-fallback-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-account-budget-persist',
+      enabled: true,
+    }).returning().get();
+
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: primaryAccount.id,
+      tokenId: primaryToken.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+
+    const fallbackChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: fallbackAccount.id,
+      tokenId: fallbackToken.id,
+      priority: 0,
+      weight: 5,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const first = await router.selectChannel('gpt-account-budget-persist');
+      expect(first?.channel.id).toBe(primaryChannel.id);
+      await router.recordSuccess(primaryChannel.id, 320, 0, 'gpt-account-budget-persist');
+
+      await router.recordFailure(primaryChannel.id, {
+        status: 429,
+        errorText: 'rate limit exceeded',
+        modelName: 'gpt-account-budget-persist',
+      });
+      await db.update(schema.routeChannels).set({
+        cooldownUntil: null,
+        lastFailAt: null,
+        failCount: 0,
+        consecutiveFailCount: 0,
+        cooldownLevel: 0,
+      }).where(eq(schema.routeChannels.id, primaryChannel.id)).run();
+      invalidateTokenRouterCache();
+
+      const beforeFlush = (await listAccountRoutingRuntimeSnapshots())
+        .find((item) => item.accountId === primaryAccount.id);
+      expect(beforeFlush?.successEma || 0).toBeGreaterThan(0);
+      expect(beforeFlush?.rateLimited).toBe(true);
+      expect(beforeFlush?.rateLimitedUntilMs || 0).toBeGreaterThan(Date.now());
+
+      await flushSiteRuntimeHealthPersistence();
+
+      const persistedKeys = new Set((await db.select({ key: schema.settings.key }).from(schema.settings).all())
+        .map((row) => row.key));
+      expect(persistedKeys.has('token_router_account_health_v1')).toBe(true);
+      expect(persistedKeys.has('token_router_account_budget_v1')).toBe(true);
+
+      resetSiteRuntimeHealthState();
+      invalidateTokenRouterCache();
+
+      const reloadedRouter = new TokenRouter();
+      const afterReload = (await listAccountRoutingRuntimeSnapshots())
+        .find((item) => item.accountId === primaryAccount.id);
+      expect(afterReload?.successEma || 0).toBeGreaterThan(0);
+      expect(afterReload?.rateLimited).toBe(true);
+
+      const preview = await reloadedRouter.previewSelectedChannel('gpt-account-budget-persist');
+      expect(preview?.channel.id).toBe(fallbackChannel.id);
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
+
   it('uses category-aware cooldown across repeated failures', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'cooldown-site',
@@ -282,16 +406,30 @@ describe('TokenRouter runtime cache', () => {
     ]).returning().all();
 
     const router = new TokenRouter();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    try {
+      const first = await router.selectChannel('gpt-4o-mini');
+      await router.recordSuccess(first!.channel.id, 320, 0, 'gpt-4o-mini');
+      await vi.advanceTimersByTimeAsync(1_000);
 
-    const first = await router.selectChannel('gpt-4o-mini');
-    const second = await router.selectChannel('gpt-4o-mini');
-    const third = await router.selectChannel('gpt-4o-mini');
-    const fourth = await router.selectChannel('gpt-4o-mini');
+      const second = await router.selectChannel('gpt-4o-mini');
+      await router.recordSuccess(second!.channel.id, 330, 0, 'gpt-4o-mini');
+      await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(first?.channel.id).toBe(channels[0].id);
-    expect(second?.channel.id).toBe(channels[1].id);
-    expect(third?.channel.id).toBe(channels[2].id);
-    expect(fourth?.channel.id).toBe(channels[0].id);
+      const third = await router.selectChannel('gpt-4o-mini');
+      await router.recordSuccess(third!.channel.id, 340, 0, 'gpt-4o-mini');
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const fourth = await router.selectChannel('gpt-4o-mini');
+
+      expect(first?.channel.id).toBe(channels[0].id);
+      expect(second?.channel.id).toBe(channels[1].id);
+      expect(third?.channel.id).toBe(channels[2].id);
+      expect(fourth?.channel.id).toBe(channels[0].id);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('applies staged cooldowns for round robin after every three consecutive failures', async () => {
@@ -502,5 +640,88 @@ describe('TokenRouter runtime cache', () => {
     const selected = await router.previewSelectedChannel('gpt-4o-round-robin-recent-failure');
 
     expect(selected?.channel.id).toBe(channels[1].id);
+  });
+
+  it('persists and reloads account runtime budget snapshots after reset', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'persist-budget-site',
+      url: 'https://persist-budget-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'persist-budget-user',
+      accessToken: 'persist-budget-access-token',
+      apiToken: 'persist-budget-api-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'persist-budget-token',
+      token: 'sk-persist-budget-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-persist-budget',
+      enabled: true,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const nowMs = Date.now();
+    await db.insert(schema.settings).values({
+      key: 'token_router_account_budget_v1',
+      value: JSON.stringify({
+        version: 1,
+        savedAtMs: nowMs,
+        byAccountId: {
+          [String(account.id)]: {
+            budget: {
+              tokens: 0.25,
+              capacity: 2,
+              refillPerSec: 0.6,
+              lastRefillAtMs: nowMs,
+              lastGrantedAtMs: null,
+              denyUntilMs: nowMs + 30_000,
+              updatedAtMs: nowMs,
+            },
+            inflightLeases: [],
+          },
+        },
+      }),
+    }).run();
+
+    resetSiteRuntimeHealthState();
+    invalidateTokenRouterCache();
+
+    const persistedBudget = await db.select().from(schema.settings)
+      .where(eq(schema.settings.key, 'token_router_account_budget_v1'))
+      .get();
+    expect(persistedBudget?.value).toContain(`"${account.id}"`);
+
+    const beforeReset = await listAccountRoutingRuntimeSnapshots();
+    const snapshotBeforeReset = beforeReset.find((item) => item.accountId === account.id);
+    expect(snapshotBeforeReset?.rateLimited).toBe(true);
+    expect(snapshotBeforeReset?.rateLimitedUntilMs || 0).toBeGreaterThan(Date.now());
+
+    resetSiteRuntimeHealthState();
+    invalidateTokenRouterCache();
+
+    const afterReset = await listAccountRoutingRuntimeSnapshots();
+    const restoredSnapshot = afterReset.find((item) => item.accountId === account.id);
+    expect(restoredSnapshot?.rateLimited).toBe(true);
+    expect(restoredSnapshot?.rateLimitCapacity || 0).toBeGreaterThan(0);
   });
 });

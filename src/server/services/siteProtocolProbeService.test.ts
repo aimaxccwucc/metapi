@@ -18,6 +18,7 @@ describe('siteProtocolProbeService', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let probeSiteProtocol: SiteProtocolProbeServiceModule['probeSiteProtocol'];
+  let resetSiteProtocolProbeRuntimeState: SiteProtocolProbeServiceModule['resetSiteProtocolProbeRuntimeState'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -30,10 +31,12 @@ describe('siteProtocolProbeService', () => {
     db = dbModule.db;
     schema = dbModule.schema;
     probeSiteProtocol = serviceModule.probeSiteProtocol;
+    resetSiteProtocolProbeRuntimeState = serviceModule.resetSiteProtocolProbeRuntimeState;
   });
 
   beforeEach(async () => {
     dispatchRuntimeRequestMock.mockReset();
+    resetSiteProtocolProbeRuntimeState();
     await db.delete(schema.settings).run();
     await db.delete(schema.tokenModelAvailability).run();
     await db.delete(schema.modelAvailability).run();
@@ -95,11 +98,11 @@ describe('siteProtocolProbeService', () => {
     expect(result.modelName).toBe('gpt-4.1');
     expect(result.accountId).toBe(account.id);
     expect(result.credentialSource).toBe('account_api_token');
-    expect(result.supportedEndpoints).toEqual(['responses']);
+    expect(result.supportedEndpoints).toEqual(['responses', 'messages']);
     expect(result.preferredEndpoint).toBe('responses');
     expect(result.protocolConfig).toMatchObject({
       mode: 'manual',
-      supportedEndpoints: ['responses'],
+      supportedEndpoints: ['responses', 'messages'],
       preferredEndpoint: 'responses',
     });
     expect(result.attempts).toHaveLength(2);
@@ -165,9 +168,10 @@ describe('siteProtocolProbeService', () => {
 
     expect(result.modelName).toBe('claude-sonnet-4-5-20250929');
     expect(result.credentialSource).toBe('preferred_token');
-    expect(result.supportedEndpoints).toEqual(['messages']);
+    expect(result.supportedEndpoints).toEqual(['messages', 'chat', 'responses']);
     expect(result.preferredEndpoint).toBe('messages');
     expect(result.attempts).toHaveLength(1);
+    expect(result.probeSource).toBe('live');
     expect(result.attempts[0]).toMatchObject({
       endpoint: 'messages',
       ok: true,
@@ -342,7 +346,11 @@ describe('siteProtocolProbeService', () => {
     await expect(probeSiteProtocol({
       siteId: site.id,
       modelName: 'gpt-preferred',
-    })).rejects.toThrow(/HTTP 401/i);
+    })).rejects.toMatchObject({
+      name: 'SiteProtocolProbeError',
+      attempts: expect.any(Array),
+      attemptSummary: expect.any(Array),
+    });
 
     const touchedCredentials = new Set(
       dispatchRuntimeRequestMock.mock.calls
@@ -353,5 +361,88 @@ describe('siteProtocolProbeService', () => {
         .filter((value) => value.length > 0),
     );
     expect(touchedCredentials.size).toBeLessThanOrEqual(6);
+  });
+
+  it('returns cached probe results without repeating network probes inside the ttl window', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'cache-site',
+      url: 'https://cache.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'cache-user',
+      accessToken: 'session-cache',
+      apiToken: 'sk-cache',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+    }).run();
+
+    dispatchRuntimeRequestMock.mockResolvedValue(new Response(JSON.stringify({ id: 'resp_ok' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const first = await probeSiteProtocol({ siteId: site.id });
+    const second = await probeSiteProtocol({ siteId: site.id });
+
+    expect(first.probeSource).toBe('live');
+    expect(second.probeSource).toBe('cache');
+    expect(second.cacheHit).toBe(true);
+    expect(dispatchRuntimeRequestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('enters cooldown after a failed probe and returns structured failure metadata', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'cooldown-site',
+      url: 'https://cooldown.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'cooldown-user',
+      accessToken: 'session-cooldown',
+      apiToken: 'sk-cooldown',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+    }).run();
+
+    dispatchRuntimeRequestMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'invalid api key' },
+    }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    await expect(probeSiteProtocol({ siteId: site.id })).rejects.toMatchObject({
+      name: 'SiteProtocolProbeError',
+      probeSource: 'live',
+      attemptSummary: expect.any(Array),
+      cooldownUntilMs: expect.any(Number),
+    });
+    const callCountAfterFirstFailure = dispatchRuntimeRequestMock.mock.calls.length;
+    await expect(probeSiteProtocol({ siteId: site.id })).rejects.toMatchObject({
+      name: 'SiteProtocolProbeError',
+      probeSource: 'cooldown_cache',
+      attempts: expect.any(Array),
+      attemptSummary: expect.any(Array),
+    });
+    expect(dispatchRuntimeRequestMock.mock.calls.length).toBe(callCountAfterFirstFailure);
   });
 });

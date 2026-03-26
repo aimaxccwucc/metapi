@@ -12,6 +12,7 @@ import { fetchModelPricingCatalog } from '../../services/modelPricingService.js'
 import { normalizeRouteRoutingStrategy } from '../../services/routeRoutingStrategy.js';
 import {
   invalidateTokenRouterCache,
+  listAccountRoutingRuntimeSnapshots,
   listPersistedUnavailableModelEntries,
   listSiteRuntimeHealthSnapshots,
   matchesModelPattern,
@@ -19,7 +20,7 @@ import {
 } from '../../services/tokenRouter.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { getAdapter } from '../../services/platforms/index.js';
-import { requiresManagedAccountTokens, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
+import { extractCheckinSnapshot, requiresManagedAccountTokens, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import {
   clearRouteDecisionSnapshot,
   clearRouteDecisionSnapshots,
@@ -44,6 +45,8 @@ type CheckinLogSnapshot = {
   message: string | null;
   createdAt: string | null;
 };
+
+type AccountCheckinSnapshot = ReturnType<typeof extractCheckinSnapshot>;
 
 type RouteDiagnosticsRouteSummary = {
   routeCount: number;
@@ -924,28 +927,6 @@ function parseDateTimeMs(value?: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function isManualCheckinRequiredMessage(message?: string | null): boolean {
-  if (!message) return false;
-  const text = message.toLowerCase();
-  return (
-    text.includes('turnstile')
-    || text.includes('manual')
-    || text.includes('人工签到')
-    || text.includes('人工验证')
-  );
-}
-
-function isUnsupportedCheckinResultMessage(message?: string | null): boolean {
-  if (!message) return false;
-  const text = message.toLowerCase();
-  return (
-    text.includes('unsupported')
-    || text.includes('not support checkin')
-    || text.includes('not supported')
-    || text.includes('不支持签到')
-  );
-}
-
 function resolveRouteDiagnosticsLimit(rawLimit: unknown): number {
   const fallback = 120;
   if (rawLimit === undefined || rawLimit === null || rawLimit === '') return fallback;
@@ -1014,6 +995,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       persistedEndpointProfiles,
       modelCircuitRows,
       siteRuntimeRows,
+      accountRuntimeRows,
       unavailableModelRows,
     ] = await Promise.all([
       db.select({
@@ -1077,6 +1059,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       listPersistedUpstreamProtocolProfiles(nowMs),
       getModelCircuitSnapshots(nowMs),
       listSiteRuntimeHealthSnapshots(nowMs),
+      listAccountRoutingRuntimeSnapshots(nowMs),
       listPersistedUnavailableModelEntries(),
     ]);
 
@@ -1222,6 +1205,19 @@ export async function tokensRoutes(app: FastifyInstance) {
     });
     const siteRuntimeBreakerOpenCount = siteRuntimeItems.filter((item) => item.breakerOpen).length;
     const siteRuntimePenalizedCount = siteRuntimeItems.filter((item) => item.multiplier < 0.999).length;
+    const accountRuntimeItems = accountRuntimeRows.map((row) => {
+      const account = accountById.get(row.accountId);
+      const site = siteById.get(row.siteId || account?.siteId || 0);
+      return {
+        ...row,
+        username: account?.username ?? null,
+        siteName: site?.name ?? null,
+        lastSuccessAt: row.lastSuccessAtMs ? new Date(row.lastSuccessAtMs).toISOString() : null,
+        lastFailureAt: row.lastFailureAtMs ? new Date(row.lastFailureAtMs).toISOString() : null,
+      };
+    });
+    const accountRuntimeBusyCount = accountRuntimeItems.filter((item) => item.inflightCount >= item.concurrencyBudget).length;
+    const accountRuntimeStickyCount = accountRuntimeItems.filter((item) => item.stickyActiveCount > 0).length;
 
     const unavailableModelItems = unavailableModelRows.map((row) => {
       if (row.scope === 'token') {
@@ -1332,6 +1328,7 @@ export async function tokensRoutes(app: FastifyInstance) {
         requiresManual: boolean;
         unsupported: boolean;
         failedRecent: boolean;
+        checkinSnapshot: AccountCheckinSnapshot;
         runtimeHealth: ReturnType<typeof extractRuntimeHealth>;
         latestCheckinStatus: string | null;
         latestCheckinMessage: string | null;
@@ -1347,11 +1344,18 @@ export async function tokensRoutes(app: FastifyInstance) {
       if (!isSchedulableCheckinAccountStatus(account.status)) continue;
 
       const latest = latestCheckinByAccount.get(account.id) || null;
+      const checkinSnapshot = extractCheckinSnapshot(account.extraConfig);
       const lastCheckinAtMs = parseDateTimeMs(account.lastCheckinAt);
-      const dueNow = !lastCheckinAtMs || (nowMs - lastCheckinAtMs) >= checkinDueThresholdMs;
-      const requiresManual = latest?.status === 'skipped' && isManualCheckinRequiredMessage(latest.message);
-      const unsupported = latest?.status === 'skipped' && isUnsupportedCheckinResultMessage(latest.message);
-      const failedRecent = latest?.status === 'failed';
+      const nextRetryAtMs = parseDateTimeMs(checkinSnapshot?.nextRetryAt ?? null);
+      const dueByLastCheckin = !lastCheckinAtMs || (nowMs - lastCheckinAtMs) >= checkinDueThresholdMs;
+      const dueNow = nextRetryAtMs != null ? nextRetryAtMs <= nowMs : dueByLastCheckin;
+      const requiresManual = checkinSnapshot?.requiresManual === true
+        || checkinSnapshot?.status === 'manual_required';
+      const unsupported = checkinSnapshot?.unsupported === true
+        || checkinSnapshot?.status === 'unsupported';
+      const failedRecent = checkinSnapshot?.status === 'retryable_failed'
+        || checkinSnapshot?.status === 'terminal_failed'
+        || (!checkinSnapshot && latest?.status === 'failed');
       const runtimeHealth = extractRuntimeHealth(account.extraConfig);
       const unhealthy = runtimeHealth?.state === 'unhealthy';
       const expired = account.status === 'expired';
@@ -1393,10 +1397,11 @@ export async function tokensRoutes(app: FastifyInstance) {
           requiresManual,
           unsupported,
           failedRecent,
+          checkinSnapshot,
           runtimeHealth,
-          latestCheckinStatus: latest?.status ?? null,
-          latestCheckinMessage: latest?.message ?? null,
-          latestCheckinAt: latest?.createdAt ?? null,
+          latestCheckinStatus: checkinSnapshot?.status ?? latest?.status ?? null,
+          latestCheckinMessage: checkinSnapshot?.message ?? latest?.message ?? null,
+          latestCheckinAt: checkinSnapshot?.lastAttemptAt ?? latest?.createdAt ?? null,
         });
       }
     }
@@ -1432,6 +1437,7 @@ export async function tokensRoutes(app: FastifyInstance) {
         persistedEndpointProfiles: persistedEndpointProfileItems.length,
         modelCircuits: modelCircuitItems.length,
         siteRuntimeStates: siteRuntimeItems.length,
+        accountRuntimeStates: accountRuntimeItems.length,
         unavailableModels: unavailableModelItems.length,
         siteProfiles: siteProfiles.length,
         checkinTodoSites: checkinTodoSites.length,
@@ -1459,6 +1465,12 @@ export async function tokensRoutes(app: FastifyInstance) {
         breakerOpenCount: siteRuntimeBreakerOpenCount,
         penalizedCount: siteRuntimePenalizedCount,
         items: siteRuntimeItems.slice(0, itemLimit),
+      },
+      accountRuntimeHealth: {
+        total: accountRuntimeItems.length,
+        busyCount: accountRuntimeBusyCount,
+        stickyActiveCount: accountRuntimeStickyCount,
+        items: accountRuntimeItems.slice(0, itemLimit),
       },
       unavailableModels: {
         total: unavailableModelItems.length,

@@ -1,4 +1,5 @@
-﻿import { and, eq, inArray } from 'drizzle-orm';
+﻿import { createHash } from 'node:crypto';
+import { and, eq, inArray } from 'drizzle-orm';
 import { minimatch } from 'minimatch';
 import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { upsertSetting } from '../db/upsertSetting.js';
@@ -113,10 +114,28 @@ const SITE_RUNTIME_HEALTH_PERSIST_DEBOUNCE_MS = 500;
 const SITE_RUNTIME_HEALTH_PERSIST_STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SITE_RUNTIME_HEALTH_PERSIST_IDLE_TTL_MS = 12 * 60 * 60 * 1000;
 const SITE_RUNTIME_HEALTH_PERSIST_MIN_PENALTY = 0.02;
+const ACCOUNT_ROUTING_HEALTH_SETTING_KEY = 'token_router_account_health_v1';
+const ACCOUNT_ROUTING_BUDGET_SETTING_KEY = 'token_router_account_budget_v1';
+const ACCOUNT_ROUTING_STICKY_SETTING_KEY = 'token_router_account_sticky_v1';
+const ACCOUNT_ROUTING_PERSIST_DEBOUNCE_MS = 500;
+const ACCOUNT_ROUTING_SYNC_INTERVAL_MS = 10_000;
+const ACCOUNT_ROUTING_PERSIST_STALE_TTL_MS = 12 * 60 * 60 * 1000;
+const ACCOUNT_ROUTING_PERSIST_IDLE_TTL_MS = 60 * 60 * 1000;
 const PERSISTED_MODEL_UNAVAILABLE_TTL_MS = 6 * 60 * 60 * 1000;
 const CHANNEL_SELECTION_LEASE_DEFAULT_MS = 30_000;
 const CHANNEL_SELECTION_LEASE_MIN_MS = 15_000;
 const CHANNEL_SELECTION_LEASE_MAX_MS = 90_000;
+const ACCOUNT_SUCCESS_EMA_ALPHA = 0.25;
+const ACCOUNT_LATENCY_EMA_ALPHA = 0.25;
+const ACCOUNT_ROUTING_STATE_TTL_MS = 6 * 60 * 60 * 1000;
+const ACCOUNT_SELECTION_LEASE_IDLE_TTL_MS = 2 * 60 * 1000;
+const ACCOUNT_STICKY_BINDING_TTL_MS = 5 * 60 * 1000;
+const ACCOUNT_STICKY_FAILURE_BREAK_MS = 90 * 1000;
+const ACCOUNT_STICKY_BUSY_BREAK_MS = 30 * 1000;
+const ACCOUNT_RATE_LIMIT_BURST_MIN = 2;
+const ACCOUNT_RATE_LIMIT_BURST_MAX = 6;
+const ACCOUNT_RATE_LIMIT_REFILL_MIN_PER_SEC = 0.15;
+const ACCOUNT_RATE_LIMIT_REFILL_MAX_PER_SEC = 1.2;
 
 const SITE_PROTOCOL_FAILURE_PATTERNS: RegExp[] = [
   /unsupported\s+legacy\s+protocol/i,
@@ -219,14 +238,84 @@ type WeightedSelectionMode = 'weighted' | 'stable_first';
 type ChannelSelectionLease = {
   expiresAtMs: number;
 };
+type AccountSelectionLease = {
+  expiresAtMs: number;
+};
+type AccountRateBudgetState = {
+  tokens: number;
+  capacity: number;
+  refillPerSec: number;
+  lastRefillAtMs: number;
+  lastGrantedAtMs: number | null;
+  denyUntilMs: number | null;
+  updatedAtMs: number;
+};
+type AccountRoutingState = {
+  successEma: number;
+  latencyEmaMs: number | null;
+  lastSuccessAtMs: number | null;
+  lastFailureAtMs: number | null;
+  consecutiveFailures: number;
+  updatedAtMs: number;
+};
+type StickySessionBinding = {
+  accountId: number;
+  expiresAtMs: number;
+  lastUsedAtMs: number;
+};
+type AccountRoutingHealthPersistencePayload = {
+  version: 1;
+  savedAtMs: number;
+  byAccountId: Record<string, AccountRoutingState>;
+};
+type AccountRoutingBudgetPersistencePayload = {
+  version: 1;
+  savedAtMs: number;
+  byAccountId: Record<string, {
+    budget: AccountRateBudgetState;
+    inflightLeases: AccountSelectionLease[];
+  }>;
+};
+type AccountStickyBindingPersistencePayload = {
+  version: 1;
+  savedAtMs: number;
+  byStickyKeyHash: Record<string, StickySessionBinding>;
+};
+type AccountRuntimeSnapshotEntry = {
+  accountId: number;
+  siteId: number;
+  successEma: number;
+  latencyEmaMs: number | null;
+  inflightCount: number;
+  concurrencyBudget: number;
+  rateLimitCapacity: number;
+  rateLimitTokens: number;
+  rateLimitRefillPerSec: number;
+  rateLimitedUntilMs: number | null;
+  rateLimited: boolean;
+  stickyActiveCount: number;
+  lastSuccessAtMs: number | null;
+  lastFailureAtMs: number | null;
+  consecutiveFailures: number;
+};
 
 const siteRuntimeHealthStates = new Map<number, SiteRuntimeHealthState>();
 const siteModelRuntimeHealthStates = new Map<number, Map<string, SiteRuntimeHealthState>>();
 const channelSelectionLeases = new Map<number, ChannelSelectionLease>();
+const accountSelectionLeases = new Map<number, AccountSelectionLease[]>();
+const accountRoutingStates = new Map<number, AccountRoutingState>();
+const accountRateBudgetStates = new Map<number, AccountRateBudgetState>();
+const stickySessionBindings = new Map<string, StickySessionBinding>();
+const stickySessionKeyByChannel = new Map<number, string>();
 let siteRuntimeHealthLoaded = false;
 let siteRuntimeHealthLoadPromise: Promise<void> | null = null;
 let siteRuntimeHealthSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let siteRuntimeHealthPersistInFlight: Promise<void> | null = null;
+let accountRuntimeLoaded = false;
+let accountRuntimeLoadPromise: Promise<void> | null = null;
+let accountRuntimeSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let accountRuntimePersistInFlight: Promise<void> | null = null;
+let accountRuntimeLastSyncedAtMs = 0;
 
 function createEmptyPersistedUnavailableModelSnapshot(): PersistedUnavailableModelSnapshot {
   return {
@@ -515,6 +604,7 @@ function resolveImmediateModelBreakerDurationMs(context: SiteRuntimeFailureConte
 function isAuthLikeFailure(context: SiteRuntimeFailureContext = {}): boolean {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
+  if (matchesAnyPattern(SITE_PROTOCOL_FAILURE_PATTERNS, errorText)) return false;
   if (status === 401 || status === 403) return true;
   return /invalid\s+api\s+key|invalid\s+access\s+token|unauthorized|forbidden/i.test(errorText);
 }
@@ -610,6 +700,73 @@ function cloneSiteRuntimeHealthState(state: SiteRuntimeHealthState): SiteRuntime
     lastUpdatedAtMs: state.lastUpdatedAtMs,
     lastFailureAtMs: state.lastFailureAtMs,
     lastSuccessAtMs: state.lastSuccessAtMs,
+  };
+}
+
+function cloneAccountRoutingState(state: AccountRoutingState): AccountRoutingState {
+  return {
+    successEma: state.successEma,
+    latencyEmaMs: state.latencyEmaMs,
+    lastSuccessAtMs: state.lastSuccessAtMs,
+    lastFailureAtMs: state.lastFailureAtMs,
+    consecutiveFailures: state.consecutiveFailures,
+    updatedAtMs: state.updatedAtMs,
+  };
+}
+
+function cloneAccountRateBudgetState(state: AccountRateBudgetState): AccountRateBudgetState {
+  return {
+    tokens: state.tokens,
+    capacity: state.capacity,
+    refillPerSec: state.refillPerSec,
+    lastRefillAtMs: state.lastRefillAtMs,
+    lastGrantedAtMs: state.lastGrantedAtMs,
+    denyUntilMs: state.denyUntilMs,
+    updatedAtMs: state.updatedAtMs,
+  };
+}
+
+function hashStickySessionKey(stickySessionKey: string): string {
+  return createHash('sha256').update(stickySessionKey).digest('hex');
+}
+
+function hydrateAccountRoutingState(raw: unknown): AccountRoutingState | null {
+  if (!isRecord(raw)) return null;
+  return {
+    successEma: clampNumber(readFiniteNumber(raw.successEma) ?? 0.5, 0, 1),
+    latencyEmaMs: readFiniteNumber(raw.latencyEmaMs),
+    lastSuccessAtMs: readNullableTimestamp(raw.lastSuccessAtMs),
+    lastFailureAtMs: readNullableTimestamp(raw.lastFailureAtMs),
+    consecutiveFailures: Math.max(0, readFiniteInteger(raw.consecutiveFailures) ?? 0),
+    updatedAtMs: Math.max(0, readFiniteInteger(raw.updatedAtMs) ?? Date.now()),
+  };
+}
+
+function hydrateAccountRateBudgetState(raw: unknown): AccountRateBudgetState | null {
+  if (!isRecord(raw)) return null;
+  const capacity = clampNumber(readFiniteNumber(raw.capacity) ?? ACCOUNT_RATE_LIMIT_BURST_MIN, ACCOUNT_RATE_LIMIT_BURST_MIN, ACCOUNT_RATE_LIMIT_BURST_MAX);
+  const refillPerSec = clampNumber(readFiniteNumber(raw.refillPerSec) ?? ACCOUNT_RATE_LIMIT_REFILL_MIN_PER_SEC, ACCOUNT_RATE_LIMIT_REFILL_MIN_PER_SEC, ACCOUNT_RATE_LIMIT_REFILL_MAX_PER_SEC);
+  return {
+    tokens: clampNumber(readFiniteNumber(raw.tokens) ?? capacity, 0, capacity),
+    capacity,
+    refillPerSec,
+    lastRefillAtMs: Math.max(0, readFiniteInteger(raw.lastRefillAtMs) ?? Date.now()),
+    lastGrantedAtMs: readNullableTimestamp(raw.lastGrantedAtMs),
+    denyUntilMs: readNullableTimestamp(raw.denyUntilMs),
+    updatedAtMs: Math.max(0, readFiniteInteger(raw.updatedAtMs) ?? Date.now()),
+  };
+}
+
+function hydrateStickySessionBinding(raw: unknown): StickySessionBinding | null {
+  if (!isRecord(raw)) return null;
+  const accountId = readFiniteInteger(raw.accountId);
+  if (accountId == null || accountId <= 0) return null;
+  const expiresAtMs = readNullableTimestamp(raw.expiresAtMs);
+  if (expiresAtMs == null) return null;
+  return {
+    accountId,
+    expiresAtMs,
+    lastUsedAtMs: readNullableTimestamp(raw.lastUsedAtMs) ?? expiresAtMs,
   };
 }
 
@@ -888,6 +1045,275 @@ async function ensureSiteRuntimeHealthStateLoaded(): Promise<void> {
   await siteRuntimeHealthLoadPromise;
 }
 
+function resolveAccountRateLimitCapacity(state?: AccountRoutingState | null): number {
+  const successEma = state?.successEma ?? 0.5;
+  const latencyEmaMs = state?.latencyEmaMs;
+  if (successEma >= 0.85 && (latencyEmaMs == null || latencyEmaMs <= 3_500)) return 6;
+  if (successEma >= 0.7 && (latencyEmaMs == null || latencyEmaMs <= 6_000)) return 4;
+  return 2;
+}
+
+function resolveAccountRateLimitRefillPerSec(state?: AccountRoutingState | null): number {
+  const successEma = state?.successEma ?? 0.5;
+  const latencyEmaMs = state?.latencyEmaMs;
+  const consecutiveFailures = state?.consecutiveFailures ?? 0;
+  if (consecutiveFailures >= 2) return 0.15;
+  if (successEma >= 0.85 && (latencyEmaMs == null || latencyEmaMs <= 3_500)) return 1.2;
+  if (successEma >= 0.7 && (latencyEmaMs == null || latencyEmaMs <= 6_000)) return 0.6;
+  return 0.25;
+}
+
+function getOrCreateAccountRateBudgetState(accountId: number, nowMs = Date.now()): AccountRateBudgetState {
+  const existing = accountRateBudgetStates.get(accountId);
+  if (existing) {
+    existing.updatedAtMs = Math.max(existing.updatedAtMs, nowMs);
+    return existing;
+  }
+
+  const routingState = accountRoutingStates.get(accountId) ?? null;
+  const capacity = resolveAccountRateLimitCapacity(routingState);
+  const refillPerSec = resolveAccountRateLimitRefillPerSec(routingState);
+  const state: AccountRateBudgetState = {
+    tokens: capacity,
+    capacity,
+    refillPerSec,
+    lastRefillAtMs: nowMs,
+    lastGrantedAtMs: null,
+    denyUntilMs: null,
+    updatedAtMs: nowMs,
+  };
+  accountRateBudgetStates.set(accountId, state);
+  return state;
+}
+
+function refillAccountRateBudget(state: AccountRateBudgetState, nowMs = Date.now()): void {
+  const elapsedMs = Math.max(0, nowMs - state.lastRefillAtMs);
+  if (elapsedMs > 0) {
+    const refillTokens = (elapsedMs / 1000) * state.refillPerSec;
+    state.tokens = clampNumber(state.tokens + refillTokens, 0, state.capacity);
+    state.lastRefillAtMs = nowMs;
+  }
+  if (state.denyUntilMs != null && state.denyUntilMs <= nowMs) {
+    state.denyUntilMs = null;
+  }
+  state.updatedAtMs = nowMs;
+}
+
+function syncAccountRateBudgetConfig(accountId: number, nowMs = Date.now()): AccountRateBudgetState {
+  const routingState = accountRoutingStates.get(accountId) ?? null;
+  const state = getOrCreateAccountRateBudgetState(accountId, nowMs);
+  refillAccountRateBudget(state, nowMs);
+  state.capacity = resolveAccountRateLimitCapacity(routingState);
+  state.refillPerSec = resolveAccountRateLimitRefillPerSec(routingState);
+  state.tokens = clampNumber(state.tokens, 0, state.capacity);
+  state.updatedAtMs = nowMs;
+  return state;
+}
+
+function shouldPersistAccountRoutingState(state: AccountRoutingState, nowMs = Date.now()): boolean {
+  const lastTouchedAtMs = Math.max(
+    state.updatedAtMs,
+    state.lastSuccessAtMs ?? 0,
+    state.lastFailureAtMs ?? 0,
+  );
+  if ((nowMs - lastTouchedAtMs) > ACCOUNT_ROUTING_PERSIST_STALE_TTL_MS) return false;
+  if (state.consecutiveFailures > 0) return true;
+  if ((state.latencyEmaMs ?? 0) > 0) return true;
+  return (nowMs - lastTouchedAtMs) <= ACCOUNT_ROUTING_PERSIST_IDLE_TTL_MS;
+}
+
+function shouldPersistAccountRateBudgetState(state: AccountRateBudgetState, nowMs = Date.now()): boolean {
+  const lastTouchedAtMs = Math.max(
+    state.updatedAtMs,
+    state.lastGrantedAtMs ?? 0,
+    state.lastRefillAtMs,
+    state.denyUntilMs ?? 0,
+  );
+  if ((nowMs - lastTouchedAtMs) > ACCOUNT_ROUTING_PERSIST_IDLE_TTL_MS) return false;
+  return state.tokens < state.capacity || (state.denyUntilMs != null && state.denyUntilMs > nowMs);
+}
+
+function buildAccountRoutingHealthPersistencePayload(nowMs = Date.now()): AccountRoutingHealthPersistencePayload {
+  const byAccountId: Record<string, AccountRoutingState> = {};
+  for (const [accountId, state] of accountRoutingStates.entries()) {
+    if (!shouldPersistAccountRoutingState(state, nowMs)) continue;
+    byAccountId[String(accountId)] = cloneAccountRoutingState(state);
+  }
+  return {
+    version: 1,
+    savedAtMs: nowMs,
+    byAccountId,
+  };
+}
+
+function buildAccountRoutingBudgetPersistencePayload(nowMs = Date.now()): AccountRoutingBudgetPersistencePayload {
+  const byAccountId: Record<string, {
+    budget: AccountRateBudgetState;
+    inflightLeases: AccountSelectionLease[];
+  }> = {};
+  pruneAccountSelectionLeases(nowMs);
+  for (const [accountId, state] of accountRateBudgetStates.entries()) {
+    if (!shouldPersistAccountRateBudgetState(state, nowMs) && getAccountSelectionLeases(accountId, nowMs).length === 0) continue;
+    byAccountId[String(accountId)] = {
+      budget: cloneAccountRateBudgetState(state),
+      inflightLeases: getAccountSelectionLeases(accountId, nowMs),
+    };
+  }
+  return {
+    version: 1,
+    savedAtMs: nowMs,
+    byAccountId,
+  };
+}
+
+function buildAccountStickyBindingPersistencePayload(nowMs = Date.now()): AccountStickyBindingPersistencePayload {
+  const byStickyKeyHash: Record<string, StickySessionBinding> = {};
+  pruneStickySessionBindings(nowMs);
+  for (const [stickyKeyHash, binding] of stickySessionBindings.entries()) {
+    if (binding.expiresAtMs <= nowMs) continue;
+    byStickyKeyHash[stickyKeyHash] = {
+      accountId: binding.accountId,
+      expiresAtMs: binding.expiresAtMs,
+      lastUsedAtMs: binding.lastUsedAtMs,
+    };
+  }
+  return {
+    version: 1,
+    savedAtMs: nowMs,
+    byStickyKeyHash,
+  };
+}
+
+async function persistAccountRuntimeState(): Promise<void> {
+  if (accountRuntimePersistInFlight) {
+    await accountRuntimePersistInFlight;
+    return;
+  }
+  const persistTask = (async () => {
+    const nowMs = Date.now();
+    await Promise.all([
+      upsertSetting(ACCOUNT_ROUTING_HEALTH_SETTING_KEY, buildAccountRoutingHealthPersistencePayload(nowMs)),
+      upsertSetting(ACCOUNT_ROUTING_BUDGET_SETTING_KEY, buildAccountRoutingBudgetPersistencePayload(nowMs)),
+      upsertSetting(ACCOUNT_ROUTING_STICKY_SETTING_KEY, buildAccountStickyBindingPersistencePayload(nowMs)),
+    ]);
+    accountRuntimeLastSyncedAtMs = nowMs;
+  })();
+  accountRuntimePersistInFlight = persistTask.finally(() => {
+    if (accountRuntimePersistInFlight === persistTask) {
+      accountRuntimePersistInFlight = null;
+    }
+  });
+  await accountRuntimePersistInFlight;
+}
+
+function scheduleAccountRuntimePersistence(): void {
+  if (accountRuntimeSaveTimer) return;
+  accountRuntimeSaveTimer = setTimeout(() => {
+    accountRuntimeSaveTimer = null;
+    void persistAccountRuntimeState();
+  }, ACCOUNT_ROUTING_PERSIST_DEBOUNCE_MS);
+}
+
+async function loadAccountRuntimeStateFromSettings(force = false): Promise<void> {
+  const nowMs = Date.now();
+  if (!force && accountRuntimeLoaded && (nowMs - accountRuntimeLastSyncedAtMs) < ACCOUNT_ROUTING_SYNC_INTERVAL_MS) {
+    return;
+  }
+
+  const [healthRow, budgetRow, stickyRow] = await Promise.all([
+    db.select({ value: schema.settings.value }).from(schema.settings).where(eq(schema.settings.key, ACCOUNT_ROUTING_HEALTH_SETTING_KEY)).get(),
+    db.select({ value: schema.settings.value }).from(schema.settings).where(eq(schema.settings.key, ACCOUNT_ROUTING_BUDGET_SETTING_KEY)).get(),
+    db.select({ value: schema.settings.value }).from(schema.settings).where(eq(schema.settings.key, ACCOUNT_ROUTING_STICKY_SETTING_KEY)).get(),
+  ]);
+
+  const parsedHealth = (() => {
+    try { return healthRow?.value ? JSON.parse(healthRow.value) : null; } catch { return null; }
+  })();
+  if (isRecord(parsedHealth) && isRecord(parsedHealth.byAccountId)) {
+    for (const [accountIdKey, stateRaw] of Object.entries(parsedHealth.byAccountId)) {
+      const accountId = Number(accountIdKey);
+      if (!Number.isFinite(accountId) || accountId <= 0) continue;
+      const state = hydrateAccountRoutingState(stateRaw);
+      if (!state) continue;
+      const existing = accountRoutingStates.get(accountId);
+      if (!existing || state.updatedAtMs >= existing.updatedAtMs) {
+        accountRoutingStates.set(accountId, state);
+      }
+    }
+  }
+
+  const parsedBudget = (() => {
+    try { return budgetRow?.value ? JSON.parse(budgetRow.value) : null; } catch { return null; }
+  })();
+  if (isRecord(parsedBudget) && isRecord(parsedBudget.byAccountId)) {
+    for (const [accountIdKey, itemRaw] of Object.entries(parsedBudget.byAccountId)) {
+      const accountId = Number(accountIdKey);
+      if (!Number.isFinite(accountId) || accountId <= 0 || !isRecord(itemRaw)) continue;
+      const budget = hydrateAccountRateBudgetState(itemRaw.budget);
+      if (budget) {
+        const existing = accountRateBudgetStates.get(accountId);
+        if (!existing || budget.updatedAtMs >= existing.updatedAtMs) {
+          accountRateBudgetStates.set(accountId, budget);
+        }
+      }
+      const inflightLeases = Array.isArray(itemRaw.inflightLeases)
+        ? itemRaw.inflightLeases
+          .map((leaseRaw) => isRecord(leaseRaw) ? { expiresAtMs: readNullableTimestamp(leaseRaw.expiresAtMs) ?? 0 } : null)
+          .filter((lease): lease is AccountSelectionLease => !!lease && lease.expiresAtMs > nowMs)
+        : [];
+      if (inflightLeases.length > 0) {
+        const existingLeases = getAccountSelectionLeases(accountId, nowMs);
+        accountSelectionLeases.set(accountId, [...existingLeases, ...inflightLeases]
+          .sort((left, right) => left.expiresAtMs - right.expiresAtMs)
+          .slice(-8));
+      }
+    }
+  }
+
+  const parsedSticky = (() => {
+    try { return stickyRow?.value ? JSON.parse(stickyRow.value) : null; } catch { return null; }
+  })();
+  if (isRecord(parsedSticky) && isRecord(parsedSticky.byStickyKeyHash)) {
+    for (const [stickyKeyHash, bindingRaw] of Object.entries(parsedSticky.byStickyKeyHash)) {
+      const binding = hydrateStickySessionBinding(bindingRaw);
+      if (!binding || binding.expiresAtMs <= nowMs) continue;
+      const existing = stickySessionBindings.get(stickyKeyHash);
+      if (
+        !existing
+        || binding.lastUsedAtMs >= existing.lastUsedAtMs
+        || binding.expiresAtMs >= existing.expiresAtMs
+      ) {
+        stickySessionBindings.set(stickyKeyHash, binding);
+      }
+    }
+  }
+
+  pruneAccountRoutingStates(nowMs);
+  pruneAccountSelectionLeases(nowMs);
+  pruneStickySessionBindings(nowMs);
+  accountRuntimeLoaded = true;
+  accountRuntimeLastSyncedAtMs = nowMs;
+}
+
+async function ensureAccountRuntimeStateLoaded(): Promise<void> {
+  if (accountRuntimeLoaded && (Date.now() - accountRuntimeLastSyncedAtMs) < ACCOUNT_ROUTING_SYNC_INTERVAL_MS) return;
+  if (!accountRuntimeLoadPromise) {
+    accountRuntimeLoadPromise = (async () => {
+      try {
+        await loadAccountRuntimeStateFromSettings(!accountRuntimeLoaded);
+      } finally {
+        accountRuntimeLoadPromise = null;
+      }
+    })();
+  }
+  await accountRuntimeLoadPromise;
+}
+
+async function ensureRoutingRuntimeStateLoaded(): Promise<void> {
+  await ensureSiteRuntimeHealthStateLoaded();
+  await ensureAccountRuntimeStateLoaded();
+}
+
 function recordSiteRuntimeFailure(siteId: number, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
   let changed = false;
   if (shouldApplySiteWideFailureTracking(context)) {
@@ -923,6 +1349,11 @@ function recordSiteRuntimeSuccess(siteId: number, latencyMs: number, modelName?:
 export function resetSiteRuntimeHealthState(): void {
   siteRuntimeHealthStates.clear();
   siteModelRuntimeHealthStates.clear();
+  accountRoutingStates.clear();
+  accountRateBudgetStates.clear();
+  accountSelectionLeases.clear();
+  stickySessionBindings.clear();
+  stickySessionKeyByChannel.clear();
   siteRuntimeHealthLoaded = false;
   siteRuntimeHealthLoadPromise = null;
   if (siteRuntimeHealthSaveTimer) {
@@ -930,6 +1361,14 @@ export function resetSiteRuntimeHealthState(): void {
     siteRuntimeHealthSaveTimer = null;
   }
   siteRuntimeHealthPersistInFlight = null;
+  accountRuntimeLoaded = false;
+  accountRuntimeLoadPromise = null;
+  if (accountRuntimeSaveTimer) {
+    clearTimeout(accountRuntimeSaveTimer);
+    accountRuntimeSaveTimer = null;
+  }
+  accountRuntimePersistInFlight = null;
+  accountRuntimeLastSyncedAtMs = 0;
 }
 
 export async function flushSiteRuntimeHealthPersistence(): Promise<void> {
@@ -937,10 +1376,15 @@ export async function flushSiteRuntimeHealthPersistence(): Promise<void> {
     clearTimeout(siteRuntimeHealthSaveTimer);
     siteRuntimeHealthSaveTimer = null;
     await persistSiteRuntimeHealthState();
-    return;
-  }
-  if (siteRuntimeHealthPersistInFlight) {
+  } else if (siteRuntimeHealthPersistInFlight) {
     await siteRuntimeHealthPersistInFlight;
+  }
+  if (accountRuntimeSaveTimer) {
+    clearTimeout(accountRuntimeSaveTimer);
+    accountRuntimeSaveTimer = null;
+    await persistAccountRuntimeState();
+  } else if (accountRuntimePersistInFlight) {
+    await accountRuntimePersistInFlight;
   }
 }
 
@@ -948,8 +1392,9 @@ export async function clearRoutingRuntimeState(): Promise<{
   updatedChannels: number;
   clearedModelCircuits: number;
   clearedPersistedSiteRuntimeState: boolean;
+  clearedAccountRuntimeState: boolean;
 }> {
-  await ensureSiteRuntimeHealthStateLoaded();
+  await ensureRoutingRuntimeStateLoaded();
 
   const updatedChannels = (await db.update(schema.routeChannels).set({
     lastFailAt: null,
@@ -961,6 +1406,13 @@ export async function clearRoutingRuntimeState(): Promise<{
   const clearedPersistedSiteRuntimeState = (await db.delete(schema.settings)
     .where(eq(schema.settings.key, SITE_RUNTIME_HEALTH_SETTING_KEY))
     .run()).changes > 0;
+  await db.delete(schema.settings)
+    .where(inArray(schema.settings.key, [
+      ACCOUNT_ROUTING_HEALTH_SETTING_KEY,
+      ACCOUNT_ROUTING_BUDGET_SETTING_KEY,
+      ACCOUNT_ROUTING_STICKY_SETTING_KEY,
+    ]))
+    .run();
 
   resetSiteRuntimeHealthState();
   const clearedModelCircuits = resetAllModelCircuits();
@@ -970,11 +1422,13 @@ export async function clearRoutingRuntimeState(): Promise<{
     updatedChannels,
     clearedModelCircuits,
     clearedPersistedSiteRuntimeState,
+    clearedAccountRuntimeState: true,
   };
 }
 
 export async function listSiteRuntimeHealthSnapshots(nowMs = Date.now()): Promise<SiteRuntimeHealthSnapshotEntry[]> {
-  await ensureSiteRuntimeHealthStateLoaded();
+  await ensureRoutingRuntimeStateLoaded();
+  pruneAccountRoutingStates(nowMs);
   const entries: SiteRuntimeHealthSnapshotEntry[] = [];
 
   for (const [siteId, state] of siteRuntimeHealthStates.entries()) {
@@ -1023,6 +1477,73 @@ export async function listSiteRuntimeHealthSnapshots(nowMs = Date.now()): Promis
     || (left.modelName || '').localeCompare((right.modelName || ''), undefined, { sensitivity: 'base' })
   ));
 
+  return entries;
+}
+
+export async function listAccountRoutingRuntimeSnapshots(nowMs = Date.now()): Promise<AccountRuntimeSnapshotEntry[]> {
+  await ensureRoutingRuntimeStateLoaded();
+  pruneAccountRoutingStates(nowMs);
+  pruneAccountSelectionLeases(nowMs);
+  pruneStickySessionBindings(nowMs);
+
+  const accountSiteRows = await db.select({
+    accountId: schema.accounts.id,
+    siteId: schema.accounts.siteId,
+  }).from(schema.accounts).all();
+  const siteIdByAccountId = new Map<number, number>();
+  for (const row of accountSiteRows) {
+    siteIdByAccountId.set(row.accountId, row.siteId);
+  }
+
+  const stickyActiveCountByAccountId = new Map<number, number>();
+  for (const binding of stickySessionBindings.values()) {
+    stickyActiveCountByAccountId.set(
+      binding.accountId,
+      (stickyActiveCountByAccountId.get(binding.accountId) || 0) + 1,
+    );
+  }
+
+  const entries: AccountRuntimeSnapshotEntry[] = [];
+  const accountIds = new Set<number>([
+    ...accountRoutingStates.keys(),
+    ...accountRateBudgetStates.keys(),
+    ...accountSelectionLeases.keys(),
+  ]);
+  for (const accountId of accountIds) {
+    const state = accountRoutingStates.get(accountId) ?? {
+      successEma: 0.5,
+      latencyEmaMs: null,
+      lastSuccessAtMs: null,
+      lastFailureAtMs: null,
+      consecutiveFailures: 0,
+      updatedAtMs: nowMs,
+    };
+    const budgetState = syncAccountRateBudgetConfig(accountId, nowMs);
+    entries.push({
+      accountId,
+      siteId: siteIdByAccountId.get(accountId) ?? 0,
+      successEma: state.successEma,
+      latencyEmaMs: state.latencyEmaMs,
+      inflightCount: getAccountSelectionLeases(accountId, nowMs).length,
+      concurrencyBudget: Math.max(1, state.successEma >= 0.75 && (state.latencyEmaMs == null || state.latencyEmaMs <= 6_000) && state.consecutiveFailures < 2 ? 2 : 1),
+      rateLimitCapacity: budgetState.capacity,
+      rateLimitTokens: Number(budgetState.tokens.toFixed(3)),
+      rateLimitRefillPerSec: budgetState.refillPerSec,
+      rateLimitedUntilMs: budgetState.denyUntilMs,
+      rateLimited: budgetState.denyUntilMs != null && budgetState.denyUntilMs > nowMs,
+      stickyActiveCount: stickyActiveCountByAccountId.get(accountId) || 0,
+      lastSuccessAtMs: state.lastSuccessAtMs,
+      lastFailureAtMs: state.lastFailureAtMs,
+      consecutiveFailures: state.consecutiveFailures,
+    });
+  }
+
+  entries.sort((left, right) => (
+    right.stickyActiveCount - left.stickyActiveCount
+    || right.inflightCount - left.inflightCount
+    || left.successEma - right.successEma
+    || left.accountId - right.accountId
+  ));
   return entries;
 }
 
@@ -1143,6 +1664,433 @@ function pruneChannelSelectionLeases(nowMs = Date.now()): void {
       channelSelectionLeases.delete(channelId);
     }
   }
+}
+
+function pruneAccountSelectionLeases(nowMs = Date.now()): void {
+  for (const [accountId, leases] of accountSelectionLeases.entries()) {
+    const activeLeases = leases.filter((lease) => lease.expiresAtMs > nowMs);
+    if (activeLeases.length === 0) {
+      accountSelectionLeases.delete(accountId);
+      continue;
+    }
+    accountSelectionLeases.set(accountId, activeLeases);
+  }
+}
+
+function getAccountSelectionLeases(accountId: number, nowMs = Date.now()): AccountSelectionLease[] {
+  pruneAccountSelectionLeases(nowMs);
+  return accountSelectionLeases.get(accountId) ?? [];
+}
+
+function getAccountSelectionLeaseUntil(accountId: number, nowMs = Date.now()): string | null {
+  const latestExpiresAtMs = getAccountSelectionLeases(accountId, nowMs)
+    .reduce<number | null>((latest, lease) => {
+      if (latest == null || lease.expiresAtMs > latest) return lease.expiresAtMs;
+      return latest;
+    }, null);
+  return latestExpiresAtMs ? new Date(latestExpiresAtMs).toISOString() : null;
+}
+
+function getOrCreateAccountRoutingState(accountId: number, nowMs = Date.now()): AccountRoutingState {
+  const existing = accountRoutingStates.get(accountId);
+  if (existing) {
+    existing.updatedAtMs = Math.max(existing.updatedAtMs, nowMs);
+    return existing;
+  }
+
+  const state: AccountRoutingState = {
+    successEma: 0.5,
+    latencyEmaMs: null,
+    lastSuccessAtMs: null,
+    lastFailureAtMs: null,
+    consecutiveFailures: 0,
+    updatedAtMs: nowMs,
+  };
+  accountRoutingStates.set(accountId, state);
+  scheduleAccountRuntimePersistence();
+  return state;
+}
+
+function pruneAccountRoutingStates(nowMs = Date.now()): void {
+  for (const [accountId, state] of accountRoutingStates.entries()) {
+    const lastTouchedAtMs = Math.max(
+      state.updatedAtMs,
+      state.lastSuccessAtMs ?? 0,
+      state.lastFailureAtMs ?? 0,
+    );
+    if ((nowMs - lastTouchedAtMs) > ACCOUNT_ROUTING_STATE_TTL_MS) {
+      accountRoutingStates.delete(accountId);
+      accountRateBudgetStates.delete(accountId);
+      accountSelectionLeases.delete(accountId);
+    }
+  }
+}
+
+function pruneStickySessionBindings(nowMs = Date.now()): void {
+  for (const [stickyKeyHash, binding] of stickySessionBindings.entries()) {
+    if (binding.expiresAtMs <= nowMs) {
+      stickySessionBindings.delete(stickyKeyHash);
+    }
+  }
+  for (const [channelId, stickyKeyHash] of stickySessionKeyByChannel.entries()) {
+    if (!stickySessionBindings.has(stickyKeyHash)) {
+      stickySessionKeyByChannel.delete(channelId);
+    }
+  }
+}
+
+function getStickySessionBinding(stickySessionKey: string | null | undefined, nowMs = Date.now()): StickySessionBinding | null {
+  const normalizedKey = typeof stickySessionKey === 'string' ? stickySessionKey.trim() : '';
+  if (!normalizedKey) return null;
+  pruneStickySessionBindings(nowMs);
+  return stickySessionBindings.get(hashStickySessionKey(normalizedKey)) ?? null;
+}
+
+function getAccountConcurrencyBudget(candidate: RouteChannelCandidate, state?: AccountRoutingState | null): number {
+  const successEma = state?.successEma ?? 0.5;
+  const latencyEmaMs = state?.latencyEmaMs;
+  const consecutiveFailures = state?.consecutiveFailures ?? 0;
+  const isExplicitToken = isExplicitTokenChannel(candidate);
+
+  if (!isExplicitToken) return 1;
+  if (consecutiveFailures >= 2) return 1;
+  if (successEma >= 0.75 && (latencyEmaMs == null || latencyEmaMs <= 6_000)) return 2;
+  return 1;
+}
+
+function buildAccountRateLimitReason(item: {
+  inflightCount: number;
+  concurrencyBudget: number;
+  leaseUntil: string;
+  rateLimitedUntil: string | null;
+  budgetTokens: number;
+  budgetCapacity: number;
+  budgetRefillPerSec: number;
+}, nowMs: number): string {
+  if (item.rateLimitedUntil) {
+    return `账号速率受限，优先避让（令牌=${item.budgetTokens.toFixed(2)}/${item.budgetCapacity}，${resolveLeaseAvoidWindowSec(item.rateLimitedUntil, nowMs)} 秒后恢复）`;
+  }
+  if (item.budgetTokens < 1 && item.inflightCount < item.concurrencyBudget) {
+    const refillPerSec = Math.max(item.budgetRefillPerSec, 0.01);
+    const retryAfterSec = Math.max(1, Math.ceil((1 - item.budgetTokens) / refillPerSec));
+    return `账号速率预算不足，优先避让（令牌=${item.budgetTokens.toFixed(2)}/${item.budgetCapacity}，约 ${retryAfterSec} 秒后恢复）`;
+  }
+  return `账号并发繁忙，优先避让（${item.inflightCount}/${item.concurrencyBudget}，${resolveLeaseAvoidWindowSec(item.leaseUntil, nowMs)} 秒租约）`;
+}
+
+function buildAccountAvoidanceSummaryLabel(items: Array<{ rateLimitedUntil: string | null; budgetTokens?: number }>): string {
+  return items.some((item) => item.rateLimitedUntil || (item.budgetTokens ?? 1) < 1)
+    ? '账号预算避让'
+    : '账号并发避让';
+}
+
+function reserveAccountSelectionLease(
+  candidate: RouteChannelCandidate,
+  nowMs = Date.now(),
+  leaseMs = CHANNEL_SELECTION_LEASE_DEFAULT_MS,
+): string {
+  const budgetAttempt = tryConsumeAccountRateBudget(candidate, nowMs);
+  if (!budgetAttempt.allowed) {
+    return budgetAttempt.retryAtMs
+      ? new Date(budgetAttempt.retryAtMs).toISOString()
+      : new Date(nowMs).toISOString();
+  }
+  const normalizedLeaseMs = Math.min(
+    CHANNEL_SELECTION_LEASE_MAX_MS,
+    Math.max(CHANNEL_SELECTION_LEASE_MIN_MS, Math.trunc(leaseMs) || CHANNEL_SELECTION_LEASE_DEFAULT_MS),
+  );
+  const expiresAtMs = nowMs + normalizedLeaseMs;
+  const leases = getAccountSelectionLeases(candidate.account.id, nowMs);
+  accountSelectionLeases.set(candidate.account.id, [
+    ...leases,
+    { expiresAtMs },
+  ]);
+  scheduleAccountRuntimePersistence();
+  return new Date(expiresAtMs).toISOString();
+}
+
+function releaseAccountSelectionLease(accountId: number, nowMs = Date.now()): void {
+  const leases = getAccountSelectionLeases(accountId, nowMs);
+  if (leases.length <= 1) {
+    accountSelectionLeases.delete(accountId);
+    scheduleAccountRuntimePersistence();
+    return;
+  }
+  accountSelectionLeases.set(accountId, leases.slice(0, leases.length - 1));
+  scheduleAccountRuntimePersistence();
+}
+
+function tryConsumeAccountRateBudget(candidate: RouteChannelCandidate, nowMs = Date.now()): {
+  allowed: boolean;
+  state: AccountRateBudgetState;
+  retryAtMs: number | null;
+} {
+  const state = syncAccountRateBudgetConfig(candidate.account.id, nowMs);
+  refillAccountRateBudget(state, nowMs);
+  if (state.denyUntilMs != null && state.denyUntilMs > nowMs) {
+    return {
+      allowed: false,
+      state,
+      retryAtMs: state.denyUntilMs,
+    };
+  }
+  if (state.tokens >= 1) {
+    state.tokens = clampNumber(state.tokens - 1, 0, state.capacity);
+    state.lastGrantedAtMs = nowMs;
+    state.updatedAtMs = nowMs;
+    scheduleAccountRuntimePersistence();
+    return {
+      allowed: true,
+      state,
+      retryAtMs: null,
+    };
+  }
+
+  const retryAfterMs = Math.max(1, Math.ceil(((1 - state.tokens) / Math.max(state.refillPerSec, 0.01)) * 1000));
+  state.denyUntilMs = nowMs + retryAfterMs;
+  state.updatedAtMs = nowMs;
+  scheduleAccountRuntimePersistence();
+  return {
+    allowed: false,
+    state,
+    retryAtMs: state.denyUntilMs,
+  };
+}
+
+function partitionAccountSelectionLeases(
+  candidates: RouteChannelCandidate[],
+  nowMs = Date.now(),
+): {
+  preferred: RouteChannelCandidate[];
+  avoided: Array<{
+    candidate: RouteChannelCandidate;
+    leaseUntil: string;
+    inflightCount: number;
+    concurrencyBudget: number;
+    rateLimitedUntil: string | null;
+    budgetTokens: number;
+    budgetCapacity: number;
+    budgetRefillPerSec: number;
+  }>;
+} {
+  if (candidates.length <= 1) {
+    const candidate = candidates[0];
+    if (!candidate) {
+      return {
+        preferred: [],
+        avoided: [],
+      };
+    }
+    const state = accountRoutingStates.get(candidate.account.id) ?? null;
+    const inflightCount = getAccountSelectionLeases(candidate.account.id, nowMs).length;
+    const concurrencyBudget = getAccountConcurrencyBudget(candidate, state);
+    const budgetState = syncAccountRateBudgetConfig(candidate.account.id, nowMs);
+    const rateLimitedUntil = budgetState.denyUntilMs != null && budgetState.denyUntilMs > nowMs
+      ? new Date(budgetState.denyUntilMs).toISOString()
+      : null;
+    const hasBudget = budgetState.tokens >= 1 && !rateLimitedUntil;
+    if (inflightCount < concurrencyBudget && hasBudget) {
+      return {
+        preferred: candidates,
+        avoided: [],
+      };
+    }
+    return {
+      preferred: hasBudget ? candidates : [],
+      avoided: [{
+        candidate,
+        leaseUntil: getAccountSelectionLeaseUntil(candidate.account.id, nowMs) || new Date(nowMs).toISOString(),
+        inflightCount,
+        concurrencyBudget,
+        rateLimitedUntil,
+        budgetTokens: Number(budgetState.tokens.toFixed(3)),
+        budgetCapacity: budgetState.capacity,
+        budgetRefillPerSec: budgetState.refillPerSec,
+      }],
+    };
+  }
+
+  pruneAccountRoutingStates(nowMs);
+  const preferred: RouteChannelCandidate[] = [];
+  const busyFallback: RouteChannelCandidate[] = [];
+  const uniqueAccountIds = new Set<number>();
+  const avoided: Array<{
+    candidate: RouteChannelCandidate;
+    leaseUntil: string;
+    inflightCount: number;
+    concurrencyBudget: number;
+    rateLimitedUntil: string | null;
+    budgetTokens: number;
+    budgetCapacity: number;
+    budgetRefillPerSec: number;
+  }> = [];
+
+  for (const candidate of candidates) {
+    uniqueAccountIds.add(candidate.account.id);
+    const state = accountRoutingStates.get(candidate.account.id) ?? null;
+    const inflightCount = getAccountSelectionLeases(candidate.account.id, nowMs).length;
+    const concurrencyBudget = getAccountConcurrencyBudget(candidate, state);
+    const budgetState = syncAccountRateBudgetConfig(candidate.account.id, nowMs);
+    const rateLimitedUntil = budgetState.denyUntilMs != null && budgetState.denyUntilMs > nowMs
+      ? new Date(budgetState.denyUntilMs).toISOString()
+      : null;
+    const hasBudget = budgetState.tokens >= 1 && !rateLimitedUntil;
+    if (inflightCount < concurrencyBudget && hasBudget) {
+      preferred.push(candidate);
+      continue;
+    }
+    if (hasBudget) {
+      busyFallback.push(candidate);
+    }
+    avoided.push({
+      candidate,
+      leaseUntil: getAccountSelectionLeaseUntil(candidate.account.id, nowMs) || new Date(nowMs).toISOString(),
+      inflightCount,
+      concurrencyBudget,
+      rateLimitedUntil,
+      budgetTokens: Number(budgetState.tokens.toFixed(3)),
+      budgetCapacity: budgetState.capacity,
+      budgetRefillPerSec: budgetState.refillPerSec,
+    });
+  }
+
+  if (avoided.length > 0) {
+    scheduleAccountRuntimePersistence();
+  }
+
+  return {
+    preferred: preferred.length > 0
+      ? preferred
+      : (
+        uniqueAccountIds.size <= 1
+          ? candidates
+          : (busyFallback.length > 0 ? busyFallback : [])
+      ),
+    avoided,
+  };
+}
+
+function preferStickySessionCandidates(
+  candidates: RouteChannelCandidate[],
+  stickySessionKey: string | null | undefined,
+  nowMs = Date.now(),
+): {
+  preferred: RouteChannelCandidate[];
+  stickyBinding: StickySessionBinding | null;
+  stickyReason: 'reused' | 'broken_by_failure' | 'broken_by_busy' | 'none';
+} {
+  if (candidates.length <= 1) {
+    return {
+      preferred: candidates,
+      stickyBinding: getStickySessionBinding(stickySessionKey, nowMs),
+      stickyReason: 'none',
+    };
+  }
+
+  const stickyBinding = getStickySessionBinding(stickySessionKey, nowMs);
+  if (!stickyBinding) {
+    return {
+      preferred: candidates,
+      stickyBinding: null,
+      stickyReason: 'none',
+    };
+  }
+
+  const stickyCandidates = candidates.filter((candidate) => candidate.account.id === stickyBinding.accountId);
+  if (stickyCandidates.length === 0) {
+    stickySessionBindings.delete(hashStickySessionKey(String(stickySessionKey)));
+    return {
+      preferred: candidates,
+      stickyBinding: null,
+      stickyReason: 'none',
+    };
+  }
+
+  const stickyState = accountRoutingStates.get(stickyBinding.accountId) ?? null;
+  const stickyInflight = getAccountSelectionLeases(stickyBinding.accountId, nowMs).length;
+  const stickyBudget = getAccountConcurrencyBudget(stickyCandidates[0], stickyState);
+  const stickyBusy = stickyInflight >= stickyBudget && (stickyBinding.expiresAtMs - nowMs) > ACCOUNT_STICKY_BUSY_BREAK_MS;
+  const stickyFailedRecently = stickyState?.lastFailureAtMs != null
+    && (nowMs - stickyState.lastFailureAtMs) <= ACCOUNT_STICKY_FAILURE_BREAK_MS
+    && (stickyState.lastSuccessAtMs ?? 0) < stickyState.lastFailureAtMs;
+
+  if (stickyBusy) {
+    return {
+      preferred: candidates,
+      stickyBinding,
+      stickyReason: 'broken_by_busy',
+    };
+  }
+  if (stickyFailedRecently) {
+    return {
+      preferred: candidates,
+      stickyBinding,
+      stickyReason: 'broken_by_failure',
+    };
+  }
+
+  return {
+    preferred: stickyCandidates,
+    stickyBinding,
+    stickyReason: 'reused',
+  };
+}
+
+function bindStickySessionToCandidate(
+  stickySessionKey: string | null | undefined,
+  candidate: RouteChannelCandidate,
+  nowMs = Date.now(),
+  leaseMs = CHANNEL_SELECTION_LEASE_DEFAULT_MS,
+): string | null {
+  const normalizedKey = typeof stickySessionKey === 'string' ? stickySessionKey.trim() : '';
+  if (!normalizedKey) return null;
+  const stickyKeyHash = hashStickySessionKey(normalizedKey);
+
+  const expiresAtMs = nowMs + Math.max(
+    ACCOUNT_STICKY_BINDING_TTL_MS,
+    Math.min(CHANNEL_SELECTION_LEASE_MAX_MS, Math.trunc(leaseMs) || CHANNEL_SELECTION_LEASE_DEFAULT_MS),
+  );
+  stickySessionBindings.set(stickyKeyHash, {
+    accountId: candidate.account.id,
+    expiresAtMs,
+    lastUsedAtMs: nowMs,
+  });
+  stickySessionKeyByChannel.set(candidate.channel.id, stickyKeyHash);
+  scheduleAccountRuntimePersistence();
+  return new Date(expiresAtMs).toISOString();
+}
+
+function clearStickyBindingForChannel(channelId: number): void {
+  const stickyKeyHash = stickySessionKeyByChannel.get(channelId);
+  if (!stickyKeyHash) return;
+  stickySessionKeyByChannel.delete(channelId);
+  stickySessionBindings.delete(stickyKeyHash);
+  scheduleAccountRuntimePersistence();
+}
+
+function getAccountLatencyMultiplier(latencyEmaMs: number | null): number {
+  if (latencyEmaMs == null || !Number.isFinite(latencyEmaMs) || latencyEmaMs <= 0) return 1;
+  const overflowRatio = Math.max(0, (latencyEmaMs - 2_500) / 7_500);
+  return clampNumber(1 - (overflowRatio * 0.35), 0.65, 1);
+}
+
+function getAccountSuccessMultiplier(successEma: number): number {
+  const normalized = clampNumber(successEma, 0.05, 0.99);
+  const scaled = 0.55 + normalized * 0.65;
+  return clampNumber(scaled, 0.55, 1.2);
+}
+
+function getAccountStickyMultiplier(
+  candidate: RouteChannelCandidate,
+  stickyBinding: StickySessionBinding | null,
+  stickyReason: 'reused' | 'broken_by_failure' | 'broken_by_busy' | 'none',
+): number {
+  if (!stickyBinding) return 1;
+  if (stickyBinding.accountId !== candidate.account.id) return 1;
+  if (stickyReason === 'reused') return 1.35;
+  if (stickyReason === 'broken_by_failure') return 0.85;
+  if (stickyReason === 'broken_by_busy') return 0.92;
+  return 1;
 }
 
 function getChannelSelectionLease(channelId: number, nowMs = Date.now()): ChannelSelectionLease | null {
@@ -1339,6 +2287,8 @@ export function invalidateTokenRouterCache(): void {
   };
   routeMatchCache.clear();
   channelSelectionLeases.clear();
+  accountSelectionLeases.clear();
+  stickySessionKeyByChannel.clear();
 }
 
 function isSiteDisabled(status?: string | null): boolean {
@@ -1628,9 +2578,11 @@ export interface RouteDecisionCandidate {
   recentlyFailed: boolean;
   avoidedByRecentFailure: boolean;
   avoidedByInflightLease?: boolean;
+  avoidedByAccountLease?: boolean;
   cooldownUntil?: string | null;
   lastFailAt?: string | null;
   leasedUntil?: string | null;
+  accountLeaseUntil?: string | null;
   consecutiveFailCount?: number;
   cooldownLevel?: number;
   probability: number;
@@ -1653,6 +2605,22 @@ export interface RouteDecisionCandidate {
     combinedMultiplier: number;
     globalBreakerOpen: boolean;
     modelBreakerOpen: boolean;
+  };
+  accountRuntimeState?: {
+    successEma: number;
+    latencyEmaMs: number | null;
+    inflightCount: number;
+    concurrencyBudget: number;
+    rateLimitCapacity: number;
+    rateLimitTokens: number;
+    rateLimitRefillPerSec: number;
+    rateLimitedUntil: string | null;
+    rateLimited: boolean;
+    stickyPreferred: boolean;
+    stickyActive: boolean;
+    stickyBoundAccountId: number | null;
+    stickyUntil: string | null;
+    consecutiveFailures: number;
   };
 }
 
@@ -2182,7 +3150,7 @@ export class TokenRouter {
    */
   async selectChannel(requestedModel: string, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<SelectedChannel | null> {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
-    await ensureSiteRuntimeHealthStateLoaded();
+    await ensureRoutingRuntimeStateLoaded();
 
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
@@ -2194,7 +3162,7 @@ export class TokenRouter {
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
   ): Promise<SelectedChannel | null> {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
-    await ensureSiteRuntimeHealthStateLoaded();
+    await ensureRoutingRuntimeStateLoaded();
 
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
@@ -2210,7 +3178,7 @@ export class TokenRouter {
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
   ): Promise<SelectedChannel | null> {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
-    await ensureSiteRuntimeHealthStateLoaded();
+    await ensureRoutingRuntimeStateLoaded();
 
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
@@ -2222,7 +3190,7 @@ export class TokenRouter {
     excludeChannelIds: number[] = [],
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
   ): Promise<RouteDecisionExplanation> {
-    await ensureSiteRuntimeHealthStateLoaded();
+    await ensureRoutingRuntimeStateLoaded();
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     return await this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
   }
@@ -2233,13 +3201,13 @@ export class TokenRouter {
     excludeChannelIds: number[] = [],
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
   ): Promise<RouteDecisionExplanation> {
-    await ensureSiteRuntimeHealthStateLoaded();
+    await ensureRoutingRuntimeStateLoaded();
     const match = await this.findRouteById(routeId, downstreamPolicy);
     return await this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
   }
 
   async explainSelectionRouteWide(routeId: number, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<RouteDecisionExplanation> {
-    await ensureSiteRuntimeHealthStateLoaded();
+    await ensureRoutingRuntimeStateLoaded();
     const match = await this.findRouteById(routeId, downstreamPolicy);
     const fallbackRequestedModel = match?.route.modelPattern || `route:${routeId}`;
     return await this.explainSelectionFromMatch(match, fallbackRequestedModel, {
@@ -2311,6 +3279,19 @@ export class TokenRouter {
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
+    const stickyPreference = preferStickySessionCandidates(
+      match.channels,
+      downstreamPolicy.stickySessionKey,
+      nowMs,
+    );
+    const accountBudgetById = new Map<number, AccountRateBudgetState>();
+    for (const row of match.channels) {
+      accountBudgetById.set(row.account.id, syncAccountRateBudgetConfig(row.account.id, nowMs));
+    }
+    const stickyAccountId = stickyPreference.stickyBinding?.accountId ?? null;
+    const stickyUntil = stickyPreference.stickyBinding
+      ? new Date(stickyPreference.stickyBinding.expiresAtMs).toISOString()
+      : null;
     const summary: string[] = [
       `命中路由：${match.route.modelPattern}`,
       routeStrategy === 'round_robin'
@@ -2368,9 +3349,11 @@ export class TokenRouter {
         recentlyFailed,
         avoidedByRecentFailure: false,
         avoidedByInflightLease: false,
+        avoidedByAccountLease: false,
         cooldownUntil: row.channel.cooldownUntil ?? null,
         lastFailAt: row.channel.lastFailAt ?? null,
         leasedUntil: getChannelSelectionLeaseUntil(row.channel.id, nowMs),
+        accountLeaseUntil: getAccountSelectionLeaseUntil(row.account.id, nowMs),
         consecutiveFailCount: Math.max(0, row.channel.consecutiveFailCount ?? 0),
         cooldownLevel: Math.max(0, row.channel.cooldownLevel ?? 0),
         probability: 0,
@@ -2383,6 +3366,24 @@ export class TokenRouter {
           combinedMultiplier: runtimeHealthDetails.combinedMultiplier,
           globalBreakerOpen: runtimeHealthDetails.globalBreakerOpen,
           modelBreakerOpen: runtimeHealthDetails.modelBreakerOpen,
+        },
+        accountRuntimeState: {
+          successEma: (accountRoutingStates.get(row.account.id)?.successEma ?? 0.5),
+          latencyEmaMs: accountRoutingStates.get(row.account.id)?.latencyEmaMs ?? null,
+          inflightCount: getAccountSelectionLeases(row.account.id, nowMs).length,
+          concurrencyBudget: getAccountConcurrencyBudget(row, accountRoutingStates.get(row.account.id) ?? null),
+          rateLimitCapacity: accountBudgetById.get(row.account.id)?.capacity ?? ACCOUNT_RATE_LIMIT_BURST_MIN,
+          rateLimitTokens: Number((accountBudgetById.get(row.account.id)?.tokens ?? ACCOUNT_RATE_LIMIT_BURST_MIN).toFixed(3)),
+          rateLimitRefillPerSec: accountBudgetById.get(row.account.id)?.refillPerSec ?? ACCOUNT_RATE_LIMIT_REFILL_MIN_PER_SEC,
+          rateLimitedUntil: accountBudgetById.get(row.account.id)?.denyUntilMs
+            ? new Date(accountBudgetById.get(row.account.id)!.denyUntilMs!).toISOString()
+            : null,
+          rateLimited: !!(accountBudgetById.get(row.account.id)?.denyUntilMs && accountBudgetById.get(row.account.id)!.denyUntilMs! > nowMs),
+          stickyPreferred: stickyAccountId === row.account.id && stickyPreference.stickyReason === 'reused',
+          stickyActive: stickyAccountId === row.account.id,
+          stickyBoundAccountId: stickyAccountId,
+          stickyUntil,
+          consecutiveFailures: accountRoutingStates.get(row.account.id)?.consecutiveFailures ?? 0,
         },
       };
       candidates.push(candidate);
@@ -2411,6 +3412,13 @@ export class TokenRouter {
     const modelCircuitOpenCount = candidates.filter((candidate) => candidate.modelCircuitStatus?.isOpen).length;
     if (modelCircuitOpenCount > 0) {
       summary.push(`模型熔断避让 ${modelCircuitOpenCount}`);
+    }
+    if (stickyPreference.stickyReason === 'reused' && stickyAccountId != null) {
+      summary.push(`账号粘性复用 account=${stickyAccountId}`);
+    } else if (stickyPreference.stickyReason === 'broken_by_failure' && stickyAccountId != null) {
+      summary.push(`账号粘性已打破：最近失败 account=${stickyAccountId}`);
+    } else if (stickyPreference.stickyReason === 'broken_by_busy' && stickyAccountId != null) {
+      summary.push(`账号粘性已打破：账号繁忙 account=${stickyAccountId}`);
     }
     const minAvailablePriority = availableByPriority.size > 0
       ? Math.min(...Array.from(availableByPriority.keys()))
@@ -2477,8 +3485,19 @@ export class TokenRouter {
         summary.push('全部候选近期失败，已切换为保守恢复探测');
       }
 
+      const accountLeasePartition = partitionAccountSelectionLeases(recoveryCandidates, nowMs);
+      if (accountLeasePartition.avoided.length > 0) {
+        for (const item of accountLeasePartition.avoided) {
+          const target = candidateMap.get(item.candidate.channel.id);
+          if (!target) continue;
+          target.avoidedByAccountLease = true;
+          target.reason = buildAccountRateLimitReason(item, nowMs);
+        }
+        summary.push(`${buildAccountAvoidanceSummaryLabel(accountLeasePartition.avoided)} ${accountLeasePartition.avoided.length}`);
+      }
+      const accountLeaseCandidates = accountLeasePartition.preferred;
       const leasePartition = partitionChannelSelectionLeases(
-        recoveryCandidates,
+        accountLeaseCandidates,
         nowMs,
       );
       if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
@@ -2494,7 +3513,7 @@ export class TokenRouter {
       const ordered = this.getRoundRobinCandidates(
         leasePartition.preferred.length > 0
           ? leasePartition.preferred
-          : recoveryCandidates,
+          : accountLeaseCandidates,
       );
       let selected: RouteChannelCandidate | null = null;
 
@@ -2537,6 +3556,9 @@ export class TokenRouter {
         selected.channel.sourceModel,
       );
       summary.push(`全局轮询：可用 ${ordered.length}，忽略优先级`);
+      if (stickyPreference.stickyReason === 'reused' && stickyPreference.stickyBinding) {
+        summary.push(`账号粘性复用 ${stickyPreference.stickyBinding.accountId}`);
+      }
       summary.push(`最终选择：${selectedLabel}`);
       if (actualModel !== mappedModel) {
         summary.push(`实际转发模型：${actualModel}`);
@@ -2616,7 +3638,25 @@ export class TokenRouter {
         continue;
       }
 
-      const leasePartition = partitionChannelSelectionLeases(recentFailurePartition.preferred, nowMs);
+      const stickyLayer = preferStickySessionCandidates(
+        recentFailurePartition.preferred,
+        downstreamPolicy.stickySessionKey,
+        nowMs,
+      );
+      const stickyCandidates = stickyLayer.preferred.length > 0
+        ? stickyLayer.preferred
+        : recentFailurePartition.preferred;
+      const accountLeasePartition = partitionAccountSelectionLeases(stickyCandidates, nowMs);
+      if (accountLeasePartition.avoided.length > 0) {
+        for (const item of accountLeasePartition.avoided) {
+          const target = candidateMap.get(item.candidate.channel.id);
+          if (!target) continue;
+          target.avoidedByAccountLease = true;
+          target.reason = buildAccountRateLimitReason(item, nowMs);
+        }
+      }
+      const candidateLayerSource = accountLeasePartition.preferred;
+      const leasePartition = partitionChannelSelectionLeases(candidateLayerSource, nowMs);
       if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
         for (const item of leasePartition.avoided) {
           const target = candidateMap.get(item.candidate.channel.id);
@@ -2627,7 +3667,7 @@ export class TokenRouter {
       }
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
-        : recentFailurePartition.preferred;
+        : candidateLayerSource;
 
       const weighted = this.calculateWeightedSelection(
         candidateLayer,
@@ -2661,6 +3701,12 @@ export class TokenRouter {
       if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
         layerSummaryParts.push(`并发占用避让 ${leasePartition.avoided.length}`);
       }
+      if (accountLeasePartition.avoided.length > 0) {
+        layerSummaryParts.push(`${buildAccountAvoidanceSummaryLabel(accountLeasePartition.avoided)} ${accountLeasePartition.avoided.length}`);
+      }
+      if (stickyLayer.stickyReason === 'reused' && stickyLayer.stickyBinding) {
+        layerSummaryParts.push(`账号粘性复用 ${stickyLayer.stickyBinding.accountId}`);
+      }
       if (degradedAcrossPriorityByRecentFailure) {
         layerSummaryParts.push('上层最近失败，已自动降级');
       }
@@ -2677,7 +3723,17 @@ export class TokenRouter {
           degradedRecoveryPool.map((candidate) => [candidate.channel.id, candidate]),
         ).values()),
       );
-      const leasePartition = partitionChannelSelectionLeases(recoveryCandidates, nowMs);
+      const accountLeasePartition = partitionAccountSelectionLeases(recoveryCandidates, nowMs);
+      if (accountLeasePartition.avoided.length > 0) {
+        for (const item of accountLeasePartition.avoided) {
+          const target = candidateMap.get(item.candidate.channel.id);
+          if (!target) continue;
+          target.avoidedByAccountLease = true;
+          target.reason = buildAccountRateLimitReason(item, nowMs);
+        }
+      }
+      const recoverySource = accountLeasePartition.preferred;
+      const leasePartition = partitionChannelSelectionLeases(recoverySource, nowMs);
       if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
         for (const item of leasePartition.avoided) {
           const target = candidateMap.get(item.candidate.channel.id);
@@ -2688,7 +3744,7 @@ export class TokenRouter {
       }
       const recoveryLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
-        : recoveryCandidates;
+        : recoverySource;
       const recoveryCandidate = recoveryLayer[0] ?? null;
       if (recoveryCandidate) {
         selected = recoveryCandidate;
@@ -2705,6 +3761,9 @@ export class TokenRouter {
         const recoverySummaryParts = [
           `优先级 P${selectedPriority}：当前层全部近期失败，已切换保守恢复探测`,
         ];
+        if (accountLeasePartition.avoided.length > 0) {
+          recoverySummaryParts.push(`${buildAccountAvoidanceSummaryLabel(accountLeasePartition.avoided)} ${accountLeasePartition.avoided.length}`);
+        }
         if (degradedAcrossPriorityByRecentFailure) {
           recoverySummaryParts.push('上层最近失败，已自动降级');
         }
@@ -2801,7 +3860,7 @@ export class TokenRouter {
    * Record success for a channel.
    */
   async recordSuccess(channelId: number, latencyMs: number, cost: number, modelName?: string | null) {
-    await ensureSiteRuntimeHealthStateLoaded();
+    await ensureRoutingRuntimeStateLoaded();
     const row = await db.select()
       .from(schema.routeChannels)
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
@@ -2837,6 +3896,7 @@ export class TokenRouter {
       channel.cooldownLevel = 0;
     });
     releaseChannelSelectionLease(channelId);
+    releaseAccountSelectionLease(account.id, nowMs);
 
     await restorePersistedModelAvailabilityForChannel(ch, account.id, modelName);
 
@@ -2844,13 +3904,41 @@ export class TokenRouter {
       recordModelCircuitSuccess(channelId, modelName || '', nowMs);
     }
     recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName, nowMs);
+    const accountState = getOrCreateAccountRoutingState(account.id, nowMs);
+    accountState.successEma = (
+      accountState.lastSuccessAtMs == null && accountState.lastFailureAtMs == null
+        ? 1
+        : ((accountState.successEma * (1 - ACCOUNT_SUCCESS_EMA_ALPHA)) + ACCOUNT_SUCCESS_EMA_ALPHA)
+    );
+    accountState.latencyEmaMs = accountState.latencyEmaMs == null
+      ? latencyMs
+      : ((accountState.latencyEmaMs * (1 - ACCOUNT_LATENCY_EMA_ALPHA)) + (latencyMs * ACCOUNT_LATENCY_EMA_ALPHA));
+    accountState.lastSuccessAtMs = nowMs;
+    accountState.consecutiveFailures = 0;
+    accountState.updatedAtMs = nowMs;
+    const stickyKey = stickySessionKeyByChannel.get(channelId);
+    if (stickyKey) {
+      const binding = stickySessionBindings.get(stickyKey);
+      if (binding) {
+        binding.accountId = account.id;
+        binding.lastUsedAtMs = nowMs;
+        binding.expiresAtMs = Math.max(binding.expiresAtMs, nowMs + ACCOUNT_STICKY_BINDING_TTL_MS);
+      }
+    }
+    const budgetState = syncAccountRateBudgetConfig(account.id, nowMs);
+    budgetState.capacity = resolveAccountRateLimitCapacity(accountState);
+    budgetState.refillPerSec = resolveAccountRateLimitRefillPerSec(accountState);
+    budgetState.tokens = clampNumber(budgetState.tokens + 0.4, 0, budgetState.capacity);
+    budgetState.denyUntilMs = null;
+    budgetState.updatedAtMs = nowMs;
+    scheduleAccountRuntimePersistence();
   }
 
   /**
    * Record failure and set cooldown.
    */
   async recordFailure(channelId: number, context: SiteRuntimeFailureContext | string | null = {}) {
-    await ensureSiteRuntimeHealthStateLoaded();
+    await ensureRoutingRuntimeStateLoaded();
     const row = await db.select()
       .from(schema.routeChannels)
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
@@ -2868,6 +3956,7 @@ export class TokenRouter {
     const normalizedContext: SiteRuntimeFailureContext = typeof context === 'string'
       ? { modelName: context }
       : (context ?? {});
+    const isProtocolFailure = matchesAnyPattern(SITE_PROTOCOL_FAILURE_PATTERNS, normalizedContext.errorText);
     const routeStrategy = resolveRouteStrategy(route);
     let cooldownUntil: string | null = null;
     let consecutiveFailCount = Math.max(0, ch.consecutiveFailCount ?? 0) + 1;
@@ -2921,6 +4010,8 @@ export class TokenRouter {
       channel.cooldownLevel = cooldownLevel;
     });
     releaseChannelSelectionLease(channelId);
+    releaseAccountSelectionLease(account.id, nowMs);
+    clearStickyBindingForChannel(channelId);
 
     if (failureCategory === 'model_unsupported') {
       await markPersistedModelUnavailableForChannel(ch, account.id, normalizedContext.modelName);
@@ -2952,6 +4043,27 @@ export class TokenRouter {
       }
     }
     recordSiteRuntimeFailure(account.siteId, normalizedContext, nowMs);
+    const accountState = getOrCreateAccountRoutingState(account.id, nowMs);
+    accountState.successEma = (
+      accountState.lastSuccessAtMs == null && accountState.lastFailureAtMs == null
+        ? 0
+        : (accountState.successEma * (1 - ACCOUNT_SUCCESS_EMA_ALPHA))
+    );
+    accountState.lastFailureAtMs = nowMs;
+    accountState.consecutiveFailures += 1;
+    accountState.updatedAtMs = nowMs;
+    const budgetState = syncAccountRateBudgetConfig(account.id, nowMs);
+    budgetState.capacity = resolveAccountRateLimitCapacity(accountState);
+    budgetState.refillPerSec = resolveAccountRateLimitRefillPerSec(accountState);
+    budgetState.tokens = clampNumber(budgetState.tokens * 0.6, 0, budgetState.capacity);
+    if (!isProtocolFailure && (failureCategory === 'auth' || failureCategory === 'rate_limit')) {
+      budgetState.denyUntilMs = Math.max(
+        budgetState.denyUntilMs ?? 0,
+        nowMs + Math.max(30_000, resolveWeightedFailureCooldownMs(Math.max(1, consecutiveFailCount), failureCategory)),
+      );
+    }
+    budgetState.updatedAtMs = nowMs;
+    scheduleAccountRuntimePersistence();
   }
 
   /**
@@ -3022,18 +4134,29 @@ export class TokenRouter {
       const fullyBlockedByRuntimeBreaker =
         breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === available.length;
       if (fullyBlockedByRuntimeBreaker) return null;
-      const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
+      const stickyPreference = preferStickySessionCandidates(
+        breakerFiltered.candidates,
+        downstreamPolicy.stickySessionKey,
+        nowMs,
+      );
+      const stickyCandidates = stickyPreference.preferred.length > 0
+        ? stickyPreference.preferred
+        : breakerFiltered.candidates;
+      const recentFailurePartition = partitionRecentlyFailedCandidates(stickyCandidates, nowMs);
       const recoveryCandidates = recentFailurePartition.preferred.length > 0
         ? recentFailurePartition.preferred
         : sortCandidatesForRecoveryPreference(recentFailurePartition.avoided);
+      const accountLeasePartition = partitionAccountSelectionLeases(recoveryCandidates, nowMs);
+      const accountLeaseCandidates = accountLeasePartition.preferred;
       const leasePartition = partitionChannelSelectionLeases(
-        recoveryCandidates,
+        accountLeaseCandidates,
         nowMs,
       );
+      const selectionPool = leasePartition.preferred.length > 0
+        ? leasePartition.preferred
+        : accountLeaseCandidates;
       const selected = this.selectWithModelCircuitGuard(
-        leasePartition.preferred.length > 0
-          ? leasePartition.preferred
-          : recoveryCandidates,
+        selectionPool,
         (items) => this.selectRoundRobinCandidate(items),
         (candidate) => (
           typeof runtimeModelResolver === 'function'
@@ -3049,7 +4172,10 @@ export class TokenRouter {
       if (!tokenValue) return null;
       if (recordSelection) {
         await this.recordChannelSelection(selected.channel.id);
-        reserveChannelSelectionLease(selected.channel.id, nowMs, resolveChannelSelectionLeaseMs(selected));
+        const leaseMs = resolveChannelSelectionLeaseMs(selected);
+        reserveChannelSelectionLease(selected.channel.id, nowMs, leaseMs);
+        reserveAccountSelectionLease(selected, nowMs, leaseMs);
+        bindStickySessionToCandidate(downstreamPolicy.stickySessionKey, selected, nowMs, leaseMs);
       }
 
       const actualModel = resolveActualModelForSelectedChannel(
@@ -3091,10 +4217,20 @@ export class TokenRouter {
         degradedRecoveryPool.push(...recentFailurePartition.avoided);
         continue;
       }
-      const leasePartition = partitionChannelSelectionLeases(recentFailurePartition.preferred, nowMs);
+      const stickyLayer = preferStickySessionCandidates(
+        recentFailurePartition.preferred,
+        downstreamPolicy.stickySessionKey,
+        nowMs,
+      );
+      const stickyCandidates = stickyLayer.preferred.length > 0
+        ? stickyLayer.preferred
+        : recentFailurePartition.preferred;
+      const accountLeasePartition = partitionAccountSelectionLeases(stickyCandidates, nowMs);
+      const candidateLayerSource = accountLeasePartition.preferred;
+      const leasePartition = partitionChannelSelectionLeases(candidateLayerSource, nowMs);
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
-        : recentFailurePartition.preferred;
+        : candidateLayerSource;
       const selected = routeStrategy === 'stable_first'
         ? this.selectWithModelCircuitGuard(
           candidateLayer,
@@ -3136,7 +4272,10 @@ export class TokenRouter {
         await this.recordChannelSelection(selected.channel.id);
       }
       if (recordSelection) {
-        reserveChannelSelectionLease(selected.channel.id, nowMs, resolveChannelSelectionLeaseMs(selected));
+        const leaseMs = resolveChannelSelectionLeaseMs(selected);
+        reserveChannelSelectionLease(selected.channel.id, nowMs, leaseMs);
+        reserveAccountSelectionLease(selected, nowMs, leaseMs);
+        bindStickySessionToCandidate(downstreamPolicy.stickySessionKey, selected, nowMs, leaseMs);
       }
 
       const actualModel = resolveActualModelForSelectedChannel(
@@ -3160,10 +4299,12 @@ export class TokenRouter {
           degradedRecoveryPool.map((candidate) => [candidate.channel.id, candidate]),
         ).values()),
       );
-      const leasePartition = partitionChannelSelectionLeases(recoveryCandidates, nowMs);
+      const accountLeasePartition = partitionAccountSelectionLeases(recoveryCandidates, nowMs);
+      const recoverySource = accountLeasePartition.preferred;
+      const leasePartition = partitionChannelSelectionLeases(recoverySource, nowMs);
       const recoveryLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
-        : recoveryCandidates;
+        : recoverySource;
       const selected = recoveryLayer[0] ?? null;
       if (!selected) return null;
 
@@ -3173,7 +4314,10 @@ export class TokenRouter {
         await this.recordChannelSelection(selected.channel.id);
       }
       if (recordSelection) {
-        reserveChannelSelectionLease(selected.channel.id, nowMs, resolveChannelSelectionLeaseMs(selected));
+        const leaseMs = resolveChannelSelectionLeaseMs(selected);
+        reserveChannelSelectionLease(selected.channel.id, nowMs, leaseMs);
+        reserveAccountSelectionLease(selected, nowMs, leaseMs);
+        bindStickySessionToCandidate(downstreamPolicy.stickySessionKey, selected, nowMs, leaseMs);
       }
 
       const actualModel = resolveActualModelForSelectedChannel(
@@ -3447,6 +4591,14 @@ export class TokenRouter {
     const modelCircuitStatuses = candidates.map((candidate) => (
       getCandidateModelCircuitStatus(candidate.channel.id, resolveModelName(candidate), nowMs)
     ));
+    const stickyPreference = preferStickySessionCandidates(
+      candidates,
+      downstreamPolicy.stickySessionKey,
+      nowMs,
+    );
+    const accountStates = candidates.map((candidate) => (
+      accountRoutingStates.get(candidate.account.id) ?? null
+    ));
 
     const valueScores = candidates.map((c, i) => {
       const unitCost = effectiveCosts[i]?.unitCost || 1;
@@ -3503,6 +4655,9 @@ export class TokenRouter {
       contribution *= modelCircuitStatuses[i]?.effectiveMultiplier ?? 1;
       contribution *= channelHealthScores[i]?.multiplier ?? 1;
       contribution *= siteHistoricalHealthMetrics.get(candidate.site.id)?.multiplier ?? 1;
+      contribution *= getAccountSuccessMultiplier(accountStates[i]?.successEma ?? 0.5);
+      contribution *= getAccountLatencyMultiplier(accountStates[i]?.latencyEmaMs ?? null);
+      contribution *= getAccountStickyMultiplier(candidate, stickyPreference.stickyBinding, stickyPreference.stickyReason);
 
       // If upstream price is unknown and we are using fallback unit cost,
       // apply an explicit penalty so raising fallback cost meaningfully lowers probability.
@@ -3546,6 +4701,7 @@ export class TokenRouter {
       const combinedSiteWeight = siteGlobalWeight * normalizedDownstreamSiteMultiplier;
       const siteRuntimeDetail = runtimeHealthDetails[i];
       const modelCircuitStatus = modelCircuitStatuses[i];
+      const accountState = accountStates[i];
       const channelHealth = channelHealthScores[i];
       const siteHistoricalHealth = siteHistoricalHealthMetrics.get(candidate.site.id);
       const siteHistoricalMultiplier = siteHistoricalHealth?.multiplier ?? 1;
@@ -3559,6 +4715,14 @@ export class TokenRouter {
         ? `${siteRuntimeDetail.combinedMultiplier.toFixed(2)}（站点=${siteRuntimeDetail.globalMultiplier.toFixed(2)}，模型=${siteRuntimeDetail.modelMultiplier.toFixed(2)}）`
         : `${siteRuntimeDetail.globalMultiplier.toFixed(2)}`;
       const modelCircuitText = describeModelCircuitStatus(modelCircuitStatus);
+      const accountSuccessMultiplier = getAccountSuccessMultiplier(accountState?.successEma ?? 0.5);
+      const accountLatencyMultiplier = getAccountLatencyMultiplier(accountState?.latencyEmaMs ?? null);
+      const accountStickyMultiplier = getAccountStickyMultiplier(candidate, stickyPreference.stickyBinding, stickyPreference.stickyReason);
+      const accountInflightCount = getAccountSelectionLeases(candidate.account.id, nowMs).length;
+      const accountConcurrencyBudget = getAccountConcurrencyBudget(candidate, accountState);
+      const stickyLabel = stickyPreference.stickyBinding?.accountId === candidate.account.id
+        ? (stickyPreference.stickyReason === 'reused' ? '命中' : `已打破:${stickyPreference.stickyReason}`)
+        : '否';
       const reasonPrefix = selectionMode === 'stable_first'
         ? `稳定优先（综合评分第 ${rankByIndex.get(i) ?? 1} / ${candidates.length}`
         : '按权重随机';
@@ -3566,8 +4730,8 @@ export class TokenRouter {
         candidate,
         probability,
         reason: selectionMode === 'stable_first'
-          ? `${reasonPrefix}，W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，模型熔断=${modelCircuitText}，通道健康=${channelHealth.summary}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），同站点通道=${siteChannels}，评分占比≈${(probability * 100).toFixed(1)}%）`
-          : `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，模型熔断=${modelCircuitText}，通道健康=${channelHealth.summary}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`,
+          ? `${reasonPrefix}，W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，模型熔断=${modelCircuitText}，通道健康=${channelHealth.summary}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），账号EMA=${(accountState?.successEma ?? 0.5).toFixed(2)}x${accountSuccessMultiplier.toFixed(2)}，账号延迟=${accountState?.latencyEmaMs == null ? '—' : `${Math.round(accountState.latencyEmaMs)}ms`}x${accountLatencyMultiplier.toFixed(2)}，账号并发=${accountInflightCount}/${accountConcurrencyBudget}，粘性=${stickyLabel}x${accountStickyMultiplier.toFixed(2)}，同站点通道=${siteChannels}，评分占比≈${(probability * 100).toFixed(1)}%）`
+          : `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，模型熔断=${modelCircuitText}，通道健康=${channelHealth.summary}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），账号EMA=${(accountState?.successEma ?? 0.5).toFixed(2)}x${accountSuccessMultiplier.toFixed(2)}，账号延迟=${accountState?.latencyEmaMs == null ? '—' : `${Math.round(accountState.latencyEmaMs)}ms`}x${accountLatencyMultiplier.toFixed(2)}，账号并发=${accountInflightCount}/${accountConcurrencyBudget}，粘性=${stickyLabel}x${accountStickyMultiplier.toFixed(2)}，同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`,
       };
     });
 

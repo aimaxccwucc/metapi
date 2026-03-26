@@ -522,7 +522,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(order).toEqual(['responses', 'chat']);
   });
 
-  it('blocks failed endpoints from explicit upstream protocol errors without remembering unverified suggestions', async () => {
+  it('learns explicit upstream protocol suggestions after a protocol error', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
       accountId: baseContext.account.id,
@@ -545,7 +545,57 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'openai',
     );
 
-    expect(order).toEqual(['messages', 'responses']);
+    expect(order).toEqual(['responses', 'messages']);
+  });
+
+  it('uses a single half-open endpoint when all candidates are temporarily blocked', async () => {
+    recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'chat',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+      status: 400,
+      errorText: 'Unsupported legacy protocol: /v1/chat/completions is not supported. Please use /v1/responses.',
+    });
+    recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'responses',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+      status: 405,
+      errorText: 'Method Not Allowed',
+    });
+    recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'messages',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+      status: 405,
+      errorText: 'Method Not Allowed',
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'openai',
+    );
+
+    expect(order).toEqual(['responses']);
   });
 
   it('isolates runtime endpoint memory by account scope on the same site', async () => {

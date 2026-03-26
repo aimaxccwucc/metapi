@@ -256,6 +256,8 @@ describe('Sites edit behavior', () => {
       modelName: 'gpt-4.1',
       preferredEndpoint: 'responses',
       supportedEndpoints: ['responses'],
+      probeSource: 'cache',
+      attemptSummary: ['1. responses success: 实时探测成功（HTTP 200）'],
       protocolConfig: {
         mode: 'manual',
         supportedEndpoints: ['responses'],
@@ -316,6 +318,8 @@ describe('Sites edit behavior', () => {
       await flushMicrotasks();
 
       expect(apiMock.probeSiteProtocol).toHaveBeenCalledWith(1);
+      expect(collectText(root.root)).toContain('缓存命中');
+      expect(collectText(root.root)).toContain('最近探测摘要');
 
       await act(async () => {
         await saveButton.props.onClick();

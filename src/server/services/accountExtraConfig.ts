@@ -36,7 +36,24 @@ type AccountExtraConfig = {
   autoRelogin?: AutoReloginConfig;
   sub2apiAuth?: Sub2ApiAuthConfig;
   sub2apiSubscription?: Sub2ApiSubscriptionConfig;
+  checkinSnapshot?: unknown;
   [key: string]: unknown;
+};
+
+export type StoredCheckinSnapshot = {
+  version: 1;
+  status: 'success' | 'already_checked' | 'manual_required' | 'unsupported' | 'retryable_failed' | 'terminal_failed' | 'site_disabled';
+  reasonCode: string;
+  retryable: boolean;
+  requiresManual: boolean;
+  unsupported: boolean;
+  lastAttemptAt: string;
+  lastSuccessAt?: string | null;
+  nextRetryAt?: string | null;
+  message: string;
+  reward?: string | null;
+  scheduleMode?: 'cron' | 'interval';
+  source: 'checkin';
 };
 
 function parseExtraConfig(extraConfig?: string | null): AccountExtraConfig {
@@ -104,6 +121,16 @@ function normalizeIsoDateTime(raw: unknown): string | undefined {
 
   const parsed = Date.parse(trimmed);
   if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  return undefined;
+}
+
+function normalizeBoolean(raw: unknown): boolean | undefined {
+  if (typeof raw === 'boolean') return raw;
+  if (typeof raw === 'string') {
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
   return undefined;
 }
 
@@ -326,4 +353,49 @@ export function getAutoReloginConfig(extraConfig?: string | null): {
   if (!username || !passwordCipher) return null;
 
   return { username, passwordCipher };
+}
+
+export function extractCheckinSnapshot(extraConfig?: string | null): StoredCheckinSnapshot | null {
+  const parsed = parseExtraConfig(extraConfig);
+  const raw = parsed.checkinSnapshot;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const source = raw as Record<string, unknown>;
+  const status = normalizeNonEmptyString(source.status);
+  const reasonCode = normalizeNonEmptyString(source.reasonCode);
+  const lastAttemptAt = normalizeIsoDateTime(source.lastAttemptAt);
+  const message = normalizeNonEmptyString(source.message);
+  if (!status || !reasonCode || !lastAttemptAt || !message) return null;
+
+  const retryable = normalizeBoolean(source.retryable) === true;
+  const requiresManual = normalizeBoolean(source.requiresManual) === true;
+  const unsupported = normalizeBoolean(source.unsupported) === true;
+  const lastSuccessAt = normalizeIsoDateTime(source.lastSuccessAt) ?? null;
+  const nextRetryAt = normalizeIsoDateTime(source.nextRetryAt) ?? null;
+  const reward = normalizeNonEmptyString(source.reward) ?? null;
+  const scheduleMode = source.scheduleMode === 'interval' ? 'interval' : 'cron';
+
+  return {
+    version: 1,
+    status: status as StoredCheckinSnapshot['status'],
+    reasonCode,
+    retryable,
+    requiresManual,
+    unsupported,
+    lastAttemptAt,
+    lastSuccessAt,
+    nextRetryAt,
+    message,
+    reward,
+    scheduleMode,
+    source: 'checkin',
+  };
+}
+
+export function mergeCheckinSnapshot(
+  extraConfig: string | null | undefined,
+  snapshot: StoredCheckinSnapshot,
+): string {
+  return mergeAccountExtraConfig(extraConfig, {
+    checkinSnapshot: snapshot,
+  });
 }

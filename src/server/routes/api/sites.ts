@@ -17,7 +17,7 @@ import {
   resolveSiteProtocolConfig,
   upsertSiteProtocolConfig,
 } from '../../services/siteProtocolConfigService.js';
-import { probeSiteProtocol } from '../../services/siteProtocolProbeService.js';
+import { SiteProtocolProbeError, probeSiteProtocol } from '../../services/siteProtocolProbeService.js';
 
 function normalizeSiteStatus(input: unknown): 'active' | 'disabled' | null {
   if (input === undefined || input === null) return null;
@@ -551,6 +551,21 @@ export async function sitesRoutes(app: FastifyInstance) {
         protocolConfig: sanitizeSiteProtocolConfigForPlatform(await resolveSiteProtocolConfig(id), existingSite.platform),
       };
     } catch (error: any) {
+      if (error instanceof SiteProtocolProbeError) {
+        return reply.code(error.probeSource === 'cooldown_cache' ? 429 : 400).send({
+          error: error.message,
+          siteId: error.siteId,
+          siteName: error.siteName,
+          sitePlatform: error.sitePlatform,
+          modelName: error.modelName,
+          probeSource: error.probeSource,
+          cacheHit: error.probeSource !== 'live',
+          cooldownUntilMs: error.cooldownUntilMs,
+          cooldownRemainingMs: error.cooldownRemainingMs,
+          attempts: error.attempts,
+          attemptSummary: error.attemptSummary,
+        });
+      }
       const message = typeof error?.message === 'string' && error.message.trim()
         ? error.message.trim()
         : '站点协议自动探测失败';

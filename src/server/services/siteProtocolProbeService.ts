@@ -22,6 +22,8 @@ type ProbeClassification =
 
 const MAX_PROBE_CANDIDATES = 6;
 const MAX_PROBE_CANDIDATES_PER_MODEL = 3;
+const PROBE_SUCCESS_CACHE_TTL_MS = 15 * 60 * 1000;
+const PROBE_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
 type ProbeCredentialSource =
   | 'preferred_token'
@@ -32,6 +34,8 @@ type ProbeCredentialSource =
 type SiteRow = typeof schema.sites.$inferSelect;
 type AccountRow = typeof schema.accounts.$inferSelect;
 type AccountTokenRow = typeof schema.accountTokens.$inferSelect;
+
+export type SiteProtocolProbeSource = 'live' | 'cache' | 'cooldown_cache';
 
 export type SiteProtocolProbeAttempt = {
   endpoint: UpstreamEndpoint;
@@ -54,7 +58,13 @@ export type SiteProtocolProbeResult = {
   preferredEndpoint: UpstreamEndpoint;
   protocolConfig: SiteProtocolConfig;
   attempts: SiteProtocolProbeAttempt[];
+  attemptSummary: string[];
   latencyMs: number;
+  probeSource: SiteProtocolProbeSource;
+  cacheHit: boolean;
+  cachedAtMs: number | null;
+  cooldownUntilMs: number | null;
+  cooldownRemainingMs: number;
 };
 
 type ProbeCredentialSelection = {
@@ -75,12 +85,162 @@ type ProbeCandidateRow = {
   isClaudeFamily: boolean;
 };
 
+type ProbeSuccessCacheEntry = {
+  savedAtMs: number;
+  expiresAtMs: number;
+  result: SiteProtocolProbeResult;
+};
+
+type ProbeFailureCooldownEntry = {
+  siteId: number;
+  siteName: string;
+  sitePlatform: string;
+  modelName: string | null;
+  attempts: SiteProtocolProbeAttempt[];
+  attemptSummary: string[];
+  message: string;
+  cooldownUntilMs: number;
+  savedAtMs: number;
+};
+
+const probeSuccessCache = new Map<string, ProbeSuccessCacheEntry>();
+const probeFailureCooldowns = new Map<string, ProbeFailureCooldownEntry>();
+let probeRuntimeContextTag: string | null = null;
+
+export class SiteProtocolProbeError extends Error {
+  siteId: number;
+  siteName: string;
+  sitePlatform: string;
+  modelName: string | null;
+  attempts: SiteProtocolProbeAttempt[];
+  attemptSummary: string[];
+  probeSource: SiteProtocolProbeSource;
+  cooldownUntilMs: number | null;
+  cooldownRemainingMs: number;
+
+  constructor(input: {
+    message: string;
+    siteId: number;
+    siteName: string;
+    sitePlatform: string;
+    modelName: string | null;
+    attempts: SiteProtocolProbeAttempt[];
+    attemptSummary: string[];
+    probeSource: SiteProtocolProbeSource;
+    cooldownUntilMs?: number | null;
+    cooldownRemainingMs?: number;
+  }) {
+    super(input.message);
+    this.name = 'SiteProtocolProbeError';
+    this.siteId = input.siteId;
+    this.siteName = input.siteName;
+    this.sitePlatform = input.sitePlatform;
+    this.modelName = input.modelName;
+    this.attempts = input.attempts;
+    this.attemptSummary = input.attemptSummary;
+    this.probeSource = input.probeSource;
+    this.cooldownUntilMs = input.cooldownUntilMs ?? null;
+    this.cooldownRemainingMs = input.cooldownRemainingMs ?? 0;
+  }
+}
+
 function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
 function normalizeModelName(value: unknown): string {
   return asTrimmedString(value).toLowerCase();
+}
+
+function getProbeRuntimeContextTag(): string | null {
+  const dataDir = (process.env.DATA_DIR || '').trim();
+  return dataDir || null;
+}
+
+function refreshProbeRuntimeContext(): void {
+  const nextTag = getProbeRuntimeContextTag();
+  if (nextTag === probeRuntimeContextTag) return;
+  probeSuccessCache.clear();
+  probeFailureCooldowns.clear();
+  probeRuntimeContextTag = nextTag;
+}
+
+function buildProbeCacheKey(siteId: number, modelName?: string | null): string {
+  const normalizedModel = normalizeModelName(modelName);
+  return `${siteId}:${normalizedModel || '*'}`;
+}
+
+function cloneProbeAttempt(attempt: SiteProtocolProbeAttempt): SiteProtocolProbeAttempt {
+  return {
+    endpoint: attempt.endpoint,
+    checkedUrl: attempt.checkedUrl,
+    statusCode: attempt.statusCode,
+    ok: attempt.ok,
+    classification: attempt.classification,
+    reason: attempt.reason,
+  };
+}
+
+function cloneProbeResult(result: SiteProtocolProbeResult): SiteProtocolProbeResult {
+  return {
+    ...result,
+    supportedEndpoints: [...result.supportedEndpoints],
+    protocolConfig: {
+      ...result.protocolConfig,
+      supportedEndpoints: [...result.protocolConfig.supportedEndpoints],
+    },
+    attempts: result.attempts.map(cloneProbeAttempt),
+    attemptSummary: [...result.attemptSummary],
+  };
+}
+
+function buildAttemptSummary(attempts: SiteProtocolProbeAttempt[]): string[] {
+  return attempts.map((attempt, index) => (
+    `${index + 1}. ${attempt.endpoint} ${attempt.ok ? 'success' : attempt.classification}: ${attempt.reason}`
+  ));
+}
+
+function buildProbeFailureMessage(attempts: SiteProtocolProbeAttempt[]): string {
+  if (attempts.length === 0) return '未能探测到可用协议';
+  const lastAttempt = attempts[attempts.length - 1];
+  const headline = lastAttempt?.reason || '未能探测到可用协议';
+  return `协议探测失败，已尝试 ${attempts.length} 次：${headline}`;
+}
+
+function getCachedSuccessResult(
+  siteId: number,
+  modelName: string | null | undefined,
+  nowMs: number,
+): SiteProtocolProbeResult | null {
+  const entry = probeSuccessCache.get(buildProbeCacheKey(siteId, modelName));
+  if (!entry) return null;
+  if (entry.expiresAtMs <= nowMs) {
+    probeSuccessCache.delete(buildProbeCacheKey(siteId, modelName));
+    return null;
+  }
+  const cloned = cloneProbeResult(entry.result);
+  cloned.probeSource = 'cache';
+  cloned.cacheHit = true;
+  cloned.cachedAtMs = entry.savedAtMs;
+  cloned.cooldownUntilMs = null;
+  cloned.cooldownRemainingMs = 0;
+  cloned.latencyMs = 0;
+  return cloned;
+}
+
+function getActiveFailureCooldown(
+  siteId: number,
+  modelName: string | null | undefined,
+  nowMs: number,
+): ProbeFailureCooldownEntry | null {
+  const key = buildProbeCacheKey(siteId, modelName);
+  const entry = probeFailureCooldowns.get(key);
+  if (!entry) return null;
+  if (entry.cooldownUntilMs <= nowMs) {
+    probeFailureCooldowns.delete(key);
+    return null;
+  }
+  return entry;
 }
 
 function isClaudeFamilyModel(modelName: string): boolean {
@@ -152,15 +312,24 @@ function buildProbeEndpointOrder(sitePlatform: string, modelName: string): Upstr
 
 function buildProtocolConfigForSuccess(
   sitePlatform: string,
+  modelName: string,
   preferredEndpoint: UpstreamEndpoint,
+  attempts: SiteProtocolProbeAttempt[],
 ): SiteProtocolConfig {
   const allowedEndpoints = new Set(getAllowedSiteProtocolEndpoints(sitePlatform));
-  const preferredPool = allowedEndpoints.has(preferredEndpoint)
-    ? [preferredEndpoint]
-    : [];
+  const protocolMismatchEndpoints = new Set(
+    attempts
+      .filter((attempt) => !attempt.ok && attempt.classification === 'protocol_mismatch')
+      .map((attempt) => attempt.endpoint),
+  );
+  const preferredPool = buildProbeEndpointOrder(sitePlatform, modelName)
+    .filter((endpoint) => allowedEndpoints.has(endpoint) && !protocolMismatchEndpoints.has(endpoint));
+  const supportedEndpoints = preferredPool.includes(preferredEndpoint)
+    ? preferredPool
+    : [preferredEndpoint, ...preferredPool];
   return {
     mode: 'manual',
-    supportedEndpoints: preferredPool,
+    supportedEndpoints,
     preferredEndpoint,
     updatedAtMs: Date.now(),
   };
@@ -490,6 +659,8 @@ export async function probeSiteProtocol(input: {
   siteId: number;
   modelName?: string | null;
 }): Promise<SiteProtocolProbeResult> {
+  refreshProbeRuntimeContext();
+
   const site = await loadSiteForProbe(input.siteId);
   if (!site) {
     throw new Error('Site not found');
@@ -504,6 +675,26 @@ export async function probeSiteProtocol(input: {
   }
 
   const startedAt = Date.now();
+  const cachedSuccess = getCachedSuccessResult(input.siteId, input.modelName, startedAt);
+  if (cachedSuccess) {
+    return cachedSuccess;
+  }
+  const activeCooldown = getActiveFailureCooldown(input.siteId, input.modelName, startedAt);
+  if (activeCooldown) {
+    throw new SiteProtocolProbeError({
+      message: `站点协议探测冷却中，请 ${Math.max(1, Math.ceil((activeCooldown.cooldownUntilMs - startedAt) / 1000))} 秒后重试`,
+      siteId: activeCooldown.siteId,
+      siteName: activeCooldown.siteName,
+      sitePlatform: activeCooldown.sitePlatform,
+      modelName: activeCooldown.modelName,
+      attempts: activeCooldown.attempts.map(cloneProbeAttempt),
+      attemptSummary: [...activeCooldown.attemptSummary],
+      probeSource: 'cooldown_cache',
+      cooldownUntilMs: activeCooldown.cooldownUntilMs,
+      cooldownRemainingMs: Math.max(0, activeCooldown.cooldownUntilMs - startedAt),
+    });
+  }
+
   const orderedCandidates = buildOrderedProbeCandidates(candidates, input.modelName);
   const attempts: SiteProtocolProbeAttempt[] = [];
 
@@ -519,9 +710,11 @@ export async function probeSiteProtocol(input: {
       if (attempt.ok) {
         const protocolConfig = buildProtocolConfigForSuccess(
           candidate.site.platform,
+          candidate.modelName,
           endpoint,
+          attempts,
         );
-        return {
+        const result: SiteProtocolProbeResult = {
           siteId: candidate.site.id,
           siteName: candidate.site.name,
           sitePlatform: candidate.site.platform,
@@ -533,8 +726,21 @@ export async function probeSiteProtocol(input: {
           preferredEndpoint: endpoint,
           protocolConfig,
           attempts,
+          attemptSummary: buildAttemptSummary(attempts),
           latencyMs: Date.now() - startedAt,
+          probeSource: 'live',
+          cacheHit: false,
+          cachedAtMs: null,
+          cooldownUntilMs: null,
+          cooldownRemainingMs: 0,
         };
+        probeSuccessCache.set(buildProbeCacheKey(input.siteId, input.modelName), {
+          savedAtMs: Date.now(),
+          expiresAtMs: Date.now() + PROBE_SUCCESS_CACHE_TTL_MS,
+          result: cloneProbeResult(result),
+        });
+        probeFailureCooldowns.delete(buildProbeCacheKey(input.siteId, input.modelName));
+        return result;
       }
 
       if (attempt.classification === 'credential') {
@@ -543,6 +749,36 @@ export async function probeSiteProtocol(input: {
     }
   }
 
-  const lastAttempt = attempts[attempts.length - 1];
-  throw new Error(lastAttempt?.reason || '未能探测到可用协议');
+  const cooldownUntilMs = Date.now() + PROBE_FAILURE_COOLDOWN_MS;
+  const attemptSummary = buildAttemptSummary(attempts);
+  const message = buildProbeFailureMessage(attempts);
+  probeFailureCooldowns.set(buildProbeCacheKey(input.siteId, input.modelName), {
+    siteId: site.id,
+    siteName: site.name,
+    sitePlatform: site.platform,
+    modelName: selectProbeCandidate(orderedCandidates, input.modelName)?.modelName || null,
+    attempts: attempts.map(cloneProbeAttempt),
+    attemptSummary: [...attemptSummary],
+    message,
+    cooldownUntilMs,
+    savedAtMs: Date.now(),
+  });
+  throw new SiteProtocolProbeError({
+    message,
+    siteId: site.id,
+    siteName: site.name,
+    sitePlatform: site.platform,
+    modelName: selectProbeCandidate(orderedCandidates, input.modelName)?.modelName || null,
+    attempts,
+    attemptSummary,
+    probeSource: 'live',
+    cooldownUntilMs,
+    cooldownRemainingMs: PROBE_FAILURE_COOLDOWN_MS,
+  });
+}
+
+export function resetSiteProtocolProbeRuntimeState(): void {
+  probeSuccessCache.clear();
+  probeFailureCooldowns.clear();
+  probeRuntimeContextTag = getProbeRuntimeContextTag();
 }

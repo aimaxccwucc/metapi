@@ -219,6 +219,59 @@ describe('Models marketplace text', () => {
     }
   });
 
+  it('splits copied token and diagnostic actions after auto key creation', async () => {
+    apiMock.testMarketplaceModelAvailability.mockResolvedValue({
+      available: true,
+      reason: 'model found in upstream list',
+      latencyMs: 123,
+      autoKeyCreated: true,
+      autoKeyTokenId: 9,
+      autoKeyName: 'auto-demo',
+      autoKeyGroup: 'default',
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const cards = root!.root.findAll((node) => (
+        node.type === 'div'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('model-card')
+        && typeof node.props.onClick === 'function'
+      ));
+      await act(async () => {
+        cards[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const detectButton = root!.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).includes('检测')
+      ));
+      await act(async () => {
+        await detectButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(collectText(root!.root)).toContain('复制成功 Key');
+      expect(collectText(root!.root)).toContain('复制诊断摘要');
+    } finally {
+      await unmountRoot(root);
+    }
+  });
+
   it('keeps a visible mobile filter entry on small screens', async () => {
     const nextWindow = (originalWindow ? { ...originalWindow } : {}) as Window & typeof globalThis;
     nextWindow.innerWidth = 768;
@@ -724,11 +777,12 @@ describe('Models marketplace text', () => {
       expect(cardText).toContain('已自动补 Key');
       expect(cardText).toContain('自动补 Key: vip / mk-gpt-4o');
       expect(cardText).toContain('前往账号令牌管理');
-      expect(cardText).toContain('复制补 Key 结果');
+      expect(cardText).toContain('复制成功 Key');
+      expect(cardText).toContain('复制诊断摘要');
 
       const cardCopyButton = root!.root.find((node) => (
         node.type === 'button'
-        && collectText(node).includes('复制补 Key 结果')
+        && collectText(node).includes('复制成功 Key')
       ));
       await act(async () => {
         await cardCopyButton.props.onClick();
@@ -750,7 +804,7 @@ describe('Models marketplace text', () => {
       expect(tableText).toContain('可用性检测');
       expect(tableText).toContain('前往账号令牌管理');
       expect(tableText).toContain('$12.50');
-      expect(tableText.includes('复制补 Key 结果') || tableText.includes('已复制')).toBe(true);
+      expect(tableText.includes('复制成功 Key') || tableText.includes('已复制')).toBe(true);
     } finally {
       await unmountRoot(root);
     }
@@ -1014,7 +1068,7 @@ describe('Models marketplace text', () => {
 
       const copyButton = root!.root.find((node) => (
         node.type === 'button'
-        && collectText(node).includes('复制结果')
+        && collectText(node).includes('复制诊断摘要')
       ));
       await act(async () => {
         await copyButton.props.onClick();
