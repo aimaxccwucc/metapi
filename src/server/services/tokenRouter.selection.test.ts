@@ -1173,7 +1173,6 @@ describe('TokenRouter selection scoring', () => {
         .find((item) => item.accountId === accountPrimary.id);
       const decision = await router.explainSelection('gpt-account-rate-budget');
       const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
-
       expect(preview?.channel.id).toBe(fallbackChannel.id);
       expect(primaryAfterPreview?.rateLimitTokens || 0).toBeCloseTo(primaryBeforePreview?.rateLimitTokens || 0, 3);
       expect(primaryCandidate?.avoidedByAccountLease || primaryCandidate?.reason.includes('账号速率')).toBe(true);
@@ -1267,7 +1266,6 @@ describe('TokenRouter selection scoring', () => {
       const recoveredPreview = await router.previewSelectedChannel('gpt-account-rate-budget-recover');
       const decision = await router.explainSelection('gpt-account-rate-budget-recover');
       const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
-
       expect(primaryBeforeRecovery?.rateLimitTokens || 0).toBeGreaterThanOrEqual(1);
       expect(recoveredPreview?.channel.id).toBe(primaryChannel.id);
       expect(primaryCandidate?.accountRuntimeState?.rateLimitTokens || 0).toBeGreaterThanOrEqual(1);
