@@ -118,6 +118,33 @@ describe('shared normalized helpers', () => {
     });
   });
 
+  it('ignores non-text claude content carriers when normalizing final responses', () => {
+    expect(normalizeUpstreamFinalResponse({
+      id: 'msg_1',
+      type: 'message',
+      model: 'claude-test',
+      content: [
+        { type: 'thinking', thinking: 'internal plan' },
+        { type: 'redacted_thinking', data: 'ciphertext-carrier' },
+        { type: 'tool_use', id: 'tool_1', name: 'lookup', input: { q: 'x' } },
+        { type: 'text', text: 'OK' },
+      ],
+      stop_reason: 'tool_use',
+    }, 'fallback-model')).toEqual({
+      id: 'msg_1',
+      model: 'claude-test',
+      created: expect.any(Number),
+      content: 'OK',
+      reasoningContent: 'internal plan',
+      finishReason: 'tool_calls',
+      toolCalls: [{
+        id: 'tool_1',
+        name: 'lookup',
+        arguments: '{"q":"x"}',
+      }],
+    });
+  });
+
   it('serializes provider-tagged reasoning signatures for openai-compatible downstreams', () => {
     const normalized = {
       id: 'chatcmpl-2',

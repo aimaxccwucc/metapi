@@ -127,6 +127,76 @@ function textFromPart(part: unknown): string {
   return '';
 }
 
+function extractReasoningTextFromBlock(block: Record<string, unknown>): string {
+  const nested = (
+    Array.isArray(block.content)
+    || Array.isArray(block.parts)
+    || typeof block.content === 'string'
+  )
+    ? extractTextAndReasoning(block.content ?? block.parts)
+    : { content: '', reasoning: '' };
+
+  return joinNonEmpty([
+    typeof block.reasoning_content === 'string' ? block.reasoning_content : '',
+    typeof block.reasoning === 'string' ? block.reasoning : '',
+    typeof block.thinking === 'string' ? block.thinking : '',
+    nested.reasoning,
+    nested.content,
+  ]);
+}
+
+function extractTypedArrayItemTextAndReasoning(
+  item: Record<string, unknown>,
+): { handled: boolean; content: string; reasoning: string } {
+  const type = typeof item.type === 'string' ? item.type.trim().toLowerCase() : '';
+  if (!type) {
+    return { handled: false, content: '', reasoning: '' };
+  }
+
+  if (type === 'thinking' || type === 'thinking_delta' || type === 'reasoning' || type === 'summary_text') {
+    return {
+      handled: true,
+      content: '',
+      reasoning: extractReasoningTextFromBlock(item),
+    };
+  }
+
+  if (typeof item.thought === 'boolean' && item.thought) {
+    const parsedThought = extractInlineThinkTags(textFromPart(item));
+    return {
+      handled: true,
+      content: '',
+      reasoning: joinNonEmpty([parsedThought.reasoning, parsedThought.content]),
+    };
+  }
+
+  if (
+    type === 'text'
+    || type === 'input_text'
+    || type === 'output_text'
+    || type === 'text_delta'
+  ) {
+    const parsedText = extractInlineThinkTags(textFromPart(item));
+    return {
+      handled: true,
+      content: parsedText.content,
+      reasoning: parsedText.reasoning,
+    };
+  }
+
+  if (
+    type === 'tool_use'
+    || type === 'tool_result'
+    || type === 'redacted_thinking'
+    || type === 'input_json_delta'
+    || type === 'signature_delta'
+  ) {
+    return { handled: true, content: '', reasoning: '' };
+  }
+
+  return { handled: true, content: '', reasoning: '' };
+}
+
 function extractTextAndReasoning(value: unknown): { content: string; reasoning: string } {
   if (typeof value === 'string') return extractInlineThinkTags(value);
   if (Array.isArray(value)) {
@@ -140,18 +210,11 @@ function extractTextAndReasoning(value: unknown): { content: string; reasoning: 
         continue;
       }
       if (!isRecord(item)) continue;
-      const type = typeof item.type === 'string' ? item.type : '';
 
-      if (type === 'thinking' && typeof item.thinking === 'string') {
-        reasoningParts.push(item.thinking);
-        continue;
-      }
-      if (type === 'thinking_delta' && typeof item.text === 'string') {
-        reasoningParts.push(item.text);
-        continue;
-      }
-      if (typeof item.thought === 'boolean' && item.thought && typeof item.text === 'string') {
-        reasoningParts.push(item.text);
+      const typed = extractTypedArrayItemTextAndReasoning(item);
+      if (typed.handled) {
+        if (typed.content) contentParts.push(typed.content);
+        if (typed.reasoning) reasoningParts.push(typed.reasoning);
         continue;
       }
 
