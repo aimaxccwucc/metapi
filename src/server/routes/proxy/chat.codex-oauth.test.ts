@@ -355,8 +355,8 @@ describe('chat proxy codex oauth compatibility', () => {
 
     const [firstUrl, firstOptions] = fetchMock.mock.calls[0] as [string, any];
     const [secondUrl, secondOptions] = fetchMock.mock.calls[1] as [string, any];
-    expect(firstUrl).toBe('https://gateway.example.com/v1/responses');
-    expect(secondUrl).toBe('https://gateway.example.com/v1/responses');
+    expect(firstUrl).toBe('https://gateway.example.com/v1/chat/completions');
+    expect(secondUrl).toBe('https://gateway.example.com/v1/chat/completions');
     expect(firstOptions.headers.Authorization).toBe('Bearer expired-access-token');
     expect(secondOptions.headers.Authorization).toBe('Bearer fresh-access-token');
     expect(response.json()?.choices?.[0]?.message?.content).toBe('ok after refresh');

@@ -6,6 +6,7 @@ const scheduleMock = vi.fn(() => ({
 }));
 const validateMock = vi.fn(() => true);
 const allMock = vi.fn();
+const dbSelectAllMock = vi.fn();
 const executeRefreshSiteReachabilityMock = vi.fn();
 
 vi.mock('node-cron', () => ({
@@ -19,7 +20,7 @@ vi.mock('../db/index.js', () => {
   const queryChain = {
     where: () => queryChain,
     get: () => undefined,
-    all: () => [],
+    all: () => dbSelectAllMock(),
     from: () => queryChain,
     innerJoin: () => queryChain,
   };
@@ -38,6 +39,7 @@ vi.mock('../db/index.js', () => {
 
 vi.mock('./checkinService.js', () => ({
   checkinAll: (...args: unknown[]) => allMock(...args),
+  isSchedulableCheckinAccountStatus: (status?: string | null) => status === 'active' || status === 'expired',
 }));
 
 vi.mock('./siteHealthService.js', () => ({
@@ -51,6 +53,7 @@ describe('checkinScheduler', () => {
     scheduleMock.mockClear();
     validateMock.mockClear();
     allMock.mockReset();
+    dbSelectAllMock.mockReset();
     executeRefreshSiteReachabilityMock.mockReset();
   });
 
@@ -113,5 +116,73 @@ describe('checkinScheduler', () => {
 
     validateMock.mockReturnValueOnce(false);
     expect(() => scheduler.updateSiteHealthRefreshCron('invalid-cron')).toThrow('Invalid cron: invalid-cron');
+  });
+
+  it('retries failed interval accounts but suppresses recently skipped ones', async () => {
+    const scheduler = await import('./checkinScheduler.js');
+    dbSelectAllMock.mockReturnValue([
+      {
+        accounts: { id: 1, checkinEnabled: true, status: 'active', lastCheckinAt: null },
+        sites: { status: 'active' },
+      },
+      {
+        accounts: { id: 2, checkinEnabled: true, status: 'active', lastCheckinAt: null },
+        sites: { status: 'active' },
+      },
+    ]);
+    allMock
+      .mockResolvedValueOnce([
+        { accountId: 1, result: { success: false, status: 'failed' } },
+        { accountId: 2, result: { success: true, status: 'skipped', skipped: true } },
+      ])
+      .mockResolvedValueOnce([
+        { accountId: 1, result: { success: false, status: 'failed' } },
+      ]);
+
+    scheduler.updateCheckinSchedule({
+      mode: 'interval',
+      intervalHours: 6,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(allMock).toHaveBeenCalledTimes(2);
+    expect(allMock).toHaveBeenNthCalledWith(1, {
+      accountIds: [1, 2],
+      scheduleMode: 'interval',
+    });
+    expect(allMock).toHaveBeenNthCalledWith(2, {
+      accountIds: [1],
+      scheduleMode: 'interval',
+    });
+  });
+
+  it('prevents interval reentry while the previous pass is still running', async () => {
+    const scheduler = await import('./checkinScheduler.js');
+    dbSelectAllMock.mockReturnValue([
+      {
+        accounts: { id: 1, checkinEnabled: true, status: 'active', lastCheckinAt: null },
+        sites: { status: 'active' },
+      },
+    ]);
+
+    let resolvePending: ((value: Array<{ accountId: number; result: { success: boolean; status: string } }>) => void) | null = null;
+    allMock.mockImplementation(() => new Promise((resolve) => {
+      resolvePending = resolve;
+    }));
+
+    scheduler.updateCheckinSchedule({
+      mode: 'interval',
+      intervalHours: 6,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(allMock).toHaveBeenCalledTimes(1);
+
+    resolvePending?.([{ accountId: 1, result: { success: true, status: 'success' } }]);
+    await vi.runAllTicks();
   });
 });

@@ -16,6 +16,9 @@ hero:
       text: 上游接入
       link: /upstream-integration
     - theme: alt
+      text: 稳定性改造
+      link: /gateway-checkin-hardening
+    - theme: alt
       text: 常见问题 FAQ
       link: /faq
 
@@ -26,6 +29,9 @@ features:
   - title: 上游接入
     details: 按当前代码支持的平台类型，快速判断该选什么平台、先走哪个连接分段。
     link: /upstream-integration
+  - title: 稳定性改造
+    details: 聚焦路由网关、协议有限探测、失败记忆恢复和签到状态机，沉淀问题、约束与改造分期。
+    link: /gateway-checkin-hardening
   - title: 问题排查
     details: 汇总高频报错、根因定位和标准修复路径，降低重复沟通成本。
     link: /faq

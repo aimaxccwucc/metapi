@@ -734,6 +734,10 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         );
         const endpointRuntimeContext = {
           siteId: selected.site.id,
+          accountId: selected.account.id,
+          accountAccessToken: selected.account.accessToken ?? null,
+          accountApiToken: (selected.account as { apiToken?: string | null }).apiToken ?? null,
+          siteApiKey: selected.site.apiKey ?? null,
           modelName: actualModel,
           downstreamFormat: 'openai' as const,
           requestedModelHint: requestedModel,

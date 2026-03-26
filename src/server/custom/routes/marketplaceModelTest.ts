@@ -398,6 +398,7 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
     let autoKeyCreated = false;
     let autoKeyName: string | null = null;
     let autoKeyGroup: string | null = null;
+    let autoKeyTokenId: number | null = null;
 
     if (!modelCredential && accountAccessToken) {
       try {
@@ -448,6 +449,7 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
           autoKeyCreated = !!modelCredential;
           autoKeyName = generatedName;
           autoKeyGroup = targetGroup;
+          autoKeyTokenId = typeof preferredToken?.id === 'number' ? preferredToken.id : null;
         }
       } catch {
         // Keep conservative behavior: fall through to explicit hint below.
@@ -521,6 +523,7 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
         autoKeyCreated,
         autoKeyName,
         autoKeyGroup,
+        autoKeyTokenId,
       };
     } catch (error) {
       return reply.code(502).send({
@@ -536,6 +539,7 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
         autoKeyCreated,
         autoKeyName,
         autoKeyGroup,
+        autoKeyTokenId,
       });
     }
   });

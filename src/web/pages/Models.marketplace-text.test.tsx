@@ -8,6 +8,7 @@ const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getModelsMarketplace: vi.fn(),
     testMarketplaceModelAvailability: vi.fn(),
+    getAccountTokenValue: vi.fn(),
   },
 }));
 
@@ -89,6 +90,10 @@ describe('Models marketplace text', () => {
       reason: 'model found in upstream list',
       latencyMs: 123,
       autoKeyCreated: false,
+    });
+    apiMock.getAccountTokenValue.mockResolvedValue({
+      success: true,
+      token: 'sk-autocreated-demo',
     });
   });
 
@@ -668,6 +673,89 @@ describe('Models marketplace text', () => {
     }
   });
 
+  it('keeps diagnosis actions aligned across card and table detail views after auto key creation', async () => {
+    apiMock.testMarketplaceModelAvailability.mockResolvedValue({
+      available: true,
+      reason: '实时探测成功',
+      latencyMs: 88,
+      autoKeyCreated: true,
+      autoKeyName: 'mk-gpt-4o',
+      autoKeyGroup: 'vip',
+      autoKeyTokenId: 99,
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const cards = root!.root.findAll((node) => (
+        node.type === 'div'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('model-card')
+        && typeof node.props.onClick === 'function'
+      ));
+      expect(cards.length).toBeGreaterThan(0);
+
+      await act(async () => {
+        cards[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const cardCheckButton = root!.root.find((node) => (
+        node.type === 'button'
+        && collectText(node) === '检测'
+      ));
+      await act(async () => {
+        await cardCheckButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const cardText = collectText(root!.root);
+      expect(cardText).toContain('已自动补 Key');
+      expect(cardText).toContain('自动补 Key: vip / mk-gpt-4o');
+      expect(cardText).toContain('前往账号令牌管理');
+      expect(cardText).toContain('复制补 Key 结果');
+
+      const cardCopyButton = root!.root.find((node) => (
+        node.type === 'button'
+        && collectText(node).includes('复制补 Key 结果')
+      ));
+      await act(async () => {
+        await cardCopyButton.props.onClick();
+      });
+      await flushMicrotasks();
+      expect(apiMock.getAccountTokenValue).toHaveBeenCalledWith(99);
+      expect(globalThis.navigator.clipboard.writeText).toHaveBeenCalledWith('sk-autocreated-demo');
+
+      const tableToggle = root!.root.find((node) => (
+        node.type === 'button'
+        && node.props['aria-label'] === '表格视图'
+      ));
+      await act(async () => {
+        tableToggle.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const tableText = collectText(root!.root);
+      expect(tableText).toContain('可用性检测');
+      expect(tableText).toContain('前往账号令牌管理');
+      expect(tableText).toContain('$12.50');
+      expect(tableText.includes('复制补 Key 结果') || tableText.includes('已复制')).toBe(true);
+    } finally {
+      await unmountRoot(root);
+    }
+  });
+
   it('supports sorting by balance from the table header', async () => {
     apiMock.getModelsMarketplace.mockResolvedValue({
       models: [
@@ -926,7 +1014,7 @@ describe('Models marketplace text', () => {
 
       const copyButton = root!.root.find((node) => (
         node.type === 'button'
-        && collectText(node).includes('复制诊断')
+        && collectText(node).includes('复制结果')
       ));
       await act(async () => {
         await copyButton.props.onClick();

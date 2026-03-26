@@ -289,12 +289,6 @@ export function recordPersistedUpstreamEndpointFailure(input: {
   const state = getOrCreateEndpointProfileState(input.key, nowMs);
   state.blockedUntilMsByEndpoint[input.endpoint] = nowMs + input.blockTtlMs;
 
-  if (input.suggestedEndpoint && input.suggestedEndpoint !== input.endpoint) {
-    state.preferredEndpoint = input.suggestedEndpoint;
-    state.preferredUpdatedAtMs = nowMs;
-    delete state.blockedUntilMsByEndpoint[input.suggestedEndpoint];
-  }
-
   scheduleEndpointProfilePersistence();
 }
 

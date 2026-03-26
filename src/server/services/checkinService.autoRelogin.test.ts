@@ -22,6 +22,12 @@ vi.mock('../db/index.js', () => {
     from: () => selectChain,
   };
 
+  const fromChain = {
+    innerJoin: () => fromChain,
+    where: () => fromChain,
+    all: () => selectAllMock(),
+  };
+
   const insertChain = {
     run: () => ({}),
     values: (...args: unknown[]) => {
@@ -40,7 +46,12 @@ vi.mock('../db/index.js', () => {
 
   return {
     db: {
-      select: () => selectChain,
+      select: () => ({
+        from: () => fromChain,
+        where: () => selectChain,
+        innerJoin: () => selectChain,
+        all: () => selectAllMock(),
+      }),
       insert: () => insertChain,
       update: () => ({
         set: (updates: Record<string, unknown>) => {
@@ -443,5 +454,151 @@ describe('checkinService auto relogin', () => {
     expect(firstInsertPayload?.message).toBe('站点开启了 Turnstile 校验，需要人工签到');
     expect(refreshBalanceMock).not.toHaveBeenCalled();
     expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it('includes expired accounts in batch checkin so auto relogin can recover them', async () => {
+    selectAllMock
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 21,
+            username: 'expired_user',
+            accessToken: 'stale-token',
+            status: 'expired',
+            checkinEnabled: true,
+            extraConfig: JSON.stringify({
+              autoRelogin: { username: 'expired_user', passwordCipher: 'cipher' },
+            }),
+          },
+          sites: {
+            id: 21,
+            name: 'demo',
+            url: 'https://example.com',
+            platform: 'new-api',
+          },
+        },
+      ])
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 21,
+            username: 'expired_user',
+            accessToken: 'stale-token',
+            status: 'expired',
+            extraConfig: JSON.stringify({
+              autoRelogin: { username: 'expired_user', passwordCipher: 'cipher' },
+            }),
+          },
+          sites: {
+            id: 21,
+            name: 'demo',
+            url: 'https://example.com',
+            platform: 'new-api',
+          },
+        },
+      ]);
+
+    adapterMock.checkin
+      .mockResolvedValueOnce({ success: false, message: 'access token expired' })
+      .mockResolvedValueOnce({ success: true, message: 'checked in' });
+    decryptPasswordMock.mockReturnValue('plain-password');
+    adapterMock.login.mockResolvedValue({ success: true, accessToken: 'fresh-token' });
+
+    const { checkinAll } = await import('./checkinService.js');
+    const results = await checkinAll({ scheduleMode: 'cron' });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.result?.success).toBe(true);
+    expect(adapterMock.login).toHaveBeenCalledTimes(1);
+    expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({
+      accessToken: 'fresh-token',
+      status: 'active',
+    }));
+  });
+
+  it('keeps batch checkin isolated when one account throws unexpectedly', async () => {
+    selectAllMock
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 22,
+            username: 'bad-user',
+            accessToken: 'token-a',
+            status: 'active',
+            checkinEnabled: true,
+            extraConfig: null,
+          },
+          sites: {
+            id: 31,
+            name: 'site-a',
+            url: 'https://a.example.com',
+            platform: 'new-api',
+          },
+        },
+        {
+          accounts: {
+            id: 23,
+            username: 'good-user',
+            accessToken: 'token-b',
+            status: 'active',
+            checkinEnabled: true,
+            extraConfig: null,
+          },
+          sites: {
+            id: 31,
+            name: 'site-a',
+            url: 'https://a.example.com',
+            platform: 'new-api',
+          },
+        },
+      ])
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 22,
+            username: 'bad-user',
+            accessToken: 'token-a',
+            status: 'active',
+            extraConfig: null,
+          },
+          sites: {
+            id: 31,
+            name: 'site-a',
+            url: 'https://a.example.com',
+            platform: 'new-api',
+          },
+        },
+      ])
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 23,
+            username: 'good-user',
+            accessToken: 'token-b',
+            status: 'active',
+            extraConfig: null,
+          },
+          sites: {
+            id: 31,
+            name: 'site-a',
+            url: 'https://a.example.com',
+            platform: 'new-api',
+          },
+        },
+      ]);
+
+    adapterMock.checkin
+      .mockRejectedValueOnce(new Error('socket hang up'))
+      .mockResolvedValueOnce({ success: true, message: 'checked in' });
+
+    const { checkinAll } = await import('./checkinService.js');
+    const results = await checkinAll({ scheduleMode: 'cron' });
+
+    expect(results).toHaveLength(2);
+    expect(results[0]?.accountId).toBe(22);
+    expect(results[0]?.result?.success).toBe(false);
+    expect(results[0]?.result?.status).toBe('failed');
+    expect(results[1]?.accountId).toBe(23);
+    expect(results[1]?.result?.success).toBe(true);
   });
 });

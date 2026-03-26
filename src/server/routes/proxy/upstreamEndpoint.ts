@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   rankConversationFileEndpoints,
@@ -75,9 +76,19 @@ type ChannelContext = {
   };
 };
 
+type EndpointMemoryCredentialScope = {
+  siteId: number;
+  accountId: number | null;
+  credentialSource: 'account_api_token' | 'account_access_token' | 'site_api_key' | 'none';
+  credentialFingerprint: string | null;
+};
+
 const ENDPOINT_RUNTIME_PREFERRED_TTL_MS = 24 * 60 * 60 * 1000;
 const ENDPOINT_RUNTIME_BLOCK_TTL_MS = 6 * 60 * 60 * 1000;
+const ENDPOINT_MEMORY_SCOPE_MAX_ENTRIES = 2048;
 const endpointRuntimeStates = new Map<string, EndpointRuntimeState>();
+const endpointMemoryScopeStorage = new AsyncLocalStorage<EndpointMemoryCredentialScope>();
+const endpointMemoryScopeBySiteAndToken = new Map<string, EndpointMemoryCredentialScope>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -103,6 +114,12 @@ function resolveRequestedModelForPayloadRules(input: {
 
 function normalizePlatformName(platform: unknown): string {
   return asTrimmedString(platform).toLowerCase();
+}
+
+function normalizeEndpointRuntimeModelScope(modelName: unknown): string {
+  const normalized = asTrimmedString(modelName).toLowerCase();
+  if (!normalized) return 'model:any';
+  return `model:${normalized.slice(0, 120)}`;
 }
 
 function isClaudeFamilyModel(modelName: string): boolean {
@@ -801,14 +818,210 @@ function shouldUseEndpointRuntimeMemory(capabilityProfile: EndpointCapabilityPro
   );
 }
 
+function hashCredentialFingerprint(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
+}
+
+function normalizeScopeSiteUrl(value: string | null | undefined): string {
+  const trimmed = asTrimmedString(value);
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    const pathname = parsed.pathname.replace(/\/+$/, '');
+    const normalizedPath = pathname === '/' ? '' : pathname;
+    return `${parsed.origin}${normalizedPath}`.toLowerCase();
+  } catch {
+    return trimmed.replace(/\/+$/, '').toLowerCase();
+  }
+}
+
+function buildCredentialScopeLookupKey(siteUrl: string | null | undefined, tokenValue: string): string | null {
+  const normalizedSiteUrl = normalizeScopeSiteUrl(siteUrl);
+  const trimmedToken = asTrimmedString(tokenValue);
+  if (!normalizedSiteUrl || !trimmedToken) return null;
+  return `${normalizedSiteUrl}:${hashCredentialFingerprint(trimmedToken)}`;
+}
+
+function resolveCredentialScopeFromContext(context: ChannelContext): EndpointMemoryCredentialScope {
+  const accountApiToken = asTrimmedString(context.account.apiToken);
+  if (accountApiToken) {
+    return {
+      siteId: context.site.id,
+      accountId: context.account.id,
+      credentialSource: 'account_api_token',
+      credentialFingerprint: hashCredentialFingerprint(accountApiToken),
+    };
+  }
+
+  const accountAccessToken = asTrimmedString(context.account.accessToken);
+  if (accountAccessToken) {
+    return {
+      siteId: context.site.id,
+      accountId: context.account.id,
+      credentialSource: 'account_access_token',
+      credentialFingerprint: hashCredentialFingerprint(accountAccessToken),
+    };
+  }
+
+  const siteApiKey = asTrimmedString(context.site.apiKey);
+  if (siteApiKey) {
+    return {
+      siteId: context.site.id,
+      accountId: null,
+      credentialSource: 'site_api_key',
+      credentialFingerprint: hashCredentialFingerprint(siteApiKey),
+    };
+  }
+
+  return {
+    siteId: context.site.id,
+    accountId: context.account.id,
+    credentialSource: 'none',
+    credentialFingerprint: null,
+  };
+}
+
+function rememberCredentialScopeBySiteAndToken(
+  siteUrl: string | null | undefined,
+  tokenValue: string | null | undefined,
+  scope: EndpointMemoryCredentialScope,
+): void {
+  const key = buildCredentialScopeLookupKey(siteUrl, tokenValue || '');
+  if (!key) return;
+  if (endpointMemoryScopeBySiteAndToken.has(key)) {
+    endpointMemoryScopeBySiteAndToken.delete(key);
+  } else if (endpointMemoryScopeBySiteAndToken.size >= ENDPOINT_MEMORY_SCOPE_MAX_ENTRIES) {
+    const oldestKey = endpointMemoryScopeBySiteAndToken.keys().next().value;
+    if (typeof oldestKey === 'string' && oldestKey) {
+      endpointMemoryScopeBySiteAndToken.delete(oldestKey);
+    }
+  }
+  endpointMemoryScopeBySiteAndToken.set(key, scope);
+}
+
+function rememberCredentialScopesFromContext(context: ChannelContext): void {
+  const accountApiToken = asTrimmedString(context.account.apiToken);
+  if (accountApiToken) {
+    rememberCredentialScopeBySiteAndToken(context.site.url, accountApiToken, {
+      siteId: context.site.id,
+      accountId: context.account.id,
+      credentialSource: 'account_api_token',
+      credentialFingerprint: hashCredentialFingerprint(accountApiToken),
+    });
+  }
+
+  const accountAccessToken = asTrimmedString(context.account.accessToken);
+  if (accountAccessToken) {
+    rememberCredentialScopeBySiteAndToken(context.site.url, accountAccessToken, {
+      siteId: context.site.id,
+      accountId: context.account.id,
+      credentialSource: 'account_access_token',
+      credentialFingerprint: hashCredentialFingerprint(accountAccessToken),
+    });
+  }
+
+  const siteApiKey = asTrimmedString(context.site.apiKey);
+  if (siteApiKey) {
+    rememberCredentialScopeBySiteAndToken(context.site.url, siteApiKey, {
+      siteId: context.site.id,
+      accountId: null,
+      credentialSource: 'site_api_key',
+      credentialFingerprint: hashCredentialFingerprint(siteApiKey),
+    });
+  }
+}
+
+function enterCredentialScopeForRequest(siteUrl: string | null | undefined, tokenValue: string): void {
+  const key = buildCredentialScopeLookupKey(siteUrl, tokenValue);
+  if (!key) return;
+  const scope = endpointMemoryScopeBySiteAndToken.get(key);
+  if (!scope) return;
+  endpointMemoryScopeStorage.enterWith(scope);
+}
+
+function resolveCredentialScopeForMemory(input: {
+  siteId: number;
+  accountId?: number | null;
+  accountAccessToken?: string | null;
+  accountApiToken?: string | null;
+  siteApiKey?: string | null;
+}): EndpointMemoryCredentialScope {
+  const accountApiToken = asTrimmedString(input.accountApiToken);
+  if (accountApiToken) {
+    return {
+      siteId: input.siteId,
+      accountId: input.accountId ?? null,
+      credentialSource: 'account_api_token',
+      credentialFingerprint: hashCredentialFingerprint(accountApiToken),
+    };
+  }
+
+  const accountAccessToken = asTrimmedString(input.accountAccessToken);
+  if (accountAccessToken) {
+    return {
+      siteId: input.siteId,
+      accountId: input.accountId ?? null,
+      credentialSource: 'account_access_token',
+      credentialFingerprint: hashCredentialFingerprint(accountAccessToken),
+    };
+  }
+
+  const siteApiKey = asTrimmedString(input.siteApiKey);
+  if (siteApiKey) {
+    return {
+      siteId: input.siteId,
+      accountId: null,
+      credentialSource: 'site_api_key',
+      credentialFingerprint: hashCredentialFingerprint(siteApiKey),
+    };
+  }
+
+  if (input.accountId != null) {
+    return {
+      siteId: input.siteId,
+      accountId: input.accountId,
+      credentialSource: 'none',
+      credentialFingerprint: null,
+    };
+  }
+
+  const runtimeScope = endpointMemoryScopeStorage.getStore();
+  if (runtimeScope && runtimeScope.siteId === input.siteId) {
+    return runtimeScope;
+  }
+
+  return {
+    siteId: input.siteId,
+    accountId: input.accountId ?? null,
+    credentialSource: 'none',
+    credentialFingerprint: null,
+  };
+}
+
 function buildEndpointRuntimeStateKey(input: {
   siteId: number;
+  accountId?: number | null;
+  accountAccessToken?: string | null;
+  accountApiToken?: string | null;
+  siteApiKey?: string | null;
   downstreamFormat: EndpointPreference;
   capabilityProfile: EndpointCapabilityProfile;
+  modelName?: string | null;
 }): string {
   const capabilityProfile = input.capabilityProfile;
+  const credentialScope = resolveCredentialScopeForMemory({
+    siteId: input.siteId,
+    accountId: input.accountId,
+    accountAccessToken: input.accountAccessToken,
+    accountApiToken: input.accountApiToken,
+    siteApiKey: input.siteApiKey,
+  });
   return [
     String(input.siteId),
+    credentialScope.accountId != null ? `acct:${credentialScope.accountId}` : 'acct:none',
+    credentialScope.credentialSource,
+    credentialScope.credentialFingerprint ? `cred:${credentialScope.credentialFingerprint}` : 'cred:none',
+    normalizeEndpointRuntimeModelScope(input.modelName),
     input.downstreamFormat,
     capabilityProfile.preferMessagesForClaudeModel ? 'claude' : 'generic',
     capabilityProfile.hasNonImageFileInput ? 'files' : 'nofiles',
@@ -934,6 +1147,7 @@ function shouldRememberSuccessfulEndpoint(input: {
 }): boolean {
   if (input.downstreamFormat !== 'responses') return true;
   if (input.endpoint === 'responses') return true;
+  if (input.endpoint === 'chat') return true;
   return input.capabilityProfile.preferMessagesForClaudeModel;
 }
 
@@ -957,11 +1171,16 @@ function shouldPersistFailureRuntimeMemory(input: {
 
 export function resetUpstreamEndpointRuntimeState(): void {
   endpointRuntimeStates.clear();
+  endpointMemoryScopeBySiteAndToken.clear();
   resetUpstreamProtocolProfileState();
 }
 
 export function recordUpstreamEndpointSuccess(input: {
   siteId: number;
+  accountId?: number;
+  accountAccessToken?: string | null;
+  accountApiToken?: string | null;
+  siteApiKey?: string | null;
   endpoint: UpstreamEndpoint;
   downstreamFormat: EndpointPreference;
   modelName?: string;
@@ -986,8 +1205,13 @@ export function recordUpstreamEndpointSuccess(input: {
   const nowMs = Date.now();
   const key = buildEndpointRuntimeStateKey({
     siteId: input.siteId,
+    accountId: input.accountId,
+    accountAccessToken: input.accountAccessToken,
+    accountApiToken: input.accountApiToken,
+    siteApiKey: input.siteApiKey,
     downstreamFormat: input.downstreamFormat,
     capabilityProfile,
+    modelName: input.modelName || input.requestedModelHint || null,
   });
   const state = getOrCreateEndpointRuntimeState(key, nowMs);
   state.preferredEndpoint = input.endpoint;
@@ -1002,6 +1226,10 @@ export function recordUpstreamEndpointSuccess(input: {
 
 export function recordUpstreamEndpointFailure(input: {
   siteId: number;
+  accountId?: number;
+  accountAccessToken?: string | null;
+  accountApiToken?: string | null;
+  siteApiKey?: string | null;
   endpoint: UpstreamEndpoint;
   downstreamFormat: EndpointPreference;
   status: number;
@@ -1035,17 +1263,16 @@ export function recordUpstreamEndpointFailure(input: {
   const nowMs = Date.now();
   const key = buildEndpointRuntimeStateKey({
     siteId: input.siteId,
+    accountId: input.accountId,
+    accountAccessToken: input.accountAccessToken,
+    accountApiToken: input.accountApiToken,
+    siteApiKey: input.siteApiKey,
     downstreamFormat: input.downstreamFormat,
     capabilityProfile,
+    modelName: input.modelName || input.requestedModelHint || null,
   });
   const state = getOrCreateEndpointRuntimeState(key, nowMs);
   state.blockedUntilMsByEndpoint[input.endpoint] = nowMs + ENDPOINT_RUNTIME_BLOCK_TTL_MS;
-
-  if (suggestedEndpoint && suggestedEndpoint !== input.endpoint) {
-    state.preferredEndpoint = suggestedEndpoint;
-    state.preferredUpdatedAtMs = nowMs;
-    delete state.blockedUntilMsByEndpoint[suggestedEndpoint];
-  }
   recordPersistedUpstreamEndpointFailure({
     key,
     endpoint: input.endpoint,
@@ -1131,6 +1358,8 @@ export async function resolveUpstreamEndpointCandidates(
     wantsNativeResponsesReasoning?: boolean;
   },
 ): Promise<UpstreamEndpoint[]> {
+  const credentialScope = resolveCredentialScopeFromContext(context);
+  rememberCredentialScopesFromContext(context);
   const sitePlatform = normalizePlatformName(context.site.platform);
   const capabilityProfile = buildEndpointCapabilityProfile({
     modelName,
@@ -1142,8 +1371,19 @@ export async function resolveUpstreamEndpointCandidates(
   const wantsNativeResponsesReasoning = capabilityProfile.wantsNativeResponsesReasoning;
   const runtimeStateKey = buildEndpointRuntimeStateKey({
     siteId: context.site.id,
+    accountId: credentialScope.accountId,
+    accountAccessToken: credentialScope.credentialSource === 'account_access_token'
+      ? context.account.accessToken ?? null
+      : null,
+    accountApiToken: credentialScope.credentialSource === 'account_api_token'
+      ? context.account.apiToken ?? null
+      : null,
+    siteApiKey: credentialScope.credentialSource === 'site_api_key'
+      ? context.site.apiKey ?? null
+      : null,
     downstreamFormat,
     capabilityProfile,
+    modelName,
   });
   const applyLearnedPreference = async (candidates: UpstreamEndpoint[]) => {
     const manuallyConstrained = await applyManualSiteProtocolConfig(candidates, context.site.id, context.site.platform);
@@ -1344,6 +1584,7 @@ export function buildUpstreamEndpointRequest(input: {
     action?: 'generateContent' | 'streamGenerateContent' | 'countTokens';
   };
 } {
+  enterCredentialScopeForRequest(input.siteUrl, input.tokenValue);
   const sitePlatform = normalizePlatformName(input.sitePlatform);
   const providerProfile = resolveProviderProfile(sitePlatform);
   const isClaudeUpstream = sitePlatform === 'claude';

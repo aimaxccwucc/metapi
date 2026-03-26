@@ -21,10 +21,14 @@ const resolveProxyUsageWithSelfLogFallbackMock = vi.fn(async ({ usage }: any) =>
   estimatedCostFromQuota: 0,
   recoveredFromSelfLog: false,
 }));
+const dbInsertValuesMock = vi.fn();
 const dbInsertMock = vi.fn((_arg?: any) => ({
-  values: () => ({
+  values: (payload: any) => {
+    dbInsertValuesMock(payload);
+    return ({
     run: () => undefined,
-  }),
+    });
+  },
 }));
 
 vi.mock('undici', () => ({
@@ -290,6 +294,7 @@ describe('responses websocket transport', () => {
     reportTokenExpiredMock.mockReset();
     resolveProxyUsageWithSelfLogFallbackMock.mockClear();
     dbInsertMock.mockClear();
+    dbInsertValuesMock.mockClear();
 
     const selectedChannel = createSelectedChannel();
     selectChannelMock.mockReturnValue(selectedChannel);
@@ -424,6 +429,16 @@ describe('responses websocket transport', () => {
     expect(fetchMock).toHaveBeenCalledTimes(0);
     expect(upstreamConnectionCount).toBe(1);
     expect(recordSuccessMock).toHaveBeenCalledWith(11, expect.any(Number), 0, 'gpt-5.4');
+    expect(dbInsertValuesMock).toHaveBeenCalledWith(expect.objectContaining({
+      routeId: 22,
+      channelId: 11,
+      accountId: 33,
+      modelRequested: 'gpt-5.4',
+      modelActual: 'gpt-5.4',
+      status: 'success',
+      httpStatus: 200,
+      totalTokens: 4,
+    }));
   });
 
   it('echoes x-codex-turn-state on websocket upgrade responses', async () => {
@@ -1236,5 +1251,15 @@ describe('responses websocket transport', () => {
       'error',
     ]);
     expect(messages[2]?.error?.message).toContain('stream closed before response.completed');
+    expect(dbInsertValuesMock).toHaveBeenCalledWith(expect.objectContaining({
+      routeId: 22,
+      channelId: 11,
+      accountId: 33,
+      modelRequested: 'gpt-5.4',
+      modelActual: 'gpt-5.4',
+      status: 'failed',
+      httpStatus: 502,
+      errorMessage: expect.stringContaining('stream closed before response.completed'),
+    }));
   });
 });

@@ -181,6 +181,10 @@ function buildProxyLogSearchCondition(search: string) {
   return sql<boolean>`(
     lower(coalesce(${schema.proxyLogs.modelRequested}, '')) like ${likeTerm}
     or lower(coalesce(${schema.proxyLogs.modelActual}, '')) like ${likeTerm}
+    or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like ${likeTerm}
+    or lower(coalesce(${schema.proxyLogs.clientFamily}, '')) like ${likeTerm}
+    or lower(coalesce(${schema.proxyLogs.clientAppId}, '')) like ${likeTerm}
+    or lower(coalesce(${schema.proxyLogs.clientAppName}, '')) like ${likeTerm}
     or lower(coalesce(${schema.downstreamApiKeys.name}, '')) like ${likeTerm}
     or lower(coalesce(${schema.downstreamApiKeys.groupName}, '')) like ${likeTerm}
     or lower(coalesce(${schema.downstreamApiKeys.tags}, '')) like ${likeTerm}

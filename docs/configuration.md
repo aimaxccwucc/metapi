@@ -85,6 +85,16 @@ Metapi 的路由引擎按多因子加权选择最优通道。
 |--------|------|--------|------|
 | `TOKEN_ROUTER_CACHE_TTL_MS` | Token 路由缓存 TTL（毫秒） | `1500` | >= 100 |
 
+### 路由治理约束
+
+以下内容不是单纯的调参问题，而是当前项目的设计约束：
+
+- 协议探测只能做单模型有限验证，不能通过增加权重或延长缓存去替代能力建模。
+- 端点记忆、模型不可用记忆和站点运行时健康都必须具备恢复路径，不能只增加冷却时间。
+- `responses / chat / messages` 的首选顺序必须以“已验证成功端点”为准，不能把默认顺序直接持久化成支持列表。
+
+完整背景与改造路线见 [路由与签到稳定性改造](./gateway-checkin-hardening.md)。
+
 ### 路由预设建议
 
 | 场景 | COST_WEIGHT | BALANCE_WEIGHT | USAGE_WEIGHT | 说明 |
@@ -212,6 +222,17 @@ Metapi 的路由引擎按多因子加权选择最优通道。
 | 数据库运行配置 | `DB_TYPE`、`DB_URL`、`DB_SSL` | 保存后在下次 Metapi 后端启动时生效 |
 
 > `TOKEN_ROUTER_CACHE_TTL_MS`、`PROXY_LOG_RETENTION_DAYS`、`PROXY_LOG_RETENTION_PRUNE_INTERVAL_MINUTES` 当前仍属于部署级环境变量，不在后台运行时设置里单独维护。
+
+运行时设置如果涉及以下方向，应优先回到专项设计文档确认边界，而不是直接在线调值：
+
+- 路由回退顺序
+- 站点协议探测
+- 模型不可用记忆
+- 自动签到间隔与失败重试
+
+参考：
+
+- [路由与签到稳定性改造](./gateway-checkin-hardening.md)
 
 ## 站点公告
 

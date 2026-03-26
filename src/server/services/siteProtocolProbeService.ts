@@ -20,6 +20,9 @@ type ProbeClassification =
   | 'protocol_mismatch'
   | 'inconclusive';
 
+const MAX_PROBE_CANDIDATES = 6;
+const MAX_PROBE_CANDIDATES_PER_MODEL = 3;
+
 type ProbeCredentialSource =
   | 'preferred_token'
   | 'oauth_access_token'
@@ -147,25 +150,14 @@ function buildProbeEndpointOrder(sitePlatform: string, modelName: string): Upstr
   return ['chat', 'responses', 'messages'];
 }
 
-function buildPreferredEndpointPool(
-  endpointOrder: UpstreamEndpoint[],
-  preferredEndpoint: UpstreamEndpoint,
-): UpstreamEndpoint[] {
-  const uniqueOrdered = Array.from(new Set(endpointOrder));
-  return [
-    preferredEndpoint,
-    ...uniqueOrdered.filter((endpoint) => endpoint !== preferredEndpoint),
-  ];
-}
-
 function buildProtocolConfigForSuccess(
-  endpointOrder: UpstreamEndpoint[],
   sitePlatform: string,
   preferredEndpoint: UpstreamEndpoint,
 ): SiteProtocolConfig {
   const allowedEndpoints = new Set(getAllowedSiteProtocolEndpoints(sitePlatform));
-  const preferredPool = buildPreferredEndpointPool(endpointOrder, preferredEndpoint)
-    .filter((endpoint): endpoint is UpstreamEndpoint => allowedEndpoints.has(endpoint));
+  const preferredPool = allowedEndpoints.has(preferredEndpoint)
+    ? [preferredEndpoint]
+    : [];
   return {
     mode: 'manual',
     supportedEndpoints: preferredPool,
@@ -372,6 +364,32 @@ function selectProbeCandidate(candidates: ProbeCandidateRow[], preferredModelNam
   return candidates[0] || null;
 }
 
+function buildOrderedProbeCandidates(
+  candidates: ProbeCandidateRow[],
+  preferredModelName?: string | null,
+): ProbeCandidateRow[] {
+  if (candidates.length <= 1) return candidates;
+  const selected = selectProbeCandidate(candidates, preferredModelName);
+  if (!selected) return candidates.slice(0, MAX_PROBE_CANDIDATES);
+
+  const selectedModel = normalizeModelName(selected.modelName);
+  const sameModelCandidates = candidates
+    .filter((candidate) => normalizeModelName(candidate.modelName) === selectedModel)
+    .slice(0, MAX_PROBE_CANDIDATES_PER_MODEL);
+  const sameModelSet = new Set(sameModelCandidates);
+  const fallbackCandidates = candidates
+    .filter((candidate) => !sameModelSet.has(candidate))
+    .slice(0, Math.max(0, MAX_PROBE_CANDIDATES - sameModelCandidates.length));
+
+  const ordered = [
+    selected,
+    ...sameModelCandidates.filter((candidate) => candidate !== selected),
+    ...fallbackCandidates.filter((candidate) => candidate !== selected),
+  ];
+
+  return ordered.slice(0, MAX_PROBE_CANDIDATES);
+}
+
 async function executeSingleEndpointProbe(input: {
   candidate: ProbeCandidateRow;
   endpoint: UpstreamEndpoint;
@@ -486,14 +504,7 @@ export async function probeSiteProtocol(input: {
   }
 
   const startedAt = Date.now();
-  const orderedCandidates = (() => {
-    const selected = selectProbeCandidate(candidates, input.modelName);
-    if (!selected) return candidates;
-    return [
-      selected,
-      ...candidates.filter((candidate) => candidate !== selected),
-    ];
-  })();
+  const orderedCandidates = buildOrderedProbeCandidates(candidates, input.modelName);
   const attempts: SiteProtocolProbeAttempt[] = [];
 
   for (const candidate of orderedCandidates) {
@@ -507,7 +518,6 @@ export async function probeSiteProtocol(input: {
 
       if (attempt.ok) {
         const protocolConfig = buildProtocolConfigForSuccess(
-          endpointOrder,
           candidate.site.platform,
           endpoint,
         );
@@ -527,7 +537,7 @@ export async function probeSiteProtocol(input: {
         };
       }
 
-      if (attempt.classification === 'credential' || attempt.classification === 'model_unavailable') {
+      if (attempt.classification === 'credential') {
         break;
       }
     }

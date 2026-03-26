@@ -95,11 +95,11 @@ describe('siteProtocolProbeService', () => {
     expect(result.modelName).toBe('gpt-4.1');
     expect(result.accountId).toBe(account.id);
     expect(result.credentialSource).toBe('account_api_token');
-    expect(result.supportedEndpoints).toEqual(['responses', 'chat', 'messages']);
+    expect(result.supportedEndpoints).toEqual(['responses']);
     expect(result.preferredEndpoint).toBe('responses');
     expect(result.protocolConfig).toMatchObject({
       mode: 'manual',
-      supportedEndpoints: ['responses', 'chat', 'messages'],
+      supportedEndpoints: ['responses'],
       preferredEndpoint: 'responses',
     });
     expect(result.attempts).toHaveLength(2);
@@ -165,7 +165,7 @@ describe('siteProtocolProbeService', () => {
 
     expect(result.modelName).toBe('claude-sonnet-4-5-20250929');
     expect(result.credentialSource).toBe('preferred_token');
-    expect(result.supportedEndpoints).toEqual(['messages', 'chat', 'responses']);
+    expect(result.supportedEndpoints).toEqual(['messages']);
     expect(result.preferredEndpoint).toBe('messages');
     expect(result.attempts).toHaveLength(1);
     expect(result.attempts[0]).toMatchObject({
@@ -292,5 +292,66 @@ describe('siteProtocolProbeService', () => {
       ok: false,
       classification: 'inconclusive',
     });
+  });
+
+  it('limits protocol probing to a bounded candidate set instead of scanning all available models', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'bounded-site',
+      url: 'https://bounded.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const modelNames = [
+      'gpt-preferred',
+      'gpt-4.1',
+      'gpt-4o',
+      'gpt-4o-mini',
+      'gpt-5',
+      'o3-mini',
+      'claude-sonnet',
+      'claude-haiku',
+      'deepseek-chat',
+      'qwen-max',
+    ];
+
+    for (let i = 0; i < modelNames.length; i += 1) {
+      const account = await db.insert(schema.accounts).values({
+        siteId: site.id,
+        username: `probe-user-${i + 1}`,
+        accessToken: `session-${i + 1}`,
+        apiToken: `sk-probe-${i + 1}`,
+        status: 'active',
+        extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+      }).returning().get();
+
+      await db.insert(schema.modelAvailability).values({
+        accountId: account.id,
+        modelName: modelNames[i],
+        available: true,
+      }).run();
+    }
+
+    dispatchRuntimeRequestMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'invalid api key' },
+    }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    await expect(probeSiteProtocol({
+      siteId: site.id,
+      modelName: 'gpt-preferred',
+    })).rejects.toThrow(/HTTP 401/i);
+
+    const touchedCredentials = new Set(
+      dispatchRuntimeRequestMock.mock.calls
+        .map((call) => {
+          const headers = (call[0] as { request?: { headers?: Record<string, string> } })?.request?.headers || {};
+          return String(headers.Authorization || headers.authorization || headers['x-api-key'] || '').trim();
+        })
+        .filter((value) => value.length > 0),
+    );
+    expect(touchedCredentials.size).toBeLessThanOrEqual(6);
   });
 });

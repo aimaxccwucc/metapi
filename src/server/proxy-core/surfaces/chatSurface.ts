@@ -160,6 +160,10 @@ export async function handleChatSurfaceRequest(
     ];
     const endpointRuntimeContext = {
       siteId: selected.site.id,
+      accountId: selected.account.id,
+      accountAccessToken: selected.account.accessToken ?? null,
+      accountApiToken: (selected.account as { apiToken?: string | null }).apiToken ?? null,
+      siteApiKey: selected.site.apiKey ?? null,
       modelName,
       downstreamFormat,
       requestedModelHint: requestedModel,

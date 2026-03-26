@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { api } from '../api.js';
 import { BrandGlyph, getBrand, hashColor, BrandIcon, type BrandInfo } from '../components/BrandIcon.js';
 import SiteBadgeLink from '../components/SiteBadgeLink.js';
@@ -86,7 +86,10 @@ type AvailabilityCheckState = {
   autoKeyCreated?: boolean;
   autoKeyName?: string | null;
   autoKeyGroup?: string | null;
+  autoKeyTokenId?: number | null;
 };
+
+const TOKEN_MANAGEMENT_PATH = '/accounts?segment=tokens';
 
 function isKnownLatency(latency: number | null | undefined): latency is number {
   return typeof latency === 'number' && Number.isFinite(latency);
@@ -207,6 +210,10 @@ function buildDiagnosticClipboardText(input: {
   detail?: string | null;
 }): string {
   return [input.summary, input.detail].filter(Boolean).join('\n');
+}
+
+function getAvailabilityCopyLabel(check: AvailabilityCheckState): string {
+  return check.autoKeyCreated ? '复制补 Key 结果' : '复制结果';
 }
 
 function buildAvailabilityDetail(input: {
@@ -545,15 +552,129 @@ export default function Models() {
     setTimeout(() => setCopied(null), 1500);
   };
 
-  const copyDiagnostic = async (key: string, summary: string, detail?: string | null) => {
+  const copyDiagnostic = async (
+    key: string,
+    summary: string,
+    detail?: string | null,
+    autoKeyTokenId?: number | null,
+  ) => {
     try {
-      await navigator.clipboard.writeText(buildDiagnosticClipboardText({ summary, detail }));
-      toast.success('诊断信息已复制');
+      if (typeof autoKeyTokenId === 'number' && Number.isFinite(autoKeyTokenId) && autoKeyTokenId > 0) {
+        const res = await api.getAccountTokenValue(autoKeyTokenId) as { token?: string };
+        const tokenValue = typeof res?.token === 'string' ? res.token.trim() : '';
+        if (tokenValue) {
+          await navigator.clipboard.writeText(tokenValue);
+          toast.success('已复制自动补齐的令牌');
+        } else {
+          await navigator.clipboard.writeText(buildDiagnosticClipboardText({ summary, detail }));
+          toast.success('诊断信息已复制');
+        }
+      } else {
+        await navigator.clipboard.writeText(buildDiagnosticClipboardText({ summary, detail }));
+        toast.success('诊断信息已复制');
+      }
       setCopied(`diagnostic:${key}`);
       setTimeout(() => setCopied((current) => (current === `diagnostic:${key}` ? null : current)), 1500);
-    } catch {
-      toast.error('复制诊断信息失败');
+    } catch (error: any) {
+      toast.error(error?.message || '复制失败');
     }
+  };
+
+  const renderAvailabilityStatusBlock = (modelName: string, account: ModelAccountInfo, dense = false) => {
+    const key = accountModelKey(modelName, account.id);
+    const checking = !!availabilityTesting[key];
+    const check = availabilityChecks[key];
+    const expandedDetail = !!expandedCheckDetails[key];
+    const actionButtonStyle = {
+      border: '1px solid var(--color-border)',
+      fontSize: 11,
+      padding: dense ? '3px 8px' : '4px 10px',
+    } as const;
+    const detailStyle = {
+      fontSize: 11,
+      color: 'var(--color-text-muted)',
+      lineHeight: 1.5,
+      whiteSpace: 'normal',
+      overflowWrap: 'anywhere',
+      wordBreak: 'break-word',
+      minWidth: 0,
+    } as const;
+
+    return (
+      <div style={{ display: 'grid', gap: 6, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0 }}>
+          <button
+            className="btn btn-ghost"
+            style={actionButtonStyle}
+            onClick={() => { void testModelAvailability(modelName, account); }}
+            disabled={checking}
+          >
+            {checking ? tr('检测中...') : tr('检测')}
+          </button>
+          {check ? (
+            <span
+              className={`badge ${check.status === 'available' ? 'badge-success' : (check.status === 'unavailable' ? 'badge-warning' : 'badge-error')}`}
+              style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}
+              title={check.message}
+            >
+              {check.status === 'available' ? tr('可用') : (check.status === 'unavailable' ? tr('不可用') : tr('失败'))}
+              {check.latencyMs != null ? ` ${check.latencyMs}ms` : ''}
+            </span>
+          ) : null}
+          {check?.autoKeyCreated ? (
+            <span className="badge badge-info" style={{ fontSize: 11, flexShrink: 0 }}>
+              {tr('已自动补 Key')}
+            </span>
+          ) : null}
+        </div>
+        {check ? (
+          <div style={{ ...detailStyle, display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+            <span style={{ color: getAvailabilityAccentColor(check.probeClassification), fontWeight: 600, flexShrink: 0 }}>●</span>
+            <span style={{ minWidth: 0 }}>{check.message}</span>
+          </div>
+        ) : null}
+        {check?.autoKeyCreated ? (
+          <div style={{ ...detailStyle, display: 'grid', gap: 4 }}>
+            <span>{`自动补 Key: ${check.autoKeyGroup || 'default'} / ${check.autoKeyName || '-'}`}</span>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              <Link
+                to={TOKEN_MANAGEMENT_PATH}
+                className="btn btn-ghost"
+                style={actionButtonStyle}
+                onClick={(event) => event.stopPropagation()}
+              >
+                {tr('前往账号令牌管理')}
+              </Link>
+            </div>
+          </div>
+        ) : null}
+        {check ? (
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {check.detail ? (
+              <button
+                className="btn btn-ghost"
+                style={actionButtonStyle}
+                onClick={() => setExpandedCheckDetails((prev) => ({ ...prev, [key]: !prev[key] }))}
+              >
+                {expandedDetail ? tr('收起详情') : tr('查看详情')}
+              </button>
+            ) : null}
+            <button
+              className="btn btn-ghost"
+              style={actionButtonStyle}
+              onClick={() => { void copyDiagnostic(key, check.message, check.detail, check.autoKeyTokenId); }}
+            >
+              {copied === `diagnostic:${key}` ? tr('已复制') : tr(getAvailabilityCopyLabel(check))}
+            </button>
+          </div>
+        ) : null}
+        {check?.detail && expandedDetail ? (
+          <div style={detailStyle}>
+            {check.detail}
+          </div>
+        ) : null}
+      </div>
+    );
   };
 
   const toggleSort = (nextSortBy: SortColumn) => {
@@ -629,6 +750,7 @@ export default function Models() {
         autoKeyCreated?: boolean;
         autoKeyName?: string | null;
         autoKeyGroup?: string | null;
+        autoKeyTokenId?: number | null;
       };
       const available = res?.available === true;
       const state: AvailabilityCheckState = {
@@ -653,6 +775,9 @@ export default function Models() {
         autoKeyCreated: res?.autoKeyCreated === true,
         autoKeyName: typeof res?.autoKeyName === 'string' ? res.autoKeyName : null,
         autoKeyGroup: typeof res?.autoKeyGroup === 'string' ? res.autoKeyGroup : null,
+        autoKeyTokenId: typeof res?.autoKeyTokenId === 'number' && Number.isFinite(res.autoKeyTokenId)
+          ? res.autoKeyTokenId
+          : null,
       };
       setAvailabilityChecks((prev) => ({
         ...prev,
@@ -1088,62 +1213,7 @@ export default function Models() {
                               </div>
                               <div style={{ display: 'grid', gap: 6 }}>
                                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{tr('可用性检测')}</span>
-                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                                  <button
-                                    className="btn btn-ghost"
-                                    style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
-                                    onClick={() => { void testModelAvailability(m.name, a); }}
-                                    disabled={!!availabilityTesting[accountModelKey(m.name, a.id)]}
-                                  >
-                                    {availabilityTesting[accountModelKey(m.name, a.id)] ? tr('检测中...') : tr('检测')}
-                                  </button>
-                                  {availabilityChecks[accountModelKey(m.name, a.id)] ? (
-                                    <span
-                                      className={`badge ${availabilityChecks[accountModelKey(m.name, a.id)]!.status === 'available' ? 'badge-success' : (availabilityChecks[accountModelKey(m.name, a.id)]!.status === 'unavailable' ? 'badge-warning' : 'badge-error')}`}
-                                      style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums' }}
-                                      title={availabilityChecks[accountModelKey(m.name, a.id)]!.message}
-                                    >
-                                      {availabilityChecks[accountModelKey(m.name, a.id)]!.status === 'available'
-                                        ? tr('可用')
-                                        : (availabilityChecks[accountModelKey(m.name, a.id)]!.status === 'unavailable' ? tr('不可用') : tr('失败'))}
-                                      {availabilityChecks[accountModelKey(m.name, a.id)]!.latencyMs != null ? ` ${availabilityChecks[accountModelKey(m.name, a.id)]!.latencyMs}ms` : ''}
-                                    </span>
-                                  ) : null}
-                                  {availabilityChecks[accountModelKey(m.name, a.id)] ? (
-                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                      <span style={{ color: getAvailabilityAccentColor(availabilityChecks[accountModelKey(m.name, a.id)]!.probeClassification), fontWeight: 600, marginRight: 6 }}>●</span>
-                                      {availabilityChecks[accountModelKey(m.name, a.id)]!.message}
-                                    </span>
-                                  ) : null}
-                                </div>
-                                {availabilityChecks[accountModelKey(m.name, a.id)]?.autoKeyCreated ? (
-                                  <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                    {`自动补 Key: ${availabilityChecks[accountModelKey(m.name, a.id)]?.autoKeyGroup || 'default'} / ${availabilityChecks[accountModelKey(m.name, a.id)]?.autoKeyName || '-'}`}
-                                  </span>
-                                ) : null}
-                                {availabilityChecks[accountModelKey(m.name, a.id)]?.detail ? (
-                                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                    <button
-                                      className="btn btn-ghost"
-                                      style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
-                                      onClick={() => setExpandedCheckDetails((prev) => ({ ...prev, [accountModelKey(m.name, a.id)]: !prev[accountModelKey(m.name, a.id)] }))}
-                                    >
-                                      {expandedCheckDetails[accountModelKey(m.name, a.id)] ? tr('收起详情') : tr('查看详情')}
-                                    </button>
-                                    <button
-                                      className="btn btn-ghost"
-                                      style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
-                                      onClick={() => { void copyDiagnostic(accountModelKey(m.name, a.id), availabilityChecks[accountModelKey(m.name, a.id)]!.message, availabilityChecks[accountModelKey(m.name, a.id)]!.detail); }}
-                                    >
-                                      {copied === `diagnostic:${accountModelKey(m.name, a.id)}` ? tr('已复制') : tr('复制诊断')}
-                                    </button>
-                                  </div>
-                                ) : null}
-                                {availabilityChecks[accountModelKey(m.name, a.id)]?.detail && expandedCheckDetails[accountModelKey(m.name, a.id)] ? (
-                                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
-                                    {availabilityChecks[accountModelKey(m.name, a.id)]!.detail}
-                                  </div>
-                                ) : null}
+                                {renderAvailabilityStatusBlock(m.name, a, true)}
                               </div>
                               <div style={{ display: 'grid', gap: 6 }}>
                                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{tr('令牌')}</span>
@@ -1158,23 +1228,19 @@ export default function Models() {
                         ))}
                       </div>
                     ) : (
-                      <table className="data-table" style={{ width: '100%' }}>
+                      <table className="data-table" style={{ width: '100%', tableLayout: 'fixed' }}>
                         <thead>
                           <tr>
-                            <th style={{ fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('site')}>{tr('站点')} {accountDetailSortBy === 'site' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
-                            <th style={{ fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('username')}>{tr('账号')} {accountDetailSortBy === 'username' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
-                            <th style={{ fontWeight: 500 }}>{tr('令牌')}</th>
-                            <th style={{ fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('latency', 'model-detail-sort-latency')}>{tr('延迟')} {accountDetailSortBy === 'latency' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
-                            <th style={{ fontWeight: 500 }}>{tr('可用性检测')}</th>
-                            <th style={{ fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('balance', 'model-detail-sort-balance')}>{tr('余额')} {accountDetailSortBy === 'balance' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                            <th style={{ width: '16%', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('site')}>{tr('站点')} {accountDetailSortBy === 'site' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                            <th style={{ width: '14%', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('username')}>{tr('账号')} {accountDetailSortBy === 'username' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                            <th style={{ width: '18%', fontWeight: 500 }}>{tr('令牌')}</th>
+                            <th style={{ width: '10%', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('latency', 'model-detail-sort-latency')}>{tr('延迟')} {accountDetailSortBy === 'latency' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                            <th style={{ width: '30%', fontWeight: 500 }}>{tr('可用性检测')}</th>
+                            <th style={{ width: '12%', fontWeight: 500, cursor: 'pointer', whiteSpace: 'nowrap' }} {...accountDetailSortHeaderProps('balance', 'model-detail-sort-balance')}>{tr('余额')} {accountDetailSortBy === 'balance' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {sortAccountsForDetail(m.accounts).map(a => {
-                            const rowKey = accountModelKey(m.name, a.id);
-                            const checking = !!availabilityTesting[rowKey];
-                            const check = availabilityChecks[rowKey];
-                            return (
+                          {sortAccountsForDetail(m.accounts).map(a => (
                             <tr key={a.id}>
                               <td><SiteBadgeLink siteId={siteIdByName.get(a.site)} siteName={a.site} badgeClassName="badge badge-info" badgeStyle={{ fontSize: 11 }} /></td>
                               <td style={{ fontSize: 12 }}>{a.username || `ID:${a.id}`}</td>
@@ -1188,66 +1254,12 @@ export default function Models() {
                                   <span style={{ color: getMetricColor(a.latency), fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>{a.latency}ms</span>
                                 ) : '—'}
                               </td>
-                              <td>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                  <button
-                                    className="btn btn-ghost"
-                                    style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
-                                    onClick={() => { void testModelAvailability(m.name, a); }}
-                                    disabled={checking}
-                                  >
-                                    {checking ? tr('检测中...') : tr('检测')}
-                                  </button>
-                                  {check ? (
-                                    <span
-                                      className={`badge ${check.status === 'available' ? 'badge-success' : (check.status === 'unavailable' ? 'badge-warning' : 'badge-error')}`}
-                                      style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums' }}
-                                      title={check.message}
-                                    >
-                                      {check.status === 'available' ? tr('可用') : (check.status === 'unavailable' ? tr('不可用') : tr('失败'))}
-                                      {check.latencyMs != null ? ` ${check.latencyMs}ms` : ''}
-                                    </span>
-                                  ) : null}
-                                  {check ? (
-                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                      <span style={{ color: getAvailabilityAccentColor(check.probeClassification), fontWeight: 600, marginRight: 6 }}>●</span>
-                                      {check.message}
-                                    </span>
-                                  ) : null}
-                                  {check?.autoKeyCreated ? (
-                                    <span className="badge badge-info" style={{ fontSize: 11 }}>
-                                      {tr('已自动补 Key')}
-                                    </span>
-                                  ) : null}
-                                  {check?.detail ? (
-                                    <button
-                                      className="btn btn-ghost"
-                                      style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
-                                      onClick={() => setExpandedCheckDetails((prev) => ({ ...prev, [rowKey]: !prev[rowKey] }))}
-                                    >
-                                      {expandedCheckDetails[rowKey] ? tr('收起详情') : tr('查看详情')}
-                                    </button>
-                                  ) : null}
-                                  {check?.detail ? (
-                                    <button
-                                      className="btn btn-ghost"
-                                      style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '3px 8px' }}
-                                      onClick={() => { void copyDiagnostic(rowKey, check.message, check.detail); }}
-                                    >
-                                      {copied === `diagnostic:${rowKey}` ? tr('已复制') : tr('复制诊断')}
-                                    </button>
-                                  ) : null}
-                                </div>
-                                {check?.detail && expandedCheckDetails[rowKey] ? (
-                                  <div style={{ marginTop: 6, fontSize: 11, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
-                                    {check.detail}
-                                  </div>
-                                ) : null}
+                              <td style={{ minWidth: 0 }}>
+                                {renderAvailabilityStatusBlock(m.name, a, true)}
                               </td>
-                              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>${(a.balance || 0).toFixed(2)}</td>
+                              <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12, whiteSpace: 'nowrap' }}>${(a.balance || 0).toFixed(2)}</td>
                             </tr>
-                            );
-                          })}
+                          ))}
                         </tbody>
                       </table>
                     )}
@@ -1386,13 +1398,14 @@ export default function Models() {
                               </div>
                             </div>
 
-                            <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                            <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse', tableLayout: 'fixed' }}>
                               <thead><tr style={{ color: 'var(--color-text-muted)' }}>
-                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('site')}>{tr('站点')} {accountDetailSortBy === 'site' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
-                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('username')}>{tr('账号')} {accountDetailSortBy === 'username' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
-                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('令牌')}</th>
-                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('latency', 'model-card-detail-sort-latency')}>{tr('延迟')} {accountDetailSortBy === 'latency' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
-                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('balance', 'model-card-detail-sort-balance')}>{tr('余额')} {accountDetailSortBy === 'balance' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                                <th style={{ width: '16%', textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('site')}>{tr('站点')} {accountDetailSortBy === 'site' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                                <th style={{ width: '14%', textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('username')}>{tr('账号')} {accountDetailSortBy === 'username' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                                <th style={{ width: '18%', textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('令牌')}</th>
+                                <th style={{ width: '10%', textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer' }} {...accountDetailSortHeaderProps('latency', 'model-card-detail-sort-latency')}>{tr('延迟')} {accountDetailSortBy === 'latency' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
+                                <th style={{ width: '30%', textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{tr('可用性检测')}</th>
+                                <th style={{ width: '12%', textAlign: 'left', padding: '6px 8px', fontWeight: 500, cursor: 'pointer', whiteSpace: 'nowrap' }} {...accountDetailSortHeaderProps('balance', 'model-card-detail-sort-balance')}>{tr('余额')} {accountDetailSortBy === 'balance' ? (accountDetailSortDir === 'desc' ? '↓' : '↑') : ''}</th>
                               </tr></thead>
                               <tbody>
                                 {sortAccountsForDetail(m.accounts).map(a => (
@@ -1407,7 +1420,10 @@ export default function Models() {
                                     <td style={{ padding: 8, color: a.latency != null ? getMetricColor(a.latency) : 'var(--color-text-muted)' }}>
                                       {a.latency != null ? `${a.latency}ms` : '—'}
                                     </td>
-                                    <td style={{ padding: 8 }}>${(a.balance || 0).toFixed(2)}</td>
+                                    <td style={{ padding: 8, minWidth: 0 }}>
+                                      {renderAvailabilityStatusBlock(m.name, a)}
+                                    </td>
+                                    <td style={{ padding: 8, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>${(a.balance || 0).toFixed(2)}</td>
                                   </tr>
                                 ))}
                               </tbody>

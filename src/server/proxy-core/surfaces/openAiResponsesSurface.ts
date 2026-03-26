@@ -263,6 +263,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
       }
       const endpointRuntimeContext = {
         siteId: selected.site.id,
+        accountId: selected.account.id,
+        accountAccessToken: selected.account.accessToken ?? null,
+        accountApiToken: (selected.account as { apiToken?: string | null }).apiToken ?? null,
+        siteApiKey: selected.site.apiKey ?? null,
         modelName,
         downstreamFormat: 'responses' as const,
         requestedModelHint: requestedModel,

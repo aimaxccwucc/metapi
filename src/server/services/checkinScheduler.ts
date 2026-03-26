@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { refreshAllBalances } from './balanceService.js';
-import { checkinAll } from './checkinService.js';
+import { checkinAll, isSchedulableCheckinAccountStatus } from './checkinService.js';
 import { refreshModelsAndRebuildRoutes } from './modelService.js';
 import { sendNotification } from './notifyService.js';
 import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dailySummaryService.js';
@@ -20,6 +20,7 @@ let logCleanupTask: cron.ScheduledTask | null = null;
 let siteHealthTask: cron.ScheduledTask | null = null;
 let siteHealthRefreshRunning = false;
 const intervalAttemptByAccount = new Map<number, number>();
+let intervalCheckinPassRunning = false;
 
 const DAILY_SUMMARY_DEFAULT_CRON = '58 23 * * *';
 const LOG_CLEANUP_DEFAULT_CRON = '0 6 * * *';
@@ -77,6 +78,15 @@ type IntervalCheckinCandidate = {
   lastCheckinAt?: string | null;
 };
 
+type IntervalCheckinResult = {
+  accountId: number;
+  result?: {
+    success?: boolean;
+    status?: string;
+    skipped?: boolean;
+  };
+};
+
 export function selectDueIntervalCheckinAccountIds(
   rows: IntervalCheckinCandidate[],
   intervalHours: number,
@@ -104,39 +114,63 @@ export function selectDueIntervalCheckinAccountIds(
 }
 
 async function runIntervalCheckinPass(now = new Date()) {
+  if (intervalCheckinPassRunning) {
+    console.log('[Scheduler] Interval check-in skipped: existing run is in progress');
+    return;
+  }
+  intervalCheckinPassRunning = true;
   const rows = await db
     .select()
     .from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .all();
 
-  const dueAccountIds = selectDueIntervalCheckinAccountIds(
-    rows
-      .filter((row: any) => row.accounts?.checkinEnabled === true && row.accounts?.status === 'active' && row.sites?.status !== 'disabled')
-      .map((row: any) => ({
-        id: row.accounts.id,
-        lastCheckinAt: row.accounts.lastCheckinAt,
-      })),
-    config.checkinIntervalHours,
-    now,
-  );
-
-  if (dueAccountIds.length === 0) return;
-
   try {
+    const dueAccountIds = selectDueIntervalCheckinAccountIds(
+      rows
+        .filter((row: any) => (
+          row.accounts?.checkinEnabled === true
+          && isSchedulableCheckinAccountStatus(row.accounts?.status)
+          && row.sites?.status !== 'disabled'
+        ))
+        .map((row: any) => ({
+          id: row.accounts.id,
+          lastCheckinAt: row.accounts.lastCheckinAt,
+        })),
+      config.checkinIntervalHours,
+      now,
+    );
+
+    if (dueAccountIds.length === 0) return;
+
     const results = await checkinAll({
       accountIds: dueAccountIds,
       scheduleMode: 'interval',
     });
     const nowMs = now.getTime();
-    for (const item of results) {
-      intervalAttemptByAccount.set(item.accountId, nowMs);
-    }
+    applyIntervalCheckinAttemptResults(results, nowMs);
     const success = results.filter((r) => r.result.success).length;
     const failed = results.length - success;
     console.log(`[Scheduler] Interval check-in complete: ${success} success, ${failed} failed`);
   } catch (err) {
     console.error('[Scheduler] Interval check-in error:', err);
+  } finally {
+    intervalCheckinPassRunning = false;
+  }
+}
+
+function shouldRecordIntervalAttemptResult(item: IntervalCheckinResult): boolean {
+  if (!item?.result) return false;
+  if (item.result.success === true) return true;
+  if (item.result.status === 'skipped' || item.result.skipped === true) return true;
+  return false;
+}
+
+function applyIntervalCheckinAttemptResults(results: IntervalCheckinResult[], nowMs: number, attemptState = intervalAttemptByAccount): void {
+  for (const item of results) {
+    if (!Number.isFinite(item?.accountId) || item.accountId <= 0) continue;
+    if (!shouldRecordIntervalAttemptResult(item)) continue;
+    attemptState.set(item.accountId, nowMs);
   }
 }
 
@@ -367,5 +401,6 @@ export function __resetCheckinSchedulerForTests() {
   logCleanupTask = null;
   siteHealthTask = null;
   siteHealthRefreshRunning = false;
+  intervalCheckinPassRunning = false;
   intervalAttemptByAccount.clear();
 }

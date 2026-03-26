@@ -21,6 +21,10 @@ import { withAccountProxyOverride } from './siteProxy.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
 
+export function isSchedulableCheckinAccountStatus(status?: string | null): boolean {
+  return status === 'active' || status === 'expired';
+}
+
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
 }
@@ -182,7 +186,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   let result = await withAccountProxyOverride(accountProxyUrl,
     () => adapter.checkin(site.url, activeAccessToken, platformUserId));
 
-  if (!result.success && shouldAttemptAutoRelogin(result.message)) {
+  if (!result.success && (account.status === 'expired' || shouldAttemptAutoRelogin(result.message))) {
     const refreshedAccessToken = await tryAutoRelogin(account, site);
     if (refreshedAccessToken) {
       activeAccessToken = refreshedAccessToken;
@@ -328,7 +332,6 @@ export async function checkinAll(options?: { accountIds?: number[]; scheduleMode
     .where(
       and(
         eq(schema.accounts.checkinEnabled, true),
-        eq(schema.accounts.status, 'active'),
       ),
     )
     .all();
@@ -339,6 +342,7 @@ export async function checkinAll(options?: { accountIds?: number[]; scheduleMode
   const grouped = new Map<number, typeof rows>();
   for (const row of rows) {
     if (scopedAccountIds && !scopedAccountIds.has(row.accounts.id)) continue;
+    if (!isSchedulableCheckinAccountStatus(row.accounts.status)) continue;
     const siteId = row.sites.id;
     if (!grouped.has(siteId)) grouped.set(siteId, []);
     grouped.get(siteId)!.push(row);
@@ -346,16 +350,33 @@ export async function checkinAll(options?: { accountIds?: number[]; scheduleMode
 
   const promises = Array.from(grouped.entries()).map(async ([_, siteRows]) => {
     for (const row of siteRows) {
-      const r = await checkinAccount(row.accounts.id, {
-        skipEvent: true,
-        scheduleMode: options?.scheduleMode,
-      });
-      results.push({
-        accountId: row.accounts.id,
-        username: row.accounts.username,
-        site: row.sites.name,
-        result: r,
-      });
+      try {
+        const r = await checkinAccount(row.accounts.id, {
+          skipEvent: true,
+          scheduleMode: options?.scheduleMode,
+        });
+        results.push({
+          accountId: row.accounts.id,
+          username: row.accounts.username,
+          site: row.sites.name,
+          result: r,
+        });
+      } catch (error) {
+        const message = error instanceof Error
+          ? (error.message || 'unknown error')
+          : String(error || 'unknown error');
+        console.error(`[Checkin] Account ${row.accounts.id} failed with uncaught error:`, error);
+        results.push({
+          accountId: row.accounts.id,
+          username: row.accounts.username,
+          site: row.sites.name,
+          result: {
+            success: false,
+            status: 'failed' as const,
+            message,
+          },
+        });
+      }
     }
   });
 

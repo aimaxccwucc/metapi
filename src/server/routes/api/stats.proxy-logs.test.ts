@@ -92,6 +92,7 @@ describe('stats proxy logs routes', () => {
         modelRequested: 'gpt-4o-mini',
         modelActual: 'gpt-4o-mini',
         status: 'failed',
+        errorMessage: 'upstream timeout from codex-cli',
         clientFamily: 'codex',
         promptTokens: 8,
         completionTokens: 2,
@@ -324,6 +325,116 @@ describe('stats proxy logs routes', () => {
     expect(body.total).toBe(1);
     expect(body.items[0]?.downstreamKeyName).toBe('渠道-A');
     expect(body.items[0]?.downstreamKeyGroupName).toBe('项目甲');
+  });
+
+  it('supports searching proxy logs by error message text', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'error-site',
+      url: 'https://error.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'error-user',
+      accessToken: 'error-token',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.proxyLogs).values([
+      {
+        accountId: account.id,
+        modelRequested: 'gpt-4.1',
+        modelActual: 'gpt-4.1',
+        status: 'failed',
+        errorMessage: 'upstream timeout from codex-cli',
+        totalTokens: 0,
+        estimatedCost: 0,
+        createdAt: formatUtcSqlDateTime(new Date('2026-03-09T12:00:00.000Z')),
+      },
+      {
+        accountId: account.id,
+        modelRequested: 'gpt-4.1-mini',
+        modelActual: 'gpt-4.1-mini',
+        status: 'failed',
+        errorMessage: 'invalid auth token',
+        totalTokens: 0,
+        estimatedCost: 0,
+        createdAt: formatUtcSqlDateTime(new Date('2026-03-09T12:05:00.000Z')),
+      },
+    ]).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/stats/proxy-logs?search=codex-cli',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      total: number;
+      items: Array<Record<string, unknown>>;
+    };
+
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.modelRequested).toBe('gpt-4.1');
+    expect(String(body.items[0]?.errorMessage || '')).toContain('codex-cli');
+  });
+
+  it('supports searching proxy logs by third-party client metadata', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'client-site',
+      url: 'https://client.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'client-user',
+      accessToken: 'client-token',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.proxyLogs).values([
+      {
+        accountId: account.id,
+        modelRequested: 'gpt-4.1',
+        modelActual: 'gpt-4.1',
+        status: 'success',
+        clientFamily: 'codex',
+        clientAppId: 'cherry_studio',
+        clientAppName: 'Cherry Studio',
+        totalTokens: 12,
+        estimatedCost: 0.12,
+        createdAt: formatUtcSqlDateTime(new Date('2026-03-09T13:00:00.000Z')),
+      },
+      {
+        accountId: account.id,
+        modelRequested: 'gpt-4.1-mini',
+        modelActual: 'gpt-4.1-mini',
+        status: 'success',
+        clientFamily: 'generic',
+        clientAppId: null,
+        clientAppName: null,
+        totalTokens: 8,
+        estimatedCost: 0.08,
+        createdAt: formatUtcSqlDateTime(new Date('2026-03-09T13:05:00.000Z')),
+      },
+    ]).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/stats/proxy-logs?search=cherry%20studio',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      total: number;
+      items: Array<Record<string, unknown>>;
+    };
+
+    expect(body.total).toBe(1);
+    expect(body.items[0]?.clientAppName).toBe('Cherry Studio');
+    expect(body.items[0]?.clientAppId).toBe('cherry_studio');
   });
 
   it('filters proxy logs by site and time range', async () => {

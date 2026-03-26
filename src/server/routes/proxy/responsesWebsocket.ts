@@ -10,9 +10,14 @@ import {
   isModelAllowedByPolicyOrAllowedRoutes,
   type DownstreamTokenAuthSuccess,
 } from '../../services/downstreamApiKeyService.js';
+import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
+import { insertProxyLog } from '../../services/proxyLogStore.js';
+import { mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
 import { openAiResponsesTransformer } from '../../transformers/openai/responses/index.js';
+import { detectDownstreamClientContext, type DownstreamClientContext } from './downstreamClientContext.js';
+import { composeProxyLogMessage } from './logPathMeta.js';
 import { buildUpstreamEndpointRequest } from './upstreamEndpoint.js';
 
 const installedApps = new WeakSet<FastifyInstance>();
@@ -23,6 +28,7 @@ const codexWebsocketRuntime = createCodexWebsocketRuntime();
 
 type SelectedChannel = NonNullable<Awaited<ReturnType<typeof tokenRouter.selectChannel>>>;
 type ResponsesWebsocketAuthContext = DownstreamTokenAuthSuccess;
+type ProxyUsageSummary = ReturnType<typeof parseProxyUsage>;
 
 type NormalizedResponsesWebsocketRequest =
   | {
@@ -333,6 +339,69 @@ function collectResponsesOutput(payloads: unknown[]): unknown[] {
     .map(([, value]) => value);
 }
 
+function collectResponsesUsageFromEvents(payloads: Array<Record<string, unknown>>): ProxyUsageSummary {
+  let merged = parseProxyUsage({});
+  for (const payload of payloads) {
+    merged = mergeProxyUsage(merged, parseProxyUsage(payload));
+  }
+  return merged;
+}
+
+async function writeResponsesWebsocketProxyLog(input: {
+  selected: SelectedChannel;
+  modelRequested: string;
+  modelActual: string;
+  status: 'success' | 'failed';
+  httpStatus: number;
+  latencyMs: number;
+  errorMessage: string | null;
+  retryCount: number;
+  downstreamPath: string;
+  upstreamPath: string | null;
+  clientContext: DownstreamClientContext | null;
+  usage: ProxyUsageSummary;
+  downstreamApiKeyId: number | null;
+}) {
+  try {
+    const createdAt = formatUtcSqlDateTime(new Date());
+    const normalizedErrorMessage = composeProxyLogMessage({
+      clientKind: input.clientContext?.clientKind && input.clientContext.clientKind !== 'generic'
+        ? input.clientContext.clientKind
+        : null,
+      sessionId: input.clientContext?.sessionId || null,
+      traceHint: input.clientContext?.traceHint || null,
+      downstreamPath: input.downstreamPath,
+      upstreamPath: input.upstreamPath,
+      errorMessage: input.errorMessage,
+    });
+
+    await insertProxyLog({
+      routeId: input.selected.channel.routeId,
+      channelId: input.selected.channel.id,
+      accountId: input.selected.account.id,
+      downstreamApiKeyId: input.downstreamApiKeyId,
+      modelRequested: input.modelRequested,
+      modelActual: input.modelActual,
+      status: input.status,
+      httpStatus: input.httpStatus,
+      latencyMs: Math.max(0, Math.round(input.latencyMs)),
+      promptTokens: input.usage.promptTokens,
+      completionTokens: input.usage.completionTokens,
+      totalTokens: input.usage.totalTokens,
+      estimatedCost: 0,
+      clientFamily: input.clientContext?.clientKind || null,
+      clientAppId: input.clientContext?.clientAppId || null,
+      clientAppName: input.clientContext?.clientAppName || null,
+      clientConfidence: input.clientContext?.clientConfidence || null,
+      errorMessage: normalizedErrorMessage,
+      retryCount: input.retryCount,
+      createdAt,
+    });
+  } catch (error) {
+    console.warn('[proxy/responses.websocket] failed to write proxy log', error);
+  }
+}
+
 async function forwardResponsesRequestViaHttp(input: {
   app: FastifyInstance;
   socket: WebSocket;
@@ -531,6 +600,12 @@ async function handleResponsesWebsocketConnection(
             writeResponsesWebsocketError(socket, normalized.status, normalized.message);
             return;
           }
+          const downstreamPath = '/v1/responses';
+          const clientContext = detectDownstreamClientContext({
+            downstreamPath,
+            headers: request.headers as Record<string, unknown>,
+            body: normalized.request,
+          });
 
           if (authContext.source === 'managed' && authContext.key?.id) {
             await consumeManagedKeyRequest(authContext.key.id);
@@ -598,6 +673,22 @@ async function handleResponsesWebsocketConnection(
                 0,
                 actualModel,
               );
+              const runtimeUsage = collectResponsesUsageFromEvents(runtimeResult.events);
+              await writeResponsesWebsocketProxyLog({
+                selected: codexWebsocketChannel,
+                modelRequested: requestModel || actualModel,
+                modelActual: actualModel,
+                status: 'success',
+                httpStatus: 200,
+                latencyMs: Date.now() - requestStartedAt,
+                errorMessage: null,
+                retryCount: 0,
+                downstreamPath,
+                upstreamPath: prepared.path,
+                clientContext,
+                usage: runtimeUsage,
+                downstreamApiKeyId: authContext.key?.id ?? null,
+              });
               lastResponseOutput = collectResponsesOutput(runtimeResult.events);
               for (const payload of runtimeResult.events) {
                 socket.send(JSON.stringify(payload));
@@ -626,6 +717,22 @@ async function handleResponsesWebsocketConnection(
                 }
                 return;
               }
+              const runtimeUsage = collectResponsesUsageFromEvents(runtimeError.events);
+              await writeResponsesWebsocketProxyLog({
+                selected: codexWebsocketChannel,
+                modelRequested: requestModel || actualModel,
+                modelActual: actualModel,
+                status: 'failed',
+                httpStatus: runtimeError.status || 502,
+                latencyMs: Date.now() - requestStartedAt,
+                errorMessage: runtimeError.message,
+                retryCount: 0,
+                downstreamPath,
+                upstreamPath: prepared.path,
+                clientContext,
+                usage: runtimeUsage,
+                downstreamApiKeyId: authContext.key?.id ?? null,
+              });
               lastResponseOutput = collectResponsesOutput(runtimeError.events);
               for (const payload of runtimeError.events) {
                 socket.send(JSON.stringify(payload));

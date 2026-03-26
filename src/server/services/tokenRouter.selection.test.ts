@@ -869,7 +869,7 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.summary.join(' ')).toContain('上层最近失败，已自动降级');
   });
 
-  it('does not immediately recycle recently failed channels when every priority layer is degraded', async () => {
+  it('falls back to the least recently failed channel when every priority layer is degraded', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
       valueScoreFactor: 0,
@@ -923,9 +923,9 @@ describe('TokenRouter selection scoring', () => {
     const preview = await router.previewSelectedChannel('gpt-5.7');
     const decision = await router.explainSelection('gpt-5.7');
 
-    expect(preview).toBeNull();
-    expect(decision.selectedChannelId).toBeUndefined();
-    expect(decision.summary.join(' ')).toContain('本次未选出通道');
+    expect(preview).not.toBeNull();
+    expect(decision.selectedChannelId).toBeTruthy();
+    expect(decision.summary.join(' ')).toContain('保守恢复探测');
   });
 
   it('temporarily avoids channels that were just selected by another request', async () => {
@@ -982,6 +982,50 @@ describe('TokenRouter selection scoring', () => {
     } finally {
       randomSpy.mockRestore();
     }
+  });
+
+  it('restores persisted unavailable model state after a later successful request', async () => {
+    const route = await createRoute('gpt-4o-persisted-recover');
+    const site = await createSite('persist-recover');
+    const account = await createAccount(site.id, 'persist-recover-user');
+    const token = await createToken(account.id, 'persist-recover-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, {
+      status: 400,
+      errorText: 'model not supported',
+      modelName: 'gpt-4o-persisted-recover',
+    });
+
+    let availability = await db.select().from(schema.tokenModelAvailability)
+      .where(
+        and(
+          eq(schema.tokenModelAvailability.tokenId, token.id),
+          eq(schema.tokenModelAvailability.modelName, 'gpt-4o-persisted-recover'),
+        ),
+      )
+      .get();
+    expect(availability?.available).toBe(false);
+
+    await router.recordSuccess(channel.id, 320, 0.1, 'gpt-4o-persisted-recover');
+
+    availability = await db.select().from(schema.tokenModelAvailability)
+      .where(
+        and(
+          eq(schema.tokenModelAvailability.tokenId, token.id),
+          eq(schema.tokenModelAvailability.modelName, 'gpt-4o-persisted-recover'),
+        ),
+      )
+      .get();
+    expect(availability?.available).toBe(true);
   });
 
   it('does not fall back to a runtime-breaker-blocked layer when only lower priorities are recently failed', async () => {

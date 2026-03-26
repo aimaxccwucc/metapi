@@ -202,6 +202,7 @@ describe('/api/models/marketplace', () => {
       siteId: site.id,
       autoKeyCreated: true,
       autoKeyGroup: 'default',
+      autoKeyTokenId: expect.any(Number),
     });
     expect(createApiTokenMock).toHaveBeenCalledTimes(1);
     expect(createApiTokenMock.mock.calls[0]?.[3]).toMatchObject({

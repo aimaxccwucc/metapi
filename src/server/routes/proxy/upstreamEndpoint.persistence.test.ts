@@ -75,9 +75,13 @@ describe('upstream endpoint persisted protocol profile', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('reloads explicit protocol preference from persisted profile after runtime reset', async () => {
+  it('does not persist unverified suggested endpoint preferences after runtime reset', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'chat',
       downstreamFormat: 'openai',
       modelName: 'gpt-5.3',
@@ -93,12 +97,16 @@ describe('upstream endpoint persisted protocol profile', () => {
       'openai',
     );
 
-    expect(order).toEqual(['responses', 'messages']);
+    expect(order).toEqual(['messages', 'responses']);
   });
 
   it('does not persist generic responses-to-messages redirect hints across runtime reset', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'responses',
       downstreamFormat: 'responses',
       modelName: 'gpt-5.3',
@@ -118,8 +126,17 @@ describe('upstream endpoint persisted protocol profile', () => {
   });
 
   it('reloads successful endpoint preference from persisted profile after runtime reset', async () => {
+    await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'openai',
+    );
     recordUpstreamEndpointSuccess({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'responses',
       downstreamFormat: 'openai',
       modelName: 'gpt-5.3',
@@ -134,5 +151,118 @@ describe('upstream endpoint persisted protocol profile', () => {
     );
 
     expect(order).toEqual(['responses', 'chat', 'messages']);
+  });
+
+  it('reloads persisted endpoint preference only for the same account scope', async () => {
+    const accountA = {
+      ...baseContext,
+      account: {
+        id: 2,
+        accessToken: 'token-a',
+        apiToken: null,
+      },
+    };
+    const accountB = {
+      ...baseContext,
+      account: {
+        id: 3,
+        accessToken: 'token-b',
+        apiToken: null,
+      },
+    };
+
+    await resolveUpstreamEndpointCandidates(
+      accountA,
+      'gpt-5.3',
+      'openai',
+    );
+    recordUpstreamEndpointSuccess({
+      siteId: accountA.site.id,
+      accountId: accountA.account.id,
+      accountAccessToken: accountA.account.accessToken,
+      accountApiToken: accountA.account.apiToken,
+      siteApiKey: accountA.site.apiKey,
+      endpoint: 'responses',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+    });
+    await flushUpstreamProtocolProfilePersistence();
+    resetUpstreamEndpointRuntimeState();
+
+    const orderA = await resolveUpstreamEndpointCandidates(
+      accountA,
+      'gpt-5.3',
+      'openai',
+    );
+    const orderB = await resolveUpstreamEndpointCandidates(
+      accountB,
+      'gpt-5.3',
+      'openai',
+    );
+
+    expect(orderA).toEqual(['responses', 'chat', 'messages']);
+    expect(orderB).toEqual(['chat', 'messages', 'responses']);
+  });
+
+  it('reloads generic responses-to-chat fallback success for the same credential scope after runtime reset', async () => {
+    await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'responses',
+    );
+    recordUpstreamEndpointSuccess({
+      siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'chat',
+      downstreamFormat: 'responses',
+      modelName: 'gpt-5.3',
+    });
+    await flushUpstreamProtocolProfilePersistence();
+    resetUpstreamEndpointRuntimeState();
+
+    const order = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'responses',
+    );
+
+    expect(order).toEqual(['chat', 'responses']);
+  });
+
+  it('reloads persisted endpoint preference only for the same model within one credential scope', async () => {
+    await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'openai',
+    );
+    recordUpstreamEndpointSuccess({
+      siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'responses',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+    });
+    await flushUpstreamProtocolProfilePersistence();
+    resetUpstreamEndpointRuntimeState();
+
+    const sameModelOrder = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'openai',
+    );
+    const otherModelOrder = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-4.1',
+      'openai',
+    );
+
+    expect(sameModelOrder).toEqual(['responses', 'chat', 'messages']);
+    expect(otherModelOrder).toEqual(['chat', 'messages', 'responses']);
   });
 });

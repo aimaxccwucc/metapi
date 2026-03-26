@@ -55,11 +55,12 @@ type FailureAwareChannel = {
   failCount?: number | null;
   lastFailAt?: string | null;
   consecutiveFailCount?: number | null;
+  cooldownUntil?: string | null;
 };
 
 type PersistedUnavailableModelSnapshot = {
-  tokenModels: Map<number, Set<string>>;
-  accountModels: Map<number, Set<string>>;
+  tokenModels: Map<number, Map<string, number>>;
+  accountModels: Map<number, Map<string, number>>;
 };
 
 type SiteRuntimeFailureContext = {
@@ -102,7 +103,10 @@ const SITE_RUNTIME_HEALTH_PERSIST_DEBOUNCE_MS = 500;
 const SITE_RUNTIME_HEALTH_PERSIST_STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SITE_RUNTIME_HEALTH_PERSIST_IDLE_TTL_MS = 12 * 60 * 60 * 1000;
 const SITE_RUNTIME_HEALTH_PERSIST_MIN_PENALTY = 0.02;
-const CHANNEL_SELECTION_LEASE_MS = 8_000;
+const PERSISTED_MODEL_UNAVAILABLE_TTL_MS = 6 * 60 * 60 * 1000;
+const CHANNEL_SELECTION_LEASE_DEFAULT_MS = 30_000;
+const CHANNEL_SELECTION_LEASE_MIN_MS = 15_000;
+const CHANNEL_SELECTION_LEASE_MAX_MS = 90_000;
 
 const SITE_PROTOCOL_FAILURE_PATTERNS: RegExp[] = [
   /unsupported\s+legacy\s+protocol/i,
@@ -200,19 +204,29 @@ let siteRuntimeHealthPersistInFlight: Promise<void> | null = null;
 
 function createEmptyPersistedUnavailableModelSnapshot(): PersistedUnavailableModelSnapshot {
   return {
-    tokenModels: new Map<number, Set<string>>(),
-    accountModels: new Map<number, Set<string>>(),
+    tokenModels: new Map<number, Map<string, number>>(),
+    accountModels: new Map<number, Map<string, number>>(),
   };
 }
 
-function appendUnavailableModel(target: Map<number, Set<string>>, ownerId: number, modelName: string): void {
+function appendUnavailableModel(
+  target: Map<number, Map<string, number>>,
+  ownerId: number,
+  modelName: string,
+  checkedAtMs: number,
+): void {
   if (!Number.isFinite(ownerId) || ownerId <= 0) return;
   const normalizedModelName = normalizeModelAlias(modelName);
   if (!normalizedModelName) return;
+  if (!Number.isFinite(checkedAtMs) || checkedAtMs <= 0) return;
   if (!target.has(ownerId)) {
-    target.set(ownerId, new Set<string>());
+    target.set(ownerId, new Map<string, number>());
   }
-  target.get(ownerId)!.add(normalizedModelName);
+  target.get(ownerId)!.set(normalizedModelName, checkedAtMs);
+}
+
+function isPersistedUnavailableModelStillBlocking(checkedAtMs: number, nowMs = Date.now()): boolean {
+  return Number.isFinite(checkedAtMs) && checkedAtMs > 0 && (nowMs - checkedAtMs) < PERSISTED_MODEL_UNAVAILABLE_TTL_MS;
 }
 
 async function loadPersistedUnavailableModelsForCandidates(
@@ -220,6 +234,7 @@ async function loadPersistedUnavailableModelsForCandidates(
 ): Promise<PersistedUnavailableModelSnapshot> {
   const snapshot = createEmptyPersistedUnavailableModelSnapshot();
   if (candidates.length === 0) return snapshot;
+  const nowMs = Date.now();
 
   const tokenIds = Array.from(new Set(
     candidates
@@ -240,6 +255,7 @@ async function loadPersistedUnavailableModelsForCandidates(
     const tokenRows = await db.select({
       tokenId: schema.tokenModelAvailability.tokenId,
       modelName: schema.tokenModelAvailability.modelName,
+      checkedAt: schema.tokenModelAvailability.checkedAt,
     }).from(schema.tokenModelAvailability)
       .where(
         and(
@@ -249,8 +265,10 @@ async function loadPersistedUnavailableModelsForCandidates(
       )
       .all();
     for (const row of tokenRows) {
+      const checkedAtMs = parseIsoTimeMs(String(row.checkedAt || '')) ?? nowMs;
+      if (!isPersistedUnavailableModelStillBlocking(checkedAtMs, nowMs)) continue;
       const normalizedModelName = normalizeModelAlias(String(row.modelName || ''));
-      appendUnavailableModel(snapshot.tokenModels, row.tokenId, normalizedModelName);
+      appendUnavailableModel(snapshot.tokenModels, row.tokenId, normalizedModelName, checkedAtMs);
     }
   }
 
@@ -258,6 +276,7 @@ async function loadPersistedUnavailableModelsForCandidates(
     const accountRows = await db.select({
       accountId: schema.modelAvailability.accountId,
       modelName: schema.modelAvailability.modelName,
+      checkedAt: schema.modelAvailability.checkedAt,
     }).from(schema.modelAvailability)
       .where(
         and(
@@ -267,8 +286,10 @@ async function loadPersistedUnavailableModelsForCandidates(
       )
       .all();
     for (const row of accountRows) {
+      const checkedAtMs = parseIsoTimeMs(String(row.checkedAt || '')) ?? nowMs;
+      if (!isPersistedUnavailableModelStillBlocking(checkedAtMs, nowMs)) continue;
       const normalizedModelName = normalizeModelAlias(String(row.modelName || ''));
-      appendUnavailableModel(snapshot.accountModels, row.accountId, normalizedModelName);
+      appendUnavailableModel(snapshot.accountModels, row.accountId, normalizedModelName, checkedAtMs);
     }
   }
 
@@ -279,6 +300,7 @@ function isCandidatePersistentlyUnavailableForModel(
   candidate: RouteChannelCandidate,
   runtimeModelName: string | null | undefined,
   snapshot?: PersistedUnavailableModelSnapshot,
+  nowMs = Date.now(),
 ): boolean {
   if (!snapshot) return false;
   const normalizedModelName = normalizeModelAlias(runtimeModelName || '');
@@ -287,11 +309,15 @@ function isCandidatePersistentlyUnavailableForModel(
   const tokenId = typeof candidate.channel.tokenId === 'number' && candidate.channel.tokenId > 0
     ? candidate.channel.tokenId
     : null;
-  if (tokenId != null && snapshot.tokenModels.get(tokenId)?.has(normalizedModelName)) {
-    return true;
+  if (tokenId != null) {
+    const checkedAtMs = snapshot.tokenModels.get(tokenId)?.get(normalizedModelName);
+    if (typeof checkedAtMs === 'number' && isPersistedUnavailableModelStillBlocking(checkedAtMs, nowMs)) {
+      return true;
+    }
   }
 
-  return snapshot.accountModels.get(candidate.account.id)?.has(normalizedModelName) ?? false;
+  const checkedAtMs = snapshot.accountModels.get(candidate.account.id)?.get(normalizedModelName);
+  return typeof checkedAtMs === 'number' && isPersistedUnavailableModelStillBlocking(checkedAtMs, nowMs);
 }
 
 function resolveSiteRuntimeBreakerMs(level: number): number {
@@ -970,8 +996,28 @@ function getChannelSelectionLeaseUntil(channelId: number, nowMs = Date.now()): s
   return new Date(lease.expiresAtMs).toISOString();
 }
 
-function reserveChannelSelectionLease(channelId: number, nowMs = Date.now()): string {
-  const expiresAtMs = nowMs + CHANNEL_SELECTION_LEASE_MS;
+function resolveChannelSelectionLeaseMs(candidate?: RouteChannelCandidate | null): number {
+  const latencyMs = Number(candidate?.channel?.totalLatencyMs ?? 0);
+  if (!Number.isFinite(latencyMs) || latencyMs <= 0) {
+    return CHANNEL_SELECTION_LEASE_DEFAULT_MS;
+  }
+  const scaledMs = Math.ceil(latencyMs * 3);
+  return Math.min(
+    CHANNEL_SELECTION_LEASE_MAX_MS,
+    Math.max(CHANNEL_SELECTION_LEASE_MIN_MS, scaledMs),
+  );
+}
+
+function reserveChannelSelectionLease(
+  channelId: number,
+  nowMs = Date.now(),
+  leaseMs = CHANNEL_SELECTION_LEASE_DEFAULT_MS,
+): string {
+  const normalizedLeaseMs = Math.min(
+    CHANNEL_SELECTION_LEASE_MAX_MS,
+    Math.max(CHANNEL_SELECTION_LEASE_MIN_MS, Math.trunc(leaseMs) || CHANNEL_SELECTION_LEASE_DEFAULT_MS),
+  );
+  const expiresAtMs = nowMs + normalizedLeaseMs;
   channelSelectionLeases.set(channelId, { expiresAtMs });
   return new Date(expiresAtMs).toISOString();
 }
@@ -1200,6 +1246,16 @@ function partitionRecentlyFailedCandidates<T extends { channel: FailureAwareChan
   return { preferred, avoided };
 }
 
+function sortCandidatesForRecoveryPreference<T extends { channel: FailureAwareChannel }>(candidates: T[]): T[] {
+  return [...candidates].sort((left, right) => {
+    const cooldownCompare = compareNullableTimeAsc(left.channel.cooldownUntil, right.channel.cooldownUntil);
+    if (cooldownCompare !== 0) return cooldownCompare;
+    const failCompare = compareNullableTimeAsc(left.channel.lastFailAt, right.channel.lastFailAt);
+    if (failCompare !== 0) return failCompare;
+    return Math.max(0, left.channel.failCount ?? 0) - Math.max(0, right.channel.failCount ?? 0);
+  });
+}
+
 async function markPersistedModelUnavailableForChannel(
   channel: Pick<ChannelRow, 'tokenId'>,
   accountId: number,
@@ -1288,6 +1344,85 @@ async function markPersistedModelUnavailableForChannel(
       target: [schema.modelAvailability.accountId, schema.modelAvailability.modelName],
       set: {
         available: false,
+        checkedAt,
+      },
+    })
+    .run();
+}
+
+async function restorePersistedModelAvailabilityForChannel(
+  channel: Pick<ChannelRow, 'tokenId'>,
+  accountId: number,
+  modelName?: string | null,
+): Promise<void> {
+  const normalizedModelName = (modelName || '').trim();
+  if (!normalizedModelName) return;
+  const checkedAt = new Date().toISOString();
+
+  if (typeof channel.tokenId === 'number' && Number.isFinite(channel.tokenId)) {
+    if (runtimeDbDialect === 'mysql') {
+      const existing = await db.select({ id: schema.tokenModelAvailability.id })
+        .from(schema.tokenModelAvailability)
+        .where(
+          and(
+            eq(schema.tokenModelAvailability.tokenId, channel.tokenId),
+            eq(schema.tokenModelAvailability.modelName, normalizedModelName),
+          ),
+        )
+        .get();
+      if (!existing) return;
+      await db.update(schema.tokenModelAvailability).set({
+        available: true,
+        checkedAt,
+      }).where(eq(schema.tokenModelAvailability.id, existing.id)).run();
+      return;
+    }
+
+    await (db.insert(schema.tokenModelAvailability).values({
+      tokenId: channel.tokenId,
+      modelName: normalizedModelName,
+      available: true,
+      checkedAt,
+    }) as any)
+      .onConflictDoUpdate({
+        target: [schema.tokenModelAvailability.tokenId, schema.tokenModelAvailability.modelName],
+        set: {
+          available: true,
+          checkedAt,
+        },
+      })
+      .run();
+    return;
+  }
+
+  if (runtimeDbDialect === 'mysql') {
+    const existing = await db.select({ id: schema.modelAvailability.id })
+      .from(schema.modelAvailability)
+      .where(
+        and(
+          eq(schema.modelAvailability.accountId, accountId),
+          eq(schema.modelAvailability.modelName, normalizedModelName),
+        ),
+      )
+      .get();
+    if (!existing) return;
+    await db.update(schema.modelAvailability).set({
+      available: true,
+      checkedAt,
+    }).where(eq(schema.modelAvailability.id, existing.id)).run();
+    return;
+  }
+
+  await (db.insert(schema.modelAvailability).values({
+    accountId,
+    modelName: normalizedModelName,
+    available: true,
+    checkedAt,
+  }) as any)
+    .onConflictDoUpdate({
+      target: [schema.modelAvailability.accountId, schema.modelAvailability.modelName],
+      set: {
+        available: true,
         checkedAt,
       },
     })
@@ -1743,7 +1878,10 @@ function resolveRouteStrategy(route: RouteRow): RouteRoutingStrategy {
 
 function parseIsoTimeMs(value?: string | null): number | null {
   if (!value) return null;
-  const parsed = Date.parse(value);
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? value.replace(' ', 'T') + 'Z'
+    : value;
+  const parsed = Date.parse(normalized);
   return Number.isNaN(parsed) ? null : parsed;
 }
 
@@ -2114,6 +2252,15 @@ export class TokenRouter {
     if (modelCircuitOpenCount > 0) {
       summary.push(`模型熔断避让 ${modelCircuitOpenCount}`);
     }
+    const minAvailablePriority = availableByPriority.size > 0
+      ? Math.min(...Array.from(availableByPriority.keys()))
+      : null;
+    const hasHigherPriorityModelCircuitBlock = minAvailablePriority != null
+      && candidates.some((candidate) => (
+        !candidate.eligible
+        && candidate.priority < minAvailablePriority
+        && candidate.reason.includes('模型熔断中')
+      ));
 
     if (routeStrategy === 'round_robin') {
       const rawOrdered = this.getRoundRobinCandidates(match.channels.filter((row) => {
@@ -2163,23 +2310,15 @@ export class TokenRouter {
         }
         summary.push(`轮询最近失败避让 ${recentFailurePartition.avoided.length}`);
       }
+      const recoveryCandidates = recentFailurePartition.preferred.length > 0
+        ? recentFailurePartition.preferred
+        : sortCandidatesForRecoveryPreference(recentFailurePartition.avoided);
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        summary.push('本次未选出通道');
-        return {
-          requestedModel,
-          actualModel: mappedModel,
-          matched: true,
-          routeId: match.route.id,
-          modelPattern: match.route.modelPattern,
-          summary,
-          candidates,
-        };
+        summary.push('全部候选近期失败，已切换为保守恢复探测');
       }
 
       const leasePartition = partitionChannelSelectionLeases(
-        recentFailurePartition.preferred.length > 0
-          ? recentFailurePartition.preferred
-          : breakerFiltered.candidates,
+        recoveryCandidates,
         nowMs,
       );
       if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
@@ -2195,9 +2334,7 @@ export class TokenRouter {
       const ordered = this.getRoundRobinCandidates(
         leasePartition.preferred.length > 0
           ? leasePartition.preferred
-          : (recentFailurePartition.preferred.length > 0
-            ? recentFailurePartition.preferred
-            : breakerFiltered.candidates),
+          : recoveryCandidates,
       );
       let selected: RouteChannelCandidate | null = null;
 
@@ -2263,6 +2400,9 @@ export class TokenRouter {
     let degradedAcrossPriorityByRecentFailure = false;
     let selected: RouteChannelCandidate | null = null;
     let selectedPriority = 0;
+    let recoverySelected = false;
+    let sawFullyBlockedByRuntimeBreaker = false;
+    const degradedRecoveryPool: RouteChannelCandidate[] = [];
 
     for (const priority of sortedPriorities) {
       const rawLayer = availableByPriority.get(priority) ?? [];
@@ -2285,6 +2425,7 @@ export class TokenRouter {
         }
       }
       if (fullyBlockedByRuntimeBreaker) {
+        sawFullyBlockedByRuntimeBreaker = true;
         const breakerSummaryLabel = breakerFiltered.avoided.some((item) => item.reason.includes('模型熔断'))
           ? '运行时熔断避让'
           : '站点熔断避让';
@@ -2293,9 +2434,6 @@ export class TokenRouter {
       }
 
       const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
-      const filteredLayer = recentFailurePartition.preferred.length > 0
-        ? recentFailurePartition.preferred
-        : breakerFiltered.candidates;
       const avoided = recentFailurePartition.avoided;
       if (avoided.length > 0) {
         for (const row of avoided) {
@@ -2314,10 +2452,11 @@ export class TokenRouter {
       }
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
         degradedAcrossPriorityByRecentFailure = true;
+        degradedRecoveryPool.push(...recentFailurePartition.avoided);
         continue;
       }
 
-      const leasePartition = partitionChannelSelectionLeases(filteredLayer, nowMs);
+      const leasePartition = partitionChannelSelectionLeases(recentFailurePartition.preferred, nowMs);
       if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
         for (const item of leasePartition.avoided) {
           const target = candidateMap.get(item.candidate.channel.id);
@@ -2328,7 +2467,7 @@ export class TokenRouter {
       }
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
-        : filteredLayer;
+        : recentFailurePartition.preferred;
 
       const weighted = this.calculateWeightedSelection(
         candidateLayer,
@@ -2365,8 +2504,52 @@ export class TokenRouter {
       if (degradedAcrossPriorityByRecentFailure) {
         layerSummaryParts.push('上层最近失败，已自动降级');
       }
+      if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
+        layerSummaryParts.push('当前层全部近期失败，已切换保守恢复探测');
+      }
       summary.push(layerSummaryParts.join('，'));
       break;
+    }
+
+    if (!selected && !sawFullyBlockedByRuntimeBreaker && !hasHigherPriorityModelCircuitBlock && degradedRecoveryPool.length > 0) {
+      const recoveryCandidates = sortCandidatesForRecoveryPreference(
+        Array.from(new Map(
+          degradedRecoveryPool.map((candidate) => [candidate.channel.id, candidate]),
+        ).values()),
+      );
+      const leasePartition = partitionChannelSelectionLeases(recoveryCandidates, nowMs);
+      if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
+        for (const item of leasePartition.avoided) {
+          const target = candidateMap.get(item.candidate.channel.id);
+          if (!target) continue;
+          target.avoidedByInflightLease = true;
+          target.reason = `通道忙碌中，优先避让（${resolveLeaseAvoidWindowSec(item.leaseUntil, nowMs)} 秒租约）`;
+        }
+      }
+      const recoveryLayer = leasePartition.preferred.length > 0
+        ? leasePartition.preferred
+        : recoveryCandidates;
+      const recoveryCandidate = recoveryLayer[0] ?? null;
+      if (recoveryCandidate) {
+        selected = recoveryCandidate;
+        selectedPriority = recoveryCandidate.channel.priority ?? 0;
+        recoverySelected = true;
+        for (const candidate of recoveryLayer) {
+          const target = candidateMap.get(candidate.channel.id);
+          if (!target) continue;
+          target.probability = candidate.channel.id === recoveryCandidate.channel.id ? 100 : 0;
+          target.reason = candidate.channel.id === recoveryCandidate.channel.id
+            ? '保守恢复探测（全部优先级近期失败，优先尝试最久未失败通道）'
+            : '保守恢复探测待命';
+        }
+        const recoverySummaryParts = [
+          `优先级 P${selectedPriority}：当前层全部近期失败，已切换保守恢复探测`,
+        ];
+        if (degradedAcrossPriorityByRecentFailure) {
+          recoverySummaryParts.push('上层最近失败，已自动降级');
+        }
+        summary.push(recoverySummaryParts.join('，'));
+      }
     }
 
     if (!selected) {
@@ -2392,7 +2575,11 @@ export class TokenRouter {
       mappedModel,
       selected.channel.sourceModel,
     );
-    summary.push(`最终选择：${selectedLabel}（P${selectedPriority}）`);
+    summary.push(
+      recoverySelected
+        ? `最终选择：${selectedLabel}（P${selectedPriority}，保守恢复探测）`
+        : `最终选择：${selectedLabel}（P${selectedPriority}）`,
+    );
     if (actualModel !== mappedModel) {
       summary.push(`实际转发模型：${actualModel}`);
     }
@@ -2490,6 +2677,8 @@ export class TokenRouter {
       channel.cooldownLevel = 0;
     });
     releaseChannelSelectionLease(channelId);
+
+    await restorePersistedModelAvailabilityForChannel(ch, account.id, modelName);
 
     if (normalizeModelAlias(modelName || '')) {
       recordModelCircuitSuccess(channelId, modelName || '', nowMs);
@@ -2636,19 +2825,35 @@ export class TokenRouter {
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
-    const available = match.channels.filter((candidate) => (
-      this.getCandidateEligibilityReasons(candidate, {
+    const evaluatedCandidates = match.channels.map((candidate) => {
+      const runtimeModelName = typeof runtimeModelResolver === 'function'
+        ? runtimeModelResolver(candidate)
+        : runtimeModelResolver;
+      const reasons = this.getCandidateEligibilityReasons(candidate, {
         requestedModel,
         bypassSourceModelCheck,
         excludeChannelIds,
         nowIso,
         nowMs,
-        runtimeModelName: typeof runtimeModelResolver === 'function'
-          ? runtimeModelResolver(candidate)
-          : runtimeModelResolver,
+        runtimeModelName,
         persistedUnavailableModels,
-      }).length === 0
-    ));
+      });
+      return {
+        candidate,
+        reasons,
+      };
+    });
+    const available = evaluatedCandidates
+      .filter((entry) => entry.reasons.length === 0)
+      .map((entry) => entry.candidate);
+    const minAvailablePriority = available.length > 0
+      ? Math.min(...available.map((candidate) => candidate.channel.priority ?? 0))
+      : null;
+    const hasHigherPriorityModelCircuitBlock = minAvailablePriority != null
+      && evaluatedCandidates.some((entry) => (
+        (entry.candidate.channel.priority ?? 0) < minAvailablePriority
+        && entry.reasons.includes('模型熔断中')
+      ));
 
     if (available.length === 0) return null;
 
@@ -2658,21 +2863,17 @@ export class TokenRouter {
         breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === available.length;
       if (fullyBlockedByRuntimeBreaker) return null;
       const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
-      if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        return null;
-      }
+      const recoveryCandidates = recentFailurePartition.preferred.length > 0
+        ? recentFailurePartition.preferred
+        : sortCandidatesForRecoveryPreference(recentFailurePartition.avoided);
       const leasePartition = partitionChannelSelectionLeases(
-        recentFailurePartition.preferred.length > 0
-          ? recentFailurePartition.preferred
-          : breakerFiltered.candidates,
+        recoveryCandidates,
         nowMs,
       );
       const selected = this.selectWithModelCircuitGuard(
         leasePartition.preferred.length > 0
           ? leasePartition.preferred
-          : (recentFailurePartition.preferred.length > 0
-            ? recentFailurePartition.preferred
-            : breakerFiltered.candidates),
+          : recoveryCandidates,
         (items) => this.selectRoundRobinCandidate(items),
         (candidate) => (
           typeof runtimeModelResolver === 'function'
@@ -2688,7 +2889,7 @@ export class TokenRouter {
       if (!tokenValue) return null;
       if (recordSelection) {
         await this.recordChannelSelection(selected.channel.id);
-        reserveChannelSelectionLease(selected.channel.id, nowMs);
+        reserveChannelSelectionLease(selected.channel.id, nowMs, resolveChannelSelectionLeaseMs(selected));
       }
 
       const actualModel = resolveActualModelForSelectedChannel(
@@ -2714,25 +2915,26 @@ export class TokenRouter {
     }
 
     const sortedPriorities = Array.from(layers.keys()).sort((a, b) => a - b);
+    let sawFullyBlockedByRuntimeBreaker = false;
+    const degradedRecoveryPool: RouteChannelCandidate[] = [];
     for (const priority of sortedPriorities) {
       const rawLayer = layers.get(priority) ?? [];
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
       const fullyBlockedByRuntimeBreaker =
         breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length;
       if (fullyBlockedByRuntimeBreaker) {
+        sawFullyBlockedByRuntimeBreaker = true;
         continue;
       }
       const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
-      const candidates = recentFailurePartition.preferred.length > 0
-        ? recentFailurePartition.preferred
-        : breakerFiltered.candidates;
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
+        degradedRecoveryPool.push(...recentFailurePartition.avoided);
         continue;
       }
-      const leasePartition = partitionChannelSelectionLeases(candidates, nowMs);
+      const leasePartition = partitionChannelSelectionLeases(recentFailurePartition.preferred, nowMs);
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
-        : candidates;
+        : recentFailurePartition.preferred;
       const selected = routeStrategy === 'stable_first'
         ? this.selectWithModelCircuitGuard(
           candidateLayer,
@@ -2774,7 +2976,44 @@ export class TokenRouter {
         await this.recordChannelSelection(selected.channel.id);
       }
       if (recordSelection) {
-        reserveChannelSelectionLease(selected.channel.id, nowMs);
+        reserveChannelSelectionLease(selected.channel.id, nowMs, resolveChannelSelectionLeaseMs(selected));
+      }
+
+      const actualModel = resolveActualModelForSelectedChannel(
+        requestedModel,
+        match.route,
+        mappedModel,
+        selected.channel.sourceModel,
+      );
+
+      return {
+        ...selected,
+        tokenValue,
+        tokenName: selected.token?.name || 'default',
+        actualModel,
+      };
+    }
+
+    if (!sawFullyBlockedByRuntimeBreaker && !hasHigherPriorityModelCircuitBlock && degradedRecoveryPool.length > 0) {
+      const recoveryCandidates = sortCandidatesForRecoveryPreference(
+        Array.from(new Map(
+          degradedRecoveryPool.map((candidate) => [candidate.channel.id, candidate]),
+        ).values()),
+      );
+      const leasePartition = partitionChannelSelectionLeases(recoveryCandidates, nowMs);
+      const recoveryLayer = leasePartition.preferred.length > 0
+        ? leasePartition.preferred
+        : recoveryCandidates;
+      const selected = recoveryLayer[0] ?? null;
+      if (!selected) return null;
+
+      const tokenValue = this.resolveChannelTokenValue(selected);
+      if (!tokenValue) return null;
+      if (routeStrategy === 'stable_first' && recordSelection) {
+        await this.recordChannelSelection(selected.channel.id);
+      }
+      if (recordSelection) {
+        reserveChannelSelectionLease(selected.channel.id, nowMs, resolveChannelSelectionLeaseMs(selected));
       }
 
       const actualModel = resolveActualModelForSelectedChannel(
@@ -2880,6 +3119,7 @@ export class TokenRouter {
       candidate,
       options.runtimeModelName,
       options.persistedUnavailableModels,
+      nowMs,
     )) {
       reasonParts.push('模型能力已标记不可用');
     }

@@ -14,6 +14,7 @@ const saveProxyVideoTaskMock = vi.fn();
 const getProxyVideoTaskByPublicIdMock = vi.fn();
 const deleteProxyVideoTaskByPublicIdMock = vi.fn();
 const refreshProxyVideoTaskSnapshotMock = vi.fn();
+const insertProxyLogMock = vi.fn(async () => undefined);
 
 vi.mock('undici', async () => {
   const actual = await vi.importActual<typeof import('undici')>('undici');
@@ -60,6 +61,10 @@ vi.mock('../../services/proxyVideoTaskStore.js', () => ({
   refreshProxyVideoTaskSnapshot: (...args: unknown[]) => refreshProxyVideoTaskSnapshotMock(...args),
 }));
 
+vi.mock('../../services/proxyLogStore.js', () => ({
+  insertProxyLog: (...args: unknown[]) => insertProxyLogMock(...args),
+}));
+
 describe('/v1/videos routes', () => {
   let app: FastifyInstance;
 
@@ -97,6 +102,7 @@ describe('/v1/videos routes', () => {
     getProxyVideoTaskByPublicIdMock.mockReset();
     deleteProxyVideoTaskByPublicIdMock.mockReset();
     refreshProxyVideoTaskSnapshotMock.mockReset();
+    insertProxyLogMock.mockClear();
 
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
@@ -154,6 +160,15 @@ describe('/v1/videos routes', () => {
       object: 'video',
       status: 'queued',
     });
+    expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
+      routeId: 22,
+      channelId: 11,
+      accountId: 33,
+      modelRequested: 'sora-2',
+      modelActual: 'sora-2',
+      status: 'success',
+      httpStatus: 200,
+    }));
   });
 
   it('accepts multipart video create requests', async () => {
@@ -195,6 +210,10 @@ describe('/v1/videos routes', () => {
       upstreamVideoId: 'vid_upstream_123',
       siteUrl: 'https://upstream.example.com',
       tokenValue: 'sk-demo',
+      requestedModel: 'sora-2',
+      actualModel: 'sora-2',
+      channelId: 11,
+      accountId: 33,
     });
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       id: 'vid_upstream_123',
@@ -226,6 +245,16 @@ describe('/v1/videos routes', () => {
       object: 'video',
       status: 'running',
     });
+    expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
+      routeId: null,
+      channelId: 11,
+      accountId: 33,
+      modelRequested: 'sora-2',
+      modelActual: 'sora-2',
+      status: 'success',
+      httpStatus: 200,
+      errorMessage: expect.stringContaining('[downstream:/v1/videos/:id] [upstream:/v1/videos/:id]'),
+    }));
   });
 
   it('deletes the upstream task and local mapping on DELETE', async () => {
@@ -234,6 +263,10 @@ describe('/v1/videos routes', () => {
       upstreamVideoId: 'vid_upstream_123',
       siteUrl: 'https://upstream.example.com',
       tokenValue: 'sk-demo',
+      requestedModel: 'sora-2',
+      actualModel: 'sora-2',
+      channelId: 11,
+      accountId: 33,
     });
     fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
 
@@ -244,6 +277,16 @@ describe('/v1/videos routes', () => {
 
     expect(response.statusCode).toBe(204);
     expect(deleteProxyVideoTaskByPublicIdMock).toHaveBeenCalledWith('vid_local_123');
+    expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
+      routeId: null,
+      channelId: 11,
+      accountId: 33,
+      modelRequested: 'sora-2',
+      modelActual: 'sora-2',
+      status: 'success',
+      httpStatus: 204,
+      errorMessage: expect.stringContaining('[downstream:/v1/videos/:id] [upstream:/v1/videos/:id]'),
+    }));
   });
 
   it('reports upstream failure with status and error text for routing cooldown classification', async () => {
@@ -267,5 +310,15 @@ describe('/v1/videos routes', () => {
       errorText: 'model not supported',
       modelName: 'sora-2',
     });
+    expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
+      routeId: 22,
+      channelId: 11,
+      accountId: 33,
+      modelRequested: 'sora-2',
+      modelActual: 'sora-2',
+      status: 'failed',
+      httpStatus: 400,
+      errorMessage: expect.stringContaining('model not supported'),
+    }));
   });
 });

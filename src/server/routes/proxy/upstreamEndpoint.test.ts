@@ -204,6 +204,10 @@ describe('resolveUpstreamEndpointCandidates', () => {
   it('does not apply runtime endpoint memory to image attachments', async () => {
     recordUpstreamEndpointSuccess({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'responses',
       downstreamFormat: 'openai',
       modelName: 'gpt-5.3',
@@ -241,6 +245,10 @@ describe('resolveUpstreamEndpointCandidates', () => {
   it('does not apply runtime endpoint memory to document attachments', async () => {
     recordUpstreamEndpointSuccess({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'messages',
       downstreamFormat: 'openai',
       modelName: 'gpt-5.3',
@@ -280,6 +288,10 @@ describe('resolveUpstreamEndpointCandidates', () => {
   it('remembers the last successful endpoint per site capability profile', async () => {
     recordUpstreamEndpointSuccess({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'responses',
       downstreamFormat: 'openai',
       modelName: 'gpt-5.3',
@@ -320,6 +332,10 @@ describe('resolveUpstreamEndpointCandidates', () => {
   it('keeps remote-document-url requests on a separate runtime preference bucket from inline document requests', async () => {
     recordUpstreamEndpointSuccess({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'chat',
       downstreamFormat: 'openai',
       modelName: 'gpt-5.3',
@@ -359,6 +375,10 @@ describe('resolveUpstreamEndpointCandidates', () => {
   it('does not remember messages fallback success for generic /v1/responses requests', async () => {
     recordUpstreamEndpointSuccess({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'messages',
       downstreamFormat: 'responses',
       modelName: 'gpt-5.3',
@@ -376,9 +396,61 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(order).toEqual(['responses', 'chat']);
   });
 
+  it('remembers generic responses-to-chat fallback success for the same credential scope', async () => {
+    await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'responses',
+    );
+
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.3',
+      stream: false,
+      tokenValue: baseContext.account.accessToken!,
+      sitePlatform: 'new-api',
+      siteUrl: baseContext.site.url,
+      openaiBody: {
+        model: 'gpt-5.3',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'responses',
+    });
+    expect(request.path).toBe('/v1/chat/completions');
+
+    recordUpstreamEndpointSuccess({
+      siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'chat',
+      downstreamFormat: 'responses',
+      modelName: 'gpt-5.3',
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'responses',
+    );
+
+    expect(order).toEqual(['chat', 'responses']);
+  });
+
   it('does not block generic /v1/responses endpoints on transient upstream errors', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'responses',
       downstreamFormat: 'responses',
       modelName: 'gpt-5.3',
@@ -401,6 +473,10 @@ describe('resolveUpstreamEndpointCandidates', () => {
   it('does not persist generic /v1/responses runtime memory from redirect-to-messages failures', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'responses',
       downstreamFormat: 'responses',
       modelName: 'gpt-5.3',
@@ -423,6 +499,10 @@ describe('resolveUpstreamEndpointCandidates', () => {
   it('keeps failed /v1/messages blocked for later generic /v1/responses requests', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'messages',
       downstreamFormat: 'responses',
       modelName: 'gpt-5.3',
@@ -442,9 +522,13 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(order).toEqual(['responses', 'chat']);
   });
 
-  it('learns a better endpoint from explicit upstream protocol errors', async () => {
+  it('blocks failed endpoints from explicit upstream protocol errors without remembering unverified suggestions', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
       endpoint: 'chat',
       downstreamFormat: 'openai',
       modelName: 'gpt-5.3',
@@ -461,7 +545,124 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'openai',
     );
 
-    expect(order).toEqual(['responses', 'messages']);
+    expect(order).toEqual(['messages', 'responses']);
+  });
+
+  it('isolates runtime endpoint memory by account scope on the same site', async () => {
+    const accountA = {
+      ...baseContext,
+      account: {
+        id: 2,
+        accessToken: 'token-a',
+        apiToken: null,
+      },
+    };
+    const accountB = {
+      ...baseContext,
+      account: {
+        id: 3,
+        accessToken: 'token-b',
+        apiToken: null,
+      },
+    };
+
+    await resolveUpstreamEndpointCandidates(
+      {
+        ...accountA,
+        site: { ...accountA.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'openai',
+    );
+
+    buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-5.3',
+      stream: false,
+      tokenValue: accountA.account.accessToken!,
+      sitePlatform: 'new-api',
+      siteUrl: accountA.site.url,
+      openaiBody: {
+        model: 'gpt-5.3',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    recordUpstreamEndpointSuccess({
+      siteId: accountA.site.id,
+      accountId: accountA.account.id,
+      accountAccessToken: accountA.account.accessToken,
+      accountApiToken: accountA.account.apiToken,
+      siteApiKey: accountA.site.apiKey,
+      endpoint: 'responses',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+    });
+
+    const orderA = await resolveUpstreamEndpointCandidates(
+      {
+        ...accountA,
+        site: { ...accountA.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'openai',
+    );
+
+    const orderB = await resolveUpstreamEndpointCandidates(
+      {
+        ...accountB,
+        site: { ...accountB.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'openai',
+    );
+
+    expect(orderA).toEqual(['responses', 'chat', 'messages']);
+    expect(orderB).toEqual(['chat', 'messages', 'responses']);
+  });
+
+  it('isolates runtime endpoint memory by model within the same account scope', async () => {
+    await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'openai',
+    );
+
+    recordUpstreamEndpointSuccess({
+      siteId: baseContext.site.id,
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'responses',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+    });
+
+    const preferredModelOrder = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'openai',
+    );
+
+    const otherModelOrder = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-4.1',
+      'openai',
+    );
+
+    expect(preferredModelOrder).toEqual(['responses', 'chat', 'messages']);
+    expect(otherModelOrder).toEqual(['chat', 'messages', 'responses']);
   });
 
   it('keeps claude models messages-first even when openai platform catalog prefers chat', async () => {
