@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { arrayMove } from '@dnd-kit/sortable';
 import type { DragEndEvent } from '@dnd-kit/core';
 import { api } from '../api.js';
+import type { RouteDiagnosticsResponse } from '../api.js';
 import { BrandGlyph, getBrand, InlineBrandIcon, type BrandInfo } from '../components/BrandIcon.js';
 import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
@@ -226,6 +227,13 @@ function hasActiveCooldown(candidate: NonNullable<RouteDecision['candidates']>[n
   return !!candidate.cooldownUntil && candidate.cooldownUntil > nowIso;
 }
 
+function formatIsoDateTime(input?: string | null): string {
+  if (!input) return '-';
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString();
+}
+
 export default function TokenRoutes() {
   const navigate = useNavigate();
   const [routeSummaries, setRouteSummaries] = useState<RouteSummaryRow[]>([]);
@@ -263,6 +271,8 @@ export default function TokenRoutes() {
   const [decisionByRoute, setDecisionByRoute] = useState<Record<number, RouteDecision | null>>({});
   const [loadingDecision, setLoadingDecision] = useState(false);
   const [decisionAutoSkipped, setDecisionAutoSkipped] = useState(false);
+  const [routeDiagnostics, setRouteDiagnostics] = useState<RouteDiagnosticsResponse | null>(null);
+  const [loadingRouteDiagnostics, setLoadingRouteDiagnostics] = useState(false);
   const [visibleRouteCount, setVisibleRouteCount] = useState(ROUTE_RENDER_CHUNK);
   const [expandedSourceGroupMap, setExpandedSourceGroupMap] = useState<Record<string, boolean>>({});
   const [expandedRouteIds, setExpandedRouteIds] = useState<number[]>([]);
@@ -346,6 +356,20 @@ export default function TokenRoutes() {
     }
   };
 
+  const loadRouteDiagnostics = useCallback(async () => {
+    setLoadingRouteDiagnostics(true);
+    try {
+      const res = await api.getRouteDiagnostics(120);
+      setRouteDiagnostics(res as RouteDiagnosticsResponse);
+      return res as RouteDiagnosticsResponse;
+    } catch (error) {
+      setRouteDiagnostics(null);
+      throw error;
+    } finally {
+      setLoadingRouteDiagnostics(false);
+    }
+  }, []);
+
   const applyRouteCandidateRows = useCallback((candidateRows: any) => {
     setModelCandidates((candidateRows?.models || {}) as RouteModelCandidatesByModelName);
     setMissingTokenModelsByName(
@@ -401,12 +425,15 @@ export default function TokenRoutes() {
   useEffect(() => {
     (async () => {
       try {
-        await load();
+        await Promise.all([
+          load(),
+          loadRouteDiagnostics(),
+        ]);
       } catch {
         toast.error('加载路由配置失败');
       }
     })();
-  }, []);
+  }, [loadRouteDiagnostics]);
 
   useEffect(() => {
     if (showZeroChannelRoutes || showFilters || showManual || !filterCollapsed) {
@@ -420,13 +447,19 @@ export default function TokenRoutes() {
       const res = await api.rebuildRoutes(true);
       if (res?.queued) {
         toast.info(res.message || '已开始重建路由，请稍后查看日志');
-        await load({ includeCandidates: routeCandidatesLoaded });
+        await Promise.all([
+          load({ includeCandidates: routeCandidatesLoaded }),
+          loadRouteDiagnostics(),
+        ]);
         return;
       }
       const createdRoutes = res?.rebuild?.createdRoutes ?? 0;
       const createdChannels = res?.rebuild?.createdChannels ?? 0;
       toast.success(`自动重建完成（新增 ${createdRoutes} 条路由 / ${createdChannels} 个通道）`);
-      await load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded });
+      await Promise.all([
+        load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded }),
+        loadRouteDiagnostics(),
+      ]);
     } catch (e: any) {
       toast.error(e.message || '重建路由失败');
     } finally {
@@ -436,7 +469,10 @@ export default function TokenRoutes() {
 
   const handleRefreshRouteDecisions = async () => {
     try {
-      await loadRouteDecisions(routeSummaries, { force: true, refreshPricingCatalog: true, persistSnapshots: true });
+      await Promise.all([
+        loadRouteDecisions(routeSummaries, { force: true, refreshPricingCatalog: true, persistSnapshots: true }),
+        loadRouteDiagnostics(),
+      ]);
       toast.success(tr('路由决策已刷新'));
     } catch {
       toast.error(tr('刷新路由决策失败'));
@@ -450,7 +486,10 @@ export default function TokenRoutes() {
       const res = await api.resetRoutingRuntimeState();
       toast.success(`路由运行时状态已清理（通道 ${res.updatedChannels || 0} 个，模型熔断 ${res.clearedModelCircuits || 0} 条）`);
       const refreshed = await load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded });
-      await loadRouteDecisions(refreshed.summaries, { force: true, refreshPricingCatalog: true, persistSnapshots: true });
+      await Promise.all([
+        loadRouteDecisions(refreshed.summaries, { force: true, refreshPricingCatalog: true, persistSnapshots: true }),
+        loadRouteDiagnostics(),
+      ]);
     } catch (e: any) {
       toast.error(e.message || '清理路由运行时状态失败');
     } finally {
@@ -1000,6 +1039,32 @@ export default function TokenRoutes() {
     };
   }, [decisionByRoute, explicitGroupSourceHealthByRouteId, filteredRoutes]);
 
+  const routeDiagnosticsHighlights = useMemo(() => {
+    const diagnostics = routeDiagnostics;
+    if (!diagnostics) {
+      return {
+        generatedAtLabel: '未加载',
+        endpointRuntimeBlocked: 0,
+        modelCircuitOpen: 0,
+        runtimeBreakerOpen: 0,
+        unavailableBlocking: 0,
+        checkinAttention: 0,
+      };
+    }
+    const generatedAtLabel = diagnostics.generatedAt
+      ? new Date(diagnostics.generatedAt).toLocaleString()
+      : '未知';
+    return {
+      generatedAtLabel,
+      endpointRuntimeBlocked: diagnostics.endpointRuntimeMemory.items
+        .reduce((sum, item) => sum + (Array.isArray(item.activeBlocks) ? item.activeBlocks.length : 0), 0),
+      modelCircuitOpen: diagnostics.modelCircuits.openCount || 0,
+      runtimeBreakerOpen: diagnostics.siteRuntimeHealth.breakerOpenCount || 0,
+      unavailableBlocking: diagnostics.unavailableModels.blockingCount || 0,
+      checkinAttention: diagnostics.checkinTodo.attentionCount || 0,
+    };
+  }, [routeDiagnostics]);
+
   const getRouteCandidateView = (routeId: number): RouteCandidateView => {
     return routeModelCandidateIndex[routeId] || EMPTY_ROUTE_CANDIDATE_VIEW;
   };
@@ -1405,6 +1470,159 @@ export default function TokenRoutes() {
             ? `已加载 ${routeFaultOverview.routesWithDecisions}/${routeFaultOverview.totalRoutes} 条路由的决策快照，可直接查看冷却、失败避让、模型熔断和站点运行时惩罚。`
             : '当前筛选结果还没有可用的决策快照；点击“刷新路由决策”可拉取最新的路由故障解释。'}
         </div>
+      </div>
+
+      <div className="info-tip" style={{ marginBottom: 12, display: 'grid', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="badge badge-info" style={{ fontSize: 11 }}>路由稳定性诊断</span>
+          {loadingRouteDiagnostics ? (
+            <span className="badge badge-muted" style={{ fontSize: 11 }}>加载中…</span>
+          ) : (
+            <span className="badge badge-muted" style={{ fontSize: 11 }}>快照时间 {routeDiagnosticsHighlights.generatedAtLabel}</span>
+          )}
+          <span className={`badge ${routeDiagnosticsHighlights.endpointRuntimeBlocked > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>端点记忆阻断 {routeDiagnosticsHighlights.endpointRuntimeBlocked}</span>
+          <span className={`badge ${routeDiagnosticsHighlights.modelCircuitOpen > 0 ? 'badge-error' : 'badge-muted'}`} style={{ fontSize: 11 }}>模型熔断中 {routeDiagnosticsHighlights.modelCircuitOpen}</span>
+          <span className={`badge ${routeDiagnosticsHighlights.runtimeBreakerOpen > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>站点熔断中 {routeDiagnosticsHighlights.runtimeBreakerOpen}</span>
+          <span className={`badge ${routeDiagnosticsHighlights.unavailableBlocking > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>持久不可用阻断 {routeDiagnosticsHighlights.unavailableBlocking}</span>
+          <span className={`badge ${routeDiagnosticsHighlights.checkinAttention > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到待处理 {routeDiagnosticsHighlights.checkinAttention}</span>
+        </div>
+
+        {routeDiagnostics ? (
+          <>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              汇总：路由 {routeDiagnostics.routeSummary.enabledRouteCount}/{routeDiagnostics.routeSummary.routeCount} 启用，通道 {routeDiagnostics.routeSummary.enabledChannelCount}/{routeDiagnostics.routeSummary.channelCount} 启用，手动协议站点 {routeDiagnostics.siteProfiles.manualConfiguredCount}/{routeDiagnostics.siteProfiles.total}。
+            </div>
+
+            <details>
+              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>签到待办站点（前 {routeDiagnostics.checkinTodo.sites.length}）</summary>
+              <div style={{ marginTop: 8, overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>站点</th>
+                      <th>待处理</th>
+                      <th>应执行</th>
+                      <th>人工验证</th>
+                      <th>失败</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {routeDiagnostics.checkinTodo.sites.map((site) => (
+                      <tr key={`checkin-todo-${site.siteId}`}>
+                        <td>{site.siteName}</td>
+                        <td>{site.attentionCount}</td>
+                        <td>{site.dueNowCount}</td>
+                        <td>{site.manualRequiredCount}</td>
+                        <td>{site.failedRecentCount}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+            <details>
+              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>站点运行时健康（前 {routeDiagnostics.siteRuntimeHealth.items.length}）</summary>
+              <div style={{ marginTop: 8, overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>站点</th>
+                      <th>范围</th>
+                      <th>模型</th>
+                      <th>倍率</th>
+                      <th>熔断</th>
+                      <th>最近失败</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {routeDiagnostics.siteRuntimeHealth.items.map((item) => (
+                      <tr key={`runtime-health-${item.siteId}-${item.scope}-${item.modelName || 'global'}`}>
+                        <td>{item.siteName}</td>
+                        <td>{item.scope === 'global' ? '全站' : '模型'}</td>
+                        <td>{item.modelName || '-'}</td>
+                        <td>{Math.round((item.multiplier || 0) * 100)}%</td>
+                        <td>{item.breakerOpen ? '开启' : '关闭'}</td>
+                        <td>{formatIsoDateTime(item.lastFailureAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+            <details>
+              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>模型熔断明细（前 {routeDiagnostics.modelCircuits.items.length}）</summary>
+              <div style={{ marginTop: 8, overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>站点</th>
+                      <th>账号</th>
+                      <th>模型</th>
+                      <th>状态</th>
+                      <th>失败数</th>
+                      <th>下次恢复</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {routeDiagnostics.modelCircuits.items.map((item) => (
+                      <tr key={`model-circuit-${item.channelId}-${item.modelName}`}>
+                        <td>{item.siteName || '-'}</td>
+                        <td>{item.accountUsername || (item.accountId != null ? `#${item.accountId}` : '-')}</td>
+                        <td>{item.modelName}</td>
+                        <td>{item.status.state}</td>
+                        <td>{item.failCount}</td>
+                        <td>{item.openUntilMs ? formatIsoDateTime(new Date(item.openUntilMs).toISOString()) : '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+            <details>
+              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>端点记忆与持久画像（前 {routeDiagnostics.endpointRuntimeMemory.items.length}/{routeDiagnostics.persistedEndpointProfiles.items.length}）</summary>
+              <div style={{ marginTop: 8, overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>站点</th>
+                      <th>类型</th>
+                      <th>首选端点</th>
+                      <th>活跃阻断</th>
+                      <th>更新时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {routeDiagnostics.endpointRuntimeMemory.items.map((item) => (
+                      <tr key={`endpoint-runtime-${item.key}`}>
+                        <td>{item.siteName || '-'}</td>
+                        <td>运行时</td>
+                        <td>{item.preferredEndpoint || '-'}</td>
+                        <td>{item.activeBlocks.join(',') || '-'}</td>
+                        <td>{item.preferredUpdatedAtMs ? formatIsoDateTime(new Date(item.preferredUpdatedAtMs).toISOString()) : '-'}</td>
+                      </tr>
+                    ))}
+                    {routeDiagnostics.persistedEndpointProfiles.items.map((item) => (
+                      <tr key={`endpoint-profile-${item.key}`}>
+                        <td>{item.siteName || '-'}</td>
+                        <td>持久画像</td>
+                        <td>{item.preferredEndpoint || '-'}</td>
+                        <td>{item.activeBlocks.join(',') || '-'}</td>
+                        <td>{item.preferredUpdatedAtMs ? formatIsoDateTime(new Date(item.preferredUpdatedAtMs).toISOString()) : '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </>
+        ) : (
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+            诊断快照暂不可用，点击“刷新路由决策”后会同步拉取最新稳定性快照。
+          </div>
+        )}
       </div>
 
       {/* Collapsible filter panel */}

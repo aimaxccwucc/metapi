@@ -11,6 +11,7 @@ const { apiMock, getBrandMock } = vi.hoisted(() => ({
     getModelTokenCandidates: vi.fn(),
     getRouteDecisionsBatch: vi.fn(),
     getRouteWideDecisionsBatch: vi.fn(),
+    getRouteDiagnostics: vi.fn(),
   },
   getBrandMock: vi.fn(),
 }));
@@ -66,6 +67,40 @@ describe('TokenRoutes cached snapshot load', () => {
     apiMock.getModelTokenCandidates.mockResolvedValue({ models: {} });
     apiMock.getRouteDecisionsBatch.mockResolvedValue({ decisions: {} });
     apiMock.getRouteWideDecisionsBatch.mockResolvedValue({ decisions: {} });
+    apiMock.getRouteDiagnostics.mockResolvedValue({
+      success: true,
+      generatedAt: '2026-03-26T00:00:00.000Z',
+      limits: { itemLimit: 120 },
+      routeSummary: { routeCount: 0, enabledRouteCount: 0, channelCount: 0, enabledChannelCount: 0 },
+      snapshotCounts: {
+        endpointRuntimeMemory: 0,
+        endpointCredentialScopes: 0,
+        persistedEndpointProfiles: 0,
+        modelCircuits: 0,
+        siteRuntimeStates: 0,
+        unavailableModels: 0,
+        siteProfiles: 0,
+        checkinTodoSites: 0,
+      },
+      endpointRuntimeMemory: { total: 0, items: [] },
+      endpointCredentialScopes: { total: 0, items: [] },
+      persistedEndpointProfiles: { total: 0, items: [] },
+      modelCircuits: { total: 0, openCount: 0, halfOpenCount: 0, items: [] },
+      siteRuntimeHealth: { total: 0, breakerOpenCount: 0, penalizedCount: 0, items: [] },
+      unavailableModels: { total: 0, blockingCount: 0, items: [] },
+      siteProfiles: { total: 0, manualConfiguredCount: 0, items: [] },
+      checkinTodo: {
+        scheduleMode: 'interval',
+        intervalHours: 6,
+        totalSchedulableAccounts: 0,
+        dueNowCount: 0,
+        manualRequiredCount: 0,
+        unsupportedCount: 0,
+        failedRecentCount: 0,
+        attentionCount: 0,
+        sites: [],
+      },
+    });
     apiMock.getRoutesSummary.mockResolvedValue([
       {
         id: 1,

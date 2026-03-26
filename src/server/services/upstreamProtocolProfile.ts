@@ -8,6 +8,15 @@ type EndpointProfileState = {
   blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpoint, number>>;
 };
 
+export type PersistedUpstreamProtocolProfileEntry = {
+  key: string;
+  preferredEndpoint: UpstreamEndpoint | null;
+  preferredUpdatedAtMs: number;
+  blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpoint, number>>;
+  activeBlocks: UpstreamEndpoint[];
+  hasFreshPreference: boolean;
+};
+
 type EndpointProfilePersistencePayload = {
   version: 1;
   savedAtMs: number;
@@ -301,6 +310,37 @@ export function resetUpstreamProtocolProfileState(): void {
     endpointProfilesSaveTimer = null;
   }
   endpointProfilesPersistInFlight = null;
+}
+
+export async function listPersistedUpstreamProtocolProfiles(nowMs = Date.now()): Promise<PersistedUpstreamProtocolProfileEntry[]> {
+  await ensureEndpointProfilesLoaded();
+  const entries: PersistedUpstreamProtocolProfileEntry[] = [];
+  for (const [key, state] of endpointProfiles.entries()) {
+    const activeBlocks = (['chat', 'messages', 'responses'] as const).filter((endpoint) => {
+      const untilMs = state.blockedUntilMsByEndpoint[endpoint];
+      return typeof untilMs === 'number' && untilMs > nowMs;
+    });
+    const hasFreshPreference = (
+      !!state.preferredEndpoint
+      && (state.preferredUpdatedAtMs + PREFERRED_ENDPOINT_TTL_MS) > nowMs
+    );
+    if (!hasFreshPreference && activeBlocks.length === 0) continue;
+    entries.push({
+      key,
+      preferredEndpoint: state.preferredEndpoint,
+      preferredUpdatedAtMs: state.preferredUpdatedAtMs,
+      blockedUntilMsByEndpoint: { ...state.blockedUntilMsByEndpoint },
+      activeBlocks,
+      hasFreshPreference,
+    });
+  }
+
+  entries.sort((left, right) => (
+    right.activeBlocks.length - left.activeBlocks.length
+    || right.preferredUpdatedAtMs - left.preferredUpdatedAtMs
+    || left.key.localeCompare(right.key, undefined, { sensitivity: 'base' })
+  ));
+  return entries;
 }
 
 export async function flushUpstreamProtocolProfilePersistence(): Promise<void> {

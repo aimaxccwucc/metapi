@@ -25,6 +25,7 @@ import { composeProxyLogMessage } from '../../routes/proxy/logPathMeta.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../../routes/proxy/endpointFlow.js';
 import { detectProxyFailure } from '../../routes/proxy/proxyFailureJudge.js';
 import { buildUpstreamUrl } from '../../routes/proxy/upstreamUrl.js';
+import { logProxyNoChannelFailure } from '../../routes/proxy/proxyNoChannelLog.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { resolveProxyLogBilling } from '../../routes/proxy/proxyBilling.js';
 import { openAiChatTransformer } from '../../transformers/openai/chat/index.js';
@@ -133,6 +134,17 @@ export async function handleChatSurfaceRequest(
         model: requestedModel,
         reason: 'No available channels after retries',
       });
+      if (retryCount === 0) {
+        await logProxyNoChannelFailure({
+          modelRequested: requestedModel,
+          httpStatus: 503,
+          errorMessage: 'No available channels for this model',
+          retryCount,
+          downstreamPath,
+          clientContext,
+          downstreamApiKeyId,
+        });
+      }
       return reply.code(503).send({
         error: { message: 'No available channels for this model', type: 'server_error' },
       });
@@ -871,6 +883,17 @@ export async function handleClaudeCountTokensSurfaceRequest(
         model: requestedModel,
         reason: 'No available channels after retries',
       });
+      if (retryCount === 0) {
+        await logProxyNoChannelFailure({
+          modelRequested: requestedModel,
+          httpStatus: 503,
+          errorMessage: 'No available channels for this model',
+          retryCount,
+          downstreamPath,
+          clientContext,
+          downstreamApiKeyId,
+        });
+      }
       return reply.code(503).send({
         error: { message: 'No available channels for this model', type: 'server_error' },
       });

@@ -17,6 +17,7 @@ import { resolveProxyLogBilling } from './proxyBilling.js';
 import { getProxyAuthContext } from '../../middleware/auth.js';
 import { buildUpstreamUrl } from './upstreamUrl.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from './downstreamClientContext.js';
+import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 
 const MAX_RETRIES = 2;
@@ -57,6 +58,17 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           model: requestedModel,
           reason: 'No available channels after retries',
         });
+        if (retryCount === 0) {
+          await logProxyNoChannelFailure({
+            modelRequested: requestedModel,
+            httpStatus: 503,
+            errorMessage: 'No available channels for this model',
+            retryCount,
+            downstreamPath,
+            clientContext,
+            downstreamApiKeyId,
+          });
+        }
         return reply.code(503).send({
           error: { message: 'No available channels for this model', type: 'server_error' },
         });

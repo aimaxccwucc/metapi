@@ -80,11 +80,15 @@ describe('downstream client context route logging', () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
+    const { chatProxyRoute } = await import('./chat.js');
     const { claudeMessagesProxyRoute } = await import('./chat.js');
     const { responsesProxyRoute } = await import('./responses.js');
+    const { completionsProxyRoute } = await import('./completions.js');
     app = Fastify();
+    await app.register(chatProxyRoute);
     await app.register(claudeMessagesProxyRoute);
     await app.register(responsesProxyRoute);
+    await app.register(completionsProxyRoute);
   });
 
   beforeEach(() => {
@@ -245,5 +249,101 @@ describe('downstream client context route logging', () => {
     expect(insertedLog.errorMessage).toContain('[downstream:/v1/messages]');
     expect(insertedLog.errorMessage).not.toContain('[client:');
     expect(insertedLog.errorMessage).not.toContain('[session:');
+  });
+
+  it('writes no-channel failure logs for /v1/responses when routing exhausts all channels', async () => {
+    selectChannelMock.mockReturnValue(null);
+    refreshModelsAndRebuildRoutesMock.mockResolvedValue(undefined);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: {
+        originator: 'codex_cli_rs',
+        Session_id: 'no-channel-session',
+      },
+      payload: {
+        model: 'gpt-5.2',
+        input: 'hello',
+      },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(dbValuesMock).toHaveBeenCalled();
+    const insertedLog = dbValuesMock.mock.calls.at(-1)?.[0];
+    expect(insertedLog.routeId).toBeNull();
+    expect(insertedLog.channelId).toBeNull();
+    expect(insertedLog.accountId).toBeNull();
+    expect(insertedLog.status).toBe('failed');
+    expect(insertedLog.httpStatus).toBe(503);
+    expect(insertedLog.modelRequested).toBe('gpt-5.2');
+    expect(insertedLog.errorMessage).toContain('[client:codex]');
+    expect(insertedLog.errorMessage).toContain('[session:no-channel-session]');
+    expect(insertedLog.errorMessage).toContain('[downstream:/v1/responses]');
+    expect(insertedLog.errorMessage).toContain('No available channels for this model');
+  });
+
+  it('writes no-channel failure logs for /v1/completions with downstream metadata', async () => {
+    selectChannelMock.mockReturnValue(null);
+    refreshModelsAndRebuildRoutesMock.mockResolvedValue(undefined);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/completions',
+      headers: {
+        originator: 'codex_cli_rs',
+        Session_id: 'completions-no-channel',
+      },
+      payload: {
+        model: 'gpt-4.1-mini',
+        prompt: 'ping',
+      },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(dbValuesMock).toHaveBeenCalled();
+    const insertedLog = dbValuesMock.mock.calls.at(-1)?.[0];
+    expect(insertedLog.routeId).toBeNull();
+    expect(insertedLog.channelId).toBeNull();
+    expect(insertedLog.accountId).toBeNull();
+    expect(insertedLog.status).toBe('failed');
+    expect(insertedLog.httpStatus).toBe(503);
+    expect(insertedLog.modelRequested).toBe('gpt-4.1-mini');
+    expect(insertedLog.errorMessage).not.toContain('[client:');
+    expect(insertedLog.errorMessage).not.toContain('[session:');
+    expect(insertedLog.errorMessage).toContain('[downstream:/v1/completions]');
+    expect(insertedLog.errorMessage).toContain('No available channels for this model');
+  });
+
+  it('writes no-channel failure logs for /v1/chat/completions with Codex metadata', async () => {
+    selectChannelMock.mockReturnValue(null);
+    refreshModelsAndRebuildRoutesMock.mockResolvedValue(undefined);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: {
+        originator: 'codex_cli_rs',
+        Session_id: 'chat-no-channel',
+      },
+      payload: {
+        model: 'gpt-5.2',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(dbValuesMock).toHaveBeenCalled();
+    const insertedLog = dbValuesMock.mock.calls.at(-1)?.[0];
+    expect(insertedLog.routeId).toBeNull();
+    expect(insertedLog.channelId).toBeNull();
+    expect(insertedLog.accountId).toBeNull();
+    expect(insertedLog.status).toBe('failed');
+    expect(insertedLog.httpStatus).toBe(503);
+    expect(insertedLog.modelRequested).toBe('gpt-5.2');
+    expect(insertedLog.errorMessage).toContain('[client:codex]');
+    expect(insertedLog.errorMessage).toContain('[session:chat-no-channel]');
+    expect(insertedLog.errorMessage).toContain('[downstream:/v1/chat/completions]');
+    expect(insertedLog.errorMessage).toContain('No available channels for this model');
   });
 });

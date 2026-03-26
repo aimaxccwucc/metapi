@@ -1,6 +1,7 @@
 ﻿import { FastifyInstance } from 'fastify';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
+import { config } from '../../config.js';
 import { rebuildTokenRoutesFromAvailability, refreshModelsAndRebuildRoutes, refreshModelsForAccount } from '../../services/modelService.js';
 import {
   ACCOUNT_TOKEN_VALUE_STATUS_READY,
@@ -9,7 +10,13 @@ import {
 } from '../../services/accountTokenService.js';
 import { fetchModelPricingCatalog } from '../../services/modelPricingService.js';
 import { normalizeRouteRoutingStrategy } from '../../services/routeRoutingStrategy.js';
-import { invalidateTokenRouterCache, matchesModelPattern, tokenRouter } from '../../services/tokenRouter.js';
+import {
+  invalidateTokenRouterCache,
+  listPersistedUnavailableModelEntries,
+  listSiteRuntimeHealthSnapshots,
+  matchesModelPattern,
+  tokenRouter,
+} from '../../services/tokenRouter.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { getAdapter } from '../../services/platforms/index.js';
 import { requiresManagedAccountTokens, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
@@ -19,8 +26,31 @@ import {
   parseRouteDecisionSnapshot,
   saveRouteDecisionSnapshots,
 } from '../../services/routeDecisionSnapshotStore.js';
+import { getModelCircuitSnapshots } from '../../services/modelCircuitBreaker.js';
+import {
+  getEndpointMemoryCredentialScopeSnapshot,
+  getUpstreamEndpointRuntimeMemorySnapshot,
+} from '../proxy/upstreamEndpoint.js';
+import { listPersistedUpstreamProtocolProfiles } from '../../services/upstreamProtocolProfile.js';
+import { listSiteProtocolConfigs } from '../../services/siteProtocolConfigService.js';
+import { extractRuntimeHealth } from '../../services/accountHealthService.js';
+import { isSchedulableCheckinAccountStatus } from '../../services/checkinService.js';
 
 const ROUTE_AUTOCREATE_SOFT_TIMEOUT_MS = 4_000;
+
+type CheckinLogSnapshot = {
+  accountId: number;
+  status: string | null;
+  message: string | null;
+  createdAt: string | null;
+};
+
+type RouteDiagnosticsRouteSummary = {
+  routeCount: number;
+  enabledRouteCount: number;
+  channelCount: number;
+  enabledChannelCount: number;
+};
 
 function isExactModelPattern(modelPattern: string): boolean {
   const normalized = modelPattern.trim();
@@ -885,6 +915,45 @@ async function buildRouteChannelSummaryMap(routes: RouteRow[]): Promise<Map<numb
   return summaryByRoute;
 }
 
+function parseDateTimeMs(value?: string | null): number | null {
+  if (!value) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(' ', 'T')}Z`
+    : value;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isManualCheckinRequiredMessage(message?: string | null): boolean {
+  if (!message) return false;
+  const text = message.toLowerCase();
+  return (
+    text.includes('turnstile')
+    || text.includes('manual')
+    || text.includes('人工签到')
+    || text.includes('人工验证')
+  );
+}
+
+function isUnsupportedCheckinResultMessage(message?: string | null): boolean {
+  if (!message) return false;
+  const text = message.toLowerCase();
+  return (
+    text.includes('unsupported')
+    || text.includes('not support checkin')
+    || text.includes('not supported')
+    || text.includes('不支持签到')
+  );
+}
+
+function resolveRouteDiagnosticsLimit(rawLimit: unknown): number {
+  const fallback = 120;
+  if (rawLimit === undefined || rawLimit === null || rawLimit === '') return fallback;
+  const parsed = Number.parseInt(String(rawLimit), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(20, Math.min(500, parsed));
+}
+
 export async function tokensRoutes(app: FastifyInstance) {
   // List routes with basic info only (lightweight for selectors)
   app.get('/api/routes/lite', async () => {
@@ -926,6 +995,486 @@ export async function tokensRoutes(app: FastifyInstance) {
         decisionRefreshedAt: route.decisionRefreshedAt ?? null,
       };
     });
+  });
+
+  app.get<{ Querystring: { limit?: string } }>('/api/routes/diagnostics', async (request) => {
+    const itemLimit = resolveRouteDiagnosticsLimit(request.query.limit);
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+
+    const [
+      routeRows,
+      channelRows,
+      siteRows,
+      accountRows,
+      checkinLogs,
+      siteProtocolConfigs,
+      endpointRuntimeMemoryRows,
+      endpointCredentialScopeRows,
+      persistedEndpointProfiles,
+      modelCircuitRows,
+      siteRuntimeRows,
+      unavailableModelRows,
+    ] = await Promise.all([
+      db.select({
+        id: schema.tokenRoutes.id,
+        enabled: schema.tokenRoutes.enabled,
+      }).from(schema.tokenRoutes).all(),
+      db.select({
+        id: schema.routeChannels.id,
+        routeId: schema.routeChannels.routeId,
+        accountId: schema.routeChannels.accountId,
+        sourceModel: schema.routeChannels.sourceModel,
+        tokenId: schema.routeChannels.tokenId,
+        enabled: schema.routeChannels.enabled,
+        priority: schema.routeChannels.priority,
+        weight: schema.routeChannels.weight,
+        cooldownUntil: schema.routeChannels.cooldownUntil,
+        lastFailAt: schema.routeChannels.lastFailAt,
+        consecutiveFailCount: schema.routeChannels.consecutiveFailCount,
+        failCount: schema.routeChannels.failCount,
+        routeModelPattern: schema.tokenRoutes.modelPattern,
+        routeEnabled: schema.tokenRoutes.enabled,
+        siteId: schema.accounts.siteId,
+        accountUsername: schema.accounts.username,
+        accountStatus: schema.accounts.status,
+        siteName: schema.sites.name,
+        sitePlatform: schema.sites.platform,
+        siteStatus: schema.sites.status,
+      }).from(schema.routeChannels)
+        .innerJoin(schema.tokenRoutes, eq(schema.routeChannels.routeId, schema.tokenRoutes.id))
+        .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
+        .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+        .all(),
+      db.select({
+        id: schema.sites.id,
+        name: schema.sites.name,
+        url: schema.sites.url,
+        platform: schema.sites.platform,
+        status: schema.sites.status,
+      }).from(schema.sites).all(),
+      db.select({
+        id: schema.accounts.id,
+        siteId: schema.accounts.siteId,
+        username: schema.accounts.username,
+        status: schema.accounts.status,
+        checkinEnabled: schema.accounts.checkinEnabled,
+        lastCheckinAt: schema.accounts.lastCheckinAt,
+        extraConfig: schema.accounts.extraConfig,
+      }).from(schema.accounts).all(),
+      db.select({
+        accountId: schema.checkinLogs.accountId,
+        status: schema.checkinLogs.status,
+        message: schema.checkinLogs.message,
+        createdAt: schema.checkinLogs.createdAt,
+      }).from(schema.checkinLogs)
+        .orderBy(desc(schema.checkinLogs.createdAt))
+        .limit(20_000)
+        .all(),
+      listSiteProtocolConfigs(),
+      getUpstreamEndpointRuntimeMemorySnapshot(nowMs),
+      getEndpointMemoryCredentialScopeSnapshot(),
+      listPersistedUpstreamProtocolProfiles(nowMs),
+      getModelCircuitSnapshots(nowMs),
+      listSiteRuntimeHealthSnapshots(nowMs),
+      listPersistedUnavailableModelEntries(),
+    ]);
+
+    const siteById = new Map<number, {
+      id: number;
+      name: string;
+      url: string;
+      platform: string;
+      status: string;
+    }>();
+    for (const site of siteRows) {
+      siteById.set(site.id, {
+        id: site.id,
+        name: site.name || `site-${site.id}`,
+        url: site.url || '',
+        platform: site.platform || '',
+        status: site.status || 'active',
+      });
+    }
+
+    const accountById = new Map<number, {
+      id: number;
+      siteId: number;
+      username: string | null;
+      status: string | null;
+      checkinEnabled: boolean;
+      lastCheckinAt: string | null;
+      extraConfig: string | null;
+    }>();
+    for (const account of accountRows) {
+      accountById.set(account.id, {
+        id: account.id,
+        siteId: account.siteId,
+        username: account.username ?? null,
+        status: account.status ?? null,
+        checkinEnabled: account.checkinEnabled === true,
+        lastCheckinAt: account.lastCheckinAt ?? null,
+        extraConfig: account.extraConfig ?? null,
+      });
+    }
+
+    const latestCheckinByAccount = new Map<number, CheckinLogSnapshot>();
+    for (const log of checkinLogs) {
+      if (!Number.isFinite(log.accountId) || log.accountId <= 0) continue;
+      if (latestCheckinByAccount.has(log.accountId)) continue;
+      latestCheckinByAccount.set(log.accountId, {
+        accountId: log.accountId,
+        status: log.status ?? null,
+        message: log.message ?? null,
+        createdAt: log.createdAt ?? null,
+      });
+    }
+
+    const routeSummary: RouteDiagnosticsRouteSummary = {
+      routeCount: routeRows.length,
+      enabledRouteCount: routeRows.filter((row) => row.enabled === true).length,
+      channelCount: channelRows.length,
+      enabledChannelCount: channelRows.filter((row) => row.enabled === true).length,
+    };
+
+    const channelById = new Map<number, {
+      id: number;
+      routeId: number;
+      routeModelPattern: string;
+      routeEnabled: boolean;
+      accountId: number;
+      accountUsername: string | null;
+      accountStatus: string | null;
+      siteId: number;
+      siteName: string;
+      sitePlatform: string;
+      siteStatus: string;
+      sourceModel: string | null;
+      tokenId: number | null;
+      enabled: boolean;
+      priority: number;
+      weight: number;
+      cooldownUntil: string | null;
+      lastFailAt: string | null;
+      consecutiveFailCount: number;
+      failCount: number;
+    }>();
+    for (const channel of channelRows) {
+      channelById.set(channel.id, {
+        id: channel.id,
+        routeId: channel.routeId,
+        routeModelPattern: channel.routeModelPattern || '',
+        routeEnabled: channel.routeEnabled === true,
+        accountId: channel.accountId,
+        accountUsername: channel.accountUsername ?? null,
+        accountStatus: channel.accountStatus ?? null,
+        siteId: channel.siteId,
+        siteName: channel.siteName || `site-${channel.siteId}`,
+        sitePlatform: channel.sitePlatform || '',
+        siteStatus: channel.siteStatus || 'active',
+        sourceModel: channel.sourceModel ?? null,
+        tokenId: typeof channel.tokenId === 'number' && Number.isFinite(channel.tokenId) ? channel.tokenId : null,
+        enabled: channel.enabled === true,
+        priority: Number.isFinite(channel.priority) ? channel.priority : 0,
+        weight: Number.isFinite(channel.weight) ? channel.weight : 0,
+        cooldownUntil: channel.cooldownUntil ?? null,
+        lastFailAt: channel.lastFailAt ?? null,
+        consecutiveFailCount: Number.isFinite(channel.consecutiveFailCount) ? channel.consecutiveFailCount : 0,
+        failCount: Number.isFinite(channel.failCount) ? channel.failCount : 0,
+      });
+    }
+
+    const modelCircuitItems = modelCircuitRows.map((row) => {
+      const channel = channelById.get(row.channelId);
+      return {
+        channelId: row.channelId,
+        modelName: row.modelName,
+        state: row.state,
+        failCount: row.failCount,
+        openedAtMs: row.openedAt,
+        openUntilMs: row.openUntil,
+        lastErrorAtMs: row.lastErrorAt,
+        lastSuccessAtMs: row.lastSuccessAt,
+        probeInFlight: row.probeInFlight,
+        status: row.status,
+        routeId: channel?.routeId ?? null,
+        routeModelPattern: channel?.routeModelPattern ?? null,
+        accountId: channel?.accountId ?? null,
+        accountUsername: channel?.accountUsername ?? null,
+        siteId: channel?.siteId ?? null,
+        siteName: channel?.siteName ?? null,
+      };
+    });
+    const modelCircuitOpenCount = modelCircuitItems.filter((item) => item.status.isOpen).length;
+    const modelCircuitHalfOpenCount = modelCircuitItems.filter((item) => item.status.isHalfOpen).length;
+
+    const siteRuntimeItems = siteRuntimeRows.map((row) => {
+      const site = siteById.get(row.siteId);
+      return {
+        ...row,
+        siteName: site?.name || `site-${row.siteId}`,
+        sitePlatform: site?.platform || '',
+        siteStatus: site?.status || 'active',
+        breakerUntil: row.breakerUntilMs ? new Date(row.breakerUntilMs).toISOString() : null,
+        lastFailureAt: row.lastFailureAtMs ? new Date(row.lastFailureAtMs).toISOString() : null,
+        lastSuccessAt: row.lastSuccessAtMs ? new Date(row.lastSuccessAtMs).toISOString() : null,
+      };
+    });
+    const siteRuntimeBreakerOpenCount = siteRuntimeItems.filter((item) => item.breakerOpen).length;
+    const siteRuntimePenalizedCount = siteRuntimeItems.filter((item) => item.multiplier < 0.999).length;
+
+    const unavailableModelItems = unavailableModelRows.map((row) => {
+      if (row.scope === 'token') {
+        const channel = row.ownerId > 0
+          ? channelRows.find((item) => item.tokenId === row.ownerId)
+          : null;
+        return {
+          ...row,
+          tokenId: row.ownerId,
+          accountId: channel?.accountId ?? null,
+          accountUsername: channel?.accountUsername ?? null,
+          siteId: channel?.siteId ?? null,
+          siteName: channel?.siteName ?? null,
+        };
+      }
+      const account = accountById.get(row.ownerId);
+      const site = account ? siteById.get(account.siteId) : null;
+      return {
+        ...row,
+        tokenId: null,
+        accountId: account?.id ?? row.ownerId,
+        accountUsername: account?.username ?? null,
+        siteId: site?.id ?? null,
+        siteName: site?.name ?? null,
+      };
+    });
+    const unavailableBlockingCount = unavailableModelItems.filter((item) => item.stillBlocking).length;
+
+    const endpointRuntimeItems = endpointRuntimeMemoryRows.map((row) => {
+      const siteId = Number.parseInt(String(row.key.split(':')[0] || ''), 10);
+      const site = Number.isFinite(siteId) ? siteById.get(siteId) : null;
+      return {
+        ...row,
+        siteId: Number.isFinite(siteId) ? siteId : null,
+        siteName: site?.name ?? null,
+      };
+    });
+    const endpointCredentialScopeItems = endpointCredentialScopeRows.map((row) => {
+      const site = siteById.get(row.siteId);
+      const account = row.accountId != null ? accountById.get(row.accountId) : null;
+      return {
+        ...row,
+        siteName: site?.name ?? null,
+        accountUsername: account?.username ?? null,
+      };
+    });
+    const persistedEndpointProfileItems = persistedEndpointProfiles.map((row) => {
+      const siteId = Number.parseInt(String(row.key.split(':')[0] || ''), 10);
+      const site = Number.isFinite(siteId) ? siteById.get(siteId) : null;
+      return {
+        ...row,
+        siteId: Number.isFinite(siteId) ? siteId : null,
+        siteName: site?.name ?? null,
+      };
+    });
+
+    const siteProfiles = siteRows.map((site) => {
+      const protocolConfig = siteProtocolConfigs[site.id];
+      const siteAccounts = accountRows.filter((account) => account.siteId === site.id);
+      const schedulableAccounts = siteAccounts.filter((account) => (
+        account.checkinEnabled === true
+        && isSchedulableCheckinAccountStatus(account.status)
+        && site.status !== 'disabled'
+      ));
+      return {
+        siteId: site.id,
+        siteName: site.name || `site-${site.id}`,
+        siteUrl: site.url || '',
+        platform: site.platform || '',
+        status: site.status || 'active',
+        protocolMode: protocolConfig?.mode === 'manual' ? 'manual' : 'auto',
+        supportedEndpoints: protocolConfig?.supportedEndpoints || [],
+        preferredEndpoint: protocolConfig?.preferredEndpoint || null,
+        protocolUpdatedAt: protocolConfig?.updatedAtMs ? new Date(protocolConfig.updatedAtMs).toISOString() : null,
+        schedulableCheckinAccounts: schedulableAccounts.length,
+        activeAccounts: siteAccounts.filter((account) => account.status === 'active').length,
+        expiredAccounts: siteAccounts.filter((account) => account.status === 'expired').length,
+        degradedAccounts: siteAccounts.filter((account) => (
+          extractRuntimeHealth(account.extraConfig)?.state === 'degraded'
+        )).length,
+      };
+    });
+    const manualSiteProfileCount = siteProfiles.filter((item) => item.protocolMode === 'manual').length;
+
+    const checkinIntervalMs = Math.max(1, config.checkinIntervalHours) * 60 * 60 * 1000;
+    const checkinCronFallbackMs = 24 * 60 * 60 * 1000;
+    const checkinDueThresholdMs = config.checkinScheduleMode === 'interval'
+      ? checkinIntervalMs
+      : checkinCronFallbackMs;
+
+    const checkinSiteTodoMap = new Map<number, {
+      siteId: number;
+      siteName: string;
+      siteStatus: string;
+      totalSchedulableAccounts: number;
+      dueNowCount: number;
+      manualRequiredCount: number;
+      unsupportedCount: number;
+      failedRecentCount: number;
+      expiredCount: number;
+      unhealthyCount: number;
+      attentionCount: number;
+      sampleAccounts: Array<{
+        accountId: number;
+        username: string | null;
+        status: string | null;
+        dueNow: boolean;
+        requiresManual: boolean;
+        unsupported: boolean;
+        failedRecent: boolean;
+        runtimeHealth: ReturnType<typeof extractRuntimeHealth>;
+        latestCheckinStatus: string | null;
+        latestCheckinMessage: string | null;
+        latestCheckinAt: string | null;
+      }>;
+    }>();
+
+    for (const account of accountRows) {
+      const site = siteById.get(account.siteId);
+      if (!site) continue;
+      if (site.status === 'disabled') continue;
+      if (account.checkinEnabled !== true) continue;
+      if (!isSchedulableCheckinAccountStatus(account.status)) continue;
+
+      const latest = latestCheckinByAccount.get(account.id) || null;
+      const lastCheckinAtMs = parseDateTimeMs(account.lastCheckinAt);
+      const dueNow = !lastCheckinAtMs || (nowMs - lastCheckinAtMs) >= checkinDueThresholdMs;
+      const requiresManual = latest?.status === 'skipped' && isManualCheckinRequiredMessage(latest.message);
+      const unsupported = latest?.status === 'skipped' && isUnsupportedCheckinResultMessage(latest.message);
+      const failedRecent = latest?.status === 'failed';
+      const runtimeHealth = extractRuntimeHealth(account.extraConfig);
+      const unhealthy = runtimeHealth?.state === 'unhealthy';
+      const expired = account.status === 'expired';
+      const attention = requiresManual || failedRecent || unhealthy || expired;
+
+      if (!checkinSiteTodoMap.has(site.id)) {
+        checkinSiteTodoMap.set(site.id, {
+          siteId: site.id,
+          siteName: site.name,
+          siteStatus: site.status,
+          totalSchedulableAccounts: 0,
+          dueNowCount: 0,
+          manualRequiredCount: 0,
+          unsupportedCount: 0,
+          failedRecentCount: 0,
+          expiredCount: 0,
+          unhealthyCount: 0,
+          attentionCount: 0,
+          sampleAccounts: [],
+        });
+      }
+
+      const bucket = checkinSiteTodoMap.get(site.id)!;
+      bucket.totalSchedulableAccounts += 1;
+      if (dueNow) bucket.dueNowCount += 1;
+      if (requiresManual) bucket.manualRequiredCount += 1;
+      if (unsupported) bucket.unsupportedCount += 1;
+      if (failedRecent) bucket.failedRecentCount += 1;
+      if (expired) bucket.expiredCount += 1;
+      if (unhealthy) bucket.unhealthyCount += 1;
+      if (attention) bucket.attentionCount += 1;
+
+      if (attention && bucket.sampleAccounts.length < 5) {
+        bucket.sampleAccounts.push({
+          accountId: account.id,
+          username: account.username ?? null,
+          status: account.status ?? null,
+          dueNow,
+          requiresManual,
+          unsupported,
+          failedRecent,
+          runtimeHealth,
+          latestCheckinStatus: latest?.status ?? null,
+          latestCheckinMessage: latest?.message ?? null,
+          latestCheckinAt: latest?.createdAt ?? null,
+        });
+      }
+    }
+
+    const checkinTodoSites = Array.from(checkinSiteTodoMap.values())
+      .sort((left, right) => (
+        right.attentionCount - left.attentionCount
+        || right.dueNowCount - left.dueNowCount
+        || left.siteName.localeCompare(right.siteName, undefined, { sensitivity: 'base' })
+      ));
+
+    const checkinTodoSummary = {
+      scheduleMode: config.checkinScheduleMode,
+      intervalHours: config.checkinIntervalHours,
+      totalSchedulableAccounts: checkinTodoSites.reduce((sum, item) => sum + item.totalSchedulableAccounts, 0),
+      dueNowCount: checkinTodoSites.reduce((sum, item) => sum + item.dueNowCount, 0),
+      manualRequiredCount: checkinTodoSites.reduce((sum, item) => sum + item.manualRequiredCount, 0),
+      unsupportedCount: checkinTodoSites.reduce((sum, item) => sum + item.unsupportedCount, 0),
+      failedRecentCount: checkinTodoSites.reduce((sum, item) => sum + item.failedRecentCount, 0),
+      attentionCount: checkinTodoSites.reduce((sum, item) => sum + item.attentionCount, 0),
+    };
+
+    return {
+      success: true,
+      generatedAt: nowIso,
+      limits: {
+        itemLimit,
+      },
+      routeSummary,
+      snapshotCounts: {
+        endpointRuntimeMemory: endpointRuntimeItems.length,
+        endpointCredentialScopes: endpointCredentialScopeItems.length,
+        persistedEndpointProfiles: persistedEndpointProfileItems.length,
+        modelCircuits: modelCircuitItems.length,
+        siteRuntimeStates: siteRuntimeItems.length,
+        unavailableModels: unavailableModelItems.length,
+        siteProfiles: siteProfiles.length,
+        checkinTodoSites: checkinTodoSites.length,
+      },
+      endpointRuntimeMemory: {
+        total: endpointRuntimeItems.length,
+        items: endpointRuntimeItems.slice(0, itemLimit),
+      },
+      endpointCredentialScopes: {
+        total: endpointCredentialScopeItems.length,
+        items: endpointCredentialScopeItems.slice(0, itemLimit),
+      },
+      persistedEndpointProfiles: {
+        total: persistedEndpointProfileItems.length,
+        items: persistedEndpointProfileItems.slice(0, itemLimit),
+      },
+      modelCircuits: {
+        total: modelCircuitItems.length,
+        openCount: modelCircuitOpenCount,
+        halfOpenCount: modelCircuitHalfOpenCount,
+        items: modelCircuitItems.slice(0, itemLimit),
+      },
+      siteRuntimeHealth: {
+        total: siteRuntimeItems.length,
+        breakerOpenCount: siteRuntimeBreakerOpenCount,
+        penalizedCount: siteRuntimePenalizedCount,
+        items: siteRuntimeItems.slice(0, itemLimit),
+      },
+      unavailableModels: {
+        total: unavailableModelItems.length,
+        blockingCount: unavailableBlockingCount,
+        items: unavailableModelItems.slice(0, itemLimit),
+      },
+      siteProfiles: {
+        total: siteProfiles.length,
+        manualConfiguredCount: manualSiteProfileCount,
+        items: siteProfiles.slice(0, itemLimit),
+      },
+      checkinTodo: {
+        ...checkinTodoSummary,
+        sites: checkinTodoSites.slice(0, itemLimit),
+      },
+    };
   });
 
   // Get channels for a single route (on-demand loading)

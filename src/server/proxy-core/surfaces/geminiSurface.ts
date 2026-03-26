@@ -33,6 +33,7 @@ import {
 } from '../../routes/proxy/geminiCliCompat.js';
 import { dispatchRuntimeRequest } from '../../routes/proxy/runtimeExecutor.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
+import { logProxyNoChannelFailure } from '../../routes/proxy/proxyNoChannelLog.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/conversationFileCapabilities.js';
 import { readRuntimeResponseText } from '../executors/types.js';
@@ -381,6 +382,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
 
     const policy = getDownstreamRoutingPolicy(request);
     const downstreamPath = resolveDownstreamPath(request);
+    const downstreamApiKeyId = null;
     const clientContext = detectDownstreamClientContext({
       downstreamPath,
       headers: request.headers as Record<string, unknown>,
@@ -397,6 +399,17 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         ? await tokenRouter.selectChannel(requestedModel, policy)
         : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, policy);
       if (!selected) {
+        if (retryCount === 0) {
+          await logProxyNoChannelFailure({
+            modelRequested: requestedModel,
+            httpStatus: lastStatus,
+            errorMessage: lastText || 'No available channels for this model',
+            retryCount,
+            downstreamPath,
+            clientContext,
+            downstreamApiKeyId,
+          });
+        }
         return reply.code(lastStatus).type(lastContentType).send(lastText);
       }
 

@@ -62,6 +62,15 @@ type EndpointRuntimeState = {
   blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpoint, number>>;
 };
 
+export type UpstreamEndpointRuntimeMemoryEntry = {
+  key: string;
+  preferredEndpoint: UpstreamEndpoint | null;
+  preferredUpdatedAtMs: number;
+  blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpoint, number>>;
+  activeBlocks: UpstreamEndpoint[];
+  hasFreshPreference: boolean;
+};
+
 type ChannelContext = {
   site: {
     id: number;
@@ -81,6 +90,10 @@ type EndpointMemoryCredentialScope = {
   accountId: number | null;
   credentialSource: 'account_api_token' | 'account_access_token' | 'site_api_key' | 'none';
   credentialFingerprint: string | null;
+};
+
+export type EndpointMemoryCredentialScopeEntry = EndpointMemoryCredentialScope & {
+  cacheKey: string;
 };
 
 const ENDPOINT_RUNTIME_PREFERRED_TTL_MS = 24 * 60 * 60 * 1000;
@@ -1173,6 +1186,57 @@ export function resetUpstreamEndpointRuntimeState(): void {
   endpointRuntimeStates.clear();
   endpointMemoryScopeBySiteAndToken.clear();
   resetUpstreamProtocolProfileState();
+}
+
+export function getUpstreamEndpointRuntimeMemorySnapshot(nowMs = Date.now()): UpstreamEndpointRuntimeMemoryEntry[] {
+  const snapshot: UpstreamEndpointRuntimeMemoryEntry[] = [];
+  for (const [key, state] of endpointRuntimeStates.entries()) {
+    const activeBlocks = (['chat', 'messages', 'responses'] as const).filter((endpoint) => {
+      const untilMs = state.blockedUntilMsByEndpoint[endpoint];
+      return typeof untilMs === 'number' && untilMs > nowMs;
+    });
+    const hasFreshPreference = (
+      !!state.preferredEndpoint
+      && (state.preferredUpdatedAtMs + ENDPOINT_RUNTIME_PREFERRED_TTL_MS) > nowMs
+    );
+    if (!hasFreshPreference && activeBlocks.length === 0) continue;
+    snapshot.push({
+      key,
+      preferredEndpoint: state.preferredEndpoint,
+      preferredUpdatedAtMs: state.preferredUpdatedAtMs,
+      blockedUntilMsByEndpoint: { ...state.blockedUntilMsByEndpoint },
+      activeBlocks,
+      hasFreshPreference,
+    });
+  }
+
+  snapshot.sort((left, right) => (
+    right.activeBlocks.length - left.activeBlocks.length
+    || right.preferredUpdatedAtMs - left.preferredUpdatedAtMs
+    || left.key.localeCompare(right.key, undefined, { sensitivity: 'base' })
+  ));
+  return snapshot;
+}
+
+export function getEndpointMemoryCredentialScopeSnapshot(): EndpointMemoryCredentialScopeEntry[] {
+  const snapshot: EndpointMemoryCredentialScopeEntry[] = [];
+  for (const [cacheKey, scope] of endpointMemoryScopeBySiteAndToken.entries()) {
+    snapshot.push({
+      cacheKey,
+      siteId: scope.siteId,
+      accountId: scope.accountId,
+      credentialSource: scope.credentialSource,
+      credentialFingerprint: scope.credentialFingerprint,
+    });
+  }
+
+  snapshot.sort((left, right) => (
+    left.siteId - right.siteId
+    || (left.accountId ?? 0) - (right.accountId ?? 0)
+    || left.credentialSource.localeCompare(right.credentialSource, undefined, { sensitivity: 'base' })
+    || left.cacheKey.localeCompare(right.cacheKey, undefined, { sensitivity: 'base' })
+  ));
+  return snapshot;
 }
 
 export function recordUpstreamEndpointSuccess(input: {

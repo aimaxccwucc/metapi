@@ -63,6 +63,16 @@ type PersistedUnavailableModelSnapshot = {
   accountModels: Map<number, Map<string, number>>;
 };
 
+export type PersistedUnavailableModelDiagnosticEntry = {
+  scope: 'token' | 'account';
+  ownerId: number;
+  modelName: string;
+  checkedAt: string | null;
+  checkedAtMs: number;
+  stillBlocking: boolean;
+  ageMs: number;
+};
+
 type SiteRuntimeFailureContext = {
   status?: number | null;
   errorText?: string | null;
@@ -189,6 +199,22 @@ type SiteRuntimeHealthDetails = {
   modelKey: string;
 };
 
+export type SiteRuntimeHealthSnapshotEntry = {
+  siteId: number;
+  modelName: string | null;
+  scope: 'global' | 'model';
+  penaltyScore: number;
+  latencyEmaMs: number | null;
+  transientFailureStreak: number;
+  breakerLevel: number;
+  breakerUntilMs: number | null;
+  lastUpdatedAtMs: number;
+  lastFailureAtMs: number | null;
+  lastSuccessAtMs: number | null;
+  multiplier: number;
+  breakerOpen: boolean;
+};
+
 type WeightedSelectionMode = 'weighted' | 'stable_first';
 type ChannelSelectionLease = {
   expiresAtMs: number;
@@ -227,6 +253,87 @@ function appendUnavailableModel(
 
 function isPersistedUnavailableModelStillBlocking(checkedAtMs: number, nowMs = Date.now()): boolean {
   return Number.isFinite(checkedAtMs) && checkedAtMs > 0 && (nowMs - checkedAtMs) < PERSISTED_MODEL_UNAVAILABLE_TTL_MS;
+}
+
+function appendPersistedUnavailableModelDiagnosticEntries(
+  entries: PersistedUnavailableModelDiagnosticEntry[],
+  scope: 'token' | 'account',
+  ownerId: number,
+  models: Map<string, number>,
+  nowMs = Date.now(),
+): void {
+  if (!Number.isFinite(ownerId) || ownerId <= 0) return;
+  for (const [modelName, checkedAtMs] of models.entries()) {
+    if (!modelName || !Number.isFinite(checkedAtMs) || checkedAtMs <= 0) continue;
+    const stillBlocking = isPersistedUnavailableModelStillBlocking(checkedAtMs, nowMs);
+    entries.push({
+      scope,
+      ownerId,
+      modelName,
+      checkedAt: new Date(checkedAtMs).toISOString(),
+      checkedAtMs,
+      stillBlocking,
+      ageMs: Math.max(0, nowMs - checkedAtMs),
+    });
+  }
+}
+
+export async function listPersistedUnavailableModelEntries(): Promise<PersistedUnavailableModelDiagnosticEntry[]> {
+  const nowMs = Date.now();
+  const entries: PersistedUnavailableModelDiagnosticEntry[] = [];
+
+  const [tokenRows, accountRows] = await Promise.all([
+    db.select({
+      tokenId: schema.tokenModelAvailability.tokenId,
+      modelName: schema.tokenModelAvailability.modelName,
+      checkedAt: schema.tokenModelAvailability.checkedAt,
+    }).from(schema.tokenModelAvailability)
+      .where(eq(schema.tokenModelAvailability.available, false))
+      .all(),
+    db.select({
+      accountId: schema.modelAvailability.accountId,
+      modelName: schema.modelAvailability.modelName,
+      checkedAt: schema.modelAvailability.checkedAt,
+    }).from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.available, false))
+      .all(),
+  ]);
+
+  const tokenEntries = new Map<number, Map<string, number>>();
+  const accountEntries = new Map<number, Map<string, number>>();
+
+  for (const row of tokenRows) {
+    const tokenId = Math.trunc(row.tokenId);
+    if (!Number.isFinite(tokenId) || tokenId <= 0) continue;
+    const modelName = normalizeModelAlias(String(row.modelName || ''));
+    if (!modelName) continue;
+    const checkedAtMs = parseIsoTimeMs(String(row.checkedAt || '')) ?? nowMs;
+    appendUnavailableModel(tokenEntries, tokenId, modelName, checkedAtMs);
+  }
+  for (const row of accountRows) {
+    const accountId = Math.trunc(row.accountId);
+    if (!Number.isFinite(accountId) || accountId <= 0) continue;
+    const modelName = normalizeModelAlias(String(row.modelName || ''));
+    if (!modelName) continue;
+    const checkedAtMs = parseIsoTimeMs(String(row.checkedAt || '')) ?? nowMs;
+    appendUnavailableModel(accountEntries, accountId, modelName, checkedAtMs);
+  }
+
+  for (const [tokenId, models] of tokenEntries.entries()) {
+    appendPersistedUnavailableModelDiagnosticEntries(entries, 'token', tokenId, models, nowMs);
+  }
+  for (const [accountId, models] of accountEntries.entries()) {
+    appendPersistedUnavailableModelDiagnosticEntries(entries, 'account', accountId, models, nowMs);
+  }
+
+  entries.sort((left, right) => (
+    Number(right.stillBlocking) - Number(left.stillBlocking)
+    || right.checkedAtMs - left.checkedAtMs
+    || left.scope.localeCompare(right.scope, undefined, { sensitivity: 'base' })
+    || left.ownerId - right.ownerId
+    || left.modelName.localeCompare(right.modelName, undefined, { sensitivity: 'base' })
+  ));
+  return entries;
 }
 
 async function loadPersistedUnavailableModelsForCandidates(
@@ -864,6 +971,59 @@ export async function clearRoutingRuntimeState(): Promise<{
     clearedModelCircuits,
     clearedPersistedSiteRuntimeState,
   };
+}
+
+export async function listSiteRuntimeHealthSnapshots(nowMs = Date.now()): Promise<SiteRuntimeHealthSnapshotEntry[]> {
+  await ensureSiteRuntimeHealthStateLoaded();
+  const entries: SiteRuntimeHealthSnapshotEntry[] = [];
+
+  for (const [siteId, state] of siteRuntimeHealthStates.entries()) {
+    entries.push({
+      siteId,
+      modelName: null,
+      scope: 'global',
+      penaltyScore: state.penaltyScore,
+      latencyEmaMs: state.latencyEmaMs,
+      transientFailureStreak: state.transientFailureStreak,
+      breakerLevel: state.breakerLevel,
+      breakerUntilMs: state.breakerUntilMs,
+      lastUpdatedAtMs: state.lastUpdatedAtMs,
+      lastFailureAtMs: state.lastFailureAtMs,
+      lastSuccessAtMs: state.lastSuccessAtMs,
+      multiplier: getRuntimeHealthMultiplier(state, nowMs),
+      breakerOpen: isRuntimeHealthBreakerOpen(state, nowMs),
+    });
+  }
+
+  for (const [siteId, models] of siteModelRuntimeHealthStates.entries()) {
+    for (const [modelName, state] of models.entries()) {
+      entries.push({
+        siteId,
+        modelName,
+        scope: 'model',
+        penaltyScore: state.penaltyScore,
+        latencyEmaMs: state.latencyEmaMs,
+        transientFailureStreak: state.transientFailureStreak,
+        breakerLevel: state.breakerLevel,
+        breakerUntilMs: state.breakerUntilMs,
+        lastUpdatedAtMs: state.lastUpdatedAtMs,
+        lastFailureAtMs: state.lastFailureAtMs,
+        lastSuccessAtMs: state.lastSuccessAtMs,
+        multiplier: getRuntimeHealthMultiplier(state, nowMs),
+        breakerOpen: isRuntimeHealthBreakerOpen(state, nowMs),
+      });
+    }
+  }
+
+  entries.sort((left, right) => (
+    Number(right.breakerOpen) - Number(left.breakerOpen)
+    || left.multiplier - right.multiplier
+    || right.penaltyScore - left.penaltyScore
+    || left.siteId - right.siteId
+    || (left.modelName || '').localeCompare((right.modelName || ''), undefined, { sensitivity: 'base' })
+  ));
+
+  return entries;
 }
 
 export function getSiteRuntimeHealthMultiplier(siteId: number, nowMs = Date.now()): number {

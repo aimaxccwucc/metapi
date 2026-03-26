@@ -32,6 +32,10 @@ export type ModelCircuitStatusView = {
   effectiveMultiplier: number;
 };
 
+export type ModelCircuitSnapshotView = ModelCircuitSnapshot & {
+  status: ModelCircuitStatusView;
+};
+
 const circuitEntries = new Map<string, CircuitEntry>();
 
 const FAILURE_THRESHOLDS = {
@@ -227,6 +231,33 @@ export function resetModelCircuitsForChannels(channelIds: number[]): number {
     cleared += 1;
   }
   return cleared;
+}
+
+export function getModelCircuitSnapshots(nowMs = Date.now()): ModelCircuitSnapshotView[] {
+  const stateRank: Record<ModelCircuitState, number> = {
+    open: 0,
+    half_open: 1,
+    closed: 2,
+  };
+
+  const snapshots = Array.from(circuitEntries.values())
+    .map((entry) => {
+      const status = getModelCircuitStatus(entry.channelId, entry.modelName, nowMs);
+      const normalized = getEntry(entry.channelId, entry.modelName) || entry;
+      return {
+        ...normalized,
+        status,
+      };
+    })
+    .sort((left, right) => (
+      stateRank[left.state] - stateRank[right.state]
+      || right.failCount - left.failCount
+      || (right.lastErrorAt ?? 0) - (left.lastErrorAt ?? 0)
+      || left.channelId - right.channelId
+      || left.modelName.localeCompare(right.modelName, undefined, { sensitivity: 'base' })
+    ));
+
+  return snapshots;
 }
 
 export function resetAllModelCircuits(): number {

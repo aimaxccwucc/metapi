@@ -284,6 +284,202 @@ export type RouteDecision = {
   candidates: RouteDecisionCandidate[];
 };
 
+export type RouteDiagnosticsResponse = {
+  success: boolean;
+  generatedAt: string;
+  limits: {
+    itemLimit: number;
+  };
+  routeSummary: {
+    routeCount: number;
+    enabledRouteCount: number;
+    channelCount: number;
+    enabledChannelCount: number;
+  };
+  snapshotCounts: {
+    endpointRuntimeMemory: number;
+    endpointCredentialScopes: number;
+    persistedEndpointProfiles: number;
+    modelCircuits: number;
+    siteRuntimeStates: number;
+    unavailableModels: number;
+    siteProfiles: number;
+    checkinTodoSites: number;
+  };
+  endpointRuntimeMemory: {
+    total: number;
+    items: Array<{
+      key: string;
+      siteId: number | null;
+      siteName: string | null;
+      preferredEndpoint: string | null;
+      preferredUpdatedAtMs: number;
+      blockedUntilMsByEndpoint: Record<string, number | undefined>;
+      activeBlocks: string[];
+      hasFreshPreference: boolean;
+    }>;
+  };
+  endpointCredentialScopes: {
+    total: number;
+    items: Array<{
+      cacheKey: string;
+      siteId: number;
+      siteName: string | null;
+      accountId: number | null;
+      accountUsername: string | null;
+      credentialSource: string;
+      credentialFingerprint: string | null;
+    }>;
+  };
+  persistedEndpointProfiles: {
+    total: number;
+    items: Array<{
+      key: string;
+      siteId: number | null;
+      siteName: string | null;
+      preferredEndpoint: string | null;
+      preferredUpdatedAtMs: number;
+      blockedUntilMsByEndpoint: Record<string, number | undefined>;
+      activeBlocks: string[];
+      hasFreshPreference: boolean;
+    }>;
+  };
+  modelCircuits: {
+    total: number;
+    openCount: number;
+    halfOpenCount: number;
+    items: Array<{
+      channelId: number;
+      modelName: string;
+      state: string;
+      failCount: number;
+      openedAtMs: number | null;
+      openUntilMs: number | null;
+      lastErrorAtMs: number | null;
+      lastSuccessAtMs: number | null;
+      probeInFlight: boolean;
+      status: {
+        state: string;
+        isOpen: boolean;
+        isHalfOpen: boolean;
+        openUntil: number | null;
+        reason: string;
+        effectiveMultiplier: number;
+      };
+      routeId: number | null;
+      routeModelPattern: string | null;
+      accountId: number | null;
+      accountUsername: string | null;
+      siteId: number | null;
+      siteName: string | null;
+    }>;
+  };
+  siteRuntimeHealth: {
+    total: number;
+    breakerOpenCount: number;
+    penalizedCount: number;
+    items: Array<{
+      siteId: number;
+      siteName: string;
+      sitePlatform: string;
+      siteStatus: string;
+      modelName: string | null;
+      scope: 'global' | 'model';
+      penaltyScore: number;
+      latencyEmaMs: number | null;
+      transientFailureStreak: number;
+      breakerLevel: number;
+      breakerUntilMs: number | null;
+      breakerUntil: string | null;
+      lastUpdatedAtMs: number;
+      lastFailureAtMs: number | null;
+      lastFailureAt: string | null;
+      lastSuccessAtMs: number | null;
+      lastSuccessAt: string | null;
+      multiplier: number;
+      breakerOpen: boolean;
+    }>;
+  };
+  unavailableModels: {
+    total: number;
+    blockingCount: number;
+    items: Array<{
+      scope: 'token' | 'account';
+      ownerId: number;
+      tokenId: number | null;
+      accountId: number | null;
+      accountUsername: string | null;
+      siteId: number | null;
+      siteName: string | null;
+      modelName: string;
+      checkedAt: string | null;
+      checkedAtMs: number;
+      stillBlocking: boolean;
+      ageMs: number;
+    }>;
+  };
+  siteProfiles: {
+    total: number;
+    manualConfiguredCount: number;
+    items: Array<{
+      siteId: number;
+      siteName: string;
+      siteUrl: string;
+      platform: string;
+      status: string;
+      protocolMode: 'auto' | 'manual';
+      supportedEndpoints: string[];
+      preferredEndpoint: string | null;
+      protocolUpdatedAt: string | null;
+      schedulableCheckinAccounts: number;
+      activeAccounts: number;
+      expiredAccounts: number;
+      degradedAccounts: number;
+    }>;
+  };
+  checkinTodo: {
+    scheduleMode: 'cron' | 'interval';
+    intervalHours: number;
+    totalSchedulableAccounts: number;
+    dueNowCount: number;
+    manualRequiredCount: number;
+    unsupportedCount: number;
+    failedRecentCount: number;
+    attentionCount: number;
+    sites: Array<{
+      siteId: number;
+      siteName: string;
+      siteStatus: string;
+      totalSchedulableAccounts: number;
+      dueNowCount: number;
+      manualRequiredCount: number;
+      unsupportedCount: number;
+      failedRecentCount: number;
+      expiredCount: number;
+      unhealthyCount: number;
+      attentionCount: number;
+      sampleAccounts: Array<{
+        accountId: number;
+        username: string | null;
+        status: string | null;
+        dueNow: boolean;
+        requiresManual: boolean;
+        unsupported: boolean;
+        failedRecent: boolean;
+        runtimeHealth: {
+          state: string;
+          reason: string;
+          source: string;
+          checkedAt: string | null;
+        } | null;
+        latestCheckinStatus: string | null;
+        latestCheckinMessage: string | null;
+        latestCheckinAt: string | null;
+      }>;
+    }>;
+  };
+};
+
 export type RuntimeOverview = {
   service: {
     name: string;
@@ -703,6 +899,8 @@ export const api = {
       ...(options?.persistSnapshots ? { persistSnapshots: true } : {}),
     }),
   }),
+  getRouteDiagnostics: (limit?: number) =>
+    request(`/api/routes/diagnostics${buildQueryString({ limit: typeof limit === 'number' ? Math.trunc(limit) : undefined })}`) as Promise<RouteDiagnosticsResponse>,
 
   // Stats
   getDashboard: () => request('/api/stats/dashboard'),
