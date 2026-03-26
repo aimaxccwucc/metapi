@@ -5,12 +5,15 @@ import { join } from 'node:path';
 
 type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
+type ModelCircuitBreakerModule = typeof import('./modelCircuitBreaker.js');
 
 describe('TokenRouter patterns and model mapping', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let TokenRouter: TokenRouterModule['TokenRouter'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
+  let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
+  let resetAllModelCircuits: ModelCircuitBreakerModule['resetAllModelCircuits'];
   let dataDir = '';
   let idSeed = 0;
 
@@ -26,24 +29,32 @@ describe('TokenRouter patterns and model mapping', () => {
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const tokenRouterModule = await import('./tokenRouter.js');
+    const modelCircuitBreakerModule = await import('./modelCircuitBreaker.js');
     db = dbModule.db;
     schema = dbModule.schema;
     TokenRouter = tokenRouterModule.TokenRouter;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
+    resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
+    resetAllModelCircuits = modelCircuitBreakerModule.resetAllModelCircuits;
   });
 
   beforeEach(async () => {
     idSeed = 0;
+    await db.delete(schema.settings).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
     invalidateTokenRouterCache();
+    resetSiteRuntimeHealthState();
+    resetAllModelCircuits();
   });
 
   afterAll(() => {
     invalidateTokenRouterCache();
+    resetSiteRuntimeHealthState();
+    resetAllModelCircuits();
     delete process.env.DATA_DIR;
   });
 
@@ -146,9 +157,9 @@ describe('TokenRouter patterns and model mapping', () => {
     await createRouteWithSingleChannel('*', mapping);
     const router = new TokenRouter();
 
-    const exact = await router.selectChannel('claude-sonnet-4-6');
-    const glob = await router.selectChannel('claude-sonnet-4-7');
-    const regex = await router.selectChannel('gpt-4o-mini-20250101');
+    const exact = await router.previewSelectedChannel('claude-sonnet-4-6');
+    const glob = await router.previewSelectedChannel('claude-sonnet-4-7');
+    const regex = await router.previewSelectedChannel('gpt-4o-mini-20250101');
 
     expect(exact?.actualModel).toBe('target-exact');
     expect(glob?.actualModel).toBe('target-glob');

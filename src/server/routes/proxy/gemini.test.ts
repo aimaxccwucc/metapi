@@ -1304,8 +1304,18 @@ describe('gemini native proxy routes', () => {
         },
       ],
     });
-    expect(isModelAllowedByPolicyOrAllowedRoutesMock).toHaveBeenCalledWith('gemini-2.5-flash', { supportedModels: ['gemini-2.5-flash'], allowedRouteIds: [], siteWeightMultipliers: {} });
-    expect(isModelAllowedByPolicyOrAllowedRoutesMock).toHaveBeenCalledWith('gemini-2.0-flash', { supportedModels: ['gemini-2.5-flash'], allowedRouteIds: [], siteWeightMultipliers: {} });
+    expect(isModelAllowedByPolicyOrAllowedRoutesMock).toHaveBeenCalledWith('gemini-2.5-flash', expect.objectContaining({
+      supportedModels: ['gemini-2.5-flash'],
+      allowedRouteIds: [],
+      siteWeightMultipliers: {},
+      stickySessionKey: expect.any(String),
+    }));
+    expect(isModelAllowedByPolicyOrAllowedRoutesMock).toHaveBeenCalledWith('gemini-2.0-flash', expect.objectContaining({
+      supportedModels: ['gemini-2.5-flash'],
+      allowedRouteIds: [],
+      siteWeightMultipliers: {},
+      stickySessionKey: expect.any(String),
+    }));
   });
 
   it('writes a proxy log row for successful native generateContent requests', async () => {

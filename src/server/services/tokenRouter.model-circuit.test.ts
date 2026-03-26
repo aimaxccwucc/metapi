@@ -119,7 +119,11 @@ describe('TokenRouter model circuit breaker', () => {
     }).run();
 
     const router = new TokenRouter();
-    await router.recordFailure(channelA.id, { status: 401, errorText: 'unauthorized', modelName: 'claude-opus-4-6' });
+    await router.recordFailure(channelA.id, {
+      status: 403,
+      errorText: 'model not supported',
+      modelName: 'claude-opus-4-6',
+    });
 
     const opusDecision = await router.explainSelection('claude-opus-4-6');
     const channelACandidate = opusDecision.candidates.find((candidate) => candidate.channelId === channelA.id);
