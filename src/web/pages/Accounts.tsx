@@ -25,6 +25,7 @@ import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { SITE_DOCS_URL } from '../docsLink.js';
 
 type ConnectionsSegment = 'session' | 'apikey' | 'tokens';
+type AccountSortMode = SortMode | 'runtime-health-desc' | 'runtime-health-asc';
 
 const ACCOUNT_SEGMENTS: Array<{
   value: ConnectionsSegment;
@@ -83,7 +84,7 @@ export default function Accounts() {
   const [accounts, setAccounts] = useState<any[]>([]);
   const [sites, setSites] = useState<any[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [sortMode, setSortMode] = useState<SortMode>('custom');
+  const [sortMode, setSortMode] = useState<AccountSortMode>('custom');
   const [highlightAccountId, setHighlightAccountId] = useState<number | null>(null);
   const [expandedAccountIds, setExpandedAccountIds] = useState<number[]>([]);
   const isMobile = useIsMobile();
@@ -214,9 +215,51 @@ export default function Accounts() {
     return resolveAccountCredentialMode(account) === 'apikey' ? 'API Key 连接' : '未命名';
   };
 
+  const compareAccountCustomOrder = useCallback((a: any, b: any) => {
+    const aPinned = a?.isPinned ? 1 : 0;
+    const bPinned = b?.isPinned ? 1 : 0;
+    if (aPinned !== bPinned) return bPinned - aPinned;
+
+    const aOrder = Number.isFinite(a?.sortOrder) ? Number(a.sortOrder) : Number.MAX_SAFE_INTEGER;
+    const bOrder = Number.isFinite(b?.sortOrder) ? Number(b.sortOrder) : Number.MAX_SAFE_INTEGER;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+
+    return (a?.id || 0) - (b?.id || 0);
+  }, []);
+
+  const getRuntimeHealthSortRank = useCallback((account: any) => {
+    const state = resolveRuntimeHealth(account).state;
+    switch (state) {
+      case 'unhealthy':
+        return 4;
+      case 'degraded':
+        return 3;
+      case 'unknown':
+        return 2;
+      case 'disabled':
+        return 1;
+      case 'healthy':
+      default:
+        return 0;
+    }
+  }, []);
+
   const sortedAccounts = useMemo(
-    () => sortItemsForDisplay(accounts, sortMode, (account) => account.balance || 0),
-    [accounts, sortMode],
+    () => {
+      if (sortMode === 'custom' || sortMode === 'balance-desc' || sortMode === 'balance-asc') {
+        return sortItemsForDisplay(accounts, sortMode, (account) => account.balance || 0);
+      }
+
+      const list = [...accounts];
+      return list.sort((a, b) => {
+        const rankDiff = getRuntimeHealthSortRank(a) - getRuntimeHealthSortRank(b);
+        if (rankDiff !== 0) {
+          return sortMode === 'runtime-health-desc' ? -rankDiff : rankDiff;
+        }
+        return compareAccountCustomOrder(a, b);
+      });
+    },
+    [accounts, compareAccountCustomOrder, getRuntimeHealthSortRank, sortMode],
   );
   const visibleAccounts = useMemo(() => {
     if (activeSegment === 'tokens') return [];
@@ -235,6 +278,33 @@ export default function Accounts() {
   const allVisibleAccountsSelected = visibleAccounts.length > 0 && visibleAccounts.every((account) => selectedAccountIds.includes(account.id));
   const verifyFailureHint = buildVerifyFailureHint(verifyResult);
   const addAccountPrereqHint = buildAddAccountPrereqHint(verifyResult);
+  const accountSortOptions: Array<{ value: AccountSortMode; label: string }> = [
+    { value: 'custom', label: '自定义排序' },
+    { value: 'balance-desc', label: '余额高到低' },
+    { value: 'balance-asc', label: '余额低到高' },
+    { value: 'runtime-health-desc', label: '运行健康状态: 异常优先' },
+    { value: 'runtime-health-asc', label: '运行健康状态: 健康优先' },
+  ];
+
+  const getAccountHeaderSortMeta = (field: 'balance' | 'runtimeHealth') => {
+    if (field === 'balance') {
+      if (sortMode === 'balance-desc') return { active: true, direction: 'desc' as const };
+      if (sortMode === 'balance-asc') return { active: true, direction: 'asc' as const };
+      return { active: false, direction: null };
+    }
+    if (sortMode === 'runtime-health-desc') return { active: true, direction: 'desc' as const };
+    if (sortMode === 'runtime-health-asc') return { active: true, direction: 'asc' as const };
+    return { active: false, direction: null };
+  };
+
+  const toggleAccountHeaderSort = (field: 'balance' | 'runtimeHealth') => {
+    setSortMode((current) => {
+      if (field === 'balance') {
+        return current === 'balance-desc' ? 'balance-asc' : 'balance-desc';
+      }
+      return current === 'runtime-health-desc' ? 'runtime-health-asc' : 'runtime-health-desc';
+    });
+  };
 
   const setSegment = (nextSegment: ConnectionsSegment) => {
     const params = new URLSearchParams(location.search);
@@ -958,12 +1028,8 @@ export default function Accounts() {
                   <ModernSelect
                     size="sm"
                     value={sortMode}
-                    onChange={(nextValue) => setSortMode(nextValue as SortMode)}
-                    options={[
-                      { value: 'custom', label: '自定义排序' },
-                      { value: 'balance-desc', label: '余额高到低' },
-                      { value: 'balance-asc', label: '余额低到高' },
-                    ]}
+                    onChange={(nextValue) => setSortMode(nextValue as AccountSortMode)}
+                    options={accountSortOptions}
                     placeholder="自定义排序"
                   />
                 </div>
@@ -1012,12 +1078,8 @@ export default function Accounts() {
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>排序方式</div>
             <ModernSelect
               value={sortMode}
-              onChange={(nextValue) => setSortMode(nextValue as SortMode)}
-              options={[
-                { value: 'custom', label: '自定义排序' },
-                { value: 'balance-desc', label: '余额高到低' },
-                { value: 'balance-asc', label: '余额低到高' },
-              ]}
+              onChange={(nextValue) => setSortMode(nextValue as AccountSortMode)}
+              options={accountSortOptions}
               placeholder="自定义排序"
             />
           </div>
@@ -1867,8 +1929,20 @@ export default function Accounts() {
                     </th>
                     <th>连接名称</th>
                     <th>站点</th>
-                    <th>运行健康状态</th>
-                    <th>余额</th>
+                    <th
+                      onClick={() => toggleAccountHeaderSort('runtimeHealth')}
+                      style={{ cursor: 'pointer', userSelect: 'none' }}
+                      data-testid="accounts-sort-runtime-health"
+                    >
+                      运行健康状态 {getAccountHeaderSortMeta('runtimeHealth').active ? (getAccountHeaderSortMeta('runtimeHealth').direction === 'desc' ? '↓' : '↑') : ''}
+                    </th>
+                    <th
+                      onClick={() => toggleAccountHeaderSort('balance')}
+                      style={{ cursor: 'pointer', userSelect: 'none' }}
+                      data-testid="accounts-sort-balance"
+                    >
+                      余额 {getAccountHeaderSortMeta('balance').active ? (getAccountHeaderSortMeta('balance').direction === 'desc' ? '↓' : '↑') : ''}
+                    </th>
                     <th>已用</th>
                     <th>签到</th>
                     <th className="accounts-actions-col" style={{ textAlign: 'right' }}>操作</th>

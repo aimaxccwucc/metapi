@@ -27,6 +27,8 @@ import {
   type SiteForm,
 } from './helpers/sitesEditor.js';
 
+type SiteSortMode = SortMode | 'reachability-desc' | 'reachability-asc';
+
 type SiteSubscriptionSummary = {
   activeCount: number;
   totalUsedUsd: number;
@@ -261,7 +263,7 @@ export default function Sites() {
   const navigate = useNavigate();
   const [sites, setSites] = useState<SiteRow[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [sortMode, setSortMode] = useState<SortMode>('custom');
+  const [sortMode, setSortMode] = useState<SiteSortMode>('custom');
   const [highlightSiteId, setHighlightSiteId] = useState<number | null>(null);
   const [editor, setEditor] = useState<SiteEditorState | null>(null);
   const [form, setForm] = useState<SiteForm>(emptySiteForm());
@@ -397,11 +399,79 @@ export default function Sites() {
     );
   };
 
+  const compareSiteCustomOrder = useMemo(() => (
+    (a: SiteRow, b: SiteRow) => {
+      const aPinned = a.isPinned ? 1 : 0;
+      const bPinned = b.isPinned ? 1 : 0;
+      if (aPinned !== bPinned) return bPinned - aPinned;
+
+      const aOrder = Number.isFinite(a.sortOrder as number) ? Number(a.sortOrder) : Number.MAX_SAFE_INTEGER;
+      const bOrder = Number.isFinite(b.sortOrder as number) ? Number(b.sortOrder) : Number.MAX_SAFE_INTEGER;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+
+      return a.id - b.id;
+    }
+  ), []);
+
+  const getSiteReachabilityRank = useMemo(() => (
+    (site: SiteRow) => {
+      switch (site.healthStatus || 'unknown') {
+        case 'unreachable':
+          return 2;
+        case 'unknown':
+          return 1;
+        case 'alive':
+        default:
+          return 0;
+      }
+    }
+  ), []);
+
   const sortedSites = useMemo(
-    () => sortItemsForDisplay(sites, sortMode, (site) => site.totalBalance || 0),
-    [sites, sortMode],
+    () => {
+      if (sortMode === 'custom' || sortMode === 'balance-desc' || sortMode === 'balance-asc') {
+        return sortItemsForDisplay(sites, sortMode, (site) => site.totalBalance || 0);
+      }
+
+      const list = [...sites];
+      return list.sort((a, b) => {
+        const rankDiff = getSiteReachabilityRank(a) - getSiteReachabilityRank(b);
+        if (rankDiff !== 0) {
+          return sortMode === 'reachability-desc' ? -rankDiff : rankDiff;
+        }
+        return compareSiteCustomOrder(a, b);
+      });
+    },
+    [compareSiteCustomOrder, getSiteReachabilityRank, sites, sortMode],
   );
   const allVisibleSitesSelected = sortedSites.length > 0 && sortedSites.every((site) => selectedSiteIds.includes(site.id));
+  const siteSortOptions: Array<{ value: SiteSortMode; label: string }> = [
+    { value: 'custom', label: '自定义排序' },
+    { value: 'balance-desc', label: '余额高到低' },
+    { value: 'balance-asc', label: '余额低到高' },
+    { value: 'reachability-desc', label: '可达状态: 异常优先' },
+    { value: 'reachability-asc', label: '可达状态: 可达优先' },
+  ];
+
+  const getSiteHeaderSortMeta = (field: 'balance' | 'reachability') => {
+    if (field === 'balance') {
+      if (sortMode === 'balance-desc') return { active: true, direction: 'desc' as const };
+      if (sortMode === 'balance-asc') return { active: true, direction: 'asc' as const };
+      return { active: false, direction: null };
+    }
+    if (sortMode === 'reachability-desc') return { active: true, direction: 'desc' as const };
+    if (sortMode === 'reachability-asc') return { active: true, direction: 'asc' as const };
+    return { active: false, direction: null };
+  };
+
+  const toggleSiteHeaderSort = (field: 'balance' | 'reachability') => {
+    setSortMode((current) => {
+      if (field === 'balance') {
+        return current === 'balance-desc' ? 'balance-asc' : 'balance-desc';
+      }
+      return current === 'reachability-desc' ? 'reachability-asc' : 'reachability-desc';
+    });
+  };
 
   const platformOptions = useMemo(() => {
     const current = form.platform.trim();
@@ -843,12 +913,8 @@ export default function Sites() {
               <ModernSelect
                 size="sm"
                 value={sortMode}
-                onChange={(nextValue) => setSortMode(nextValue as SortMode)}
-                options={[
-                  { value: 'custom', label: '自定义排序' },
-                  { value: 'balance-desc', label: '余额高到低' },
-                  { value: 'balance-asc', label: '余额低到高' },
-                ]}
+                onChange={(nextValue) => setSortMode(nextValue as SiteSortMode)}
+                options={siteSortOptions}
                 placeholder="自定义排序"
               />
             </div>
@@ -865,12 +931,8 @@ export default function Sites() {
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>排序方式</div>
             <ModernSelect
               value={sortMode}
-              onChange={(nextValue) => setSortMode(nextValue as SortMode)}
-              options={[
-                { value: 'custom', label: '自定义排序' },
-                { value: 'balance-desc', label: '余额高到低' },
-                { value: 'balance-asc', label: '余额低到高' },
-              ]}
+              onChange={(nextValue) => setSortMode(nextValue as SiteSortMode)}
+              options={siteSortOptions}
               placeholder="自定义排序"
             />
           </div>
@@ -1623,9 +1685,21 @@ export default function Sites() {
                   </th>
                   <th>名称</th>
                   <th>外部签到站URL</th>
-                  <th>总余额</th>
+                  <th
+                    onClick={() => toggleSiteHeaderSort('balance')}
+                    style={{ cursor: 'pointer', userSelect: 'none' }}
+                    data-testid="sites-sort-balance"
+                  >
+                    总余额 {getSiteHeaderSortMeta('balance').active ? (getSiteHeaderSortMeta('balance').direction === 'desc' ? '↓' : '↑') : ''}
+                  </th>
                   <th>状态</th>
-                  <th>可达状态</th>
+                  <th
+                    onClick={() => toggleSiteHeaderSort('reachability')}
+                    style={{ cursor: 'pointer', userSelect: 'none' }}
+                    data-testid="sites-sort-reachability"
+                  >
+                    可达状态 {getSiteHeaderSortMeta('reachability').active ? (getSiteHeaderSortMeta('reachability').direction === 'desc' ? '↓' : '↑') : ''}
+                  </th>
                   <th>系统代理</th>
                   <th>权重</th>
                   <th>平台</th>
