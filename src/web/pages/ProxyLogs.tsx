@@ -1,4 +1,4 @@
-import React, { useDeferredValue, useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import React, { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   api,
@@ -342,7 +342,7 @@ export default function ProxyLogs() {
       page,
       pageSize,
       status: statusFilter,
-      search: searchInput,
+      search: deferredSearchInput,
       client: clientFilter,
       siteId: siteFilter,
       from: fromInput,
@@ -350,7 +350,7 @@ export default function ProxyLogs() {
     });
     if (nextSearch === location.search) return;
     navigate({ pathname: location.pathname, search: nextSearch }, { replace: true });
-  }, [clientFilter, fromInput, location.pathname, location.search, navigate, page, pageSize, searchInput, siteFilter, statusFilter, toInput]);
+  }, [clientFilter, deferredSearchInput, fromInput, location.pathname, location.search, navigate, page, pageSize, siteFilter, statusFilter, toInput]);
 
   useEffect(() => {
     let cancelled = false;
@@ -464,10 +464,12 @@ export default function ProxyLogs() {
       };
       const data = await api.getProxyLogs(params);
       if (seq !== loadSeq.current) return;
-      setLogs(Array.isArray(data.items) ? data.items : []);
-      setTotal(Number(data.total || 0));
-      setSummary(data.summary || EMPTY_SUMMARY);
-      setClientOptions(Array.isArray(data.clientOptions) ? data.clientOptions : []);
+      startTransition(() => {
+        setLogs(Array.isArray(data.items) ? data.items : []);
+        setTotal(Number(data.total || 0));
+        setSummary(data.summary || EMPTY_SUMMARY);
+        setClientOptions(Array.isArray(data.clientOptions) ? data.clientOptions : []);
+      });
     } catch (e: any) {
       if (seq !== loadSeq.current) return;
       if (!silent) toast.error(e.message || '加载日志失败');

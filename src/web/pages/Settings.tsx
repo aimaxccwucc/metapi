@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
@@ -278,6 +278,8 @@ export default function Settings() {
   const [selectorRoutes, setSelectorRoutes] = useState<RouteSelectorItem[]>([]);
   const [selectorModelSearch, setSelectorModelSearch] = useState('');
   const [selectorGroupSearch, setSelectorGroupSearch] = useState('');
+  const deferredSelectorModelSearch = useDeferredValue(selectorModelSearch.trim());
+  const deferredSelectorGroupSearch = useDeferredValue(selectorGroupSearch.trim());
   const [visibleSelectorModelCount, setVisibleSelectorModelCount] = useState(SETTINGS_SELECTOR_RENDER_CHUNK);
   const [visibleSelectorGroupCount, setVisibleSelectorGroupCount] = useState(SETTINGS_SELECTOR_RENDER_CHUNK);
   const [downstreamCreate, setDownstreamCreate] = useState<DownstreamCreateForm>({
@@ -312,19 +314,19 @@ export default function Settings() {
   ), [selectorRoutes]);
 
   const filteredExactModelOptions = useMemo(() => {
-    const query = selectorModelSearch.trim();
+    const query = deferredSelectorModelSearch;
     if (!query) return exactModelOptions;
     return exactModelOptions.filter((modelName) => fuzzyMatch(modelName, query));
-  }, [exactModelOptions, selectorModelSearch]);
+  }, [deferredSelectorModelSearch, exactModelOptions]);
 
   const filteredGroupRouteOptions = useMemo(() => {
-    const query = selectorGroupSearch.trim();
+    const query = deferredSelectorGroupSearch;
     if (!query) return groupRouteOptions;
     return groupRouteOptions.filter((route) => {
       const matchText = `${routeTitle(route)} ${route.modelPattern} ${route.displayName || ''}`;
       return fuzzyMatch(matchText, query);
     });
-  }, [groupRouteOptions, selectorGroupSearch]);
+  }, [deferredSelectorGroupSearch, groupRouteOptions]);
   const selectedDownstreamModelSet = useMemo(
     () => new Set(downstreamCreate.selectedModels),
     [downstreamCreate.selectedModels],
@@ -1913,7 +1915,7 @@ export default function Settings() {
                                 background: checked
                                   ? 'color-mix(in srgb, var(--color-primary) 9%, var(--color-bg-card))'
                                   : 'var(--color-bg-card)',
-                                transition: 'all 0.15s ease',
+                                transition: 'border-color 0.15s ease, background-color 0.15s ease',
                               }}
                             >
                               <input
@@ -2021,7 +2023,7 @@ export default function Settings() {
                                 background: checked
                                   ? 'color-mix(in srgb, var(--color-primary) 9%, var(--color-bg-card))'
                                   : 'var(--color-bg-card)',
-                                transition: 'all 0.15s ease',
+                                transition: 'border-color 0.15s ease, background-color 0.15s ease',
                               }}
                             >
                               <input

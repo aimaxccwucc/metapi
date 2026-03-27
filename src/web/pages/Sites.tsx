@@ -1108,7 +1108,7 @@ export default function Sites() {
                 border: `1px solid ${form.platform.trim() ? 'color-mix(in srgb, var(--color-success) 48%, transparent)' : 'var(--color-border)'}`,
                 borderRadius: 'var(--radius-sm)',
                 background: form.platform.trim() ? 'color-mix(in srgb, var(--color-success) 10%, var(--color-bg))' : 'var(--color-bg)',
-                transition: 'all 0.2s',
+                transition: 'border-color 0.2s ease, background-color 0.2s ease',
               }}
             >
               <ModernSelect
@@ -1704,7 +1704,7 @@ export default function Sites() {
                       else rowRefs.current.delete(site.id);
                     }}
                     onClick={(event) => handleSiteRowClick(site.id, event)}
-                    className={`animate-slide-up stagger-${Math.min(i + 1, 5)} row-selectable ${selectedSiteIds.includes(site.id) ? 'row-selected' : ''} ${highlightSiteId === site.id ? 'row-focus-highlight' : ''}`.trim()}
+                    className={`row-selectable ${selectedSiteIds.includes(site.id) ? 'row-selected' : ''} ${highlightSiteId === site.id ? 'row-focus-highlight' : ''}`.trim()}
                   >
                     <td>
                       <input

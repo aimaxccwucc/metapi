@@ -314,6 +314,67 @@ describe('Accounts edit panel', () => {
       root?.unmount();
     }
   });
-});
 
+  it('renders model modal progressively for large model lists', async () => {
+    apiMock.getAccountModels.mockResolvedValue({
+      siteId: 1,
+      siteName: 'Site A',
+      models: Array.from({ length: 120 }, (_, index) => ({
+        name: `model-${String(index + 1).padStart(3, '0')}`,
+        latencyMs: index,
+        disabled: false,
+      })),
+      totalCount: 120,
+      disabledCount: 0,
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/accounts']}>
+            <ToastProvider>
+              <Accounts />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const modelButton = root.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('btn-link-info')
+        && collectText(node).trim() === '模型'
+      ));
+
+      await act(async () => {
+        await modelButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      let rendered = collectText(root.root);
+      expect(rendered).toContain('model-080');
+      expect(rendered).not.toContain('model-120');
+      expect(rendered).toContain('加载更多模型 (80/120)');
+
+      const loadMoreButton = root.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).includes('加载更多模型')
+      ));
+
+      await act(async () => {
+        loadMoreButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      rendered = collectText(root.root);
+      expect(rendered).toContain('model-120');
+    } finally {
+      root?.unmount();
+    }
+  });
+});
 

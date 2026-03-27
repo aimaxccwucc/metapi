@@ -1,4 +1,4 @@
-import { Suspense, lazy, useState, useMemo } from 'react';
+import { Suspense, lazy, startTransition, useState, useMemo } from 'react';
 import type { IPieChartSpec } from '@visactor/vchart';
 import { useThemeLabelColor } from '../useThemeLabelColor.js';
 
@@ -95,6 +95,13 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
   const [viewMode, setViewMode] = useState<ViewMode>('balance');
   const labelColor = useThemeLabelColor();
 
+  const handleViewModeChange = (nextMode: ViewMode) => {
+    if (nextMode === viewMode) return;
+    startTransition(() => {
+      setViewMode(nextMode);
+    });
+  };
+
   const chartData = useMemo(() => {
     if (!data || data.length === 0) return [];
     return data.map((item) => ({
@@ -148,7 +155,7 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
         },
       },
       color: PIE_COLORS,
-      animation: true,
+      animation: false,
       background: 'transparent',
     } satisfies Partial<IPieChartSpec>;
   }, [chartData, hasData, labelColor]);
@@ -218,7 +225,7 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
           }}
         >
           <button
-            onClick={() => setViewMode('balance')}
+            onClick={() => handleViewModeChange('balance')}
             style={{
               padding: '5px 14px',
               fontSize: 12,
@@ -226,7 +233,7 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
               border: 'none',
               borderRadius: 'calc(var(--radius-sm) - 2px)',
               cursor: 'pointer',
-              transition: 'all 0.2s ease',
+              transition: 'background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease',
               background: viewMode === 'balance' ? 'var(--color-primary)' : 'transparent',
               color: viewMode === 'balance' ? '#ffffff' : 'var(--color-text-secondary)',
               boxShadow: viewMode === 'balance' ? 'var(--shadow-sm)' : 'none',
@@ -235,7 +242,7 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
             余额分布
           </button>
           <button
-            onClick={() => setViewMode('spend')}
+            onClick={() => handleViewModeChange('spend')}
             style={{
               padding: '5px 14px',
               fontSize: 12,
@@ -243,7 +250,7 @@ export default function SiteDistributionChart({ data, loading }: SiteDistributio
               border: 'none',
               borderRadius: 'calc(var(--radius-sm) - 2px)',
               cursor: 'pointer',
-              transition: 'all 0.2s ease',
+              transition: 'background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease',
               background: viewMode === 'spend' ? 'var(--color-primary)' : 'transparent',
               color: viewMode === 'spend' ? '#ffffff' : 'var(--color-text-secondary)',
               boxShadow: viewMode === 'spend' ? 'var(--shadow-sm)' : 'none',

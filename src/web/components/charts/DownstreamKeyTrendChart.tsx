@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useMemo, useState } from 'react';
+import React, { Suspense, lazy, startTransition, useMemo, useState } from 'react';
 import type { IAreaChartSpec } from '@visactor/vchart';
 
 const AreaChartRenderer = lazy(() => import('./AreaChartRenderer.js'));
@@ -34,6 +34,13 @@ export default function DownstreamKeyTrendChart({
 }) {
   const [metric, setMetric] = useState<Metric>('tokens');
 
+  const handleMetricChange = (nextMetric: Metric) => {
+    if (nextMetric === metric) return;
+    startTransition(() => {
+      setMetric(nextMetric);
+    });
+  };
+
   const flatData = useMemo(() => {
     if (!Array.isArray(buckets) || buckets.length === 0) return [];
     return buckets
@@ -64,7 +71,7 @@ export default function DownstreamKeyTrendChart({
     return (
       <div style={containerStyle}>
         <div style={headerStyle}>
-          <MetricToggle metric={metric} onChange={setMetric} />
+          <MetricToggle metric={metric} onChange={handleMetricChange} />
         </div>
         <div className="empty-state" style={{ padding: 32 }}>
           <div className="empty-state-title">暂无趋势数据</div>
@@ -123,17 +130,14 @@ export default function DownstreamKeyTrendChart({
     },
     color: ['var(--color-primary)'],
     background: 'transparent',
-    animationAppear: {
-      area: { type: 'fadeIn', duration: 500, easing: 'cubicOut' },
-      line: { type: 'clipIn', duration: 700, easing: 'cubicOut' },
-    },
+    animation: false,
     padding: { left: 8, right: 16, top: 8, bottom: 8 },
   };
 
   return (
     <div style={containerStyle}>
       <div style={headerStyle}>
-        <MetricToggle metric={metric} onChange={setMetric} />
+        <MetricToggle metric={metric} onChange={handleMetricChange} />
       </div>
       <div style={{ width: '100%', height }}>
         <Suspense fallback={<div className="skeleton" style={{ width: '100%', height: '100%', borderRadius: 'var(--radius-sm)' }} />}>
@@ -198,7 +202,7 @@ const toggleBtnBase: React.CSSProperties = {
   fontWeight: 500,
   cursor: 'pointer',
   border: 'none',
-  transition: 'all 0.2s ease',
+  transition: 'background-color 0.2s ease, color 0.2s ease',
   fontFamily: 'inherit',
 };
 

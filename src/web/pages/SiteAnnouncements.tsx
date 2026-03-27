@@ -210,7 +210,7 @@ export default function SiteAnnouncements() {
                 if (node) rowRefs.current.set(row.id, node);
                 else rowRefs.current.delete(row.id);
               }}
-              className={`animate-slide-up stagger-${Math.min(index + 1, 5)} ${highlightAnnouncementId === row.id ? 'row-focus-highlight' : ''}`.trim()}
+              className={`${highlightAnnouncementId === row.id ? 'row-focus-highlight' : ''}`.trim()}
               style={{
                 padding: '16px 18px',
                 borderBottom: index === rows.length - 1 ? 'none' : '1px solid var(--color-border-light)',

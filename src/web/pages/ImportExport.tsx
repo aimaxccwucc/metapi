@@ -587,7 +587,7 @@ export default function ImportExport() {
                 padding: '28px 20px',
                 textAlign: 'center',
                 cursor: 'pointer',
-                transition: 'all 0.2s ease',
+                transition: 'border-color 0.2s ease, background-color 0.2s ease',
                 background: dragOver ? 'var(--color-primary-light)' : 'var(--color-bg)',
               }}
             >

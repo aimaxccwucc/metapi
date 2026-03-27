@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, useState } from 'react';
+import { Suspense, lazy, startTransition, useMemo, useState } from 'react';
 import { InlineBrandIcon } from './BrandIcon.js';
 import { formatCompactTokenMetric } from '../numberFormat.js';
 import { useThemeLabelColor } from './useThemeLabelColor.js';
@@ -77,6 +77,13 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('spend');
   const labelColor = useThemeLabelColor();
 
+  const handleTabChange = (nextTab: TabKey) => {
+    if (nextTab === activeTab) return;
+    startTransition(() => {
+      setActiveTab(nextTab);
+    });
+  };
+
   const totals = {
     spend: toSafeNumber(data?.totals?.spend),
     calls: toSafeNumber(data?.totals?.calls),
@@ -99,7 +106,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
     bar: { style: { cornerRadius: [0, 6, 6, 0], fill: { gradient: 'linear' as const, x0: 0, y0: 0, x1: 1, y1: 0, stops: [{ offset: 0, color: '#4f46e5' }, { offset: 1, color: '#818cf8' }] } } },
     label: { visible: true, position: 'right', formatter: '{value}', style: { fontSize: 11, fill: labelColor, stroke: 'transparent' } },
     axes: [{ orient: 'left', label: { style: { fontSize: 11, fill: labelColor } } }, { orient: 'bottom', visible: false }],
-    animation: true, background: 'transparent',
+    animation: false, background: 'transparent',
   }), [spendDistribution, labelColor]);
 
   const trendSpec = useMemo<Partial<IAreaChartSpec>>(() => ({
@@ -118,7 +125,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
         }],
       },
     },
-    animation: true, background: 'transparent',
+    animation: false, background: 'transparent',
   }), [spendTrend, labelColor]);
 
   const callsPieSpec = useMemo<Partial<IPieChartSpec>>(() => ({
@@ -129,7 +136,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
     pie: { style: { cornerRadius: 4, padAngle: 0.02 } },
     label: { visible: true, position: 'outside', formatter: '{_percent_}%', style: { fill: labelColor } },
     legends: { visible: false },
-    animation: true,
+    animation: false,
     color: ['#4f46e5', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6'],
     background: 'transparent',
   }), [callsDistribution, labelColor]);
@@ -161,7 +168,7 @@ export default function ModelAnalysisPanel({ data }: ModelAnalysisPanelProps) {
             <button
               key={tab.key}
               className={`pill-tab ${activeTab === tab.key ? 'active' : ''}`}
-              onClick={() => setActiveTab(tab.key)}
+              onClick={() => handleTabChange(tab.key)}
             >
               {tab.icon} {tab.label}
             </button>

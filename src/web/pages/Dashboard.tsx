@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState, useCallback, useRef } from 'react';
+import { Suspense, lazy, startTransition, useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api, type RuntimeOverview } from '../api.js';
 import { useToast } from '../components/Toast.js';
@@ -21,6 +21,13 @@ function getGreeting(): string {
 function safeNumber(value: unknown): number {
   if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value)) return 0;
   return value;
+}
+
+function getMonotonicNow(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
 }
 
 function ChartFallback({ height = 280 }: { height?: number }) {
@@ -65,6 +72,8 @@ type SiteSpeedState =
   | { status: 'timeout' }
   | { status: 'done'; ms: number }
   | undefined;
+
+type ResolvedSiteSpeedState = Exclude<SiteSpeedState, undefined>;
 
 type SiteAvailabilityBucket = {
   startUtc?: string | null;
@@ -230,12 +239,42 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
   const toast = useToast();
   const normalizedAdminName = (adminName || '').trim() || '\u7ba1\u7406\u5458';
   const analyticsSection = useDeferredSectionVisible();
+  const modelAnalysisSection = useDeferredSectionVisible();
 
   const getSiteSpeedKey = (site: any, idx: number) => String(site?.id ?? idx);
 
-  const setSiteSpeedState = (siteKey: string, nextState: SiteSpeedState) => {
-    setSiteSpeedStates((current) => ({ ...current, [siteKey]: nextState }));
-  };
+  const mergeSiteSpeedStates = useCallback(
+    (patch: Record<string, SiteSpeedState>, lowPriority = true) => {
+      if (Object.keys(patch).length === 0) return;
+      const applyPatch = () => {
+        setSiteSpeedStates((current) => ({ ...current, ...patch }));
+      };
+      if (lowPriority) {
+        startTransition(applyPatch);
+      } else {
+        applyPatch();
+      }
+    },
+    [],
+  );
+
+  const setSiteSpeedState = useCallback(
+    (siteKey: string, nextState: SiteSpeedState, lowPriority = true) => {
+      mergeSiteSpeedStates({ [siteKey]: nextState }, lowPriority);
+    },
+    [mergeSiteSpeedStates],
+  );
+
+  const measureSiteSpeed = useCallback(async (siteUrl: string): Promise<ResolvedSiteSpeedState> => {
+    try {
+      const start = getMonotonicNow();
+      await fetch(`${siteUrl}/v1/models`, { method: 'GET', mode: 'no-cors' });
+      const ms = Math.round(getMonotonicNow() - start);
+      return { status: 'done', ms };
+    } catch {
+      return { status: 'timeout' };
+    }
+  }, []);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -244,7 +283,9 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
 
     try {
       const result = await api.getDashboard();
-      setData(result);
+      startTransition(() => {
+        setData(result);
+      });
     } catch (err: any) {
       const message = err?.message || '加载仪表盘失败';
       setError(message);
@@ -259,8 +300,10 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
     if (!silent) setRuntimeLoading(true);
     try {
       const result = await api.getRuntimeOverview();
-      setRuntimeOverview(result);
-      setRuntimeError(null);
+      startTransition(() => {
+        setRuntimeOverview(result);
+        setRuntimeError(null);
+      });
     } catch (err: any) {
       const message = err?.message || '加载运行时概览失败';
       setRuntimeError(message);
@@ -278,11 +321,13 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
         api.getSiteTrend(trendDays),
         api.getSites(),
       ]);
-      setSiteDistribution(distRes.distribution || []);
-      setSiteTrend(trendRes.trend || []);
       const siteRows = Array.isArray(sitesRes) ? sitesRes : (sitesRes?.sites || []);
-      setSites(siteRows.filter((site: any) => site?.status !== 'disabled'));
-      setSiteSpeedStates({});
+      startTransition(() => {
+        setSiteDistribution(distRes.distribution || []);
+        setSiteTrend(trendRes.trend || []);
+        setSites(siteRows.filter((site: any) => site?.status !== 'disabled'));
+        setSiteSpeedStates({});
+      });
     } catch (err) {
       console.error('Failed to load site stats:', err);
     } finally {
@@ -311,7 +356,11 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
       try {
         const next = await api.getDashboard();
-        if (!disposed) setData(next);
+        if (!disposed) {
+          startTransition(() => {
+            setData(next);
+          });
+        }
       } catch {
         // ignore polling errors
       }
@@ -322,9 +371,11 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
       try {
         const next = await api.getRuntimeOverview();
         if (!disposed) {
-          setRuntimeOverview(next);
-          setRuntimeError(null);
-          setRuntimeLoading(false);
+          startTransition(() => {
+            setRuntimeOverview(next);
+            setRuntimeError(null);
+            setRuntimeLoading(false);
+          });
         }
       } catch {
         // ignore polling errors
@@ -518,8 +569,6 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
             height: 6,
             borderRadius: '50%',
             background: color,
-            boxShadow: `0 0 4px ${color}`,
-            animation: 'pulse 1.5s ease-in-out infinite',
             marginRight: 3,
             verticalAlign: 'middle',
           }}
@@ -810,7 +859,7 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
                 padding: '4px 12px', borderRadius: 6, fontSize: 12, fontWeight: 500, border: 'none', cursor: 'pointer',
                 background: trendDays === d ? 'var(--color-primary)' : 'var(--color-bg)',
                 color: trendDays === d ? 'white' : 'var(--color-text-secondary)',
-                transition: 'all 0.2s ease',
+                transition: 'background-color 0.2s ease, color 0.2s ease',
               }}>
               {d}天
             </button>
@@ -819,14 +868,14 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 16, marginBottom: 24 }}>
-        <div className="chart-panel-enter animate-slide-up stagger-6">
+        <div className="chart-panel-enter">
           {analyticsSection.visible ? (
             <Suspense fallback={<ChartFallback height={320} />}>
               <SiteDistributionChart data={siteDistribution} loading={siteLoading} />
             </Suspense>
           ) : <ChartFallback height={320} />}
         </div>
-        <div className="chart-panel-enter animate-slide-up stagger-7">
+        <div className="chart-panel-enter">
           {analyticsSection.visible ? (
             <Suspense fallback={<ChartFallback height={320} />}>
               <SiteTrendChart data={siteTrend} loading={siteLoading} />
@@ -835,7 +884,7 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
         </div>
       </div>
 
-      <div className="chart-container animate-slide-up stagger-8 site-observability-panel">
+      <div className="chart-container site-observability-panel">
         <div className="site-observability-header">
           <div>
             <div className="site-observability-title">
@@ -938,21 +987,21 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 300px', gap: 16 }}>
-        <div className="chart-container animate-slide-up stagger-8">
+      <div ref={modelAnalysisSection.ref} className="chart-container">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 14, fontWeight: 600, color: 'var(--color-text-primary)' }}>
               <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
               模型数据分析
             </div>
           </div>
-          {analyticsSection.visible ? (
+          {modelAnalysisSection.visible ? (
             <Suspense fallback={<ChartFallback height={260} />}>
               <ModelAnalysisPanel data={data?.modelAnalysis} />
             </Suspense>
           ) : <ChartFallback height={260} />}
         </div>
 
-        <div className="chart-container animate-slide-up stagger-9" style={{ display: 'flex', flexDirection: 'column' }}>
+        <div className="chart-container" style={{ display: 'flex', flexDirection: 'column' }}>
           <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--color-text-primary)' }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" /></svg>
@@ -963,18 +1012,18 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
                 className="btn btn-ghost"
                 style={{ fontSize: 11, padding: '3px 10px', border: '1px solid var(--color-border)', borderRadius: 6, display: 'inline-flex', alignItems: 'center', gap: 4 }}
                 onClick={async () => {
-                  await Promise.all(sites.map(async (s: any, idx: number) => {
+                  const loadingPatch = sites.reduce<Record<string, SiteSpeedState>>((patch, s: any, idx: number) => {
+                    patch[getSiteSpeedKey(s, idx)] = { status: 'loading' };
+                    return patch;
+                  }, {});
+                  mergeSiteSpeedStates(loadingPatch, false);
+
+                  const resultEntries = await Promise.all(sites.map(async (s: any, idx: number) => {
                     const siteKey = getSiteSpeedKey(s, idx);
-                    setSiteSpeedState(siteKey, { status: 'loading' });
-                    try {
-                      const start = performance.now();
-                      await fetch(`${s.url}/v1/models`, { method: 'GET', mode: 'no-cors' });
-                      const ms = Math.round(performance.now() - start);
-                      setSiteSpeedState(siteKey, { status: 'done', ms });
-                    } catch {
-                      setSiteSpeedState(siteKey, { status: 'timeout' });
-                    }
+                    const nextState = await measureSiteSpeed(s.url);
+                    return [siteKey, nextState] as const;
                   }));
+                  mergeSiteSpeedStates(Object.fromEntries(resultEntries) as Record<string, SiteSpeedState>);
                   toast.success('全部测速完成');
                 }}
               >
@@ -994,15 +1043,12 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
                       style={{ fontSize: 11, padding: '2px 8px', border: '1px solid var(--color-border)', borderRadius: 6, display: 'inline-flex', alignItems: 'center', gap: 3 }}
                       onClick={async () => {
                         const siteKey = getSiteSpeedKey(site, idx);
-                        setSiteSpeedState(siteKey, { status: 'loading' });
-                        try {
-                          const start = performance.now();
-                          await fetch(`${site.url}/v1/models`, { method: 'GET', mode: 'no-cors' });
-                          const ms = Math.round(performance.now() - start);
-                          setSiteSpeedState(siteKey, { status: 'done', ms });
-                          toast.success(`${site.name}: ${ms}ms`);
-                        } catch {
-                          setSiteSpeedState(siteKey, { status: 'timeout' });
+                        setSiteSpeedState(siteKey, { status: 'loading' }, false);
+                        const nextState = await measureSiteSpeed(site.url);
+                        setSiteSpeedState(siteKey, nextState);
+                        if (nextState.status === 'done') {
+                          toast.success(`${site.name}: ${nextState.ms}ms`);
+                        } else {
                           toast.error(`${site.name}: 测速失败`);
                         }
                       }}

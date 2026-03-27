@@ -1341,7 +1341,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                       else rowRefs.current.delete(token.id);
                     }}
                     onClick={(event) => handleTokenRowClick(token.id, event)}
-                    className={`animate-slide-up stagger-${Math.min(i + 1, 5)} row-selectable ${selectedTokenIds.includes(token.id) ? 'row-selected' : ''} ${highlightTokenId === token.id ? 'row-focus-highlight' : ''}`.trim()}
+                    className={`row-selectable ${selectedTokenIds.includes(token.id) ? 'row-selected' : ''} ${highlightTokenId === token.id ? 'row-focus-highlight' : ''}`.trim()}
                   >
                     <td>
                       <input

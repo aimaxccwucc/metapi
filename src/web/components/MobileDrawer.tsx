@@ -32,7 +32,7 @@ function MobileDrawer({
       const timer = setTimeout(() => {
         setShouldRender(false);
         setIsClosing(false);
-      }, 280);
+      }, 220);
       return () => clearTimeout(timer);
     }
   }, [open]);

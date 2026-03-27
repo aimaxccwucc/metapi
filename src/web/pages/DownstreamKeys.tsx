@@ -882,6 +882,8 @@ function EditorModal({
 }) {
   const [modelSearch, setModelSearch] = useState('');
   const [groupSearch, setGroupSearch] = useState('');
+  const deferredModelSearch = useDeferredValue(modelSearch.trim());
+  const deferredGroupSearch = useDeferredValue(groupSearch.trim());
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [visibleModelCount, setVisibleModelCount] = useState(DOWNSTREAM_EDITOR_RENDER_CHUNK);
   const [visibleGroupCount, setVisibleGroupCount] = useState(DOWNSTREAM_EDITOR_RENDER_CHUNK);
@@ -922,19 +924,19 @@ function EditorModal({
   );
 
   const filteredModels = useMemo(() => {
-    const keyword = modelSearch.trim().toLowerCase();
+    const keyword = deferredModelSearch.toLowerCase();
     if (!keyword) return exactModels;
     return exactModels.filter((model) => model.toLowerCase().includes(keyword));
-  }, [exactModels, modelSearch]);
+  }, [deferredModelSearch, exactModels]);
 
   const filteredGroups = useMemo(() => {
-    const keyword = groupSearch.trim().toLowerCase();
+    const keyword = deferredGroupSearch.toLowerCase();
     if (!keyword) return groupRouteOptions;
     return groupRouteOptions.filter((route) => {
       const title = routeTitle(route).toLowerCase();
       return title.includes(keyword) || route.modelPattern.toLowerCase().includes(keyword);
     });
-  }, [groupRouteOptions, groupSearch]);
+  }, [deferredGroupSearch, groupRouteOptions]);
 
   useEffect(() => {
     setVisibleModelCount(getInitialVisibleCount(filteredModels.length, DOWNSTREAM_EDITOR_RENDER_CHUNK));

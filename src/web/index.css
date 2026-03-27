@@ -440,7 +440,6 @@ body {
   position: sticky;
   top: 0;
   z-index: 100;
-  backdrop-filter: blur(12px);
   background: rgba(255, 255, 255, 0.85);
 }
 
@@ -559,7 +558,7 @@ body {
   color: var(--color-text-secondary);
   text-decoration: none;
   border-radius: var(--radius-sm);
-  transition: all 0.2s ease;
+  transition: background-color 0.14s ease, color 0.14s ease;
   cursor: pointer;
   font-weight: 500;
 }
@@ -597,7 +596,7 @@ body {
   justify-content: center;
   color: var(--color-text-secondary);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background-color 0.14s ease, color 0.14s ease;
   border: none;
   background: none;
   position: relative;
@@ -624,7 +623,7 @@ body {
   padding: 0 10px 0 12px;
   color: var(--color-text-muted);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: border-color 0.14s ease, background-color 0.14s ease, color 0.14s ease;
 }
 
 .topbar-search-trigger:hover {
@@ -687,7 +686,7 @@ body {
   font-weight: 600;
   color: var(--color-primary);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: border-color 0.14s ease, transform 0.14s ease;
   border: 2px solid transparent;
   padding: 0;
   appearance: none;
@@ -747,7 +746,7 @@ body {
   color: var(--color-text-secondary);
   text-decoration: none;
   border-radius: var(--radius-sm);
-  transition: all 0.2s ease;
+  transition: background-color 0.14s ease, color 0.14s ease;
   cursor: pointer;
   white-space: nowrap;
   font-weight: 500;
@@ -803,7 +802,7 @@ body {
   border: none;
   background: none;
   border-radius: var(--radius-sm);
-  transition: all 0.2s ease;
+  transition: background-color 0.14s ease, color 0.14s ease;
   margin-top: auto;
   white-space: nowrap;
   width: 100%;
@@ -835,7 +834,7 @@ body {
 .btn {
   position: relative;
   overflow: hidden;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background-color 0.14s ease, color 0.14s ease, border-color 0.14s ease, transform 0.12s ease, box-shadow 0.12s ease;
   cursor: pointer;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
@@ -856,7 +855,7 @@ body {
 .btn:active {
   transform: translateY(0) scale(0.97);
   box-shadow: var(--shadow-sm);
-  transition-duration: 0.1s;
+  transition-duration: 0.08s;
 }
 
 .btn:disabled {
@@ -939,7 +938,7 @@ body {
 
 .btn-ghost {
   background: color-mix(in srgb, var(--color-primary) 12%, var(--color-bg-card));
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   border: 1px solid color-mix(in srgb, var(--color-primary) 26%, transparent);
   border-radius: var(--radius-sm);
   padding: 6px 12px;
@@ -1006,7 +1005,7 @@ body {
 .btn-transition {
   position: relative;
   overflow: hidden;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background-color 0.14s ease, color 0.14s ease, border-color 0.14s ease, transform 0.12s ease, box-shadow 0.12s ease;
   cursor: pointer;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
@@ -1036,7 +1035,7 @@ body {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-card);
   border: 1px solid var(--color-border-light);
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
 
 .card:hover {
@@ -1044,7 +1043,7 @@ body {
 }
 
 .card-transition {
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: box-shadow 0.16s ease, transform 0.16s ease;
 }
 
 .card-transition:hover {
@@ -1281,9 +1280,7 @@ body {
   inset: 0;
   background: rgba(15, 15, 15, 0.5);
   border: none;
-  animation: drawer-backdrop-in 0.25s ease both;
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  animation: drawer-backdrop-in 0.18s ease both;
 }
 
 .mobile-drawer-root.is-closing .mobile-drawer-backdrop {
@@ -1300,7 +1297,7 @@ body {
   padding: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  animation: drawer-slide-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: drawer-slide-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
   display: flex;
   flex-direction: column;
 }
@@ -1310,7 +1307,7 @@ body {
   border-left: 1px solid var(--color-border-light);
   border-right: none;
   box-shadow: -6px 0 24px rgba(0, 0, 0, 0.12);
-  animation: drawer-slide-in-right 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: drawer-slide-in-right 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .mobile-drawer-root.is-closing .mobile-drawer-panel {
@@ -1417,7 +1414,7 @@ body {
   color: var(--color-text-secondary);
   text-decoration: none;
   border-radius: var(--radius-sm);
-  transition: all 0.18s ease;
+  transition: background-color 0.18s ease, color 0.18s ease;
   cursor: pointer;
   position: relative;
   -webkit-tap-highlight-color: transparent;
@@ -1510,7 +1507,7 @@ body {
   padding: 20px;
   box-shadow: var(--shadow-card);
   border: 1px solid var(--color-border-light);
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .stat-card:hover {
@@ -1764,7 +1761,7 @@ body {
 
 /* ===== Nav ===== */
 .nav-transition {
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .nav-transition:active {
@@ -2228,7 +2225,7 @@ body {
   font-weight: 500;
   padding: 2px 8px;
   border-radius: 999px;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .badge-success {
@@ -2750,7 +2747,7 @@ body[data-tooltip-portal="true"] [data-tooltip]::before {
   color: var(--color-text-muted);
   cursor: pointer;
   border-bottom: 2px solid transparent;
-  transition: all 0.2s ease;
+  transition: color 0.2s ease, border-color 0.2s ease, background-color 0.2s ease;
   background: none;
   border-top: none;
   border-left: none;
@@ -2781,7 +2778,7 @@ body[data-tooltip-portal="true"] [data-tooltip]::before {
 
 .toast {
   pointer-events: auto;
-  animation: toast-in 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: toast-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
   min-width: 280px;
   max-width: 400px;
   border-radius: var(--radius-md);
@@ -2792,7 +2789,6 @@ body[data-tooltip-portal="true"] [data-tooltip]::before {
   box-shadow: var(--shadow-lg);
   position: relative;
   overflow: hidden;
-  backdrop-filter: blur(8px);
 }
 
 .toast-exit {
@@ -3218,11 +3214,10 @@ textarea {
   padding: 40px 34px 28px;
   border-radius: 28px;
   border: 1px solid rgba(226, 232, 240, 0.92);
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.97);
   box-shadow:
     0 28px 50px rgba(148, 163, 184, 0.22),
     inset 0 1px 0 rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(10px);
 }
 
 .login-auth-eyebrow {
@@ -3444,8 +3439,7 @@ textarea {
   justify-content: center;
   padding: 16px;
   overflow-y: auto;
-  animation: fade-in 0.2s ease both;
-  backdrop-filter: blur(4px);
+  animation: fade-in 0.16s ease both;
 }
 
 .modal-backdrop.is-closing {
@@ -3462,7 +3456,7 @@ textarea {
   max-height: calc(100vh - 32px);
   margin: auto;
   overflow-y: auto;
-  animation: scale-in 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: scale-in 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .source-route-picker-card {
@@ -3792,7 +3786,7 @@ textarea {
 
 /* ===== Page Transition ===== */
 .page-enter {
-  animation: fade-in 0.3s cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: fade-in 0.18s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 /* ===== Info Tip ===== */
@@ -3924,7 +3918,7 @@ textarea {
   color: var(--color-text-secondary);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.12s ease, color 0.12s ease;
   border: none;
   background: none;
   width: 100%;
@@ -3982,7 +3976,7 @@ textarea {
 
 /* ===== Chart Panel Entrance Animation ===== */
 .chart-panel-enter {
-  animation: chartSlideIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: chartSlideIn 0.22s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
 @keyframes chartSlideIn {
@@ -4038,11 +4032,15 @@ textarea {
 
 /* ===== Additional Stagger Delays for Chart Panels ===== */
 .stagger-7 {
-  animation-delay: 0.6s;
+  animation-delay: 0.28s;
 }
 
 .stagger-8 {
-  animation-delay: 0.7s;
+  animation-delay: 0.32s;
+}
+
+.stagger-9 {
+  animation-delay: 0.36s;
 }
 
 /* ===== Dark Mode Chart Container ===== */
@@ -4123,7 +4121,7 @@ textarea {
   padding: 6px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, color 0.15s ease;
   font-size: 13px;
   color: var(--color-text-secondary);
   user-select: none;
@@ -4182,7 +4180,7 @@ textarea {
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-md);
   padding: 20px;
-  transition: all 0.2s ease;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
   cursor: pointer;
 }
 
@@ -4260,7 +4258,7 @@ textarea {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .model-card-action-btn:hover {
@@ -4282,7 +4280,7 @@ textarea {
   padding: 3px 10px;
   border-radius: 999px;
   border: 1px solid;
-  transition: all 0.15s;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .model-tag-green {
@@ -4411,7 +4409,7 @@ textarea {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   padding: 0 8px;
 }
 
@@ -4476,7 +4474,7 @@ textarea {
   color: var(--color-text-muted);
   border-radius: 8px;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, color 0.2s ease;
   border: none;
   background: none;
   white-space: nowrap;
@@ -4697,7 +4695,7 @@ textarea {
   background: var(--color-bg-card);
   color: var(--color-text-muted);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .view-toggle-btn+.view-toggle-btn {
@@ -4752,7 +4750,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  transition: all 0.18s ease;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease, color 0.18s ease;
 }
 
 .monitor-tab:hover {
@@ -5101,9 +5099,7 @@ textarea {
     bottom: 12px;
     padding: 12px 14px;
     border-radius: var(--radius-lg);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    background: color-mix(in srgb, var(--color-bg-card) 88%, transparent);
+    background: color-mix(in srgb, var(--color-bg-card) 96%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
   }
@@ -5250,7 +5246,7 @@ textarea {
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   white-space: nowrap;
 }
 
@@ -5358,7 +5354,7 @@ textarea {
   background: var(--color-bg);
   color: var(--color-text-muted);
   text-decoration: none;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .site-observability-log-link-compact:hover {
@@ -5797,7 +5793,7 @@ textarea {
   font-size: 12px;
   color: var(--color-text-secondary);
   white-space: nowrap;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   line-height: 1.3;
 }
 

@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useState, useEffect, useRef } from 'react';
+import React, { Suspense, lazy, memo, startTransition, useState, useEffect, useRef } from 'react';
 import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { ToastProvider, useToast } from './components/Toast.js';
 import { api } from './api.js';
@@ -633,6 +633,47 @@ function OverlayFallback() {
   return null;
 }
 
+const AppMainContent = memo(function AppMainContent({
+  displayName,
+}: {
+  displayName: string;
+}) {
+  const location = useLocation();
+  const { t } = useI18n();
+
+  return (
+    <main className="main-content">
+      <PageTransition>
+        <RouteErrorBoundary resetKey={location.pathname} t={t}>
+          <Suspense fallback={<RouteLoadingFallback />}>
+            <Routes>
+              <Route path="/" element={<Dashboard adminName={displayName} />} />
+              <Route path="/sites" element={<Sites />} />
+              <Route path="/site-announcements" element={<SiteAnnouncements />} />
+              <Route path="/accounts" element={<Accounts />} />
+              <Route path="/oauth" element={<OAuthManagement />} />
+              <Route path="/tokens" element={<Tokens />} />
+              <Route path="/checkin" element={<CheckinLog />} />
+              <Route path="/routes" element={<TokenRoutes />} />
+              <Route path="/logs" element={<ProxyLogs />} />
+              <Route path="/monitor" element={<Monitors />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route path="/downstream-keys" element={<DownstreamKeys />} />
+              <Route path="/events" element={<ProgramLogs />} />
+              <Route path="/settings/import-export" element={<ImportExport />} />
+              <Route path="/settings/notify" element={<NotificationSettings />} />
+              <Route path="/models" element={<Models />} />
+              <Route path="/playground" element={<ModelTester />} />
+              <Route path="/about" element={<About />} />
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          </Suspense>
+        </RouteErrorBoundary>
+      </PageTransition>
+    </main>
+  );
+});
+
 function navLinkPreloadProps(path: string) {
   return {
     onMouseEnter: () => preloadRoute(path),
@@ -643,7 +684,6 @@ function navLinkPreloadProps(path: string) {
 
 function AppShell() {
   const { language, toggleLanguage, t } = useI18n();
-  const location = useLocation();
   const [authed, setAuthed] = useState(() => hasValidAuthSession(localStorage));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -756,7 +796,9 @@ function AppShell() {
         if (cancelled) return;
         const rows = Array.isArray(recentEvents) ? recentEvents : [];
         const unread = rows.filter((r: any) => !r.read).length;
-        setUnreadCount(unread);
+        startTransition(() => {
+          setUnreadCount(unread);
+        });
         const maxId = rows.reduce((acc: number, row: any) => Math.max(acc, Number(row?.id) || 0), 0);
 
         if (latestTaskEventIdRef.current === 0) {
@@ -834,7 +876,9 @@ function AppShell() {
       try {
         const overview = await api.getRuntimeOverview();
         if (cancelled) return;
-        setRuntimeOverview(overview);
+        startTransition(() => {
+          setRuntimeOverview(overview);
+        });
       } catch {
         if (cancelled) return;
       }
@@ -1118,35 +1162,7 @@ function AppShell() {
           </aside>
         )}
 
-        <main className="main-content">
-          <PageTransition>
-            <RouteErrorBoundary resetKey={location.pathname} t={t}>
-              <Suspense fallback={<RouteLoadingFallback />}>
-                <Routes>
-                  <Route path="/" element={<Dashboard adminName={displayName} />} />
-                  <Route path="/sites" element={<Sites />} />
-                  <Route path="/site-announcements" element={<SiteAnnouncements />} />
-                  <Route path="/accounts" element={<Accounts />} />
-                  <Route path="/oauth" element={<OAuthManagement />} />
-                  <Route path="/tokens" element={<Tokens />} />
-                  <Route path="/checkin" element={<CheckinLog />} />
-                  <Route path="/routes" element={<TokenRoutes />} />
-                  <Route path="/logs" element={<ProxyLogs />} />
-                  <Route path="/monitor" element={<Monitors />} />
-                  <Route path="/settings" element={<Settings />} />
-                  <Route path="/downstream-keys" element={<DownstreamKeys />} />
-                  <Route path="/events" element={<ProgramLogs />} />
-                  <Route path="/settings/import-export" element={<ImportExport />} />
-                  <Route path="/settings/notify" element={<NotificationSettings />} />
-                  <Route path="/models" element={<Models />} />
-                  <Route path="/playground" element={<ModelTester />} />
-                  <Route path="/about" element={<About />} />
-                  <Route path="*" element={<Navigate to="/" />} />
-                </Routes>
-              </Suspense>
-            </RouteErrorBoundary>
-          </PageTransition>
-        </main>
+        <AppMainContent displayName={displayName} />
       </div>
 
       <UserProfileModal

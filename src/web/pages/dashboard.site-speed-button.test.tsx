@@ -160,4 +160,53 @@ describe('Dashboard site speed buttons', () => {
       root?.unmount();
     }
   });
+
+  it('shows resolved results for multiple sites after bulk speed test', async () => {
+    apiMock.getSites.mockResolvedValue([
+      { id: 1, name: 'Alpha Site', url: 'https://alpha.example.com', status: 'active' },
+      { id: 2, name: 'Beta Site', url: 'https://beta.example.com', status: 'active' },
+    ]);
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('alpha.example.com')) {
+        return Promise.resolve({ ok: true });
+      }
+      return Promise.reject(new Error('timeout'));
+    }) as unknown as typeof fetch;
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter>
+            <ToastProvider>
+              <Dashboard />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const bulkSpeedButton = root!.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).trim() === '一键测速'
+      ));
+
+      await act(async () => {
+        await bulkSpeedButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const buttonTexts = root!.root.findAll((node) => node.type === 'button')
+        .map((node) => collectText(node).trim());
+
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(buttonTexts.some((text) => text.includes('ms'))).toBe(true);
+      expect(buttonTexts).toContain('超时');
+    } finally {
+      root?.unmount();
+    }
+  });
 });

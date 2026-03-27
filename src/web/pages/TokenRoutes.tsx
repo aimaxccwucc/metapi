@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { arrayMove } from '@dnd-kit/sortable';
 import type { DragEndEvent } from '@dnd-kit/core';
@@ -245,6 +245,7 @@ export default function TokenRoutes() {
   const [routeCandidatesLoading, setRouteCandidatesLoading] = useState(false);
 
   const [search, setSearch] = useState('');
+  const deferredSearch = useDeferredValue(search.trim());
   const [activeBrand, setActiveBrand] = useState<string | null>(null);
   const [activeSite, setActiveSite] = useState<string | null>(null);
   const [activeEndpointType, setActiveEndpointType] = useState<string | null>(null);
@@ -360,10 +361,14 @@ export default function TokenRoutes() {
     setLoadingRouteDiagnostics(true);
     try {
       const res = await api.getRouteDiagnostics(120);
-      setRouteDiagnostics(res as RouteDiagnosticsResponse);
+      startTransition(() => {
+        setRouteDiagnostics(res as RouteDiagnosticsResponse);
+      });
       return res as RouteDiagnosticsResponse;
     } catch (error) {
-      setRouteDiagnostics(null);
+      startTransition(() => {
+        setRouteDiagnostics(null);
+      });
       throw error;
     } finally {
       setLoadingRouteDiagnostics(false);
@@ -371,15 +376,17 @@ export default function TokenRoutes() {
   }, []);
 
   const applyRouteCandidateRows = useCallback((candidateRows: any) => {
-    setModelCandidates((candidateRows?.models || {}) as RouteModelCandidatesByModelName);
-    setMissingTokenModelsByName(
-      normalizeMissingTokenModels((candidateRows?.modelsWithoutToken || {}) as MissingTokenModelsByName),
-    );
-    setMissingTokenGroupModelsByName(
-      normalizeMissingTokenModels((candidateRows?.modelsMissingTokenGroups || {}) as MissingTokenModelsByName),
-    );
-    setEndpointTypesByModel(candidateRows?.endpointTypesByModel || {});
-    setRouteCandidatesLoaded(true);
+    startTransition(() => {
+      setModelCandidates((candidateRows?.models || {}) as RouteModelCandidatesByModelName);
+      setMissingTokenModelsByName(
+        normalizeMissingTokenModels((candidateRows?.modelsWithoutToken || {}) as MissingTokenModelsByName),
+      );
+      setMissingTokenGroupModelsByName(
+        normalizeMissingTokenModels((candidateRows?.modelsMissingTokenGroups || {}) as MissingTokenModelsByName),
+      );
+      setEndpointTypesByModel(candidateRows?.endpointTypesByModel || {});
+      setRouteCandidatesLoaded(true);
+    });
   }, []);
 
   const loadRouteCandidates = useCallback(async (force = false) => {
@@ -404,7 +411,9 @@ export default function TokenRoutes() {
     const summaryRows = await api.getRoutesSummary();
 
     const summaries = (summaryRows || []) as RouteSummaryRow[];
-    setRouteSummaries(summaries);
+    startTransition(() => {
+      setRouteSummaries(summaries);
+    });
     const shouldIncludeCandidates = !!options?.includeCandidates || summaries.some((route) => isExplicitGroupRoute(route));
     let candidateRows: ModelTokenCandidatesPayload | undefined;
     if (shouldIncludeCandidates) {
@@ -415,10 +424,12 @@ export default function TokenRoutes() {
     for (const route of summaries) {
       decisionPlaceholder[route.id] = route.decisionSnapshot || null;
     }
-    setDecisionByRoute(decisionPlaceholder);
-    setDecisionAutoSkipped(
-      summaries.some((route) => isRouteExactModel(route) && !(route.decisionSnapshot || route.decisionSnapshotAvailable)),
-    );
+    startTransition(() => {
+      setDecisionByRoute(decisionPlaceholder);
+      setDecisionAutoSkipped(
+        summaries.some((route) => isRouteExactModel(route) && !(route.decisionSnapshot || route.decisionSnapshotAvailable)),
+      );
+    });
     return { summaries, candidateRows };
   };
 
@@ -908,8 +919,8 @@ export default function TokenRoutes() {
       );
     }
 
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
+    if (deferredSearch) {
+      const q = deferredSearch.toLowerCase();
       list = list.filter((route) => {
         const modelPattern = route.modelPattern.toLowerCase();
         const displayName = (route.displayName || '').toLowerCase();
@@ -926,7 +937,7 @@ export default function TokenRoutes() {
     activeSite,
     activeEndpointType,
     showOnlyManualRoutes,
-    search,
+    deferredSearch,
     routeBrandById,
     routeEndpointTypesByRouteId,
   ]);
@@ -973,7 +984,7 @@ export default function TokenRoutes() {
 
   const explicitGroupSourceHealthByRouteId = useMemo<Record<number, ExplicitGroupSourceHealthSummary>>(() => {
     const result: Record<number, ExplicitGroupSourceHealthSummary> = {};
-    for (const route of visibleRouteRows) {
+    for (const route of filteredRoutes) {
       if (!isExplicitGroupRoute(route)) continue;
       const summary = buildExplicitGroupSaveFeedback(route.sourceRouteIds || [], routeSummaries, {
         models: modelCandidates,
@@ -986,7 +997,7 @@ export default function TokenRoutes() {
       }
     }
     return result;
-  }, [endpointTypesByModel, missingTokenGroupModelsByName, missingTokenModelsByName, modelCandidates, routeSummaries, visibleRouteRows]);
+  }, [endpointTypesByModel, filteredRoutes, missingTokenGroupModelsByName, missingTokenModelsByName, modelCandidates, routeSummaries]);
 
   const routeFaultOverview = useMemo(() => {
     const nowIso = new Date().toISOString();
@@ -1021,10 +1032,12 @@ export default function TokenRoutes() {
       const candidates = decision?.candidates || [];
       if (candidates.length === 0) continue;
       routesWithDecisions += 1;
-      cooldownChannels += candidates.filter((candidate) => hasActiveCooldown(candidate, nowIso)).length;
-      avoidedChannels += candidates.filter((candidate) => candidate.avoidedByRecentFailure).length;
-      modelCircuitChannels += candidates.filter(hasModelCircuitIssue).length;
-      siteRuntimeChannels += candidates.filter(hasSiteRuntimeIssue).length;
+      for (const candidate of candidates) {
+        if (hasActiveCooldown(candidate, nowIso)) cooldownChannels += 1;
+        if (candidate.avoidedByRecentFailure) avoidedChannels += 1;
+        if (hasModelCircuitIssue(candidate)) modelCircuitChannels += 1;
+        if (hasSiteRuntimeIssue(candidate)) siteRuntimeChannels += 1;
+      }
     }
 
     return {

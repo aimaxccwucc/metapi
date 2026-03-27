@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useMemo, useState } from 'react';
+import React, { Suspense, lazy, startTransition, useMemo, useState } from 'react';
 import type { ILineChartSpec } from '@visactor/vchart';
 
 const LineChartRenderer = lazy(() => import('./LineChartRenderer.js'));
@@ -50,6 +50,13 @@ function getDatumRecord(datum: unknown): Record<string, unknown> {
 export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
   const [metric, setMetric] = useState<Metric>('spend');
 
+  const handleMetricChange = (nextMetric: Metric) => {
+    if (nextMetric === metric) return;
+    startTransition(() => {
+      setMetric(nextMetric);
+    });
+  };
+
   /* ---------- data transform ---------- */
 
   const flatData = useMemo(() => {
@@ -82,7 +89,7 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
     return (
       <div style={containerStyle}>
         <div style={headerStyle}>
-          <MetricToggle metric={metric} onChange={setMetric} />
+          <MetricToggle metric={metric} onChange={handleMetricChange} />
         </div>
         <div className="empty-state" style={{ padding: 48 }}>
           <div className="empty-state-title">暂无趋势数据</div>
@@ -101,7 +108,7 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
     yField: 'value',
     seriesField: 'site',
     point: {
-      visible: true,
+      visible: flatData.length <= 60,
       style: { size: 6 },
     },
     line: {
@@ -144,11 +151,7 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
         ],
       },
     },
-    animation: true,
-    animationAppear: {
-      line: { type: 'clipIn', duration: 800, easing: 'cubicOut' },
-      point: { type: 'fadeIn', duration: 600, delay: 400, easing: 'cubicOut' },
-    },
+    animation: false,
     axes: [
       {
         orient: 'bottom',
@@ -175,7 +178,7 @@ export default function SiteTrendChart({ data, loading }: SiteTrendChartProps) {
   return (
     <div style={containerStyle}>
       <div style={headerStyle}>
-        <MetricToggle metric={metric} onChange={setMetric} />
+        <MetricToggle metric={metric} onChange={handleMetricChange} />
       </div>
       <div style={{ width: '100%', height: 320 }}>
         <Suspense fallback={<div className="skeleton" style={{ width: '100%', height: '100%', borderRadius: 'var(--radius-sm)' }} />}>
@@ -248,7 +251,7 @@ const toggleBtnBase: React.CSSProperties = {
   fontWeight: 500,
   cursor: 'pointer',
   border: 'none',
-  transition: 'all 0.2s ease',
+  transition: 'background-color 0.2s ease, color 0.2s ease',
   fontFamily: 'inherit',
 };
 

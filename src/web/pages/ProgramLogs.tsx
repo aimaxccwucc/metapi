@@ -723,7 +723,7 @@ export default function ProgramLogs() {
                   const eventStatus = eventStatusLabel(row);
                   const eventTask = resolveEventTask(row, tasks);
                   return (
-                    <tr key={row.id} className={`animate-slide-up stagger-${Math.min(idx + 1, 5)}`}>
+                    <tr key={row.id}>
                       <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                         {formatDateTimeLocal(row.createdAt)}
                       </td>

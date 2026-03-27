@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import CenteredModal from '../components/CenteredModal.js';
@@ -26,6 +26,7 @@ import { SITE_DOCS_URL } from '../docsLink.js';
 
 type ConnectionsSegment = 'session' | 'apikey' | 'tokens';
 type AccountSortMode = SortMode | 'runtime-health-desc' | 'runtime-health-asc';
+const ACCOUNT_MODEL_MODAL_RENDER_CHUNK = 80;
 
 const ACCOUNT_SEGMENTS: Array<{
   value: ConnectionsSegment;
@@ -101,6 +102,7 @@ export default function Accounts() {
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
   const [visibleAccountCount, setVisibleAccountCount] = useState(60);
   const [batchActionLoading, setBatchActionLoading] = useState(false);
+  const [visibleModelModalCount, setVisibleModelModalCount] = useState(ACCOUNT_MODEL_MODAL_RENDER_CHUNK);
   const [deleteConfirm, setDeleteConfirm] = useState<null | {
     mode: 'single' | 'batch';
     accountId?: number;
@@ -161,18 +163,27 @@ export default function Accounts() {
       api.getAccounts(),
       api.getSites(),
     ]);
+    let nextAccounts: any[] | null = null;
+    let nextSites: any[] | null = null;
     if (accountsResult.status === 'fulfilled') {
-      const nextAccounts = accountsResult.value || [];
-      setAccounts(nextAccounts);
-      setSelectedAccountIds((current) => current.filter((id) => nextAccounts.some((account: any) => account.id === id)));
+      nextAccounts = accountsResult.value || [];
     } else {
       const reason = (accountsResult as PromiseRejectedResult).reason as any;
       toast.error(reason?.message || '加载账号列表失败');
     }
     if (sitesResult.status === 'fulfilled') {
-      setSites(sitesResult.value || []);
+      nextSites = sitesResult.value || [];
     }
-    setLoaded(true);
+    startTransition(() => {
+      if (nextAccounts) {
+        setAccounts(nextAccounts);
+        setSelectedAccountIds((current) => current.filter((id) => nextAccounts!.some((account: any) => account.id === id)));
+      }
+      if (nextSites) {
+        setSites(nextSites);
+      }
+      setLoaded(true);
+    });
   };
   useEffect(() => { void load(); }, []);
 
@@ -512,13 +523,16 @@ export default function Accounts() {
   const applyLoadedModelModal = (account: any, result: any) => {
     const models = Array.isArray(result?.models) ? result.models : [];
     const disabledSet = new Set<string>(models.filter((m: any) => m.disabled).map((m: any) => m.name as string));
-    setModelModal(s => ({
-      ...s,
-      loading: false,
-      models,
-      pendingDisabled: disabledSet,
-      siteName: result?.siteName || account.site?.name || s.siteName,
-    }));
+    startTransition(() => {
+      setVisibleModelModalCount(getInitialVisibleCount(models.length, ACCOUNT_MODEL_MODAL_RENDER_CHUNK));
+      setModelModal(s => ({
+        ...s,
+        loading: false,
+        models,
+        pendingDisabled: disabledSet,
+        siteName: result?.siteName || account.site?.name || s.siteName,
+      }));
+    });
   };
 
   const loadModelModalModels = async (
@@ -570,6 +584,7 @@ export default function Accounts() {
 
   const closeModelModal = () => {
     modelModalRequestSeqRef.current += 1;
+    setVisibleModelModalCount(ACCOUNT_MODEL_MODAL_RENDER_CHUNK);
     setModelModal(s => ({ ...s, open: false, account: null, manualModelsInput: '', addingManualModels: false }));
   };
 
@@ -623,6 +638,11 @@ export default function Accounts() {
       setModelModal(s => ({ ...s, addingManualModels: false }));
     }
   };
+
+  const visibleModelModalModels = useMemo(
+    () => modelModal.models.slice(0, visibleModelModalCount),
+    [modelModal.models, visibleModelModalCount],
+  );
 
 
   const inputStyle: React.CSSProperties = {
@@ -1137,7 +1157,7 @@ export default function Accounts() {
               background: activeSegment === segment.value ? 'var(--color-bg)' : 'transparent',
               color: activeSegment === segment.value ? 'var(--color-primary)' : 'var(--color-text-secondary)',
               boxShadow: activeSegment === segment.value ? 'var(--shadow-sm)' : 'none',
-              transition: 'all 0.2s ease',
+              transition: 'background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease',
             }}
           >
             {segment.label}
@@ -1217,7 +1237,7 @@ export default function Accounts() {
                       fontWeight: 500,
                       border: 'none',
                       cursor: 'pointer',
-                      transition: 'all 0.2s',
+                      transition: 'background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease',
                       background: addMode === 'token' ? 'var(--color-bg-card)' : 'transparent',
                       color: addMode === 'token' ? 'var(--color-primary)' : 'var(--color-text-muted)',
                       boxShadow: addMode === 'token' ? 'var(--shadow-sm)' : 'none',
@@ -1235,7 +1255,7 @@ export default function Accounts() {
                       fontWeight: 500,
                       border: 'none',
                       cursor: 'pointer',
-                      transition: 'all 0.2s',
+                      transition: 'background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease',
                       background: addMode === 'login' ? 'var(--color-bg-card)' : 'transparent',
                       color: addMode === 'login' ? 'var(--color-primary)' : 'var(--color-text-muted)',
                       boxShadow: addMode === 'login' ? 'var(--shadow-sm)' : 'none',
@@ -1959,7 +1979,7 @@ export default function Accounts() {
                           else rowRefs.current.delete(a.id);
                         }}
                         onClick={(event) => handleAccountRowClick(a.id, event)}
-                        className={`animate-slide-up stagger-${Math.min(i + 1, 5)} row-selectable ${selectedAccountIds.includes(a.id) ? 'row-selected' : ''} ${highlightAccountId === a.id ? 'row-focus-highlight' : ''}`.trim()}
+                        className={`row-selectable ${selectedAccountIds.includes(a.id) ? 'row-selected' : ''} ${highlightAccountId === a.id ? 'row-focus-highlight' : ''}`.trim()}
                       >
                         <td>
                           <input
@@ -2259,7 +2279,7 @@ export default function Accounts() {
                   border: '1px solid var(--color-border-light)',
                   borderRadius: 'var(--radius-sm)',
                 }}>
-                  {modelModal.models.map((model, idx) => {
+                  {visibleModelModalModels.map((model, idx) => {
                     const isDisabled = modelModal.pendingDisabled.has(model.name);
                     return (
                       <label
@@ -2271,7 +2291,7 @@ export default function Accounts() {
                           padding: '9px 14px',
                           cursor: 'pointer',
                           background: isDisabled ? 'var(--color-bg)' : undefined,
-                          borderBottom: idx < modelModal.models.length - 1 ? '1px solid var(--color-border-light)' : undefined,
+                          borderBottom: idx < visibleModelModalModels.length - 1 ? '1px solid var(--color-border-light)' : undefined,
                           opacity: isDisabled ? 0.55 : 1,
                           transition: 'opacity 0.15s, background 0.15s',
                         }}
@@ -2300,6 +2320,20 @@ export default function Accounts() {
                     );
                   })}
                 </div>
+                {visibleModelModalModels.length < modelModal.models.length && (
+                  <div style={{ display: 'flex', justifyContent: 'center', marginTop: 10 }}>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={{ fontSize: 12, padding: '6px 12px' }}
+                      onClick={() => setVisibleModelModalCount((current) => (
+                        getNextVisibleCount(current, modelModal.models.length, ACCOUNT_MODEL_MODAL_RENDER_CHUNK)
+                      ))}
+                    >
+                      {`加载更多模型 (${visibleModelModalModels.length}/${modelModal.models.length})`}
+                    </button>
+                  </div>
+                )}
                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                   💡 禁用的模型将对整个站点生效，该站点下所有连接都不会使用这些模型进行代理。
                 </div>

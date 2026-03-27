@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type RouteDecision } from '../api.js';
 import { clearAuthSession, getAuthToken } from '../authSession.js';
 import {
@@ -686,6 +686,7 @@ export default function ModelTester() {
   const isMobile = useIsMobile();
   const [models, setModels] = useState<string[]>([]);
   const [modelSearch, setModelSearch] = useState('');
+  const deferredModelSearch = useDeferredValue(modelSearch.trim());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [inputs, setInputs] = useState<ModelTesterInputs>(DEFAULT_INPUTS);
@@ -736,6 +737,10 @@ export default function ModelTester() {
   const restoredSessionRef = useRef<ReturnType<typeof parseModelTesterSession>>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamStopRequestedRef = useRef(false);
+  const sessionPersistTimerRef = useRef<number | null>(null);
+  const historyPersistTimerRef = useRef<number | null>(null);
+  const latestSessionSnapshotRef = useRef<string>('');
+  const latestHistorySnapshotRef = useRef<string>('');
   const conversationFileCapability = useMemo(
     () => resolveConversationFileCapability(inputs.protocol),
     [inputs.protocol],
@@ -931,7 +936,9 @@ export default function ModelTester() {
           marketResult.status === 'fulfilled' ? marketResult.value : null,
           routesResult.status === 'fulfilled' ? routesResult.value : null,
         );
-        setModels(names);
+        startTransition(() => {
+          setModels(names);
+        });
 
         const restoredModel = restoredSessionRef.current?.inputs.model || '';
         const currentModel = inputs.model || '';
@@ -976,7 +983,7 @@ export default function ModelTester() {
 
   useEffect(() => {
     if (!inputs.model) return;
-    localStorage.setItem(MODEL_TESTER_STORAGE_KEY, serializeModelTesterSession({
+    latestSessionSnapshotRef.current = serializeModelTesterSession({
       input,
       inputs,
       parameterEnabled,
@@ -999,7 +1006,20 @@ export default function ModelTester() {
       customRequestBody,
       showDebugPanel,
       activeDebugTab,
-    }));
+    });
+    if (sessionPersistTimerRef.current !== null) {
+      globalThis.clearTimeout(sessionPersistTimerRef.current);
+    }
+    sessionPersistTimerRef.current = globalThis.setTimeout(() => {
+      localStorage.setItem(MODEL_TESTER_STORAGE_KEY, latestSessionSnapshotRef.current);
+      sessionPersistTimerRef.current = null;
+    }, 180);
+    return () => {
+      if (sessionPersistTimerRef.current !== null) {
+        globalThis.clearTimeout(sessionPersistTimerRef.current);
+        sessionPersistTimerRef.current = null;
+      }
+    };
   }, [
     activeDebugTab,
     customRequestBody,
@@ -1023,8 +1043,34 @@ export default function ModelTester() {
   ]);
 
   useEffect(() => {
-    localStorage.setItem(MODEL_TESTER_HISTORY_STORAGE_KEY, serializeModelTesterHistory(historyEntries));
+    latestHistorySnapshotRef.current = serializeModelTesterHistory(historyEntries);
+    if (historyPersistTimerRef.current !== null) {
+      globalThis.clearTimeout(historyPersistTimerRef.current);
+    }
+    historyPersistTimerRef.current = globalThis.setTimeout(() => {
+      localStorage.setItem(MODEL_TESTER_HISTORY_STORAGE_KEY, latestHistorySnapshotRef.current);
+      historyPersistTimerRef.current = null;
+    }, 180);
+    return () => {
+      if (historyPersistTimerRef.current !== null) {
+        globalThis.clearTimeout(historyPersistTimerRef.current);
+        historyPersistTimerRef.current = null;
+      }
+    };
   }, [historyEntries]);
+
+  useEffect(() => () => {
+    if (sessionPersistTimerRef.current !== null && latestSessionSnapshotRef.current) {
+      globalThis.clearTimeout(sessionPersistTimerRef.current);
+      localStorage.setItem(MODEL_TESTER_STORAGE_KEY, latestSessionSnapshotRef.current);
+      sessionPersistTimerRef.current = null;
+    }
+    if (historyPersistTimerRef.current !== null && latestHistorySnapshotRef.current) {
+      globalThis.clearTimeout(historyPersistTimerRef.current);
+      localStorage.setItem(MODEL_TESTER_HISTORY_STORAGE_KEY, latestHistorySnapshotRef.current);
+      historyPersistTimerRef.current = null;
+    }
+  }, []);
 
   const handleUploadChange = useCallback(async (
     fileList: FileList | null,
@@ -1544,17 +1590,17 @@ export default function ModelTester() {
 
   const turnCount = useMemo(() => countConversationTurns(messages), [messages]);
   const filteredModels = useMemo(
-    () => filterModelTesterModelNames(models, modelSearch),
-    [modelSearch, models],
+    () => filterModelTesterModelNames(models, deferredModelSearch),
+    [deferredModelSearch, models],
   );
   const currentModelVisible = useMemo(
     () => filteredModels.includes(inputs.model),
     [filteredModels, inputs.model],
   );
   const modelCountText = useMemo(() => {
-    if (!modelSearch.trim()) return `共 ${models.length} 个模型`;
+    if (!deferredModelSearch) return `共 ${models.length} 个模型`;
     return `匹配 ${filteredModels.length} / ${models.length}`;
-  }, [filteredModels.length, modelSearch, models.length]);
+  }, [deferredModelSearch, filteredModels.length, models.length]);
 
   const modelSelectOptions = useMemo(
     () => filteredModels.map((item) => ({ value: item, label: item })),

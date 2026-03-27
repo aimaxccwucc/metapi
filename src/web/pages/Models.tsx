@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api } from '../api.js';
 import { BrandGlyph, getBrand, hashColor, BrandIcon, type BrandInfo } from '../components/BrandIcon.js';
@@ -295,6 +295,7 @@ export default function Models() {
   const [expandedCheckDetails, setExpandedCheckDetails] = useState<Record<string, boolean>>({});
   const [visibleModelCount, setVisibleModelCount] = useState(MODEL_RENDER_CHUNK);
   const isMobile = useIsMobile();
+  const deferredSearch = useDeferredValue(search.trim());
   const filterPanelPresence = useAnimatedVisibility(!isMobile && !filterCollapsed, 220);
   const latestPrimaryRequestRef = useRef(0);
   const latestMetadataRequestRef = useRef(0);
@@ -462,13 +463,13 @@ export default function Models() {
       list = list.filter(m => m.accounts.some(a => a.site === activeSite));
     }
 
-    if (search) {
-      const q = search.toLowerCase();
+    if (deferredSearch) {
+      const q = deferredSearch.toLowerCase();
       list = list.filter(m => m.name.toLowerCase().includes(q));
     }
 
     return list;
-  }, [data.models, search, activeSite, activeBrand]);
+  }, [data.models, deferredSearch, activeSite, activeBrand]);
 
   // Keep expanded detail consistent with filters (especially site filter).
   // The list-level filter uses "model has at least one account on this site" semantics;
@@ -508,7 +509,7 @@ export default function Models() {
   useEffect(() => {
     setPage(1);
     setVisibleModelCount(getInitialVisibleCount(pageSize, MODEL_RENDER_CHUNK));
-  }, [search, activeSite, activeBrand, pageSize, sortBy, sortDir]);
+  }, [deferredSearch, activeSite, activeBrand, pageSize, sortBy, sortDir]);
 
   useEffect(() => {
     setVisibleModelCount(getInitialVisibleCount(paged.length, MODEL_RENDER_CHUNK));
