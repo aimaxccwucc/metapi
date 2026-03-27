@@ -9,6 +9,8 @@ const notifyMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
 const refreshBalanceMock = vi.fn();
 const decryptPasswordMock = vi.fn();
+const getCheckinSiteBackoffDecisionMock = vi.fn();
+const recordCheckinSiteResolutionMock = vi.fn();
 
 const selectAllMock = vi.fn();
 const insertValuesMock = vi.fn();
@@ -89,6 +91,11 @@ vi.mock('./accountCredentialService.js', () => ({
   decryptAccountPassword: (...args: unknown[]) => decryptPasswordMock(...args),
 }));
 
+vi.mock('./checkinSiteRuntime.js', () => ({
+  getCheckinSiteBackoffDecision: (...args: unknown[]) => getCheckinSiteBackoffDecisionMock(...args),
+  recordCheckinSiteResolution: (...args: unknown[]) => recordCheckinSiteResolutionMock(...args),
+}));
+
 describe('checkinService auto relogin', () => {
   beforeEach(() => {
     adapterMock.checkin.mockReset();
@@ -97,9 +104,21 @@ describe('checkinService auto relogin', () => {
     reportTokenExpiredMock.mockReset();
     refreshBalanceMock.mockReset();
     decryptPasswordMock.mockReset();
+    getCheckinSiteBackoffDecisionMock.mockReset();
+    recordCheckinSiteResolutionMock.mockReset();
     selectAllMock.mockReset();
     insertValuesMock.mockReset();
     updateSetMock.mockReset();
+    getCheckinSiteBackoffDecisionMock.mockResolvedValue({
+      siteId: 0,
+      blocked: false,
+      blockedUntilMs: null,
+      blockedUntil: null,
+      failureStreak: 0,
+      lastReasonCode: null,
+      lastMessage: null,
+    });
+    recordCheckinSiteResolutionMock.mockResolvedValue(undefined);
   });
 
   it('retries checkin once after auto relogin when access token is missing', async () => {
@@ -466,6 +485,125 @@ describe('checkinService auto relogin', () => {
     expect(notifyMock).not.toHaveBeenCalled();
   });
 
+  it('records site runtime outcome after failed and successful checkins', async () => {
+    selectAllMock
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 24,
+            username: 'runtime-user',
+            accessToken: 'token',
+            status: 'active',
+            extraConfig: null,
+          },
+          sites: {
+            id: 34,
+            name: 'runtime-site',
+            url: 'https://runtime.example.com',
+            platform: 'new-api',
+          },
+        },
+      ])
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 24,
+            username: 'runtime-user',
+            accessToken: 'token',
+            status: 'active',
+            extraConfig: null,
+          },
+          sites: {
+            id: 34,
+            name: 'runtime-site',
+            url: 'https://runtime.example.com',
+            platform: 'new-api',
+          },
+        },
+      ]);
+
+    adapterMock.checkin
+      .mockResolvedValueOnce({ success: false, message: 'HTTP 500: upstream error' })
+      .mockResolvedValueOnce({ success: true, message: 'checked in' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+
+    await checkinAccount(24, { scheduleMode: 'cron' });
+    await checkinAccount(24, { scheduleMode: 'cron' });
+
+    expect(recordCheckinSiteResolutionMock).toHaveBeenCalledTimes(2);
+    expect(recordCheckinSiteResolutionMock.mock.calls[0]?.[0]).toBe(34);
+    expect(recordCheckinSiteResolutionMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      lifecycle: 'failed',
+      checkinSnapshotStatus: 'retryable_failed',
+      code: 'upstream_error',
+    }));
+    expect(recordCheckinSiteResolutionMock.mock.calls[1]?.[0]).toBe(34);
+    expect(recordCheckinSiteResolutionMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      lifecycle: 'completed',
+      checkinSnapshotStatus: 'success',
+    }));
+  });
+
+  it('does not increase site runtime budget for manual-required or unsupported checkins', async () => {
+    selectAllMock
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 25,
+            username: 'manual-user',
+            accessToken: 'token',
+            status: 'active',
+            extraConfig: null,
+          },
+          sites: {
+            id: 35,
+            name: 'manual-site',
+            url: 'https://manual.example.com',
+            platform: 'new-api',
+          },
+        },
+      ])
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 26,
+            username: 'unsupported-user',
+            accessToken: 'token',
+            status: 'active',
+            extraConfig: null,
+          },
+          sites: {
+            id: 36,
+            name: 'unsupported-site',
+            url: 'https://unsupported.example.com',
+            platform: 'new-api',
+          },
+        },
+      ]);
+
+    adapterMock.checkin
+      .mockResolvedValueOnce({ success: false, message: 'Turnstile token 为空' })
+      .mockResolvedValueOnce({ success: false, message: 'checkin endpoint not found' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+
+    await checkinAccount(25, { scheduleMode: 'cron' });
+    await checkinAccount(26, { scheduleMode: 'cron' });
+
+    expect(recordCheckinSiteResolutionMock).toHaveBeenCalledTimes(2);
+    expect(recordCheckinSiteResolutionMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      lifecycle: 'skipped',
+      requiresManual: true,
+      checkinSnapshotStatus: 'manual_required',
+    }));
+    expect(recordCheckinSiteResolutionMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      lifecycle: 'skipped',
+      unsupported: true,
+      checkinSnapshotStatus: 'unsupported',
+    }));
+  });
+
   it('includes expired accounts in batch checkin so auto relogin can recover them', async () => {
     selectAllMock
       .mockReturnValueOnce([
@@ -524,6 +662,62 @@ describe('checkinService auto relogin', () => {
       accessToken: 'fresh-token',
       status: 'active',
     }));
+  });
+
+  it('skips all accounts on a site when site-level checkin backoff is active', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 31,
+          username: 'blocked-a',
+          accessToken: 'token-a',
+          status: 'active',
+          checkinEnabled: true,
+          extraConfig: null,
+        },
+        sites: {
+          id: 41,
+          name: 'blocked-site',
+          url: 'https://blocked.example.com',
+          platform: 'new-api',
+        },
+      },
+      {
+        accounts: {
+          id: 32,
+          username: 'blocked-b',
+          accessToken: 'token-b',
+          status: 'active',
+          checkinEnabled: true,
+          extraConfig: null,
+        },
+        sites: {
+          id: 41,
+          name: 'blocked-site',
+          url: 'https://blocked.example.com',
+          platform: 'new-api',
+        },
+      },
+    ]);
+    getCheckinSiteBackoffDecisionMock.mockResolvedValue({
+      siteId: 41,
+      blocked: true,
+      blockedUntilMs: Date.parse('2026-03-28T00:00:00.000Z'),
+      blockedUntil: '2026-03-28T00:00:00.000Z',
+      failureStreak: 3,
+      lastReasonCode: 'upstream_error',
+      lastMessage: 'site checkin backoff active',
+    });
+
+    const { checkinAll } = await import('./checkinService.js');
+    const results = await checkinAll({ scheduleMode: 'cron' });
+
+    expect(results).toHaveLength(2);
+    expect(adapterMock.checkin).not.toHaveBeenCalled();
+    expect(results.every((item) => item.result?.status === 'skipped' && item.result?.skipped === true)).toBe(true);
+    expect(results[0]?.result?.reasonCode).toBe('upstream_error');
+    expect(results[0]?.result?.failureStreak).toBe(3);
+    expect(recordCheckinSiteResolutionMock).not.toHaveBeenCalled();
   });
 
   it('keeps batch checkin isolated when one account throws unexpectedly', async () => {

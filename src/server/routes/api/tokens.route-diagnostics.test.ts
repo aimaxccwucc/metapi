@@ -10,6 +10,7 @@ type ModelCircuitModule = typeof import('../../services/modelCircuitBreaker.js')
 type UpstreamEndpointModule = typeof import('../proxy/upstreamEndpoint.js');
 type SiteProtocolConfigModule = typeof import('../../services/siteProtocolConfigService.js');
 type UpstreamProtocolProfileModule = typeof import('../../services/upstreamProtocolProfile.js');
+type CheckinSiteRuntimeModule = typeof import('../../services/checkinSiteRuntime.js');
 
 describe('GET /api/routes/diagnostics', () => {
   let app: FastifyInstance;
@@ -25,6 +26,8 @@ describe('GET /api/routes/diagnostics', () => {
   let resetSiteProtocolConfigState: SiteProtocolConfigModule['resetSiteProtocolConfigState'];
   let upsertSiteProtocolConfig: SiteProtocolConfigModule['upsertSiteProtocolConfig'];
   let resetUpstreamProtocolProfileState: UpstreamProtocolProfileModule['resetUpstreamProtocolProfileState'];
+  let recordCheckinSiteResolution: CheckinSiteRuntimeModule['recordCheckinSiteResolution'];
+  let resetCheckinSiteRuntimeState: CheckinSiteRuntimeModule['resetCheckinSiteRuntimeState'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -39,6 +42,7 @@ describe('GET /api/routes/diagnostics', () => {
     const upstreamEndpointModule = await import('../proxy/upstreamEndpoint.js');
     const siteProtocolConfigModule = await import('../../services/siteProtocolConfigService.js');
     const upstreamProtocolProfileModule = await import('../../services/upstreamProtocolProfile.js');
+    const checkinSiteRuntimeModule = await import('../../services/checkinSiteRuntime.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
@@ -52,6 +56,8 @@ describe('GET /api/routes/diagnostics', () => {
     resetSiteProtocolConfigState = siteProtocolConfigModule.resetSiteProtocolConfigState;
     upsertSiteProtocolConfig = siteProtocolConfigModule.upsertSiteProtocolConfig;
     resetUpstreamProtocolProfileState = upstreamProtocolProfileModule.resetUpstreamProtocolProfileState;
+    recordCheckinSiteResolution = checkinSiteRuntimeModule.recordCheckinSiteResolution;
+    resetCheckinSiteRuntimeState = checkinSiteRuntimeModule.resetCheckinSiteRuntimeState;
 
     app = Fastify();
     await app.register(routesModule.tokensRoutes);
@@ -75,6 +81,7 @@ describe('GET /api/routes/diagnostics', () => {
     resetUpstreamEndpointRuntimeState();
     resetSiteProtocolConfigState();
     resetUpstreamProtocolProfileState();
+    resetCheckinSiteRuntimeState();
   });
 
   afterAll(async () => {
@@ -85,6 +92,7 @@ describe('GET /api/routes/diagnostics', () => {
     resetUpstreamEndpointRuntimeState();
     resetSiteProtocolConfigState();
     resetUpstreamProtocolProfileState();
+    resetCheckinSiteRuntimeState();
     delete process.env.DATA_DIR;
   });
 
@@ -182,6 +190,24 @@ describe('GET /api/routes/diagnostics', () => {
       preferredEndpoint: 'responses',
       updatedAtMs: Date.now(),
     });
+    await recordCheckinSiteResolution(site.id, {
+      code: 'upstream_error',
+      category: 'site',
+      title: '上游站点错误',
+      actionHint: '稍后重试',
+      detailHint: 'test',
+      lifecycle: 'failed',
+      normalizedStatus: 'failed',
+      checkinSnapshotStatus: 'retryable_failed',
+      retryable: true,
+      requiresManual: false,
+      unsupported: false,
+      advanceLastCheckinAt: false,
+      refreshBalance: false,
+      healthState: 'unhealthy',
+      logMessage: 'site upstream error',
+      eventLevel: 'error',
+    });
 
     recordUpstreamEndpointFailure({
       siteId: site.id,
@@ -223,13 +249,22 @@ describe('GET /api/routes/diagnostics', () => {
         items: Array<{ accountId: number; successEma: number; inflightCount: number; concurrencyBudget: number }>;
       };
       unavailableModels: { total: number; blockingCount: number };
+      checkinSiteRuntime: {
+        total: number;
+        blockedCount: number;
+        items: Array<{ siteId: number; blocked: boolean; failureStreak: number; lastReasonCode: string | null }>;
+      };
       siteProfiles: { total: number; manualConfiguredCount: number };
       checkinTodo: {
         attentionCount: number;
         manualRequiredCount: number;
+        siteBackoffBlockedCount: number;
         sites: Array<{
           siteId: number;
           attentionCount: number;
+          siteBackoffBlocked: boolean;
+          siteBackoffFailureStreak: number;
+          siteBackoffReasonCode: string | null;
           sampleAccounts: Array<{ checkinSnapshot?: { status?: string; reasonCode?: string } | null }>;
         }>;
       };
@@ -248,12 +283,76 @@ describe('GET /api/routes/diagnostics', () => {
     expect(body.accountRuntimeHealth.items[0]?.successEma).toBeGreaterThanOrEqual(0);
     expect(body.unavailableModels.total).toBeGreaterThanOrEqual(1);
     expect(body.unavailableModels.blockingCount).toBeGreaterThanOrEqual(1);
+    expect(body.checkinSiteRuntime.total).toBeGreaterThanOrEqual(1);
+    expect(body.checkinSiteRuntime.blockedCount).toBeGreaterThanOrEqual(1);
+    expect(body.checkinSiteRuntime.items[0]?.siteId).toBe(site.id);
+    expect(body.checkinSiteRuntime.items[0]?.failureStreak).toBeGreaterThanOrEqual(1);
+    expect(body.checkinSiteRuntime.items[0]?.lastReasonCode).toBe('upstream_error');
     expect(body.siteProfiles.total).toBeGreaterThanOrEqual(1);
     expect(body.siteProfiles.manualConfiguredCount).toBeGreaterThanOrEqual(1);
     expect(body.checkinTodo.attentionCount).toBeGreaterThanOrEqual(1);
     expect(body.checkinTodo.manualRequiredCount).toBeGreaterThanOrEqual(1);
+    expect(body.checkinTodo.siteBackoffBlockedCount).toBeGreaterThanOrEqual(1);
     expect(body.checkinTodo.sites.some((item) => item.siteId === site.id && item.attentionCount > 0)).toBe(true);
+    expect(body.checkinTodo.sites[0]?.siteBackoffBlocked).toBe(true);
+    expect(body.checkinTodo.sites[0]?.siteBackoffFailureStreak).toBeGreaterThanOrEqual(1);
+    expect(body.checkinTodo.sites[0]?.siteBackoffReasonCode).toBe('upstream_error');
     expect(body.checkinTodo.sites[0]?.sampleAccounts[0]?.checkinSnapshot?.status).toBe('manual_required');
     expect(body.checkinTodo.sites[0]?.sampleAccounts[0]?.checkinSnapshot?.reasonCode).toBe('manual_turnstile_required');
+  });
+
+  it('keeps manual-required attention without marking site runtime backoff', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'manual-only-site',
+      url: 'https://manual-only.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'manual-only-user',
+      accessToken: 'manual-token',
+      status: 'active',
+      checkinEnabled: true,
+      extraConfig: JSON.stringify({
+        checkinSnapshot: {
+          version: 1,
+          status: 'manual_required',
+          reasonCode: 'manual_turnstile_required',
+          retryable: false,
+          requiresManual: true,
+          unsupported: false,
+          lastAttemptAt: '2026-03-25T00:00:00.000Z',
+          message: '站点开启了 Turnstile 校验，需要人工签到',
+          source: 'checkin',
+        },
+      }),
+    }).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/routes/diagnostics?limit=20',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      checkinSiteRuntime: { total: number; blockedCount: number };
+      checkinTodo: {
+        attentionCount: number;
+        manualRequiredCount: number;
+        siteBackoffBlockedCount: number;
+        sites: Array<{ siteId: number; siteBackoffBlocked: boolean; sampleAccounts: Array<{ checkinSnapshot?: { status?: string } | null }> }>;
+      };
+    };
+
+    expect(body.checkinSiteRuntime.total).toBe(0);
+    expect(body.checkinSiteRuntime.blockedCount).toBe(0);
+    expect(body.checkinTodo.attentionCount).toBeGreaterThanOrEqual(1);
+    expect(body.checkinTodo.manualRequiredCount).toBeGreaterThanOrEqual(1);
+    expect(body.checkinTodo.siteBackoffBlockedCount).toBe(0);
+    expect(body.checkinTodo.sites[0]?.siteId).toBe(site.id);
+    expect(body.checkinTodo.sites[0]?.siteBackoffBlocked).toBe(false);
+    expect(body.checkinTodo.sites[0]?.sampleAccounts[0]?.checkinSnapshot?.status).toBe('manual_required');
   });
 });

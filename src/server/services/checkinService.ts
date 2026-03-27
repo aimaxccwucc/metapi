@@ -18,6 +18,10 @@ import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { resolveCheckinExecution } from './failureReasonService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
+import {
+  getCheckinSiteBackoffDecision,
+  recordCheckinSiteResolution,
+} from './checkinSiteRuntime.js';
 
 export function isSchedulableCheckinAccountStatus(status?: string | null): boolean {
   return status === 'active' || status === 'expired';
@@ -145,6 +149,8 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
         createdAt,
       }).run();
     }
+
+    await recordCheckinSiteResolution(site.id, resolution);
 
     return {
       success: true,
@@ -323,6 +329,8 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     }
   }
 
+  await recordCheckinSiteResolution(site.id, resolution);
+
 
   return {
     ...result,
@@ -358,7 +366,30 @@ export async function checkinAll(options?: { accountIds?: number[]; scheduleMode
     grouped.get(siteId)!.push(row);
   }
 
-  const promises = Array.from(grouped.entries()).map(async ([_, siteRows]) => {
+  const promises = Array.from(grouped.entries()).map(async ([siteId, siteRows]) => {
+    const siteBackoff = await getCheckinSiteBackoffDecision(siteId);
+    if (siteBackoff.blocked) {
+      for (const row of siteRows) {
+        results.push({
+          accountId: row.accounts.id,
+          username: row.accounts.username,
+          site: row.sites.name,
+          result: {
+            success: true,
+            status: 'skipped' as const,
+            skipped: true,
+            reason: 'site_checkin_backoff_active',
+            reasonCode: siteBackoff.lastReasonCode ?? 'site_checkin_backoff_active',
+            message: siteBackoff.lastMessage || 'site checkin backoff active',
+            blockedUntil: siteBackoff.blockedUntil,
+            blockedUntilMs: siteBackoff.blockedUntilMs,
+            failureStreak: siteBackoff.failureStreak,
+          },
+        });
+      }
+      return;
+    }
+
     for (const row of siteRows) {
       try {
         const r = await checkinAccount(row.accounts.id, {

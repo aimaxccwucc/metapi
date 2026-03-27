@@ -36,6 +36,7 @@ import { listPersistedUpstreamProtocolProfiles } from '../../services/upstreamPr
 import { listSiteProtocolConfigs } from '../../services/siteProtocolConfigService.js';
 import { extractRuntimeHealth } from '../../services/accountHealthService.js';
 import { isSchedulableCheckinAccountStatus } from '../../services/checkinService.js';
+import { listCheckinSiteRuntimeSnapshots } from '../../services/checkinSiteRuntime.js';
 
 const ROUTE_AUTOCREATE_SOFT_TIMEOUT_MS = 4_000;
 
@@ -997,6 +998,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       siteRuntimeRows,
       accountRuntimeRows,
       unavailableModelRows,
+      checkinSiteRuntimeRows,
     ] = await Promise.all([
       db.select({
         id: schema.tokenRoutes.id,
@@ -1061,6 +1063,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       listSiteRuntimeHealthSnapshots(nowMs),
       listAccountRoutingRuntimeSnapshots(nowMs),
       listPersistedUnavailableModelEntries(),
+      listCheckinSiteRuntimeSnapshots(nowMs),
     ]);
 
     const siteById = new Map<number, {
@@ -1245,6 +1248,32 @@ export async function tokensRoutes(app: FastifyInstance) {
       };
     });
     const unavailableBlockingCount = unavailableModelItems.filter((item) => item.stillBlocking).length;
+    const checkinSiteRuntimeBySiteId = new Map<number, {
+      siteId: number;
+      failureStreak: number;
+      blockedUntilMs: number | null;
+      blocked: boolean;
+      lastFailureAtMs: number | null;
+      lastSuccessAtMs: number | null;
+      lastReasonCode: string | null;
+      lastMessage: string | null;
+      updatedAtMs: number;
+    }>();
+    const checkinSiteRuntimeItems = checkinSiteRuntimeRows.map((row) => {
+      const site = siteById.get(row.siteId);
+      const item = {
+        ...row,
+        siteName: site?.name || `site-${row.siteId}`,
+        sitePlatform: site?.platform || '',
+        siteStatus: site?.status || 'active',
+        blockedUntil: row.blockedUntilMs ? new Date(row.blockedUntilMs).toISOString() : null,
+        lastFailureAt: row.lastFailureAtMs ? new Date(row.lastFailureAtMs).toISOString() : null,
+        lastSuccessAt: row.lastSuccessAtMs ? new Date(row.lastSuccessAtMs).toISOString() : null,
+      };
+      checkinSiteRuntimeBySiteId.set(row.siteId, row);
+      return item;
+    });
+    const checkinSiteRuntimeBlockedCount = checkinSiteRuntimeItems.filter((item) => item.blocked).length;
 
     const endpointRuntimeItems = endpointRuntimeMemoryRows.map((row) => {
       const siteId = Number.parseInt(String(row.key.split(':')[0] || ''), 10);
@@ -1312,6 +1341,12 @@ export async function tokensRoutes(app: FastifyInstance) {
       siteId: number;
       siteName: string;
       siteStatus: string;
+      siteBackoffBlocked: boolean;
+      siteBackoffUntil: string | null;
+      siteBackoffUntilMs: number | null;
+      siteBackoffFailureStreak: number;
+      siteBackoffReasonCode: string | null;
+      siteBackoffMessage: string | null;
       totalSchedulableAccounts: number;
       dueNowCount: number;
       manualRequiredCount: number;
@@ -1362,10 +1397,17 @@ export async function tokensRoutes(app: FastifyInstance) {
       const attention = requiresManual || failedRecent || unhealthy || expired;
 
       if (!checkinSiteTodoMap.has(site.id)) {
+        const siteRuntime = checkinSiteRuntimeBySiteId.get(site.id) || null;
         checkinSiteTodoMap.set(site.id, {
           siteId: site.id,
           siteName: site.name,
           siteStatus: site.status,
+          siteBackoffBlocked: siteRuntime?.blocked === true,
+          siteBackoffUntil: siteRuntime?.blockedUntilMs ? new Date(siteRuntime.blockedUntilMs).toISOString() : null,
+          siteBackoffUntilMs: siteRuntime?.blockedUntilMs ?? null,
+          siteBackoffFailureStreak: siteRuntime?.failureStreak ?? 0,
+          siteBackoffReasonCode: siteRuntime?.lastReasonCode ?? null,
+          siteBackoffMessage: siteRuntime?.lastMessage ?? null,
           totalSchedulableAccounts: 0,
           dueNowCount: 0,
           manualRequiredCount: 0,
@@ -1408,7 +1450,8 @@ export async function tokensRoutes(app: FastifyInstance) {
 
     const checkinTodoSites = Array.from(checkinSiteTodoMap.values())
       .sort((left, right) => (
-        right.attentionCount - left.attentionCount
+        Number(right.siteBackoffBlocked) - Number(left.siteBackoffBlocked)
+        || right.attentionCount - left.attentionCount
         || right.dueNowCount - left.dueNowCount
         || left.siteName.localeCompare(right.siteName, undefined, { sensitivity: 'base' })
       ));
@@ -1422,6 +1465,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       unsupportedCount: checkinTodoSites.reduce((sum, item) => sum + item.unsupportedCount, 0),
       failedRecentCount: checkinTodoSites.reduce((sum, item) => sum + item.failedRecentCount, 0),
       attentionCount: checkinTodoSites.reduce((sum, item) => sum + item.attentionCount, 0),
+      siteBackoffBlockedCount: checkinTodoSites.reduce((sum, item) => sum + (item.siteBackoffBlocked ? 1 : 0), 0),
     };
 
     return {
@@ -1441,6 +1485,7 @@ export async function tokensRoutes(app: FastifyInstance) {
         unavailableModels: unavailableModelItems.length,
         siteProfiles: siteProfiles.length,
         checkinTodoSites: checkinTodoSites.length,
+        checkinSiteRuntimeStates: checkinSiteRuntimeItems.length,
       },
       endpointRuntimeMemory: {
         total: endpointRuntimeItems.length,
@@ -1476,6 +1521,11 @@ export async function tokensRoutes(app: FastifyInstance) {
         total: unavailableModelItems.length,
         blockingCount: unavailableBlockingCount,
         items: unavailableModelItems.slice(0, itemLimit),
+      },
+      checkinSiteRuntime: {
+        total: checkinSiteRuntimeItems.length,
+        blockedCount: checkinSiteRuntimeBlockedCount,
+        items: checkinSiteRuntimeItems.slice(0, itemLimit),
       },
       siteProfiles: {
         total: siteProfiles.length,

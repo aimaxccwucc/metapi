@@ -1049,6 +1049,7 @@ export default function TokenRoutes() {
         runtimeBreakerOpen: 0,
         unavailableBlocking: 0,
         checkinAttention: 0,
+        checkinSiteBackoffBlocked: 0,
       };
     }
     const generatedAtLabel = diagnostics.generatedAt
@@ -1062,6 +1063,7 @@ export default function TokenRoutes() {
       runtimeBreakerOpen: diagnostics.siteRuntimeHealth.breakerOpenCount || 0,
       unavailableBlocking: diagnostics.unavailableModels.blockingCount || 0,
       checkinAttention: diagnostics.checkinTodo.attentionCount || 0,
+      checkinSiteBackoffBlocked: diagnostics.checkinSiteRuntime.blockedCount || 0,
     };
   }, [routeDiagnostics]);
 
@@ -1484,13 +1486,14 @@ export default function TokenRoutes() {
           <span className={`badge ${routeDiagnosticsHighlights.modelCircuitOpen > 0 ? 'badge-error' : 'badge-muted'}`} style={{ fontSize: 11 }}>模型熔断中 {routeDiagnosticsHighlights.modelCircuitOpen}</span>
           <span className={`badge ${routeDiagnosticsHighlights.runtimeBreakerOpen > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>站点熔断中 {routeDiagnosticsHighlights.runtimeBreakerOpen}</span>
           <span className={`badge ${routeDiagnosticsHighlights.unavailableBlocking > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>持久不可用阻断 {routeDiagnosticsHighlights.unavailableBlocking}</span>
+          <span className={`badge ${routeDiagnosticsHighlights.checkinSiteBackoffBlocked > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到站点退避中 {routeDiagnosticsHighlights.checkinSiteBackoffBlocked}</span>
           <span className={`badge ${routeDiagnosticsHighlights.checkinAttention > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到待处理 {routeDiagnosticsHighlights.checkinAttention}</span>
         </div>
 
         {routeDiagnostics ? (
           <>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-              汇总：路由 {routeDiagnostics.routeSummary.enabledRouteCount}/{routeDiagnostics.routeSummary.routeCount} 启用，通道 {routeDiagnostics.routeSummary.enabledChannelCount}/{routeDiagnostics.routeSummary.channelCount} 启用，手动协议站点 {routeDiagnostics.siteProfiles.manualConfiguredCount}/{routeDiagnostics.siteProfiles.total}。
+              汇总：路由 {routeDiagnostics.routeSummary.enabledRouteCount}/{routeDiagnostics.routeSummary.routeCount} 启用，通道 {routeDiagnostics.routeSummary.enabledChannelCount}/{routeDiagnostics.routeSummary.channelCount} 启用，手动协议站点 {routeDiagnostics.siteProfiles.manualConfiguredCount}/{routeDiagnostics.siteProfiles.total}，签到站点退避 {routeDiagnostics.checkinSiteRuntime.blockedCount}/{routeDiagnostics.checkinSiteRuntime.total}。
             </div>
 
             <details>
@@ -1504,6 +1507,7 @@ export default function TokenRoutes() {
                       <th>应执行</th>
                       <th>人工验证</th>
                       <th>失败</th>
+                      <th>站点退避</th>
                       <th>快照</th>
                     </tr>
                   </thead>
@@ -1515,6 +1519,11 @@ export default function TokenRoutes() {
                         <td>{site.dueNowCount}</td>
                         <td>{site.manualRequiredCount}</td>
                         <td>{site.failedRecentCount}</td>
+                        <td style={{ fontSize: 12, color: site.siteBackoffBlocked ? 'var(--color-warning)' : 'var(--color-text-secondary)' }}>
+                          {site.siteBackoffBlocked
+                            ? `${site.siteBackoffFailureStreak} 次 / ${site.siteBackoffUntil ? new Date(site.siteBackoffUntil).toLocaleString() : '恢复中'}`
+                            : '-'}
+                        </td>
                         <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
                           {site.sampleAccounts[0]?.checkinSnapshot
                             ? `${site.sampleAccounts[0].checkinSnapshot.status} / ${site.sampleAccounts[0].checkinSnapshot.reasonCode}`

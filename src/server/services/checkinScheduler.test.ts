@@ -8,6 +8,7 @@ const validateMock = vi.fn(() => true);
 const allMock = vi.fn();
 const dbSelectAllMock = vi.fn();
 const executeRefreshSiteReachabilityMock = vi.fn();
+const isSiteBackoffBlockedMock = vi.fn();
 
 vi.mock('node-cron', () => ({
   default: {
@@ -46,6 +47,10 @@ vi.mock('./siteHealthService.js', () => ({
   executeRefreshSiteReachability: (...args: unknown[]) => executeRefreshSiteReachabilityMock(...args),
 }));
 
+vi.mock('./checkinSiteRuntime.js', () => ({
+  getCheckinSiteBackoffDecision: (...args: unknown[]) => isSiteBackoffBlockedMock(...args),
+}));
+
 describe('checkinScheduler', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -55,6 +60,16 @@ describe('checkinScheduler', () => {
     allMock.mockReset();
     dbSelectAllMock.mockReset();
     executeRefreshSiteReachabilityMock.mockReset();
+    isSiteBackoffBlockedMock.mockReset();
+    isSiteBackoffBlockedMock.mockResolvedValue({
+      siteId: 0,
+      blocked: false,
+      blockedUntilMs: null,
+      blockedUntil: null,
+      failureStreak: 0,
+      lastReasonCode: null,
+      lastMessage: null,
+    });
   });
 
   afterEach(async () => {
@@ -245,5 +260,45 @@ describe('checkinScheduler', () => {
 
     resolvePending?.([{ accountId: 1, result: { success: true, status: 'success' } }]);
     await vi.runAllTicks();
+  });
+
+  it('passes through site-level skipped results so blocked sites are not retried immediately', async () => {
+    const scheduler = await import('./checkinScheduler.js');
+    dbSelectAllMock.mockReturnValue([
+      {
+        accounts: { id: 1, checkinEnabled: true, status: 'active', lastCheckinAt: null },
+        sites: { status: 'active' },
+      },
+      {
+        accounts: { id: 2, checkinEnabled: true, status: 'active', lastCheckinAt: null },
+        sites: { status: 'active' },
+      },
+    ]);
+    allMock
+      .mockResolvedValueOnce([
+        { accountId: 1, result: { success: true, status: 'skipped', skipped: true, reasonCode: 'upstream_error' } },
+        { accountId: 2, result: { success: false, status: 'failed' } },
+      ])
+      .mockResolvedValueOnce([
+        { accountId: 2, result: { success: false, status: 'failed' } },
+      ]);
+
+    scheduler.updateCheckinSchedule({
+      mode: 'interval',
+      intervalHours: 6,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(allMock).toHaveBeenCalledTimes(2);
+    expect(allMock).toHaveBeenNthCalledWith(1, {
+      accountIds: [1, 2],
+      scheduleMode: 'interval',
+    });
+    expect(allMock).toHaveBeenNthCalledWith(2, {
+      accountIds: [2],
+      scheduleMode: 'interval',
+    });
   });
 });

@@ -302,9 +302,11 @@ export type RouteDiagnosticsResponse = {
     persistedEndpointProfiles: number;
     modelCircuits: number;
     siteRuntimeStates: number;
+    accountRuntimeStates: number;
     unavailableModels: number;
     siteProfiles: number;
     checkinTodoSites: number;
+    checkinSiteRuntimeStates: number;
   };
   endpointRuntimeMemory: {
     total: number;
@@ -400,6 +402,32 @@ export type RouteDiagnosticsResponse = {
       breakerOpen: boolean;
     }>;
   };
+  accountRuntimeHealth: {
+    total: number;
+    busyCount: number;
+    stickyActiveCount: number;
+    items: Array<{
+      accountId: number;
+      siteId: number | null;
+      username: string | null;
+      siteName: string | null;
+      inflightCount: number;
+      concurrencyBudget: number;
+      successEma: number;
+      recentFailures: number;
+      stickyActiveCount: number;
+      rateBudgetPerMinute: number;
+      rateTokensRemaining: number;
+      rateBudgetState: string;
+      stickyAssignmentsHash: string | null;
+      lastStickyUpdatedAtMs: number | null;
+      lastSuccessAtMs: number | null;
+      lastSuccessAt: string | null;
+      lastFailureAtMs: number | null;
+      lastFailureAt: string | null;
+      updatedAtMs: number;
+    }>;
+  };
   unavailableModels: {
     total: number;
     blockingCount: number;
@@ -416,6 +444,27 @@ export type RouteDiagnosticsResponse = {
       checkedAtMs: number;
       stillBlocking: boolean;
       ageMs: number;
+    }>;
+  };
+  checkinSiteRuntime: {
+    total: number;
+    blockedCount: number;
+    items: Array<{
+      siteId: number;
+      siteName: string;
+      sitePlatform: string;
+      siteStatus: string;
+      failureStreak: number;
+      blockedUntilMs: number | null;
+      blockedUntil: string | null;
+      blocked: boolean;
+      lastFailureAtMs: number | null;
+      lastFailureAt: string | null;
+      lastSuccessAtMs: number | null;
+      lastSuccessAt: string | null;
+      lastReasonCode: string | null;
+      lastMessage: string | null;
+      updatedAtMs: number;
     }>;
   };
   siteProfiles: {
@@ -446,10 +495,17 @@ export type RouteDiagnosticsResponse = {
     unsupportedCount: number;
     failedRecentCount: number;
     attentionCount: number;
+    siteBackoffBlockedCount: number;
     sites: Array<{
       siteId: number;
       siteName: string;
       siteStatus: string;
+      siteBackoffBlocked: boolean;
+      siteBackoffUntil: string | null;
+      siteBackoffUntilMs: number | null;
+      siteBackoffFailureStreak: number;
+      siteBackoffReasonCode: string | null;
+      siteBackoffMessage: string | null;
       totalSchedulableAccounts: number;
       dueNowCount: number;
       manualRequiredCount: number;
