@@ -122,6 +122,23 @@ function buildRawItem(overrides?: Partial<any>) {
   };
 }
 
+function buildLargeRouteOptions() {
+  return [
+    ...Array.from({ length: 140 }, (_, index) => ({
+      id: index + 1,
+      modelPattern: `model-${String(index + 1).padStart(3, '0')}`,
+      displayName: `模型 ${String(index + 1).padStart(3, '0')}`,
+      enabled: true,
+    })),
+    ...Array.from({ length: 120 }, (_, index) => ({
+      id: 1001 + index,
+      modelPattern: `group-${String(index + 1).padStart(3, '0')}-*`,
+      displayName: `群组 ${String(index + 1).padStart(3, '0')}`,
+      enabled: true,
+    })),
+  ];
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   (globalThis as any).document = {
@@ -472,6 +489,92 @@ describe('DownstreamKeys page', () => {
         key: 'sk-select-all-key-0319',
         supportedModels: ['claude-opus-4-6', 'gpt-4.1-mini'],
         allowedRouteIds: [11, 13],
+      }));
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('progressively renders large selector lists so choosing later models does not block the page', async () => {
+    apiMock.getRoutesLite.mockResolvedValue(buildLargeRouteOptions());
+
+    let root: ReturnType<typeof create> | null = null;
+    const getAdvancedPanels = () => {
+      const panels = root!.root.findAll((node) => node.props.className === 'downstream-key-advanced-panel');
+      return {
+        modelPanel: panels.find((node) => collectText(node).includes('模型白名单'))!,
+        groupPanel: panels.find((node) => collectText(node).includes('群组范围'))!,
+      };
+    };
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/downstream-keys']}>
+            <ToastProvider>
+              <DownstreamKeys />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const createBtn = root!.root.findAll((node) => node.type === 'button' && collectText(node).includes('新增下游密钥'))[0];
+      await act(async () => {
+        createBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const advancedBtn = root!.root.findAll((node) => node.type === 'button' && collectText(node).includes('高级配置'))[0];
+      await act(async () => {
+        advancedBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      let { modelPanel, groupPanel } = getAdvancedPanels();
+      expect(collectText(modelPanel)).toContain('model-001');
+      expect(collectText(modelPanel)).not.toContain('model-120');
+      expect(collectText(groupPanel)).toContain('群组 001');
+      expect(collectText(groupPanel)).not.toContain('群组 110');
+
+      const loadMoreButtons = root!.root.findAll((node) => node.type === 'button' && collectText(node).includes('加载更多'));
+      await act(async () => {
+        loadMoreButtons[0].props.onClick();
+        loadMoreButtons[1].props.onClick();
+      });
+      await flushMicrotasks();
+
+      ({ modelPanel, groupPanel } = getAdvancedPanels());
+      expect(collectText(modelPanel)).toContain('model-120');
+      expect(collectText(groupPanel)).toContain('群组 110');
+
+      const targetModelLabel = modelPanel.find((node) => node.type === 'label' && collectText(node).includes('model-120'));
+      const targetGroupLabel = groupPanel.find((node) => node.type === 'label' && collectText(node).includes('群组 110'));
+      const nameInput = root!.root.findAllByType('input').find((node) => node.props.placeholder === '例如：项目 A / 移动端');
+      const keyInput = root!.root.findAllByType('input').find((node) => node.props.placeholder === 'sk-...');
+
+      await act(async () => {
+        targetModelLabel.findByType('input').props.onChange({ target: { checked: true } });
+        targetGroupLabel.findByType('input').props.onChange({ target: { checked: true } });
+        nameInput!.props.onChange({ target: { value: 'large-selector-key' } });
+        keyInput!.props.onChange({ target: { value: 'sk-large-selector-key-0327' } });
+      });
+      await flushMicrotasks();
+
+      expect(collectText(root!.root)).toContain('已选 1 个模型');
+      expect(collectText(root!.root)).toContain('已选 1 个群组');
+
+      const saveBtn = root!.root.findAll((node) => node.type === 'button' && collectText(node).includes('创建密钥'))[0];
+      await act(async () => {
+        saveBtn.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.createDownstreamApiKey).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'large-selector-key',
+        key: 'sk-large-selector-key-0327',
+        supportedModels: ['model-120'],
+        allowedRouteIds: [1110],
       }));
     } finally {
       root?.unmount();

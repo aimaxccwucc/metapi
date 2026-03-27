@@ -12,11 +12,13 @@ import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import { tr } from '../i18n.js';
 import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
+import { getInitialVisibleCount, getNextVisibleCount } from './helpers/progressiveRender.js';
 
 const DownstreamKeyTrendChart = lazy(() => import('../components/charts/DownstreamKeyTrendChart.js'));
 type DownstreamKeyTrendBucket = import('../components/charts/DownstreamKeyTrendChart.js').DownstreamKeyTrendBucket;
 
 const PROXY_TOKEN_PREFIX = 'sk-';
+const DOWNSTREAM_EDITOR_RENDER_CHUNK = 80;
 
 type Range = '24h' | '7d' | 'all';
 type Status = 'all' | 'enabled' | 'disabled';
@@ -881,12 +883,16 @@ function EditorModal({
   const [modelSearch, setModelSearch] = useState('');
   const [groupSearch, setGroupSearch] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [visibleModelCount, setVisibleModelCount] = useState(DOWNSTREAM_EDITOR_RENDER_CHUNK);
+  const [visibleGroupCount, setVisibleGroupCount] = useState(DOWNSTREAM_EDITOR_RENDER_CHUNK);
 
   useEffect(() => {
     if (!open) {
       setModelSearch('');
       setGroupSearch('');
       setAdvancedOpen(false);
+      setVisibleModelCount(DOWNSTREAM_EDITOR_RENDER_CHUNK);
+      setVisibleGroupCount(DOWNSTREAM_EDITOR_RENDER_CHUNK);
     }
   }, [open]);
 
@@ -906,6 +912,14 @@ function EditorModal({
     () => uniqIds(form.selectedGroupRouteIds.filter((id) => validGroupRouteIdSet.has(id))),
     [form.selectedGroupRouteIds, validGroupRouteIdSet],
   );
+  const selectedModelSet = useMemo(
+    () => new Set(form.selectedModels),
+    [form.selectedModels],
+  );
+  const selectedGroupRouteIdSet = useMemo(
+    () => new Set(normalizedSelectedGroupRouteIds),
+    [normalizedSelectedGroupRouteIds],
+  );
 
   const filteredModels = useMemo(() => {
     const keyword = modelSearch.trim().toLowerCase();
@@ -921,6 +935,24 @@ function EditorModal({
       return title.includes(keyword) || route.modelPattern.toLowerCase().includes(keyword);
     });
   }, [groupRouteOptions, groupSearch]);
+
+  useEffect(() => {
+    setVisibleModelCount(getInitialVisibleCount(filteredModels.length, DOWNSTREAM_EDITOR_RENDER_CHUNK));
+  }, [filteredModels.length]);
+
+  useEffect(() => {
+    setVisibleGroupCount(getInitialVisibleCount(filteredGroups.length, DOWNSTREAM_EDITOR_RENDER_CHUNK));
+  }, [filteredGroups.length]);
+
+  const visibleModels = useMemo(
+    () => filteredModels.slice(0, visibleModelCount),
+    [filteredModels, visibleModelCount],
+  );
+
+  const visibleGroups = useMemo(
+    () => filteredGroups.slice(0, visibleGroupCount),
+    [filteredGroups, visibleGroupCount],
+  );
 
   const selectedModelCount = form.selectedModels.length;
   const selectedGroupCount = normalizedSelectedGroupRouteIds.length;
@@ -1089,8 +1121,8 @@ function EditorModal({
                 <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {filteredModels.length === 0 ? (
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无匹配模型</div>
-                  ) : filteredModels.map((model) => {
-                    const checked = form.selectedModels.includes(model);
+                  ) : visibleModels.map((model) => {
+                    const checked = selectedModelSet.has(model);
                     return (
                       <label key={model} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', padding: '8px 10px', borderRadius: 10, border: '1px solid var(--color-border-light)', background: checked ? 'color-mix(in srgb, var(--color-primary) 10%, var(--color-bg-card))' : 'var(--color-bg-card)' }}>
                         <input
@@ -1105,6 +1137,18 @@ function EditorModal({
                       </label>
                     );
                   })}
+                  {visibleModelCount < filteredModels.length ? (
+                    <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 4 }}>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        style={{ border: '1px solid var(--color-border)' }}
+                        onClick={() => setVisibleModelCount((current) => getNextVisibleCount(current, filteredModels.length, DOWNSTREAM_EDITOR_RENDER_CHUNK))}
+                      >
+                        {`加载更多 (${visibleModelCount}/${filteredModels.length})`}
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               </div>
 
@@ -1143,8 +1187,8 @@ function EditorModal({
                 <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {filteredGroups.length === 0 ? (
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无匹配群组</div>
-                  ) : filteredGroups.map((route) => {
-                    const checked = normalizedSelectedGroupRouteIds.includes(route.id);
+                  ) : visibleGroups.map((route) => {
+                    const checked = selectedGroupRouteIdSet.has(route.id);
                     return (
                       <label key={route.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer', padding: '8px 10px', borderRadius: 10, border: '1px solid var(--color-border-light)', background: checked ? 'color-mix(in srgb, var(--color-primary) 10%, var(--color-bg-card))' : 'var(--color-bg-card)' }}>
                         <input
@@ -1168,6 +1212,18 @@ function EditorModal({
                       </label>
                     );
                   })}
+                  {visibleGroupCount < filteredGroups.length ? (
+                    <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 4 }}>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        style={{ border: '1px solid var(--color-border)' }}
+                        onClick={() => setVisibleGroupCount((current) => getNextVisibleCount(current, filteredGroups.length, DOWNSTREAM_EDITOR_RENDER_CHUNK))}
+                      >
+                        {`加载更多 (${visibleGroupCount}/${filteredGroups.length})`}
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>

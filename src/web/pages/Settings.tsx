@@ -19,10 +19,12 @@ import { clearAppInstallationState } from '../appLocalState.js';
 import { tr } from '../i18n.js';
 import { ROUTE_ICON_NONE_VALUE } from './token-routes/utils.js';
 import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
+import { getInitialVisibleCount, getNextVisibleCount } from './helpers/progressiveRender.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
 const ROUTE_BRAND_ICON_PREFIX = 'brand:';
 const FACTORY_RESET_CONFIRM_SECONDS = 3;
+const SETTINGS_SELECTOR_RENDER_CHUNK = 80;
 const CHECKIN_SCHEDULE_MODE_OPTIONS = [
   { value: 'cron', label: 'Cron' },
   { value: 'interval', label: '间隔签到' },
@@ -276,6 +278,8 @@ export default function Settings() {
   const [selectorRoutes, setSelectorRoutes] = useState<RouteSelectorItem[]>([]);
   const [selectorModelSearch, setSelectorModelSearch] = useState('');
   const [selectorGroupSearch, setSelectorGroupSearch] = useState('');
+  const [visibleSelectorModelCount, setVisibleSelectorModelCount] = useState(SETTINGS_SELECTOR_RENDER_CHUNK);
+  const [visibleSelectorGroupCount, setVisibleSelectorGroupCount] = useState(SETTINGS_SELECTOR_RENDER_CHUNK);
   const [downstreamCreate, setDownstreamCreate] = useState<DownstreamCreateForm>({
     name: '',
     key: '',
@@ -321,6 +325,39 @@ export default function Settings() {
       return fuzzyMatch(matchText, query);
     });
   }, [groupRouteOptions, selectorGroupSearch]);
+  const selectedDownstreamModelSet = useMemo(
+    () => new Set(downstreamCreate.selectedModels),
+    [downstreamCreate.selectedModels],
+  );
+  const selectedDownstreamGroupRouteIdSet = useMemo(
+    () => new Set(downstreamCreate.selectedGroupRouteIds),
+    [downstreamCreate.selectedGroupRouteIds],
+  );
+
+  useEffect(() => {
+    if (!selectorOpen) {
+      setVisibleSelectorModelCount(SETTINGS_SELECTOR_RENDER_CHUNK);
+      setVisibleSelectorGroupCount(SETTINGS_SELECTOR_RENDER_CHUNK);
+    }
+  }, [selectorOpen]);
+
+  useEffect(() => {
+    setVisibleSelectorModelCount(getInitialVisibleCount(filteredExactModelOptions.length, SETTINGS_SELECTOR_RENDER_CHUNK));
+  }, [filteredExactModelOptions.length]);
+
+  useEffect(() => {
+    setVisibleSelectorGroupCount(getInitialVisibleCount(filteredGroupRouteOptions.length, SETTINGS_SELECTOR_RENDER_CHUNK));
+  }, [filteredGroupRouteOptions.length]);
+
+  const visibleExactModelOptions = useMemo(
+    () => filteredExactModelOptions.slice(0, visibleSelectorModelCount),
+    [filteredExactModelOptions, visibleSelectorModelCount],
+  );
+
+  const visibleGroupRouteOptions = useMemo(
+    () => filteredGroupRouteOptions.slice(0, visibleSelectorGroupCount),
+    [filteredGroupRouteOptions, visibleSelectorGroupCount],
+  );
 
   const generatedConnectionString = useMemo(() => (
     buildShorthandConnectionString(migrationDialect, shorthandConnection)
@@ -1859,8 +1896,8 @@ export default function Settings() {
                           <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无可选精确模型</div>
                         ) : filteredExactModelOptions.length === 0 ? (
                           <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>没有匹配的精确模型</div>
-                        ) : filteredExactModelOptions.map((modelName) => {
-                          const checked = downstreamCreate.selectedModels.includes(modelName);
+                        ) : visibleExactModelOptions.map((modelName) => {
+                          const checked = selectedDownstreamModelSet.has(modelName);
                           const brand = getBrand(modelName);
                           return (
                             <label
@@ -1933,6 +1970,18 @@ export default function Settings() {
                             </label>
                           );
                         })}
+                        {visibleSelectorModelCount < filteredExactModelOptions.length ? (
+                          <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 4 }}>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              style={{ border: '1px solid var(--color-border)' }}
+                              onClick={() => setVisibleSelectorModelCount((current) => getNextVisibleCount(current, filteredExactModelOptions.length, SETTINGS_SELECTOR_RENDER_CHUNK))}
+                            >
+                              {`加载更多 (${visibleSelectorModelCount}/${filteredExactModelOptions.length})`}
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
 
@@ -1953,8 +2002,8 @@ export default function Settings() {
                           <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无可选群组</div>
                         ) : filteredGroupRouteOptions.length === 0 ? (
                           <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>没有匹配的群组</div>
-                        ) : filteredGroupRouteOptions.map((route) => {
-                          const checked = downstreamCreate.selectedGroupRouteIds.includes(route.id);
+                        ) : visibleGroupRouteOptions.map((route) => {
+                          const checked = selectedDownstreamGroupRouteIdSet.has(route.id);
                           const explicitBrandIcon = parseBrandIconValue(route.displayIcon);
                           const explicitNoIcon = (route.displayIcon || '').trim() === ROUTE_ICON_NONE_VALUE;
                           const textIcon = explicitBrandIcon || explicitNoIcon ? '' : (route.displayIcon || '').trim();
@@ -2048,6 +2097,18 @@ export default function Settings() {
                             </label>
                           );
                         })}
+                        {visibleSelectorGroupCount < filteredGroupRouteOptions.length ? (
+                          <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 4 }}>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              style={{ border: '1px solid var(--color-border)' }}
+                              onClick={() => setVisibleSelectorGroupCount((current) => getNextVisibleCount(current, filteredGroupRouteOptions.length, SETTINGS_SELECTOR_RENDER_CHUNK))}
+                            >
+                              {`加载更多 (${visibleSelectorGroupCount}/${filteredGroupRouteOptions.length})`}
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                   </div>
