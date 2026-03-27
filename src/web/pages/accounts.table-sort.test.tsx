@@ -108,13 +108,13 @@ describe('Accounts desktop table sorting', () => {
         healthHeader.props.onClick();
       });
       await flushMicrotasks();
-      expect(getRowNames(root!)[0]).toContain('beta');
+      expect(getRowNames(root!)[0]).toContain('alpha');
 
       await act(async () => {
         healthHeader.props.onClick();
       });
       await flushMicrotasks();
-      expect(getRowNames(root!)[0]).toContain('alpha');
+      expect(getRowNames(root!)[0]).toContain('beta');
     } finally {
       root?.unmount();
     }

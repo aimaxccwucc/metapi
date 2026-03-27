@@ -102,13 +102,13 @@ describe('Sites desktop table sorting', () => {
         reachabilityHeader.props.onClick();
       });
       await flushMicrotasks();
-      expect(getRowNames(root!)[0]).toContain('Site Beta');
+      expect(getRowNames(root!)[0]).toContain('Site Alpha');
 
       await act(async () => {
         reachabilityHeader.props.onClick();
       });
       await flushMicrotasks();
-      expect(getRowNames(root!)[0]).toContain('Site Alpha');
+      expect(getRowNames(root!)[0]).toContain('Site Beta');
     } finally {
       root?.unmount();
     }

@@ -13,7 +13,7 @@ import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import { formatDateTimeLocal } from './helpers/checkinLogTime.js';
 import { clearFocusParams, readFocusSiteId } from './helpers/navigationFocus.js';
 import { tr } from '../i18n.js';
-import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
+import { buildCustomReorderUpdates, compareCustomOrderedItems, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { resolveInitialConnectionSegment } from './helpers/defaultConnectionSegment.js';
 import {
@@ -399,28 +399,14 @@ export default function Sites() {
     );
   };
 
-  const compareSiteCustomOrder = useMemo(() => (
-    (a: SiteRow, b: SiteRow) => {
-      const aPinned = a.isPinned ? 1 : 0;
-      const bPinned = b.isPinned ? 1 : 0;
-      if (aPinned !== bPinned) return bPinned - aPinned;
-
-      const aOrder = Number.isFinite(a.sortOrder as number) ? Number(a.sortOrder) : Number.MAX_SAFE_INTEGER;
-      const bOrder = Number.isFinite(b.sortOrder as number) ? Number(b.sortOrder) : Number.MAX_SAFE_INTEGER;
-      if (aOrder !== bOrder) return aOrder - bOrder;
-
-      return a.id - b.id;
-    }
-  ), []);
-
   const getSiteReachabilityRank = useMemo(() => (
     (site: SiteRow) => {
       switch (site.healthStatus || 'unknown') {
-        case 'unreachable':
+        case 'alive':
           return 2;
         case 'unknown':
           return 1;
-        case 'alive':
+        case 'unreachable':
         default:
           return 0;
       }
@@ -439,18 +425,18 @@ export default function Sites() {
         if (rankDiff !== 0) {
           return sortMode === 'reachability-desc' ? -rankDiff : rankDiff;
         }
-        return compareSiteCustomOrder(a, b);
+        return compareCustomOrderedItems(a, b);
       });
     },
-    [compareSiteCustomOrder, getSiteReachabilityRank, sites, sortMode],
+    [getSiteReachabilityRank, sites, sortMode],
   );
   const allVisibleSitesSelected = sortedSites.length > 0 && sortedSites.every((site) => selectedSiteIds.includes(site.id));
   const siteSortOptions: Array<{ value: SiteSortMode; label: string }> = [
     { value: 'custom', label: '自定义排序' },
     { value: 'balance-desc', label: '余额高到低' },
     { value: 'balance-asc', label: '余额低到高' },
-    { value: 'reachability-desc', label: '可达状态: 异常优先' },
-    { value: 'reachability-asc', label: '可达状态: 可达优先' },
+    { value: 'reachability-desc', label: '可达状态: 可达优先' },
+    { value: 'reachability-asc', label: '可达状态: 异常优先' },
   ];
 
   const getSiteHeaderSortMeta = (field: 'balance' | 'reachability') => {

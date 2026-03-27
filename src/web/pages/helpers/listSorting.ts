@@ -12,16 +12,7 @@ export function sortItemsForDisplay<T extends SortableBase>(
   getBalance: (item: T) => number,
 ): T[] {
   const list = [...items];
-  const customComparator = (a: T, b: T) => {
-    const aPinned = a.isPinned ? 1 : 0;
-    const bPinned = b.isPinned ? 1 : 0;
-    if (aPinned !== bPinned) return bPinned - aPinned;
-
-    const aOrder = Number.isFinite(a.sortOrder as number) ? Number(a.sortOrder) : Number.MAX_SAFE_INTEGER;
-    const bOrder = Number.isFinite(b.sortOrder as number) ? Number(b.sortOrder) : Number.MAX_SAFE_INTEGER;
-    if (aOrder !== bOrder) return aOrder - bOrder;
-    return a.id - b.id;
-  };
+  const customComparator = (a: T, b: T) => compareCustomOrderedItems(a, b);
 
   if (mode === 'custom') {
     return list.sort(customComparator);
@@ -40,6 +31,17 @@ export function sortItemsForDisplay<T extends SortableBase>(
 
     return customComparator(a, b);
   });
+}
+
+export function compareCustomOrderedItems<T extends SortableBase>(a: T, b: T): number {
+  const aPinned = a.isPinned ? 1 : 0;
+  const bPinned = b.isPinned ? 1 : 0;
+  if (aPinned !== bPinned) return bPinned - aPinned;
+
+  const aOrder = Number.isFinite(a.sortOrder as number) ? Number(a.sortOrder) : Number.MAX_SAFE_INTEGER;
+  const bOrder = Number.isFinite(b.sortOrder as number) ? Number(b.sortOrder) : Number.MAX_SAFE_INTEGER;
+  if (aOrder !== bOrder) return aOrder - bOrder;
+  return a.id - b.id;
 }
 
 export function buildCustomReorderUpdates<T extends SortableBase>(

@@ -20,7 +20,7 @@ import {
 import { clearFocusParams, readFocusAccountIntent } from './helpers/navigationFocus.js';
 import { TokensPanel } from './Tokens.js';
 import { tr } from '../i18n.js';
-import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
+import { buildCustomReorderUpdates, compareCustomOrderedItems, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
 import { SITE_DOCS_URL } from '../docsLink.js';
 
@@ -215,34 +215,32 @@ export default function Accounts() {
     return resolveAccountCredentialMode(account) === 'apikey' ? 'API Key 连接' : '未命名';
   };
 
-  const compareAccountCustomOrder = useCallback((a: any, b: any) => {
-    const aPinned = a?.isPinned ? 1 : 0;
-    const bPinned = b?.isPinned ? 1 : 0;
-    if (aPinned !== bPinned) return bPinned - aPinned;
-
-    const aOrder = Number.isFinite(a?.sortOrder) ? Number(a.sortOrder) : Number.MAX_SAFE_INTEGER;
-    const bOrder = Number.isFinite(b?.sortOrder) ? Number(b.sortOrder) : Number.MAX_SAFE_INTEGER;
-    if (aOrder !== bOrder) return aOrder - bOrder;
-
-    return (a?.id || 0) - (b?.id || 0);
+  const getRuntimeHealthState = useCallback((account: any) => {
+    if (account?.runtimeHealth?.state) return account.runtimeHealth.state;
+    const proxyOnly = typeof account?.capabilities?.proxyOnly === 'boolean'
+      ? !!account.capabilities.proxyOnly
+      : !(typeof account?.accessToken === 'string' && account.accessToken.trim().length > 0);
+    if (account?.status === 'disabled' || account?.site?.status === 'disabled') return 'disabled';
+    if (!proxyOnly && account?.status === 'expired') return 'unhealthy';
+    return 'unknown';
   }, []);
 
   const getRuntimeHealthSortRank = useCallback((account: any) => {
-    const state = resolveRuntimeHealth(account).state;
+    const state = getRuntimeHealthState(account);
     switch (state) {
-      case 'unhealthy':
+      case 'healthy':
         return 4;
       case 'degraded':
         return 3;
       case 'unknown':
         return 2;
-      case 'disabled':
+      case 'unhealthy':
         return 1;
-      case 'healthy':
+      case 'disabled':
       default:
         return 0;
     }
-  }, []);
+  }, [getRuntimeHealthState]);
 
   const sortedAccounts = useMemo(
     () => {
@@ -256,10 +254,10 @@ export default function Accounts() {
         if (rankDiff !== 0) {
           return sortMode === 'runtime-health-desc' ? -rankDiff : rankDiff;
         }
-        return compareAccountCustomOrder(a, b);
+        return compareCustomOrderedItems(a, b);
       });
     },
-    [accounts, compareAccountCustomOrder, getRuntimeHealthSortRank, sortMode],
+    [accounts, getRuntimeHealthSortRank, sortMode],
   );
   const visibleAccounts = useMemo(() => {
     if (activeSegment === 'tokens') return [];
@@ -282,8 +280,8 @@ export default function Accounts() {
     { value: 'custom', label: '自定义排序' },
     { value: 'balance-desc', label: '余额高到低' },
     { value: 'balance-asc', label: '余额低到高' },
-    { value: 'runtime-health-desc', label: '运行健康状态: 异常优先' },
-    { value: 'runtime-health-asc', label: '运行健康状态: 健康优先' },
+    { value: 'runtime-health-desc', label: '运行健康状态: 健康优先' },
+    { value: 'runtime-health-asc', label: '运行健康状态: 异常优先' },
   ];
 
   const getAccountHeaderSortMeta = (field: 'balance' | 'runtimeHealth') => {
