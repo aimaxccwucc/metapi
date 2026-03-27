@@ -4340,6 +4340,9 @@ export class TokenRouter {
 
   private async findRoute(model: string, downstreamPolicy: DownstreamRoutingPolicy): Promise<RouteMatch | null> {
     let routes = await loadEnabledRoutes();
+    if (downstreamPolicy.publicRoutesOnly === true) {
+      routes = buildVisibleEnabledRoutes(routes);
+    }
 
     const supportedPatterns = Array.isArray(downstreamPolicy.supportedModels)
       ? downstreamPolicy.supportedModels

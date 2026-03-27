@@ -102,6 +102,106 @@ describe('TokenRouter downstream policy', () => {
     expect(blockedPick).toBeNull();
   });
 
+  it('restricts proxy selection to public routes when publicRoutesOnly is enabled', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-public-only',
+      url: 'https://public-only.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'user-public-only',
+      accessToken: 'access-public-only',
+      apiToken: 'sk-public-only',
+      status: 'active',
+    }).returning().get();
+
+    const exactRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: exactRoute.id,
+      accountId: account.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    const router = new TokenRouter();
+
+    const internalPick = await router.selectChannel('gpt-4o-mini');
+    const proxyPick = await router.selectChannel('gpt-4o-mini', {
+      allowedRouteIds: [],
+      supportedModels: [],
+      siteWeightMultipliers: {},
+      publicRoutesOnly: true,
+    });
+
+    expect(internalPick).toBeTruthy();
+    expect(proxyPick).toBeNull();
+  });
+
+  it('keeps explicit-group routes available for proxy selection when publicRoutesOnly is enabled', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-group-public',
+      url: 'https://group-public.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'user-group-public',
+      accessToken: 'access-group-public',
+      apiToken: 'sk-group-public',
+      status: 'active',
+    }).returning().get();
+
+    const sourceRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-sonnet-4-6',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: sourceRoute.id,
+      accountId: account.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      sourceModel: 'claude-sonnet-4-6',
+    }).run();
+
+    const groupRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-stable',
+      displayName: 'claude-stable',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeGroupSources).values({
+      groupRouteId: groupRoute.id,
+      sourceRouteId: sourceRoute.id,
+    }).run();
+
+    const router = new TokenRouter();
+    const selected = await router.selectChannel('claude-stable', {
+      allowedRouteIds: [],
+      supportedModels: [],
+      siteWeightMultipliers: {},
+      publicRoutesOnly: true,
+    });
+
+    expect(selected).toBeTruthy();
+    expect(selected?.channel.routeId).toBe(sourceRoute.id);
+    expect(selected?.actualModel).toBe('claude-sonnet-4-6');
+  });
+
   it('rejects route selection when both supportedModels and allowedRouteIds are empty', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-deny-all',

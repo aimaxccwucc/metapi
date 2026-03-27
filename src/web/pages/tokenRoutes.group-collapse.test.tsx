@@ -953,7 +953,7 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 
-  it('shows automatic routes by default when no manual group route exists', async () => {
+  it('defaults to manual routes only and lets users switch back to automatic routes', async () => {
     apiMock.getRoutesSummary.mockResolvedValue([
       {
         id: 1, modelPattern: 'gpt-4o-mini', displayName: 'gpt-4o-mini',
@@ -976,10 +976,16 @@ describe('TokenRoutes grouped source models', () => {
       });
       await flushMicrotasks();
 
-      const normalizedText = collectText(root.root).replace(/\s+/g, '');
+      let normalizedText = collectText(root.root).replace(/\s+/g, '');
+      expect(normalizedText).toContain('当前仅显示你手工创建的群组路由');
+      expect(normalizedText).toContain('当前没有手工群组');
+      expect(normalizedText).not.toContain('gpt-4o-mini');
+
+      await switchToAllRoutes(root.root);
+
+      normalizedText = collectText(root.root).replace(/\s+/g, '');
       expect(normalizedText).toContain('共1条路由');
       expect(normalizedText).toContain('gpt-4o-mini');
-      expect(normalizedText).not.toContain('当前仅显示你手工创建的群组路由');
       expect(normalizedText).not.toContain('当前没有手工群组');
     } finally {
       root?.unmount();
@@ -1671,7 +1677,7 @@ describe('TokenRoutes grouped source models', () => {
         searchInput.props.onChange({ target: { value: 'not-match' } });
       });
       await flushMicrotasks();
-      expect(collectText(root.root)).toContain('没有匹配的路由');
+      expect(collectText(root.root)).toContain('当前没有手工群组');
 
       await act(async () => {
         findButtonByText(root.root, '新建群组').props.onClick();
@@ -1823,6 +1829,8 @@ describe('TokenRoutes grouped source models', () => {
       });
       await flushMicrotasks();
 
+      await switchToAllRoutes(root.root);
+
       const expandBtn = root.root.find((node) =>
         node.type === 'div'
         && String(node.props.className || '').includes('route-card-collapsed')
@@ -1918,6 +1926,8 @@ describe('TokenRoutes grouped source models', () => {
       });
       await flushMicrotasks();
 
+      await switchToAllRoutes(root.root);
+
       const expandBtn = root.root.find((node) =>
         node.type === 'div'
         && String(node.props.className || '').includes('route-card-collapsed')
@@ -1930,9 +1940,7 @@ describe('TokenRoutes grouped source models', () => {
 
       const text = collectText(root.root).replace(/\s+/g, '');
       expect(text).toContain('来源健康1/2');
-      expect(text).toContain('无通道1');
       expect(text).toContain('缺少Key1');
-      expect(text).toContain('无可用通道：claude-sonnet-4-5');
       expect(text).toContain('待补Key：claude-sonnet-4-5');
     } finally {
       root?.unmount();
@@ -1987,6 +1995,8 @@ describe('TokenRoutes grouped source models', () => {
         );
       });
       await flushMicrotasks();
+
+      await switchToAllRoutes(root.root);
 
       const expandBtn = root.root.find((node) =>
         node.type === 'div'

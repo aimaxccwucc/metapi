@@ -43,6 +43,7 @@ describe('getDownstreamRoutingPolicy', () => {
       allowedRouteIds: [7],
       siteWeightMultipliers: { 1: 1.2 },
       stickySessionKey: 'mk:42:/v1/chat/completions:codex-session-abc',
+      publicRoutesOnly: true,
     });
 
     await app.close();
@@ -80,6 +81,34 @@ describe('getDownstreamRoutingPolicy', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       stickySessionKey: 'global:global:/v1/search:cherry_studio',
+      publicRoutesOnly: true,
+    });
+
+    await app.close();
+  });
+
+  it('defaults to public routes only when auth context is missing', async () => {
+    getProxyAuthContextMock.mockReturnValue(null);
+
+    const { getDownstreamRoutingPolicy } = await import('./downstreamPolicy.js');
+    const app = Fastify();
+    app.post('/v1/chat/completions', async (request) => getDownstreamRoutingPolicy(request));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-4o-mini',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      supportedModels: [],
+      allowedRouteIds: [],
+      siteWeightMultipliers: {},
+      stickySessionKey: null,
+      publicRoutesOnly: true,
     });
 
     await app.close();

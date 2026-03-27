@@ -38,10 +38,16 @@ function buildStickySessionKey(request: FastifyRequest): string | null {
 
 export function getDownstreamRoutingPolicy(request: FastifyRequest): DownstreamRoutingPolicy {
   const authContext = getProxyAuthContext(request);
-  if (!authContext) return EMPTY_DOWNSTREAM_ROUTING_POLICY;
+  if (!authContext) {
+    return {
+      ...EMPTY_DOWNSTREAM_ROUTING_POLICY,
+      publicRoutesOnly: true,
+    };
+  }
   return {
     ...authContext.policy,
     stickySessionKey: buildStickySessionKey(request),
+    publicRoutesOnly: true,
   };
 }
 

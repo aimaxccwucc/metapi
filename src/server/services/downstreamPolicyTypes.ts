@@ -4,6 +4,7 @@ export interface DownstreamRoutingPolicy {
   siteWeightMultipliers: Record<number, number>;
   denyAllWhenEmpty?: boolean;
   stickySessionKey?: string | null;
+  publicRoutesOnly?: boolean;
 }
 
 export const EMPTY_DOWNSTREAM_ROUTING_POLICY: DownstreamRoutingPolicy = {
@@ -11,4 +12,5 @@ export const EMPTY_DOWNSTREAM_ROUTING_POLICY: DownstreamRoutingPolicy = {
   allowedRouteIds: [],
   siteWeightMultipliers: {},
   stickySessionKey: null,
+  publicRoutesOnly: false,
 };

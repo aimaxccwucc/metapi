@@ -252,7 +252,7 @@ export default function TokenRoutes() {
   const [filterCollapsed, setFilterCollapsed] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
   const [showZeroChannelRoutes, setShowZeroChannelRoutes] = useState(false);
-  const [showOnlyManualRoutes, setShowOnlyManualRoutes] = useState(false);
+  const [showOnlyManualRoutes, setShowOnlyManualRoutes] = useState(true);
   const [sortBy, setSortBy] = useState<RouteSortBy>('channelCount');
   const [sortDir, setSortDir] = useState<RouteSortDir>('desc');
 
