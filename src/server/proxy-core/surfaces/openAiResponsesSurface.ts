@@ -4,7 +4,7 @@ import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
-import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
+import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
@@ -187,12 +187,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
     const downstreamPolicy = getDownstreamRoutingPolicy(request);
     const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
     const excludeChannelIds: number[] = [];
+    const excludeSiteIds = new Set<number>();
     let retryCount = 0;
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
         ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
+        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
@@ -431,6 +432,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
             errorText: rawErrText,
             modelName,
           });
+          if (shouldAvoidSiteForRequest(status, rawErrText)) {
+            excludeSiteIds.add(selected.site.id);
+          }
           logProxy(
             selected,
             requestedModel,
@@ -590,6 +594,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
                   errorText: streamResult.errorMessage,
                   modelName,
                 });
+                if (shouldAvoidSiteForRequest(502, streamResult.errorMessage)) {
+                  excludeSiteIds.add(selected.site.id);
+                }
                 logProxy(
                   selected,
                   requestedModel,
@@ -633,6 +640,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 errorText: failure.reason,
                 modelName,
               });
+              if (shouldAvoidSiteForRequest(failure.status, failure.reason)) {
+                excludeSiteIds.add(selected.site.id);
+              }
               logProxy(
                 selected,
                 requestedModel,
@@ -672,6 +682,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 errorText: streamResult.errorMessage,
                 modelName,
               });
+              if (shouldAvoidSiteForRequest(502, streamResult.errorMessage)) {
+                excludeSiteIds.add(selected.site.id);
+              }
               logProxy(
                 selected,
                 requestedModel,
@@ -732,6 +745,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
               errorText: streamResult.errorMessage,
               modelName,
             });
+            if (shouldAvoidSiteForRequest(502, streamResult.errorMessage)) {
+              excludeSiteIds.add(selected.site.id);
+            }
             logProxy(
               selected,
               requestedModel,
@@ -800,6 +816,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
             errorText: failure.reason,
             modelName,
           });
+          if (shouldAvoidSiteForRequest(failure.status, failure.reason)) {
+            excludeSiteIds.add(selected.site.id);
+          }
           logProxy(
             selected,
             requestedModel,
@@ -878,6 +897,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
           errorText: err?.message,
           modelName,
         });
+        if (shouldAvoidSiteForRequest(0, err?.message)) {
+          excludeSiteIds.add(selected.site.id);
+        }
         logProxy(
           selected,
           requestedModel,

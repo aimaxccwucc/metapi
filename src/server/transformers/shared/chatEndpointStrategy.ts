@@ -123,8 +123,7 @@ export function createChatEndpointStrategy(input: CreateChatEndpointStrategyInpu
         currentEndpoint: ctx.request.endpoint,
       });
       return (
-        ctx.response.status >= 500
-        || isEndpointDowngradeError(ctx.response.status, ctx.rawErrText)
+        isEndpointDowngradeError(ctx.response.status, ctx.rawErrText)
         || isMessagesRequiredError(ctx.rawErrText)
         || isEndpointDispatchDeniedError(ctx.response.status, ctx.rawErrText)
       );

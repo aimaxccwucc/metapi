@@ -2362,6 +2362,17 @@ function partitionRecentlyFailedCandidates<T extends { channel: FailureAwareChan
   return { preferred, avoided };
 }
 
+function buildExcludedSiteIdsFromMatch(
+  _match: RouteMatch,
+  _excludeChannelIds: number[],
+  seed: ReadonlySet<number> = new Set<number>(),
+): Set<number> {
+  // Channel-level failover must not automatically escalate into site-level blocking.
+  // Some failures are account/token/model specific, so request-level site avoidance
+  // is only applied when the caller explicitly marks the site as temporarily bad.
+  return new Set<number>(seed);
+}
+
 function getChannelPersistedSuccessAtMs(
   channel: Pick<ChannelRow, 'lastUsedAt' | 'successCount'>,
 ): number | null {
@@ -2650,6 +2661,7 @@ export interface RouteDecisionCandidate {
   eligible: boolean;
   recentlyFailed: boolean;
   avoidedByRecentFailure: boolean;
+  avoidedByAttemptedSite?: boolean;
   avoidedByInflightLease?: boolean;
   avoidedByAccountLease?: boolean;
   cooldownUntil?: string | null;
@@ -2714,6 +2726,7 @@ const DEFAULT_DOWNSTREAM_POLICY: DownstreamRoutingPolicy = EMPTY_DOWNSTREAM_ROUT
 
 type ExplainSelectionOptions = {
   excludeChannelIds?: number[];
+  excludeSiteIds?: ReadonlySet<number>;
   bypassSourceModelCheck?: boolean;
   useChannelSourceModelForCost?: boolean;
   downstreamPolicy?: DownstreamRoutingPolicy;
@@ -2729,6 +2742,7 @@ type CandidateEligibilityOptions = {
   requestedModel: string;
   bypassSourceModelCheck?: boolean;
   excludeChannelIds?: number[];
+  excludeSiteIds?: ReadonlySet<number>;
   nowIso?: string;
   nowMs?: number;
   runtimeModelName?: string | null;
@@ -3249,23 +3263,25 @@ export class TokenRouter {
     requestedModel: string,
     excludeChannelIds: number[],
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
+    excludeSiteIds: ReadonlySet<number> = new Set<number>(),
   ): Promise<SelectedChannel | null> {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     await ensureRoutingRuntimeStateLoaded();
 
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
-    return await this.selectFromMatch(match, requestedModel, downstreamPolicy, excludeChannelIds);
+    return await this.selectFromMatch(match, requestedModel, downstreamPolicy, excludeChannelIds, true, excludeSiteIds);
   }
 
   async explainSelection(
     requestedModel: string,
     excludeChannelIds: number[] = [],
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
+    excludeSiteIds: ReadonlySet<number> = new Set<number>(),
   ): Promise<RouteDecisionExplanation> {
     await ensureRoutingRuntimeStateLoaded();
     const match = await this.findRoute(requestedModel, downstreamPolicy);
-    return await this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
+    return await this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, excludeSiteIds, downstreamPolicy });
   }
 
   async explainSelectionForRoute(
@@ -3273,10 +3289,11 @@ export class TokenRouter {
     requestedModel: string,
     excludeChannelIds: number[] = [],
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
+    excludeSiteIds: ReadonlySet<number> = new Set<number>(),
   ): Promise<RouteDecisionExplanation> {
     await ensureRoutingRuntimeStateLoaded();
     const match = await this.findRouteById(routeId, downstreamPolicy);
-    return await this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
+    return await this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, excludeSiteIds, downstreamPolicy });
   }
 
   async explainSelectionRouteWide(routeId: number, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<RouteDecisionExplanation> {
@@ -3328,6 +3345,7 @@ export class TokenRouter {
     options: ExplainSelectionOptions = {},
   ): Promise<RouteDecisionExplanation> {
     const excludeChannelIds = options.excludeChannelIds ?? [];
+    const excludeSiteIds = options.excludeSiteIds ?? new Set<number>();
     const downstreamPolicy = options.downstreamPolicy ?? DEFAULT_DOWNSTREAM_POLICY;
 
     if (!match) {
@@ -3352,6 +3370,7 @@ export class TokenRouter {
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
+    const effectiveExcludeSiteIds = buildExcludedSiteIdsFromMatch(match, excludeChannelIds, excludeSiteIds);
     const stickyPreference = preferStickySessionCandidates(
       match.channels,
       downstreamPolicy.stickySessionKey,
@@ -3387,6 +3406,7 @@ export class TokenRouter {
         requestedModel,
         bypassSourceModelCheck,
         excludeChannelIds,
+        excludeSiteIds: effectiveExcludeSiteIds,
         nowIso,
         nowMs,
         runtimeModelName,
@@ -3421,6 +3441,7 @@ export class TokenRouter {
         eligible,
         recentlyFailed,
         avoidedByRecentFailure: false,
+        avoidedByAttemptedSite: effectiveExcludeSiteIds.has(row.site.id),
         avoidedByInflightLease: false,
         avoidedByAccountLease: false,
         cooldownUntil: row.channel.cooldownUntil ?? null,
@@ -4102,6 +4123,7 @@ export class TokenRouter {
     downstreamPolicy: DownstreamRoutingPolicy,
     excludeChannelIds: number[] = [],
     recordSelection = true,
+    excludeSiteIds: ReadonlySet<number> = new Set<number>(),
   ): Promise<SelectedChannel | null> {
     const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
     const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
@@ -4114,6 +4136,7 @@ export class TokenRouter {
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
+    const effectiveExcludeSiteIds = buildExcludedSiteIdsFromMatch(match, excludeChannelIds, excludeSiteIds);
     const evaluatedCandidates = match.channels.map((candidate) => {
       const runtimeModelName = typeof runtimeModelResolver === 'function'
         ? runtimeModelResolver(candidate)
@@ -4122,6 +4145,7 @@ export class TokenRouter {
         requestedModel,
         bypassSourceModelCheck,
         excludeChannelIds,
+        excludeSiteIds: effectiveExcludeSiteIds,
         nowIso,
         nowMs,
         runtimeModelName,
@@ -4379,6 +4403,7 @@ export class TokenRouter {
     const reasonParts: string[] = [];
     const bypassSourceModelCheck = options.bypassSourceModelCheck ?? false;
     const excludeChannelIds = options.excludeChannelIds ?? [];
+    const excludeSiteIds = options.excludeSiteIds ?? new Set<number>();
     const nowIso = options.nowIso ?? new Date().toISOString();
     const nowMs = options.nowMs ?? Date.now();
 
@@ -4411,6 +4436,10 @@ export class TokenRouter {
 
     if (excludeChannelIds.includes(candidate.channel.id)) {
       reasonParts.push('当前请求已尝试');
+    }
+
+    if (excludeSiteIds.has(candidate.site.id)) {
+      reasonParts.push('当前请求站点已失败');
     }
 
     const tokenValue = this.resolveChannelTokenValue(candidate);

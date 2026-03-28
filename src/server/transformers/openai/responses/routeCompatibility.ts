@@ -97,8 +97,7 @@ export function createResponsesEndpointStrategy(input: CreateResponsesEndpointSt
     shouldDowngrade(ctx: EndpointAttemptContext): boolean {
       if (input.requiresNativeResponsesFileUrl) return false;
       return (
-        ctx.response.status >= 500
-        || isEndpointDowngradeError(ctx.response.status, ctx.rawErrText)
+        isEndpointDowngradeError(ctx.response.status, ctx.rawErrText)
         || shouldDowngradeResponsesChatToMessages(
           ctx.request.path,
           ctx.response.status,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyProxyFailureCategory, shouldRetryProxyRequest } from './proxyRetryPolicy.js';
+import { classifyProxyFailureCategory, shouldAvoidSiteForRequest, shouldRetryProxyRequest } from './proxyRetryPolicy.js';
 
 describe('proxyRetryPolicy', () => {
   it('retries on rate limit and server errors', () => {
@@ -58,5 +58,15 @@ describe('proxyRetryPolicy', () => {
     expect(
       classifyProxyFailureCategory(403, '{"error":{"message":"you do not have access to the model gpt-5.2"}}'),
     ).toBe('model_unsupported');
+  });
+
+  it('only marks transient site-level failures for request-scoped site avoidance', () => {
+    expect(shouldAvoidSiteForRequest(502, 'bad gateway')).toBe(true);
+    expect(shouldAvoidSiteForRequest(429, 'rate limit exceeded')).toBe(true);
+    expect(shouldAvoidSiteForRequest(0, 'socket hang up')).toBe(true);
+    expect(shouldAvoidSiteForRequest(400, 'unsupported model')).toBe(false);
+    expect(shouldAvoidSiteForRequest(401, 'invalid api key')).toBe(false);
+    expect(shouldAvoidSiteForRequest(403, 'forbidden')).toBe(false);
+    expect(shouldAvoidSiteForRequest(400, 'invalid request body')).toBe(false);
   });
 });

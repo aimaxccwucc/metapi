@@ -13,6 +13,7 @@ const reportProxyAllFailedMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
 const isTokenExpiredErrorMock = vi.fn(() => false);
 const shouldRetryProxyRequestMock = vi.fn(() => false);
+const shouldAvoidSiteForRequestMock = vi.fn(() => false);
 const estimateProxyCostMock = vi.fn(async (_arg?: any) => 0);
 const buildProxyBillingDetailsMock = vi.fn(async (_arg?: any) => null);
 const fetchModelPricingCatalogMock = vi.fn(async (_arg?: any): Promise<any> => null);
@@ -61,6 +62,7 @@ vi.mock('../../services/modelPricingService.js', () => ({
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldRetryProxyRequest: (status?: unknown, message?: unknown) => (shouldRetryProxyRequestMock as any)(status, message),
+  shouldAvoidSiteForRequest: (status?: unknown, message?: unknown) => (shouldAvoidSiteForRequestMock as any)(status, message),
 }));
 
 vi.mock('../../services/proxyUsageFallbackService.js', () => ({
@@ -102,6 +104,7 @@ describe('chat proxy stream behavior', () => {
     reportTokenExpiredMock.mockReset();
     isTokenExpiredErrorMock.mockReset();
     shouldRetryProxyRequestMock.mockReset();
+    shouldAvoidSiteForRequestMock.mockReset();
     estimateProxyCostMock.mockClear();
     buildProxyBillingDetailsMock.mockClear();
     fetchModelPricingCatalogMock.mockReset();
@@ -134,6 +137,7 @@ describe('chat proxy stream behavior', () => {
     config.proxyErrorKeywords = [];
     isTokenExpiredErrorMock.mockReturnValue(false);
     shouldRetryProxyRequestMock.mockReturnValue(false);
+    shouldAvoidSiteForRequestMock.mockReturnValue(false);
   });
 
   afterAll(async () => {
@@ -1612,7 +1616,7 @@ describe('chat proxy stream behavior', () => {
     expect(body.output_text).toContain('ok via chat fallback from upstream_error');
   });
 
-  it('downgrades /v1/responses to /v1/chat/completions when upstream responses endpoint returns 502', async () => {
+  it('does not downgrade /v1/responses to /v1/chat/completions when upstream responses endpoint returns 502', async () => {
     fetchMock
       .mockResolvedValueOnce(new Response(
         '<!DOCTYPE html><html><head><title>qaq.al | 502: Bad gateway</title></head><body>Cloudflare</body></html>',
@@ -1620,21 +1624,7 @@ describe('chat proxy stream behavior', () => {
           status: 502,
           headers: { 'content-type': 'text/html; charset=UTF-8' },
         },
-      ))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        id: 'chatcmpl-fallback-502',
-        object: 'chat.completion',
-        model: 'upstream-gpt',
-        choices: [{
-          index: 0,
-          message: { role: 'assistant', content: 'ok via chat fallback' },
-          finish_reason: 'stop',
-        }],
-        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
-      }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      }));
+      ));
 
     const response = await app.inject({
       method: 'POST',
@@ -1645,15 +1635,13 @@ describe('chat proxy stream behavior', () => {
       },
     });
 
-    expect(response.statusCode).toBe(200);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(response.statusCode).toBe(502);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
-    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
     expect(firstUrl).toContain('/v1/responses');
-    expect(secondUrl).toContain('/v1/chat/completions');
     const body = response.json();
-    expect(body.object).toBe('response');
-    expect(body.output_text).toContain('ok via chat fallback');
+    expect(body.error?.message).toContain('[upstream:/v1/responses]');
+    expect(body.error?.message).toContain('Cloudflare 502: Bad gateway');
   });
 
   it('retries /v1/chat/completions with minimal JSON headers on unsupported media type', async () => {
@@ -2056,12 +2044,6 @@ describe('chat proxy stream behavior', () => {
         headers: { 'content-type': 'application/json' },
       }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        error: { message: 'Bad gateway', type: 'upstream_error' },
-      }), {
-        status: 502,
-        headers: { 'content-type': 'application/json' },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
         id: 'resp_recovered_1',
         object: 'response',
         model: 'upstream-gpt',
@@ -2082,28 +2064,14 @@ describe('chat proxy stream behavior', () => {
       },
     });
 
-    expect(firstResponse.statusCode).toBe(502);
-    expect(firstResponse.json()?.error?.message).toContain('[upstream:/v1/chat/completions]');
-
-    const secondResponse = await app.inject({
-      method: 'POST',
-      url: '/v1/responses',
-      payload: {
-        model: 'gpt-5.4',
-        input: 'hello again',
-      },
-    });
-
-    expect(secondResponse.statusCode).toBe(200);
-    expect(secondResponse.json().output_text).toContain('ok via recovered responses');
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(firstResponse.statusCode).toBe(200);
+    expect(firstResponse.json().output_text).toContain('ok via recovered responses');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
 
     const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
     const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
-    const [thirdUrl] = fetchMock.mock.calls[2] as [string, any];
     expect(firstUrl).toContain('/v1/responses');
     expect(secondUrl).toContain('/v1/chat/completions');
-    expect(thirdUrl).toContain('/v1/responses');
   });
 
   it('does not fall through to /v1/messages after a redirect-driven 405 failure on generic /v1/responses traffic', async () => {
@@ -2963,7 +2931,7 @@ describe('chat proxy stream behavior', () => {
     expect(secondUrl).toContain('/v1/chat/completions');
   });
 
-  it('falls back to /v1/responses for /v1/chat/completions when messages/chat endpoints return 502', async () => {
+  it('does not fall back to other endpoints for /v1/chat/completions when the first generic claude endpoint returns 502', async () => {
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
       site: { name: 'generic-site', url: 'https://generic.example.com', platform: 'new-api' },
@@ -2980,25 +2948,7 @@ describe('chat proxy stream behavior', () => {
           status: 502,
           headers: { 'content-type': 'text/html; charset=UTF-8' },
         },
-      ))
-      .mockResolvedValueOnce(new Response(
-        '<!DOCTYPE html><html><head><title>502 Bad Gateway</title></head><body>Cloudflare</body></html>',
-        {
-          status: 502,
-          headers: { 'content-type': 'text/html; charset=UTF-8' },
-        },
-      ))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        id: 'resp_anyrouter_fallback',
-        object: 'response',
-        model: 'claude-haiku-4-5-20251001',
-        status: 'completed',
-        output_text: 'ok via responses fallback after 502',
-        usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
-      }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      }));
+      ));
 
     const response = await app.inject({
       method: 'POST',
@@ -3010,18 +2960,14 @@ describe('chat proxy stream behavior', () => {
       },
     });
 
-    expect(response.statusCode).toBe(200);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(response.statusCode).toBe(502);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
-    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
-    const [thirdUrl] = fetchMock.mock.calls[2] as [string, any];
     expect(firstUrl).toContain('/v1/messages');
-    expect(secondUrl).toContain('/v1/chat/completions');
-    expect(thirdUrl).toContain('/v1/responses');
-
     const body = response.json();
-    expect(body?.choices?.[0]?.message?.content).toContain('ok via responses fallback after 502');
+    expect(body.error?.message).toContain('[upstream:/v1/messages]');
+    expect(body.error?.message).toContain('502');
   });
 
   it('continues to /v1/responses when /v1/messages dispatch is denied for /v1/chat/completions', async () => {

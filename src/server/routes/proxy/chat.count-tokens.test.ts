@@ -54,6 +54,7 @@ vi.mock('../../services/modelPricingService.js', () => ({
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldRetryProxyRequest: (status: number) => status === 401 || status === 403 || status >= 500,
+  shouldAvoidSiteForRequest: () => false,
 }));
 
 vi.mock('../../services/proxyUsageFallbackService.js', () => ({

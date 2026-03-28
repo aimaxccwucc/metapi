@@ -52,6 +52,7 @@ vi.mock('../../services/modelPricingService.js', () => ({
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldRetryProxyRequest: () => false,
+  shouldAvoidSiteForRequest: () => false,
 }));
 
 vi.mock('../../services/proxyVideoTaskStore.js', () => ({

@@ -130,3 +130,8 @@ export function shouldRetryProxyRequest(status: number, upstreamErrorText?: stri
   if (status === 400 || status === 404 || status === 422) return false;
   return false;
 }
+
+export function shouldAvoidSiteForRequest(status?: number | null, upstreamErrorText?: string | null): boolean {
+  const category = classifyProxyFailureCategory(status, upstreamErrorText);
+  return category === 'network' || category === 'server' || category === 'rate_limit';
+}

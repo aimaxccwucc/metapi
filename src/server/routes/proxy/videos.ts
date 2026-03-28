@@ -5,7 +5,7 @@ import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
-import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
+import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
 import { withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
@@ -62,12 +62,13 @@ export async function videosProxyRoute(app: FastifyInstance) {
       body: jsonBody || {},
     });
     const excludeChannelIds: number[] = [];
+    const excludeSiteIds = new Set<number>();
     let retryCount = 0;
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
         ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
+        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
@@ -132,6 +133,9 @@ export async function videosProxyRoute(app: FastifyInstance) {
             errorText: text,
             modelName: actualModel,
           });
+          if (shouldAvoidSiteForRequest(upstream.status, text)) {
+            excludeSiteIds.add(selected.site.id);
+          }
           logProxy(
             selected,
             requestedModel,
@@ -174,6 +178,9 @@ export async function videosProxyRoute(app: FastifyInstance) {
             errorText: 'Upstream video response did not include id',
             modelName: actualModel,
           });
+          if (shouldAvoidSiteForRequest(502, 'Upstream video response did not include id')) {
+            excludeSiteIds.add(selected.site.id);
+          }
           logProxy(
             selected,
             requestedModel,
@@ -241,6 +248,9 @@ export async function videosProxyRoute(app: FastifyInstance) {
           errorText: error?.message || 'network failure',
           modelName: actualModel,
         });
+        if (shouldAvoidSiteForRequest(0, error?.message || 'network failure')) {
+          excludeSiteIds.add(selected.site.id);
+        }
         logProxy(
           selected,
           requestedModel,

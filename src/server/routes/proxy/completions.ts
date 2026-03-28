@@ -4,7 +4,7 @@ import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
-import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
+import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage, pullSseDataEvents } from '../../services/proxyUsageParser.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
@@ -41,12 +41,13 @@ export async function completionsProxyRoute(app: FastifyInstance) {
 
     const isStream = body.stream === true;
     const excludeChannelIds: number[] = [];
+    const excludeSiteIds = new Set<number>();
     let retryCount = 0;
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
         ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
+        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
@@ -97,6 +98,9 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             errorText: errText,
             modelName: selected.actualModel,
           });
+          if (shouldAvoidSiteForRequest(upstream.status, errText)) {
+            excludeSiteIds.add(selected.site.id);
+          }
           logProxy(
             selected,
             requestedModel,
@@ -250,6 +254,9 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             errorText: errText,
             modelName: selected.actualModel,
           });
+          if (shouldAvoidSiteForRequest(failure.status, errText)) {
+            excludeSiteIds.add(selected.site.id);
+          }
           logProxy(
             selected,
             requestedModel,
@@ -332,6 +339,9 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           errorText: err.message,
           modelName: selected.actualModel,
         });
+        if (shouldAvoidSiteForRequest(0, err?.message)) {
+          excludeSiteIds.add(selected.site.id);
+        }
         logProxy(
           selected,
           requestedModel,

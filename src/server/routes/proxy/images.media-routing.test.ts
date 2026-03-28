@@ -59,6 +59,7 @@ vi.mock('../../services/modelPricingService.js', () => ({
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldRetryProxyRequest: () => false,
+  shouldAvoidSiteForRequest: () => false,
 }));
 
 describe('/v1/images media routing', () => {

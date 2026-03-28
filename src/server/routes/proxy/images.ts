@@ -5,7 +5,7 @@ import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
-import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
+import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
 import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
@@ -49,12 +49,13 @@ export async function imagesProxyRoute(app: FastifyInstance) {
       body,
     });
     const excludeChannelIds: number[] = [];
+    const excludeSiteIds = new Set<number>();
     let retryCount = 0;
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
         ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
+        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
@@ -105,6 +106,9 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             errorText: text,
             modelName: selected.actualModel,
           });
+          if (shouldAvoidSiteForRequest(upstream.status, text)) {
+            excludeSiteIds.add(selected.site.id);
+          }
           if (shouldMarkImageModelUnavailable(upstream.status, text)) {
             await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
           }
@@ -162,6 +166,9 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           errorText: err.message,
           modelName: selected.actualModel,
         });
+        if (shouldAvoidSiteForRequest(0, err?.message)) {
+          excludeSiteIds.add(selected.site.id);
+        }
         logProxy(
           selected,
           requestedModel,
@@ -209,12 +216,13 @@ export async function imagesProxyRoute(app: FastifyInstance) {
       body: jsonBody || Object.fromEntries(multipartForm?.entries?.() || []),
     });
     const excludeChannelIds: number[] = [];
+    const excludeSiteIds = new Set<number>();
     let retryCount = 0;
 
     while (retryCount <= MAX_RETRIES) {
       let selected = retryCount === 0
         ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy);
+        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
 
       if (!selected && retryCount === 0) {
         await refreshModelsAndRebuildRoutes();
@@ -277,6 +285,9 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             errorText: text,
             modelName: selected.actualModel,
           });
+          if (shouldAvoidSiteForRequest(upstream.status, text)) {
+            excludeSiteIds.add(selected.site.id);
+          }
           if (shouldMarkImageModelUnavailable(upstream.status, text)) {
             await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
           }
@@ -334,6 +345,9 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           errorText: err.message,
           modelName: selected.actualModel,
         });
+        if (shouldAvoidSiteForRequest(0, err?.message)) {
+          excludeSiteIds.add(selected.site.id);
+        }
         logProxy(
           selected,
           requestedModel,

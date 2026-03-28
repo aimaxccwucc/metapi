@@ -1727,6 +1727,72 @@ describe('TokenRouter selection scoring', () => {
     expect(otherModelPreview?.channel.id).not.toBe(backupChannel.id);
   });
 
+  it('treats request-scoped site exclusion as temporary and does not turn it into a persistent site ban', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-request-site-exclude');
+    const otherRoute = await createRoute('claude-request-site-exclude');
+
+    const primarySite = await createSite('request-site-primary');
+    const primaryAccount = await createAccount(primarySite.id, 'request-site-primary-user');
+    const primaryToken = await createToken(primaryAccount.id, 'request-site-primary-token');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: primaryAccount.id,
+      tokenId: primaryToken.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: otherRoute.id,
+      accountId: primaryAccount.id,
+      tokenId: primaryToken.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).run();
+
+    const backupSite = await createSite('request-site-backup');
+    const backupAccount = await createAccount(backupSite.id, 'request-site-backup-user');
+    const backupToken = await createToken(backupAccount.id, 'request-site-backup-token');
+    const backupChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: backupAccount.id,
+      tokenId: backupToken.id,
+      priority: 0,
+      weight: 5,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const preview = await router.previewSelectedChannel('gpt-request-site-exclude');
+    const excludedDecision = await router.explainSelection(
+      'gpt-request-site-exclude',
+      [primaryChannel.id],
+      undefined,
+      new Set([primarySite.id]),
+    );
+    const normalDecision = await router.explainSelection('gpt-request-site-exclude');
+    const otherModelPreview = await router.previewSelectedChannel('claude-request-site-exclude');
+    const primaryCandidate = excludedDecision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+    const backupCandidate = excludedDecision.candidates.find((candidate) => candidate.channelId === backupChannel.id);
+
+    expect(preview?.channel.id).toBe(primaryChannel.id);
+    expect(excludedDecision.selectedChannelId).toBe(backupChannel.id);
+    expect(primaryCandidate?.avoidedByAttemptedSite).toBe(true);
+    expect(primaryCandidate?.reason || '').toContain('当前请求站点已失败');
+    expect(backupCandidate?.probability || 0).toBeGreaterThan(99);
+    expect(normalDecision.selectedChannelId).toBe(primaryChannel.id);
+    expect(otherModelPreview?.account.id).toBe(primaryAccount.id);
+  });
+
   it('persists model-unsupported failures into token model availability for token-backed channels', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,

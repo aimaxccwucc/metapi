@@ -7,7 +7,7 @@ import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { isModelAllowedByPolicyOrAllowedRoutes } from '../../services/downstreamApiKeyService.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
-import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
+import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
 import { getOauthInfoFromExtraConfig } from '../../services/oauth/oauthAccount.js';
 import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refreshSingleflight.js';
@@ -118,10 +118,14 @@ async function selectGeminiChannel(request: FastifyRequest) {
   return null;
 }
 
-async function selectNextGeminiProbeChannel(request: FastifyRequest, excludeChannelIds: number[]) {
+async function selectNextGeminiProbeChannel(
+  request: FastifyRequest,
+  excludeChannelIds: number[],
+  excludeSiteIds: ReadonlySet<number> = new Set<number>(),
+) {
   const policy = getDownstreamRoutingPolicy(request);
   for (const candidate of GEMINI_MODEL_PROBES) {
-    const selected = await tokenRouter.selectNextChannel(candidate, excludeChannelIds, policy);
+    const selected = await tokenRouter.selectNextChannel(candidate, excludeChannelIds, policy, excludeSiteIds);
     if (selected) return selected;
   }
   return null;
@@ -277,6 +281,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
       request.params as { geminiApiVersion?: string } | undefined,
     );
     const excludeChannelIds: number[] = [];
+    const excludeSiteIds = new Set<number>();
     let retryCount = 0;
     let lastStatus = 503;
     let lastText = 'No available channels for Gemini models';
@@ -285,7 +290,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
     while (retryCount <= MAX_RETRIES) {
       const selected = retryCount === 0
         ? await selectGeminiChannel(request)
-        : await selectNextGeminiProbeChannel(request, excludeChannelIds);
+        : await selectNextGeminiProbeChannel(request, excludeChannelIds, excludeSiteIds);
       if (!selected) {
         return reply.code(lastStatus).type(lastContentType).send(lastText);
       }
@@ -323,6 +328,9 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             status: upstream.status,
             errorText: text,
           });
+          if (shouldAvoidSiteForRequest(upstream.status, text)) {
+            excludeSiteIds.add(selected.site.id);
+          }
           if (shouldRetryGeminiRequest(upstream.status, text) && retryCount < MAX_RETRIES) {
             retryCount += 1;
             continue;
@@ -340,6 +348,9 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         await tokenRouter.recordFailure?.(selected.channel.id, {
           errorText: error instanceof Error ? error.message : 'Gemini upstream request failed',
         });
+        if (shouldAvoidSiteForRequest(0, error instanceof Error ? error.message : 'Gemini upstream request failed')) {
+          excludeSiteIds.add(selected.site.id);
+        }
         lastStatus = 502;
         lastContentType = 'application/json';
         lastText = JSON.stringify({
@@ -406,6 +417,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
       body: request.body,
     });
     const excludeChannelIds: number[] = [];
+    const excludeSiteIds = new Set<number>();
     let retryCount = 0;
     let lastStatus = 503;
     let lastText = 'No available channels for this model';
@@ -414,7 +426,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
     while (retryCount <= MAX_RETRIES) {
       const selected = retryCount === 0
         ? await tokenRouter.selectChannel(requestedModel, policy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, policy);
+        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, policy, excludeSiteIds);
       if (!selected) {
         if (retryCount === 0) {
           await logProxyNoChannelFailure({
@@ -570,6 +582,9 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               errorText: lastText,
               modelName: actualModel,
             });
+            if (shouldAvoidSiteForRequest(upstream.status, lastText)) {
+              excludeSiteIds.add(selected.site.id);
+            }
             await logProxy(
               selected,
               requestedModel,
@@ -868,6 +883,9 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             errorText: endpointResult.rawErrText || endpointResult.errText,
             modelName: actualModel,
           });
+          if (shouldAvoidSiteForRequest(endpointResult.status, endpointResult.rawErrText || endpointResult.errText)) {
+            excludeSiteIds.add(selected.site.id);
+          }
           await logProxy(
             selected,
             requestedModel,
@@ -946,6 +964,9 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           errorText: error instanceof Error ? error.message : 'Gemini upstream request failed',
           modelName: actualModel,
         });
+        if (shouldAvoidSiteForRequest(0, error instanceof Error ? error.message : 'Gemini upstream request failed')) {
+          excludeSiteIds.add(selected.site.id);
+        }
         await logProxy(
           selected,
           requestedModel,
