@@ -2925,6 +2925,17 @@ function matchesRouteRequestModel(model: string, route: RouteRow): boolean {
   return matchesModelPattern(model, route.modelPattern) || isRouteDisplayNameMatch(model, route.displayName);
 }
 
+function findPreferredRouteForModel(routes: RouteRow[], model: string): RouteRow | undefined {
+  return routes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
+    || routes.find((route) => (
+      !isExplicitGroupRoute(route)
+      && isExactRouteModelPattern(route.modelPattern)
+      && (route.modelPattern || '').trim() === model
+    ))
+    || routes.find((route) => !isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
+    || routes.find((route) => !isExplicitGroupRoute(route) && matchesModelPattern(model, route.modelPattern));
+}
+
 function getExposedModelNameForRoute(route: RouteRow): string {
   return normalizeRouteDisplayName(route.displayName) || route.modelPattern;
 }
@@ -4342,14 +4353,7 @@ export class TokenRouter {
       routes = routes.filter((route) => allowSet.has(route.id));
     }
 
-    const matchedRoute = routes.find((route) => (
-      !isExplicitGroupRoute(route)
-      && isExactRouteModelPattern(route.modelPattern)
-      && (route.modelPattern || '').trim() === model
-    ))
-      || routes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
-      || routes.find((route) => !isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
-      || routes.find((route) => !isExplicitGroupRoute(route) && matchesModelPattern(model, route.modelPattern));
+    const matchedRoute = findPreferredRouteForModel(routes, model);
 
     if (!matchedRoute) return null;
 

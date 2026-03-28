@@ -214,6 +214,35 @@ describe('TokenRouter patterns and model mapping', () => {
     expect(decision.actualModel).toBe('claude-opus-4-6');
   });
 
+  it('prefers an explicit-group exposed model over a legacy exact pattern route', async () => {
+    const legacy = await createRouteWithSingleChannel(
+      'gemini-2.5-pro',
+      undefined,
+      {
+        sourceModel: 'gemini-2.5-pro',
+      },
+    );
+    const stable = await createRouteWithSingleChannel(
+      'gemini-2.5-pro-search',
+      undefined,
+      {
+        sourceModel: 'gemini-2.5-pro-search',
+      },
+    );
+    await createExplicitGroupRoute('gemini-2.5-pro', [stable.route.id]);
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('gemini-2.5-pro');
+    const decision = await router.explainSelection('gemini-2.5-pro');
+
+    expect(selected).toBeTruthy();
+    expect(selected?.channel.routeId).toBe(stable.route.id);
+    expect(selected?.channel.routeId).not.toBe(legacy.route.id);
+    expect(selected?.actualModel).toBe('gemini-2.5-pro-search');
+    expect(decision.actualModel).toBe('gemini-2.5-pro-search');
+    expect(decision.summary).toContain('按显示名命中：gemini-2.5-pro');
+  });
+
   it('falls back to the source exact-route model when explicit-group channels omit sourceModel', async () => {
     const source = await createRouteWithSingleChannel('claude-opus-4-5');
     await createExplicitGroupRoute('claude-test-4.6-sonnet', [source.route.id]);
