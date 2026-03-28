@@ -311,6 +311,41 @@ export function shouldRetryResponsesCompatibility(input: {
   return true;
 }
 
+export function shouldDowngradeResponsesToChat(
+  endpointPath: string,
+  status: number,
+  upstreamErrorText: string,
+): boolean {
+  if (!endpointPath.includes('/responses')) return false;
+  if (status !== 400) return false;
+
+  const parsedError = parseUpstreamErrorShape(upstreamErrorText);
+  const type = parsedError.type.trim().toLowerCase();
+  const code = parsedError.code.trim().toLowerCase();
+  const message = parsedError.message.trim().toLowerCase();
+  const compact = `${type} ${code} ${message}`.trim();
+  const rawCompact = (upstreamErrorText || '').toLowerCase();
+
+  if (
+    compact.includes('invalid_api_key')
+    || compact.includes('authentication')
+    || compact.includes('unauthorized')
+    || compact.includes('forbidden')
+    || compact.includes('insufficient_quota')
+    || compact.includes('rate_limit')
+  ) {
+    return false;
+  }
+
+  return (
+    type === 'upstream_error'
+    || code === 'upstream_error'
+    || message === 'upstream_error'
+    || message === 'upstream request failed'
+    || rawCompact.includes('unsupported legacy protocol')
+  );
+}
+
 export function shouldDowngradeResponsesChatToMessages(
   endpointPath: string,
   status: number,

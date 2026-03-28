@@ -787,13 +787,17 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(order).toEqual(['responses', 'messages', 'chat']);
   });
 
-  it('treats endpoint-not-found responses as downgrade candidates', () => {
+  it('treats only explicit endpoint compatibility errors as downgrade candidates', () => {
     expect(isEndpointDowngradeError(404, '{"error":{"message":"Not Found","type":"not_found_error"}}')).toBe(true);
     expect(isEndpointDowngradeError(405, '{"error":{"message":"Method Not Allowed"}}')).toBe(true);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"unsupported endpoint","type":"invalid_request_error"}}')).toBe(true);
-    expect(isEndpointDowngradeError(400, '{"error":{"message":"","type":"upstream_error"}}')).toBe(true);
-    expect(isEndpointDowngradeError(400, '{"error":{"message":"openai_error","type":"bad_response_status_code"}}')).toBe(true);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"","type":"upstream_error"}}')).toBe(false);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"openai_error","type":"bad_response_status_code"}}')).toBe(false);
     expect(isEndpointDowngradeError(415, '{"error":{"message":"Unsupported Media Type: Only \\"application/json\\" is allowed"}}')).toBe(true);
+    expect(isEndpointDowngradeError(503, '{"error":{"message":"No available channel","type":"upstream_error"}}')).toBe(false);
+    expect(isEndpointDowngradeError(530, 'Cloudflare 530: origin host error')).toBe(false);
+    expect(isEndpointDowngradeError(500, '模型倍率或价格未配置')).toBe(false);
+    expect(isEndpointDowngradeError(401, '{"error":{"message":"Invalid API key","type":"invalid_request_error"}}')).toBe(false);
   });
 
   it('treats Claude Code CLI-only restriction on responses as downgrade candidate', () => {

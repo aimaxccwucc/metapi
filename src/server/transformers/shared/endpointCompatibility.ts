@@ -56,6 +56,73 @@ function normalizeHeaderMap(headers: Record<string, string>): Record<string, str
   return normalized;
 }
 
+function parseUpstreamErrorFields(upstreamErrorText?: string | null): {
+  parsedCode: string;
+  parsedType: string;
+  parsedMessage: string;
+} {
+  let parsedCode = '';
+  let parsedType = '';
+  let parsedMessage = '';
+  try {
+    const parsed = JSON.parse(upstreamErrorText || '{}') as Record<string, unknown>;
+    const error = (parsed.error && typeof parsed.error === 'object')
+      ? parsed.error as Record<string, unknown>
+      : parsed;
+    parsedCode = asTrimmedString(error.code).toLowerCase();
+    parsedType = asTrimmedString(error.type).toLowerCase();
+    parsedMessage = asTrimmedString(error.message).toLowerCase();
+  } catch {
+    parsedCode = '';
+    parsedType = '';
+    parsedMessage = '';
+  }
+
+  return {
+    parsedCode,
+    parsedType,
+    parsedMessage,
+  };
+}
+
+function hasEndpointNotFoundContext(text: string): boolean {
+  return (
+    /(?:endpoint|path|route|url).*(?:not found|does not exist)/i.test(text)
+    || /(?:not found|does not exist).*(?:endpoint|path|route|url)/i.test(text)
+  );
+}
+
+function hasExplicitEndpointSuggestion(text: string): boolean {
+  return (
+    /(?:please|try)\s+use\s+\/v1\/[a-z0-9/_:-]+/i.test(text)
+    || /use\s+\/v1\/[a-z0-9/_:-]+\s+instead/i.test(text)
+  );
+}
+
+export function hasExplicitEndpointCompatibilitySignal(upstreamErrorText?: string | null): boolean {
+  const text = (upstreamErrorText || '').toLowerCase();
+  if (!text) return false;
+
+  const { parsedCode, parsedType, parsedMessage } = parseUpstreamErrorFields(upstreamErrorText);
+  const signals = [text, parsedCode, parsedType, parsedMessage].filter((value) => value.length > 0);
+
+  return signals.some((value) => (
+    value.includes('convert_request_failed')
+    || value.includes('endpoint_not_found')
+    || value.includes('unknown_endpoint')
+    || value.includes('unsupported_endpoint')
+    || value.includes('unsupported_path')
+    || value.includes('unknown endpoint')
+    || value.includes('unsupported endpoint')
+    || value.includes('unsupported path')
+    || value.includes('unrecognized request url')
+    || value.includes('no route matched')
+    || value.includes('unsupported legacy protocol')
+    || hasEndpointNotFoundContext(value)
+    || hasExplicitEndpointSuggestion(value)
+  ));
+}
+
 export function buildMinimalJsonHeadersForCompatibility(input: {
   headers: Record<string, string>;
   endpoint: CompatibilityEndpoint;
@@ -150,74 +217,16 @@ export function promoteResponsesCandidateAfterLegacyChatError(
 
 export function isEndpointDowngradeError(status: number, upstreamErrorText?: string | null): boolean {
   if (status < 400) return false;
-  const text = (upstreamErrorText || '').toLowerCase();
   if (status === 404 || status === 405 || status === 415 || status === 501) return true;
+  const text = (upstreamErrorText || '').toLowerCase();
   if (!text) return false;
 
-  let parsedCode = '';
-  let parsedType = '';
-  let parsedMessage = '';
-  try {
-    const parsed = JSON.parse(upstreamErrorText || '{}') as Record<string, unknown>;
-    const error = (parsed.error && typeof parsed.error === 'object')
-      ? parsed.error as Record<string, unknown>
-      : parsed;
-    parsedCode = asTrimmedString(error.code).toLowerCase();
-    parsedType = asTrimmedString(error.type).toLowerCase();
-    parsedMessage = asTrimmedString(error.message).toLowerCase();
-  } catch {
-    parsedCode = '';
-    parsedType = '';
-    parsedMessage = '';
-  }
+  const { parsedCode, parsedType, parsedMessage } = parseUpstreamErrorFields(upstreamErrorText);
 
   return (
     isEndpointDispatchDeniedError(status, upstreamErrorText)
-    || text.includes('convert_request_failed')
-    || text.includes('not found')
-    || text.includes('unknown endpoint')
-    || text.includes('unsupported endpoint')
-    || text.includes('unsupported path')
-    || text.includes('unrecognized request url')
-    || text.includes('no route matched')
-    || text.includes('does not exist')
-    || text.includes('openai_error')
-    || text.includes('upstream_error')
-    || text.includes('bad_response_status_code')
-    || text.includes('unsupported media type')
-    || text.includes("only 'application/json' is allowed")
-    || text.includes('only "application/json" is allowed')
-    || (status === 400 && text.includes('unsupported'))
-    || text.includes('not implemented')
-    || text.includes('api not implemented')
-    || text.includes('unsupported legacy protocol')
-    || parsedCode === 'convert_request_failed'
-    || parsedCode === 'not_found'
-    || parsedCode === 'endpoint_not_found'
-    || parsedCode === 'unknown_endpoint'
-    || parsedCode === 'unsupported_endpoint'
-    || parsedCode === 'bad_response_status_code'
-    || parsedCode === 'openai_error'
-    || parsedCode === 'upstream_error'
-    || parsedType === 'not_found_error'
-    || parsedType === 'invalid_request_error'
-    || parsedType === 'unsupported_endpoint'
-    || parsedType === 'unsupported_path'
-    || parsedType === 'bad_response_status_code'
-    || parsedType === 'openai_error'
-    || parsedType === 'upstream_error'
-    || parsedMessage.includes('unknown endpoint')
-    || parsedMessage.includes('unsupported endpoint')
-    || parsedMessage.includes('unsupported path')
-    || parsedMessage.includes('unrecognized request url')
-    || parsedMessage.includes('no route matched')
-    || parsedMessage.includes('does not exist')
-    || parsedMessage.includes('bad_response_status_code')
-    || parsedMessage === 'openai_error'
-    || parsedMessage === 'upstream_error'
-    || parsedMessage.includes('unsupported media type')
-    || parsedMessage.includes("only 'application/json' is allowed")
-    || parsedMessage.includes('only "application/json" is allowed')
+    || isUnsupportedMediaTypeError(status, upstreamErrorText)
+    || hasExplicitEndpointCompatibilitySignal(upstreamErrorText)
     || (
       status === 400
       && parsedCode === 'invalid_request'

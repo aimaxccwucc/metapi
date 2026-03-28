@@ -29,6 +29,7 @@ import {
 } from './geminiCliCompat.js';
 import {
   buildMinimalJsonHeadersForCompatibility,
+  hasExplicitEndpointCompatibilitySignal,
   isEndpointDispatchDeniedError,
   isEndpointDowngradeError,
   isUnsupportedMediaTypeError,
@@ -37,6 +38,7 @@ import {
 } from '../../transformers/shared/endpointCompatibility.js';
 export {
   buildMinimalJsonHeadersForCompatibility,
+  hasExplicitEndpointCompatibilitySignal,
   isEndpointDispatchDeniedError,
   isEndpointDowngradeError,
   isUnsupportedMediaTypeError,
@@ -1157,25 +1159,7 @@ function shouldBlockEndpointByError(status: number, errorText?: string | null): 
   if (isEndpointDispatchDeniedError(status, errorText)) return true;
   if (status === 404 || status === 405 || status === 415 || status === 501) return true;
   if (isUnsupportedMediaTypeError(status, errorText)) return true;
-
-  const text = (errorText || '').toLowerCase();
-  return (
-    text.includes('convert_request_failed')
-    || text.includes('endpoint_not_found')
-    || text.includes('unknown_endpoint')
-    || text.includes('unsupported_endpoint')
-    || text.includes('unsupported_path')
-    || text.includes('not_found_error')
-    || text.includes('unsupported legacy protocol')
-    || text.includes('please use /v1/')
-    || text.includes('does not allow /v1/')
-    || text.includes('unknown endpoint')
-    || text.includes('unsupported endpoint')
-    || text.includes('unsupported path')
-    || text.includes('unrecognized request url')
-    || text.includes('no route matched')
-    || text.includes('does not exist')
-  );
+  return hasExplicitEndpointCompatibilitySignal(errorText);
 }
 
 function shouldRememberSuccessfulEndpoint(input: {

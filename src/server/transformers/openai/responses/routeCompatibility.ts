@@ -8,6 +8,7 @@ import type { EndpointAttemptContext, EndpointRecoverResult } from '../../../rou
 import {
   buildResponsesCompatibilityBodies,
   buildResponsesCompatibilityHeaderCandidates,
+  shouldDowngradeResponsesToChat,
   shouldDowngradeResponsesChatToMessages,
   shouldRetryResponsesCompatibility,
 } from './compatibility.js';
@@ -98,6 +99,11 @@ export function createResponsesEndpointStrategy(input: CreateResponsesEndpointSt
       if (input.requiresNativeResponsesFileUrl) return false;
       return (
         isEndpointDowngradeError(ctx.response.status, ctx.rawErrText)
+        || shouldDowngradeResponsesToChat(
+          ctx.request.path,
+          ctx.response.status,
+          ctx.rawErrText,
+        )
         || shouldDowngradeResponsesChatToMessages(
           ctx.request.path,
           ctx.response.status,
