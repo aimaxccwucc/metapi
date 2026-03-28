@@ -2362,6 +2362,73 @@ function partitionRecentlyFailedCandidates<T extends { channel: FailureAwareChan
   return { preferred, avoided };
 }
 
+function getChannelPersistedSuccessAtMs(
+  channel: Pick<ChannelRow, 'lastUsedAt' | 'successCount'>,
+): number | null {
+  if (Math.max(0, channel.successCount ?? 0) <= 0) return null;
+  return parseIsoTimeMs(channel.lastUsedAt);
+}
+
+function partitionMostRecentSuccessfulSiteCandidates<
+  T extends {
+    site: { id: number };
+    channel: Pick<ChannelRow, 'lastUsedAt' | 'successCount' | 'lastFailAt'>;
+  },
+>(
+  candidates: T[],
+): {
+  preferred: T[];
+  avoided: T[];
+  preferredSiteIds: Set<number>;
+} {
+  if (candidates.length <= 1) {
+    return {
+      preferred: candidates,
+      avoided: [],
+      preferredSiteIds: new Set(candidates.map((candidate) => candidate.site.id)),
+    };
+  }
+
+  const siteSuccessAtMs = new Map<number, number>();
+  for (const candidate of candidates) {
+    const successAtMs = getChannelPersistedSuccessAtMs(candidate.channel);
+    const failureAtMs = parseIsoTimeMs(candidate.channel.lastFailAt);
+    if (successAtMs == null || successAtMs <= (failureAtMs ?? 0)) continue;
+    siteSuccessAtMs.set(
+      candidate.site.id,
+      Math.max(siteSuccessAtMs.get(candidate.site.id) ?? 0, successAtMs),
+    );
+  }
+
+  let latestSuccessAtMs: number | null = null;
+  const preferredSiteIds = new Set<number>();
+  for (const [siteId, successAtMs] of siteSuccessAtMs.entries()) {
+    if (latestSuccessAtMs == null || successAtMs > latestSuccessAtMs) {
+      latestSuccessAtMs = successAtMs;
+      preferredSiteIds.clear();
+      preferredSiteIds.add(siteId);
+      continue;
+    }
+    if (successAtMs === latestSuccessAtMs) {
+      preferredSiteIds.add(siteId);
+    }
+  }
+
+  if (preferredSiteIds.size === 0) {
+    return {
+      preferred: candidates,
+      avoided: [],
+      preferredSiteIds,
+    };
+  }
+
+  return {
+    preferred: candidates.filter((candidate) => preferredSiteIds.has(candidate.site.id)),
+    avoided: candidates.filter((candidate) => !preferredSiteIds.has(candidate.site.id)),
+    preferredSiteIds,
+  };
+}
+
 function sortCandidatesForRecoveryPreference<T extends { channel: FailureAwareChannel }>(candidates: T[]): T[] {
   return [...candidates].sort((left, right) => {
     const cooldownCompare = compareNullableTimeAsc(left.channel.cooldownUntil, right.channel.cooldownUntil);
@@ -3668,9 +3735,17 @@ export class TokenRouter {
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
         : candidateLayerSource;
+      const recentSuccessPartition = partitionMostRecentSuccessfulSiteCandidates(candidateLayer);
+      if (recentSuccessPartition.avoided.length > 0) {
+        for (const row of recentSuccessPartition.avoided) {
+          const target = candidateMap.get(row.channel.id);
+          if (!target) continue;
+          target.reason = '已有最近成功站点，当前优先复用；仅当这些站点都不可用时才会重试其他站点';
+        }
+      }
 
       const weighted = this.calculateWeightedSelection(
-        candidateLayer,
+        recentSuccessPartition.preferred,
         useChannelSourceModelForCost ? runtimeModelResolver : mappedModel,
         downstreamPolicy,
         nowMs,
@@ -3703,6 +3778,9 @@ export class TokenRouter {
       }
       if (accountLeasePartition.avoided.length > 0) {
         layerSummaryParts.push(`${buildAccountAvoidanceSummaryLabel(accountLeasePartition.avoided)} ${accountLeasePartition.avoided.length}`);
+      }
+      if (recentSuccessPartition.avoided.length > 0) {
+        layerSummaryParts.push(`最近成功站点复用 ${recentSuccessPartition.preferredSiteIds.size}`);
       }
       if (stickyLayer.stickyReason === 'reused' && stickyLayer.stickyBinding) {
         layerSummaryParts.push(`账号粘性复用 ${stickyLayer.stickyBinding.accountId}`);
@@ -4158,9 +4236,10 @@ export class TokenRouter {
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
         : candidateLayerSource;
+      const recentSuccessPartition = partitionMostRecentSuccessfulSiteCandidates(candidateLayer);
       const selected = routeStrategy === 'stable_first'
         ? this.selectWithModelCircuitGuard(
-          candidateLayer,
+          recentSuccessPartition.preferred,
           (items) => this.stableFirstSelect(
             items,
             requestedByDisplayName ? runtimeModelResolver : mappedModel,
@@ -4176,7 +4255,7 @@ export class TokenRouter {
           recordSelection,
         )
         : this.selectWithModelCircuitGuard(
-          candidateLayer,
+          recentSuccessPartition.preferred,
           (items) => this.weightedRandomSelect(
             items,
             requestedByDisplayName ? runtimeModelResolver : mappedModel,

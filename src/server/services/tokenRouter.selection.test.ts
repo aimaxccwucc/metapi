@@ -814,6 +814,58 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.selectedChannelId).toBe(channelB.id);
   });
 
+  it('reuses the most recently successful site before retrying other sites', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gemini-2.5-pro');
+
+    const siteRecent = await createSite('recent-success');
+    const accountRecent = await createAccount(siteRecent.id, 'recent-success-user');
+    const tokenRecent = await createToken(accountRecent.id, 'recent-success-token');
+    const channelRecent = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountRecent.id,
+      tokenId: tokenRecent.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteOther = await createSite('other-site');
+    const accountOther = await createAccount(siteOther.id, 'other-site-user');
+    const tokenOther = await createToken(accountOther.id, 'other-site-token');
+    const channelOther = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountOther.id,
+      tokenId: tokenOther.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordSuccess(channelRecent.id, 450, 0, 'gemini-2.5-pro');
+    invalidateTokenRouterCache();
+
+    const preview = await router.previewSelectedChannel('gemini-2.5-pro');
+    const decision = await router.explainSelection('gemini-2.5-pro');
+    const recentCandidate = decision.candidates.find((candidate) => candidate.channelId === channelRecent.id);
+    const otherCandidate = decision.candidates.find((candidate) => candidate.channelId === channelOther.id);
+
+    expect(preview?.channel.id).toBe(channelRecent.id);
+    expect(decision.selectedChannelId).toBe(channelRecent.id);
+    expect(recentCandidate?.probability || 0).toBeGreaterThan(99);
+    expect(otherCandidate?.probability || 0).toBe(0);
+    expect(otherCandidate?.reason || '').toContain('最近成功站点');
+    expect(decision.summary.join(' ')).toContain('最近成功站点复用');
+  });
+
   it('falls through to the next priority when all higher-priority channels recently failed', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
@@ -1087,7 +1139,7 @@ describe('TokenRouter selection scoring', () => {
     const candidateA = decision.candidates.find((candidate) => candidate.channelId === channelA.id);
     const candidateB = decision.candidates.find((candidate) => candidate.channelId === channelB.id);
     expect((candidateA?.probability || 0)).toBeGreaterThan(candidateB?.probability || 0);
-    expect(candidateA?.reason || '').toContain('账号EMA=');
+    expect((candidateA?.reason || '').includes('账号EMA=') || decision.summary.join(' ').includes('最近成功站点复用')).toBe(true);
 
     const accountSnapshots = await listAccountRoutingRuntimeSnapshots();
     const snapshotA = accountSnapshots.find((item) => item.accountId === accountA.id);
@@ -1347,6 +1399,70 @@ describe('TokenRouter selection scoring', () => {
     expect(decisionRecovered.selectedChannelId).toBe(channelA.id);
 
     expect(channelB.id).not.toBe(channelA.id);
+  });
+
+  it('still reuses the most recently successful site after runtime memory is cleared', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gemini-2.5-flash');
+
+    const siteRecent = await createSite('persist-recent-success');
+    const accountRecent = await createAccount(siteRecent.id, 'persist-recent-success-user');
+    const tokenRecent = await createToken(accountRecent.id, 'persist-recent-success-token');
+    const channelRecent = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountRecent.id,
+      tokenId: tokenRecent.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteOther = await createSite('persist-other-site');
+    const accountOther = await createAccount(siteOther.id, 'persist-other-site-user');
+    const tokenOther = await createToken(accountOther.id, 'persist-other-site-token');
+    const channelOther = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountOther.id,
+      tokenId: tokenOther.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordSuccess(channelRecent.id, 500, 0, 'gemini-2.5-flash');
+    await db.update(schema.routeChannels).set({
+      lastUsedAt: '2026-01-01T00:00:00.000Z',
+      successCount: 1,
+      failCount: 0,
+    }).where(eq(schema.routeChannels.id, channelRecent.id)).run();
+    await db.update(schema.routeChannels).set({
+      lastUsedAt: '2025-12-31T23:50:00.000Z',
+      successCount: 1,
+      failCount: 0,
+    }).where(eq(schema.routeChannels.id, channelOther.id)).run();
+    await flushSiteRuntimeHealthPersistence();
+
+    resetSiteRuntimeHealthState();
+    invalidateTokenRouterCache();
+
+    const preview = await new TokenRouter().previewSelectedChannel('gemini-2.5-flash');
+    const decision = await new TokenRouter().explainSelection('gemini-2.5-flash');
+    const recentCandidate = decision.candidates.find((candidate) => candidate.channelId === channelRecent.id);
+    const otherCandidate = decision.candidates.find((candidate) => candidate.channelId === channelOther.id);
+
+    expect(preview?.channel.id).toBe(channelRecent.id);
+    expect(decision.selectedChannelId).toBe(channelRecent.id);
+    expect(recentCandidate?.probability || 0).toBeGreaterThan(99);
+    expect(otherCandidate?.probability || 0).toBe(0);
+    expect(otherCandidate?.reason || '').toContain('最近成功站点');
   });
 
   it('does not fall back to a runtime-breaker-blocked layer when only lower priorities are recently failed', async () => {
