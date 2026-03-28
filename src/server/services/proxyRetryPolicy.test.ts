@@ -42,6 +42,12 @@ describe('proxyRetryPolicy', () => {
     expect(
       shouldRetryProxyRequest(400, 'Unsupported legacy protocol: /v1/chat/completions is not supported. Please use /v1/responses.'),
     ).toBe(true);
+    expect(
+      shouldRetryProxyRequest(400, 'Missing required parameter: \'input[90].name\'.'),
+    ).toBe(true);
+    expect(
+      shouldRetryProxyRequest(400, 'No tool call found for function call output with call_id call_123.'),
+    ).toBe(true);
   });
 
   it('classifies auth-like 400 responses as auth failures for stronger channel避让', () => {

@@ -65,6 +65,9 @@ const RETRYABLE_CHANNEL_LOCAL_PATTERNS: RegExp[] = [
   /service\s+unavailable/i,
   /cpu\s+overloaded/i,
   /timeout/i,
+  /no\s+tool\s+call\s+found\s+for\s+function\s+call\s+output/i,
+  /missing\s+required\s+parameter:\s*['"]?input\[\d+\]\.name['"]?/i,
+  /missing\s+required\s+parameter:\s*['"]?input\[\d+\]/i,
 ];
 
 const NON_RETRYABLE_REQUEST_PATTERNS: RegExp[] = [
@@ -80,6 +83,11 @@ const NON_RETRYABLE_REQUEST_PATTERNS: RegExp[] = [
   /unsupported\s+media\s+type/i,
 ];
 
+const RETRYABLE_UPSTREAM_COMPATIBILITY_400_PATTERNS: RegExp[] = [
+  /no\s+tool\s+call\s+found\s+for\s+function\s+call\s+output/i,
+  /missing\s+required\s+parameter:\s*['"]?input\[\d+\]\.name['"]?/i,
+];
+
 function isModelUnsupportedErrorMessage(rawMessage?: string | null): boolean {
   const text = (rawMessage || '').trim();
   if (!text) return false;
@@ -90,6 +98,10 @@ function matchesAnyPattern(patterns: RegExp[], rawMessage?: string | null): bool
   const text = (rawMessage || '').trim();
   if (!text) return false;
   return patterns.some((pattern) => pattern.test(text));
+}
+
+function isRetryableUpstreamCompatibility400(rawMessage?: string | null): boolean {
+  return matchesAnyPattern(RETRYABLE_UPSTREAM_COMPATIBILITY_400_PATTERNS, rawMessage);
 }
 
 export function classifyProxyFailureCategory(status?: number | null, upstreamErrorText?: string | null): RetryFailureCategory {
@@ -125,6 +137,7 @@ export function shouldRetryProxyRequest(status: number, upstreamErrorText?: stri
   if (status === 408 || status === 409 || status === 425 || status === 429) return true;
   if (status === 401 || status === 403) return true;
   if (isModelUnsupportedErrorMessage(upstreamErrorText)) return true;
+  if (status === 400 && isRetryableUpstreamCompatibility400(upstreamErrorText)) return true;
   if (matchesAnyPattern(NON_RETRYABLE_REQUEST_PATTERNS, upstreamErrorText)) return false;
   if (matchesAnyPattern(RETRYABLE_CHANNEL_LOCAL_PATTERNS, upstreamErrorText)) return true;
   if (status === 400 || status === 404 || status === 422) return false;

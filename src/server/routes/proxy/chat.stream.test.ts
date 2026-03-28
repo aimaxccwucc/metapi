@@ -267,6 +267,70 @@ describe('chat proxy stream behavior', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('retries the next channel when codex-style tool continuity fails on one upstream', async () => {
+    shouldRetryProxyRequestMock.mockReturnValue(true);
+
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'bad-site', url: 'https://bad-upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'gpt-5.4',
+    });
+    selectNextChannelMock.mockReturnValue({
+      channel: { id: 12, routeId: 22 },
+      site: { name: 'good-site', url: 'https://good-upstream.example.com', platform: 'new-api' },
+      account: { id: 34, username: 'demo-user-2' },
+      tokenName: 'default-2',
+      tokenValue: 'sk-demo-2',
+      actualModel: 'gpt-5.4',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          message: 'No tool call found for function call output with call_id call_123.',
+          type: 'invalid_request_error',
+        },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl-retried-next-channel',
+        object: 'chat.completion',
+        model: 'gpt-5.4',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok from next channel' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
+    expect(firstUrl).toContain('bad-upstream.example.com');
+    expect(secondUrl).toContain('good-upstream.example.com');
+    expect(response.json()?.choices?.[0]?.message?.content).toContain('ok from next channel');
+  });
+
 
   it('sets anti-buffering SSE headers for streamed chat responses', async () => {
     const encoder = new TextEncoder();
