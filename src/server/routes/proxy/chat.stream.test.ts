@@ -2088,6 +2088,59 @@ describe('chat proxy stream behavior', () => {
     expect(secondUrl).toContain('/v1/responses');
   });
 
+  it('downgrades generic /v1/responses traffic to /v1/chat/completions when upstream reports chinese endpoint incompatibility', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          message: '该平台不支持该类型的端点调用（traceid: abc123）',
+          type: 'invalid_request_error',
+        },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_chinese_endpoint_fallback',
+        object: 'chat.completion',
+        model: 'upstream-gpt',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok via chinese endpoint fallback' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'gpt-5.4',
+        input: 'hello',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
+    expect(firstUrl).toContain('/v1/responses');
+    expect(secondUrl).toContain('/v1/chat/completions');
+    expect(response.json().output_text).toContain('ok via chinese endpoint fallback');
+  });
+
   it('does not fall through to /v1/messages after a redirect-driven 405 failure on generic /v1/responses traffic', async () => {
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },

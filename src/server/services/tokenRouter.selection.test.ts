@@ -676,6 +676,67 @@ describe('TokenRouter selection scoring', () => {
     expect(candidateA?.reason || '').toContain('运行时健康=');
   });
 
+  it('prefers the site with the latest persisted model-specific success before exploring other sites', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-4o');
+
+    const sitePreferred = await createSite('model-success-preferred');
+    const accountPreferred = await createAccount(sitePreferred.id, 'model-success-user-preferred');
+    const tokenPreferred = await createToken(accountPreferred.id, 'model-success-token-preferred');
+    const channelPreferred = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountPreferred.id,
+      tokenId: tokenPreferred.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      successCount: 1,
+      failCount: 0,
+      lastUsedAt: '2026-01-01T00:00:00.000Z',
+    }).returning().get();
+
+    const siteOther = await createSite('model-success-other');
+    const accountOther = await createAccount(siteOther.id, 'model-success-user-other');
+    const tokenOther = await createToken(accountOther.id, 'model-success-token-other');
+    const channelOther = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountOther.id,
+      tokenId: tokenOther.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      successCount: 1,
+      failCount: 0,
+      lastUsedAt: '2026-01-01T00:00:00.000Z',
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordSuccess(channelPreferred.id, 320, 0, 'gpt-4o');
+    await flushSiteRuntimeHealthPersistence();
+
+    resetSiteRuntimeHealthState();
+    invalidateTokenRouterCache();
+
+    const preview = await new TokenRouter().previewSelectedChannel('gpt-4o');
+    const decision = await new TokenRouter().explainSelection('gpt-4o');
+    const preferredCandidate = decision.candidates.find((candidate) => candidate.channelId === channelPreferred.id);
+    const otherCandidate = decision.candidates.find((candidate) => candidate.channelId === channelOther.id);
+
+    expect(preview?.channel.id).toBe(channelPreferred.id);
+    expect(decision.selectedChannelId).toBe(channelPreferred.id);
+    expect(preferredCandidate?.probability || 0).toBeGreaterThan(99);
+    expect(otherCandidate?.probability || 0).toBe(0);
+    expect((otherCandidate?.reason || '').includes('模型最近成功站点') || (otherCandidate?.reason || '').includes('最近成功站点')).toBe(true);
+    expect(decision.summary.join(' ')).toContain('最近成功站点复用');
+  });
+
   it('penalizes the failed model more than unrelated models on the same site', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,

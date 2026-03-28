@@ -13,6 +13,7 @@ export type ChannelHealthScore = {
   multiplier: number;
   summary: string;
   reliabilityFactor: number;
+  experienceFactor: number;
   recencyFactor: number;
   consecutiveFactor: number;
   cooldownFactor: number;
@@ -38,6 +39,20 @@ function resolveLatencyFactor(avgLatencyMs: number | null): number {
   return 0.72;
 }
 
+function resolveExperienceFactor(successCount: number, failCount: number): number {
+  const totalCount = successCount + failCount;
+  if (successCount > 0) {
+    if (successCount >= 3 || totalCount >= 4) return 1;
+    if (successCount >= 2) return 0.97;
+    return 0.94;
+  }
+
+  if (totalCount === 0) return 0.72;
+  if (failCount === 1) return 0.58;
+  if (failCount === 2) return 0.44;
+  return 0.32;
+}
+
 export function calculateChannelHealthScore(
   channel: ChannelHealthSnapshot,
   nowMs = Date.now(),
@@ -46,6 +61,7 @@ export function calculateChannelHealthScore(
   const failCount = Math.max(0, channel.failCount ?? 0);
   const totalCount = successCount + failCount;
   const successRatio = totalCount > 0 ? successCount / totalCount : 1;
+  const experienceFactor = resolveExperienceFactor(successCount, failCount);
   const reliabilityFactor = totalCount >= 3
     ? clamp(0.45 + successRatio * 0.7, 0.45, 1.05)
     : 1;
@@ -77,15 +93,16 @@ export function calculateChannelHealthScore(
   if (successCount >= 20 && failCount <= 1) recoveryBonus = 1.08;
 
   const multiplier = clamp(
-    reliabilityFactor * recencyFactor * consecutiveFactor * cooldownFactor * latencyFactor * recoveryBonus,
+    experienceFactor * reliabilityFactor * recencyFactor * consecutiveFactor * cooldownFactor * latencyFactor * recoveryBonus,
     0.08,
     1.1,
   );
 
   return {
     multiplier,
-    summary: `健康=${(multiplier * 100).toFixed(0)}%（成功率=${(successRatio * 100).toFixed(0)}%，近期失败=${(recencyFactor * 100).toFixed(0)}%，连续失败=${(consecutiveFactor * 100).toFixed(0)}%，冷却等级=${(cooldownFactor * 100).toFixed(0)}%，延迟=${(latencyFactor * 100).toFixed(0)}%）`,
+    summary: `健康=${(multiplier * 100).toFixed(0)}%（经验=${(experienceFactor * 100).toFixed(0)}%，成功率=${(successRatio * 100).toFixed(0)}%，近期失败=${(recencyFactor * 100).toFixed(0)}%，连续失败=${(consecutiveFactor * 100).toFixed(0)}%，冷却等级=${(cooldownFactor * 100).toFixed(0)}%，延迟=${(latencyFactor * 100).toFixed(0)}%）`,
     reliabilityFactor,
+    experienceFactor,
     recencyFactor,
     consecutiveFactor,
     cooldownFactor,

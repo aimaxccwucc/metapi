@@ -2440,6 +2440,89 @@ function partitionMostRecentSuccessfulSiteCandidates<
   };
 }
 
+function partitionModelPreferredSiteCandidates<
+  T extends {
+    site: { id: number };
+  },
+>(
+  candidates: T[],
+  modelName: string,
+  nowMs = Date.now(),
+): {
+  preferred: T[];
+  avoided: T[];
+  preferredSiteIds: Set<number>;
+  source: 'none' | 'model_runtime_success';
+} {
+  if (candidates.length <= 1) {
+    return {
+      preferred: candidates,
+      avoided: [],
+      preferredSiteIds: new Set(candidates.map((candidate) => candidate.site.id)),
+      source: 'none',
+    };
+  }
+
+  const normalizedModel = normalizeModelAlias(modelName || '');
+  if (!normalizedModel) {
+    return {
+      preferred: candidates,
+      avoided: [],
+      preferredSiteIds: new Set(candidates.map((candidate) => candidate.site.id)),
+      source: 'none',
+    };
+  }
+
+  let latestSuccessAtMs: number | null = null;
+  const preferredSiteIds = new Set<number>();
+
+  for (const candidate of candidates) {
+    const state = getSiteModelRuntimeHealthState(candidate.site.id, normalizedModel);
+    const successAtMs = state?.lastSuccessAtMs ?? null;
+    const failureAtMs = state?.lastFailureAtMs ?? null;
+    if (successAtMs == null || successAtMs <= (failureAtMs ?? 0)) continue;
+    if (latestSuccessAtMs == null || successAtMs > latestSuccessAtMs) {
+      latestSuccessAtMs = successAtMs;
+      preferredSiteIds.clear();
+      preferredSiteIds.add(candidate.site.id);
+      continue;
+    }
+    if (successAtMs === latestSuccessAtMs) {
+      preferredSiteIds.add(candidate.site.id);
+    }
+  }
+
+  if (preferredSiteIds.size === 0) {
+    return {
+      preferred: candidates,
+      avoided: [],
+      preferredSiteIds: new Set(candidates.map((candidate) => candidate.site.id)),
+      source: 'none',
+    };
+  }
+
+  const currentlyHealthyPreferredSiteIds = new Set<number>();
+  for (const siteId of preferredSiteIds) {
+    const state = getSiteModelRuntimeHealthState(siteId, normalizedModel);
+    if (state?.lastFailureAtMs != null && (state.lastFailureAtMs ?? 0) >= (state.lastSuccessAtMs ?? 0)) {
+      continue;
+    }
+    if (isRuntimeHealthBreakerOpen(state, nowMs)) continue;
+    currentlyHealthyPreferredSiteIds.add(siteId);
+  }
+
+  const effectivePreferredSiteIds = currentlyHealthyPreferredSiteIds.size > 0
+    ? currentlyHealthyPreferredSiteIds
+    : preferredSiteIds;
+
+  return {
+    preferred: candidates.filter((candidate) => effectivePreferredSiteIds.has(candidate.site.id)),
+    avoided: candidates.filter((candidate) => !effectivePreferredSiteIds.has(candidate.site.id)),
+    preferredSiteIds: effectivePreferredSiteIds,
+    source: 'model_runtime_success',
+  };
+}
+
 function sortCandidatesForRecoveryPreference<T extends { channel: FailureAwareChannel }>(candidates: T[]): T[] {
   return [...candidates].sort((left, right) => {
     const cooldownCompare = compareNullableTimeAsc(left.channel.cooldownUntil, right.channel.cooldownUntil);
@@ -3768,6 +3851,11 @@ export class TokenRouter {
         ? leasePartition.preferred
         : candidateLayerSource;
       const recentSuccessPartition = partitionMostRecentSuccessfulSiteCandidates(candidateLayer);
+      const modelPreferredPartition = partitionModelPreferredSiteCandidates(
+        recentSuccessPartition.preferred,
+        mappedModel,
+        nowMs,
+      );
       if (recentSuccessPartition.avoided.length > 0) {
         for (const row of recentSuccessPartition.avoided) {
           const target = candidateMap.get(row.channel.id);
@@ -3775,9 +3863,16 @@ export class TokenRouter {
           target.reason = '已有最近成功站点，当前优先复用；仅当这些站点都不可用时才会重试其他站点';
         }
       }
+      if (modelPreferredPartition.avoided.length > 0) {
+        for (const row of modelPreferredPartition.avoided) {
+          const target = candidateMap.get(row.channel.id);
+          if (!target) continue;
+          target.reason = '已有该模型最近成功站点，当前优先复用；仅当这些站点都不可用时才会重试其他站点';
+        }
+      }
 
       const weighted = this.calculateWeightedSelection(
-        recentSuccessPartition.preferred,
+        modelPreferredPartition.preferred,
         useChannelSourceModelForCost ? runtimeModelResolver : mappedModel,
         downstreamPolicy,
         nowMs,
@@ -3813,6 +3908,9 @@ export class TokenRouter {
       }
       if (recentSuccessPartition.avoided.length > 0) {
         layerSummaryParts.push(`最近成功站点复用 ${recentSuccessPartition.preferredSiteIds.size}`);
+      }
+      if (modelPreferredPartition.source === 'model_runtime_success' && modelPreferredPartition.avoided.length > 0) {
+        layerSummaryParts.push(`模型成功站点复用 ${modelPreferredPartition.preferredSiteIds.size}`);
       }
       if (stickyLayer.stickyReason === 'reused' && stickyLayer.stickyBinding) {
         layerSummaryParts.push(`账号粘性复用 ${stickyLayer.stickyBinding.accountId}`);

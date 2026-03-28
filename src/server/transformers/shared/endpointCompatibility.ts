@@ -99,6 +99,15 @@ function hasExplicitEndpointSuggestion(text: string): boolean {
   );
 }
 
+function hasChineseEndpointCompatibilitySignal(text: string): boolean {
+  return (
+    text.includes('不支持该类型的端点调用')
+    || text.includes('不支持该类型调用')
+    || /不支持.*端点/.test(text)
+    || /端点.*不支持/.test(text)
+  );
+}
+
 export function hasExplicitEndpointCompatibilitySignal(upstreamErrorText?: string | null): boolean {
   const text = (upstreamErrorText || '').toLowerCase();
   if (!text) return false;
@@ -118,6 +127,7 @@ export function hasExplicitEndpointCompatibilitySignal(upstreamErrorText?: strin
     || value.includes('unrecognized request url')
     || value.includes('no route matched')
     || value.includes('unsupported legacy protocol')
+    || hasChineseEndpointCompatibilitySignal(value)
     || hasEndpointNotFoundContext(value)
     || hasExplicitEndpointSuggestion(value)
   ));

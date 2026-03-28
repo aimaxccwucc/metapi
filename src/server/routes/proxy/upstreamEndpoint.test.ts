@@ -791,6 +791,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(isEndpointDowngradeError(404, '{"error":{"message":"Not Found","type":"not_found_error"}}')).toBe(true);
     expect(isEndpointDowngradeError(405, '{"error":{"message":"Method Not Allowed"}}')).toBe(true);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"unsupported endpoint","type":"invalid_request_error"}}')).toBe(true);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"该平台不支持该类型的端点调用","type":"invalid_request_error"}}')).toBe(true);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"","type":"upstream_error"}}')).toBe(false);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"openai_error","type":"bad_response_status_code"}}')).toBe(false);
     expect(isEndpointDowngradeError(415, '{"error":{"message":"Unsupported Media Type: Only \\"application/json\\" is allowed"}}')).toBe(true);
