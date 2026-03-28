@@ -7,6 +7,7 @@ import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { isModelAllowedByPolicyOrAllowedRoutes } from '../../services/downstreamApiKeyService.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
+import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
 import { getOauthInfoFromExtraConfig } from '../../services/oauth/oauthAccount.js';
 import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refreshSingleflight.js';
@@ -59,6 +60,22 @@ const EMPTY_PROXY_USAGE = {
   completionTokens: 0,
   totalTokens: 0,
 };
+
+function shouldRetryGeminiRequest(status: number, errorText?: string | null): boolean {
+  const normalizedText = String(errorText || '');
+  if (/project\s+is\s+missing/i.test(normalizedText)) return false;
+  if (/unsupported\s+model/i.test(normalizedText)) return false;
+  if (status === 400) {
+    if (/invalid\s+request\s+body|validation|missing\s+required|required\s+parameter|unknown\s+parameter|unrecognized\s+(field|key|parameter)|malformed|invalid\s+json|cannot\s+parse|unsupported\s+media\s+type/i.test(normalizedText)) {
+      return false;
+    }
+    return true;
+  }
+  if (status === 0 && /socket\s+hang\s+up|timeout|timed?\s*out|connection\s+reset|connection\s+refused|econnreset|econnrefused/i.test(normalizedText)) {
+    return true;
+  }
+  return shouldRetryProxyRequest(status, errorText);
+}
 
 function isGeminiCliPlatform(platform: unknown): boolean {
   return String(platform || '').trim().toLowerCase() === 'gemini-cli';
@@ -306,7 +323,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             status: upstream.status,
             errorText: text,
           });
-          if (retryCount < MAX_RETRIES) {
+          if (shouldRetryGeminiRequest(upstream.status, text) && retryCount < MAX_RETRIES) {
             retryCount += 1;
             continue;
           }
@@ -331,7 +348,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             type: 'upstream_error',
           },
         });
-        if (retryCount < MAX_RETRIES) {
+        if (shouldRetryGeminiRequest(0, error instanceof Error ? error.message : 'Gemini upstream request failed') && retryCount < MAX_RETRIES) {
           retryCount += 1;
           continue;
         }
@@ -443,7 +460,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               errorText: 'Gemini CLI OAuth project is missing',
               modelName: actualModel,
             });
-            if (retryCount < MAX_RETRIES) {
+            if (shouldRetryGeminiRequest(500, 'Gemini CLI OAuth project is missing') && retryCount < MAX_RETRIES) {
               retryCount += 1;
               continue;
             }
@@ -565,7 +582,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               upstreamPath,
               clientContext,
             );
-            if (retryCount < MAX_RETRIES) {
+            if (shouldRetryGeminiRequest(upstream.status, lastText) && retryCount < MAX_RETRIES) {
               retryCount += 1;
               continue;
             }
@@ -863,7 +880,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             null,
             clientContext,
           );
-          if (retryCount < MAX_RETRIES) {
+          if (shouldRetryGeminiRequest(endpointResult.status, endpointResult.rawErrText || endpointResult.errText) && retryCount < MAX_RETRIES) {
             retryCount += 1;
             continue;
           }
@@ -941,7 +958,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           upstreamPath || null,
           clientContext,
         );
-        if (retryCount < MAX_RETRIES) {
+        if (shouldRetryGeminiRequest(0, error instanceof Error ? error.message : 'Gemini upstream request failed') && retryCount < MAX_RETRIES) {
           retryCount += 1;
           continue;
         }

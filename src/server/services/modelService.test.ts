@@ -72,6 +72,7 @@ describe('rebuildTokenRoutesFromAvailability', () => {
       .where(eq(schema.tokenRoutes.modelPattern, 'gpt-5.2-codex'))
       .get();
     expect(route).toBeDefined();
+    expect(route?.routingStrategy).toBe('stable_first');
 
     const channels = await db.select().from(schema.routeChannels)
       .where(and(
@@ -134,6 +135,7 @@ describe('rebuildTokenRoutesFromAvailability', () => {
       .where(eq(schema.tokenRoutes.modelPattern, 'gpt-4.1'))
       .get();
     expect(route).toBeDefined();
+    expect(route?.routingStrategy).toBe('stable_first');
 
     const channels = await db.select().from(schema.routeChannels)
       .where(and(
@@ -186,6 +188,7 @@ describe('rebuildTokenRoutesFromAvailability', () => {
       .where(eq(schema.tokenRoutes.modelPattern, 'gpt-5.2-codex'))
       .get();
     expect(route).toBeDefined();
+    expect(route?.routingStrategy).toBe('stable_first');
 
     const channels = await db.select().from(schema.routeChannels)
       .where(and(

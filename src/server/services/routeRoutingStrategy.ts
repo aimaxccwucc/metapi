@@ -1,6 +1,6 @@
 export type RouteRoutingStrategy = 'weighted' | 'round_robin' | 'stable_first';
 
-export const DEFAULT_ROUTE_ROUTING_STRATEGY: RouteRoutingStrategy = 'weighted';
+export const DEFAULT_ROUTE_ROUTING_STRATEGY: RouteRoutingStrategy = 'stable_first';
 
 export function normalizeRouteRoutingStrategy(value: unknown): RouteRoutingStrategy {
   const normalized = String(value || '').trim().toLowerCase();

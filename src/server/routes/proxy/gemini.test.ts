@@ -688,6 +688,7 @@ describe('gemini native proxy routes', () => {
         type: 'server_error',
       },
     });
+    expect(selectNextChannelMock).not.toHaveBeenCalled();
   });
 
   it('routes Gemini native generateContent requests to openai upstreams and serializes the response back to Gemini shape', async () => {
@@ -1774,6 +1775,7 @@ describe('gemini native proxy routes', () => {
       errorText: JSON.stringify({ error: { message: 'bad request on first channel' } }),
       modelName: 'gemini-2.5-flash',
     }));
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
     const [firstUrl] = fetchMock.mock.calls[0] as [string, RequestInit];
     const [secondUrl] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(firstUrl).toContain('key=gemini-key');
@@ -1828,6 +1830,36 @@ describe('gemini native proxy routes', () => {
       errorText: JSON.stringify({ error: { message: 'forbidden on first channel' } }),
       modelName: 'gemini-2.5-flash',
     }));
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fail over on Gemini model unsupported errors before any bytes are written', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      error: { message: 'unsupported model gemini-2.5-flash on this upstream' },
+    }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: {
+        'x-goog-api-key': 'sk-managed-gemini',
+      },
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 400,
+      errorText: JSON.stringify({ error: { message: 'unsupported model gemini-2.5-flash on this upstream' } }),
+      modelName: 'gemini-2.5-flash',
+    }));
+    expect(selectNextChannelMock).not.toHaveBeenCalled();
   });
 
   it('falls back to the next channel when first Gemini channel returns 500 before any bytes are written', async () => {
@@ -1918,6 +1950,7 @@ describe('gemini native proxy routes', () => {
       errorText: 'socket hang up',
       modelName: 'gemini-2.5-flash',
     }));
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to the next channel for SSE requests before any bytes are written', async () => {
