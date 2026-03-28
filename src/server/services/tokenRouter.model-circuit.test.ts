@@ -228,6 +228,111 @@ describe('TokenRouter model circuit breaker', () => {
     expect(backupCandidate?.eligible).toBe(true);
   });
 
+  it('blocks the same model across sibling channels on the same site after a model unsupported failure', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'shared-model-site',
+      url: 'https://shared-model-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+    const backupSite = await db.insert(schema.sites).values({
+      name: 'shared-model-backup',
+      url: 'https://shared-model-backup.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const primaryAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'shared-model-primary',
+      accessToken: 'access-shared-model-primary',
+      apiToken: 'sk-shared-model-primary',
+      status: 'active',
+      unitCost: 1,
+    }).returning().get();
+    const siblingAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'shared-model-sibling',
+      accessToken: 'access-shared-model-sibling',
+      apiToken: 'sk-shared-model-sibling',
+      status: 'active',
+      unitCost: 1,
+    }).returning().get();
+    const backupAccount = await db.insert(schema.accounts).values({
+      siteId: backupSite.id,
+      username: 'shared-model-backup',
+      accessToken: 'access-shared-model-backup',
+      apiToken: 'sk-shared-model-backup',
+      status: 'active',
+      unitCost: 1,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-shared-model-denied',
+      enabled: true,
+    }).returning().get();
+    const otherRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-shared-model-ok',
+      enabled: true,
+    }).returning().get();
+
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: primaryAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    const siblingChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: siblingAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    const backupChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: backupAccount.id,
+      tokenId: null,
+      priority: 10,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: otherRoute.id,
+      accountId: siblingAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    const router = new TokenRouter();
+    await router.recordFailure(primaryChannel.id, {
+      status: 403,
+      errorText: 'you do not have access to the model gpt-shared-model-denied',
+      modelName: 'gpt-shared-model-denied',
+    });
+
+    const decision = await router.explainSelection('gpt-shared-model-denied');
+    const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+    const siblingCandidate = decision.candidates.find((candidate) => candidate.channelId === siblingChannel.id);
+    const backupCandidate = decision.candidates.find((candidate) => candidate.channelId === backupChannel.id);
+
+    expect(decision.selectedChannelId).toBe(backupChannel.id);
+    expect(primaryCandidate?.modelCircuitStatus?.isOpen).toBe(true);
+    expect(siblingCandidate?.eligible).toBe(false);
+    expect(siblingCandidate?.reason || '').toContain('模型熔断中');
+    expect(siblingCandidate?.circuitStatus?.isOpen).toBe(true);
+    expect(backupCandidate?.eligible).toBe(true);
+
+    const otherModelSelection = await router.selectChannel('gpt-shared-model-ok');
+    expect(otherModelSelection?.account.id).toBe(siblingAccount.id);
+  });
+
   it('keeps protocol mismatch recoverable without opening a model circuit', async () => {
     const primarySite = await db.insert(schema.sites).values({
       name: 'protocol-primary',

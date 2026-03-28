@@ -873,7 +873,7 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.summary.join(' ')).toContain('上层最近失败，已自动降级');
   });
 
-  it('falls back to the least recently failed channel when every priority layer is degraded', async () => {
+  it('does not select a channel when every priority layer recently failed', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
       valueScoreFactor: 0,
@@ -927,9 +927,10 @@ describe('TokenRouter selection scoring', () => {
     const preview = await router.previewSelectedChannel('gpt-5.7');
     const decision = await router.explainSelection('gpt-5.7');
 
-    expect(preview).not.toBeNull();
-    expect(decision.selectedChannelId).toBeTruthy();
-    expect(decision.summary.join(' ')).toContain('保守恢复探测');
+    expect(preview).toBeNull();
+    expect(decision.selectedChannelId).toBeUndefined();
+    expect(decision.summary.join(' ')).toContain('当前避让中');
+    expect(decision.summary.join(' ')).toContain('本次未选出通道');
   });
 
   it('temporarily avoids channels that were just selected by another request', async () => {

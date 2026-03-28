@@ -655,7 +655,10 @@ function shouldApplySiteWideFailureTracking(context: SiteRuntimeFailureContext =
 
 function shouldApplySiteModelFailureTracking(context: SiteRuntimeFailureContext = {}): boolean {
   const category = classifyProxyFailureCategory(context.status, context.errorText);
-  return category === 'network' || category === 'server' || category === 'rate_limit';
+  return category === 'network'
+    || category === 'server'
+    || category === 'rate_limit'
+    || category === 'model_unsupported';
 }
 
 function isTransientSiteRuntimeFailure(context: SiteRuntimeFailureContext = {}): boolean {
@@ -864,10 +867,18 @@ function getSiteRuntimeHealthDetails(siteId: number, modelName?: string | null, 
   };
 }
 
+function shouldOpenImmediateRuntimeBreaker(context: SiteRuntimeFailureContext = {}): boolean {
+  const category = classifyProxyFailureCategory(context.status, context.errorText);
+  return category === 'network'
+    || category === 'server'
+    || category === 'rate_limit'
+    || category === 'model_unsupported';
+}
+
 function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
   state.penaltyScore += resolveSiteRuntimeFailurePenalty(context);
   const immediateBreakerMs = resolveImmediateModelBreakerDurationMs(context);
-  if (immediateBreakerMs > 0 && shouldOpenSiteWideRuntimeBreaker(context)) {
+  if (immediateBreakerMs > 0 && shouldOpenImmediateRuntimeBreaker(context)) {
     state.breakerLevel = Math.min(
       SITE_RUNTIME_BREAKER_LEVELS_MS.length - 1,
       state.breakerLevel + 1,
@@ -1330,11 +1341,6 @@ function recordSiteRuntimeFailure(siteId: number, context: SiteRuntimeFailureCon
   if (changed) {
     scheduleSiteRuntimeHealthPersistence();
   }
-}
-
-function shouldOpenSiteWideRuntimeBreaker(context: SiteRuntimeFailureContext = {}): boolean {
-  const category = classifyProxyFailureCategory(context.status, context.errorText);
-  return category === 'network' || category === 'server' || category === 'rate_limit';
 }
 
 function recordSiteRuntimeSuccess(siteId: number, latencyMs: number, modelName?: string | null, nowMs = Date.now()): void {
@@ -3420,16 +3426,6 @@ export class TokenRouter {
     } else if (stickyPreference.stickyReason === 'broken_by_busy' && stickyAccountId != null) {
       summary.push(`账号粘性已打破：账号繁忙 account=${stickyAccountId}`);
     }
-    const minAvailablePriority = availableByPriority.size > 0
-      ? Math.min(...Array.from(availableByPriority.keys()))
-      : null;
-    const hasHigherPriorityModelCircuitBlock = minAvailablePriority != null
-      && candidates.some((candidate) => (
-        !candidate.eligible
-        && candidate.priority < minAvailablePriority
-        && candidate.reason.includes('模型熔断中')
-      ));
-
     if (routeStrategy === 'round_robin') {
       const rawOrdered = this.getRoundRobinCandidates(match.channels.filter((row) => {
         const target = candidateMap.get(row.channel.id);
@@ -3478,12 +3474,20 @@ export class TokenRouter {
         }
         summary.push(`轮询最近失败避让 ${recentFailurePartition.avoided.length}`);
       }
-      const recoveryCandidates = recentFailurePartition.preferred.length > 0
-        ? recentFailurePartition.preferred
-        : sortCandidatesForRecoveryPreference(recentFailurePartition.avoided);
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        summary.push('全部候选近期失败，已切换为保守恢复探测');
+        summary.push('全部候选近期失败，当前避让中');
+        summary.push('本次未选出通道');
+        return {
+          requestedModel,
+          actualModel: mappedModel,
+          matched: true,
+          routeId: match.route.id,
+          modelPattern: match.route.modelPattern,
+          summary,
+          candidates,
+        };
       }
+      const recoveryCandidates = recentFailurePartition.preferred;
 
       const accountLeasePartition = partitionAccountSelectionLeases(recoveryCandidates, nowMs);
       if (accountLeasePartition.avoided.length > 0) {
@@ -3582,9 +3586,6 @@ export class TokenRouter {
     let degradedAcrossPriorityByRecentFailure = false;
     let selected: RouteChannelCandidate | null = null;
     let selectedPriority = 0;
-    let recoverySelected = false;
-    let sawFullyBlockedByRuntimeBreaker = false;
-    const degradedRecoveryPool: RouteChannelCandidate[] = [];
 
     for (const priority of sortedPriorities) {
       const rawLayer = availableByPriority.get(priority) ?? [];
@@ -3607,7 +3608,6 @@ export class TokenRouter {
         }
       }
       if (fullyBlockedByRuntimeBreaker) {
-        sawFullyBlockedByRuntimeBreaker = true;
         const breakerSummaryLabel = breakerFiltered.avoided.some((item) => item.reason.includes('模型熔断'))
           ? '运行时熔断避让'
           : '站点熔断避让';
@@ -3634,7 +3634,7 @@ export class TokenRouter {
       }
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
         degradedAcrossPriorityByRecentFailure = true;
-        degradedRecoveryPool.push(...recentFailurePartition.avoided);
+        summary.push(`优先级 P${priority}：全部候选近期失败，当前避让中`);
         continue;
       }
 
@@ -3710,65 +3710,8 @@ export class TokenRouter {
       if (degradedAcrossPriorityByRecentFailure) {
         layerSummaryParts.push('上层最近失败，已自动降级');
       }
-      if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        layerSummaryParts.push('当前层全部近期失败，已切换保守恢复探测');
-      }
       summary.push(layerSummaryParts.join('，'));
       break;
-    }
-
-    if (!selected && !sawFullyBlockedByRuntimeBreaker && !hasHigherPriorityModelCircuitBlock && degradedRecoveryPool.length > 0) {
-      const recoveryCandidates = sortCandidatesForRecoveryPreference(
-        Array.from(new Map(
-          degradedRecoveryPool.map((candidate) => [candidate.channel.id, candidate]),
-        ).values()),
-      );
-      const accountLeasePartition = partitionAccountSelectionLeases(recoveryCandidates, nowMs);
-      if (accountLeasePartition.avoided.length > 0) {
-        for (const item of accountLeasePartition.avoided) {
-          const target = candidateMap.get(item.candidate.channel.id);
-          if (!target) continue;
-          target.avoidedByAccountLease = true;
-          target.reason = buildAccountRateLimitReason(item, nowMs);
-        }
-      }
-      const recoverySource = accountLeasePartition.preferred;
-      const leasePartition = partitionChannelSelectionLeases(recoverySource, nowMs);
-      if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
-        for (const item of leasePartition.avoided) {
-          const target = candidateMap.get(item.candidate.channel.id);
-          if (!target) continue;
-          target.avoidedByInflightLease = true;
-          target.reason = `通道忙碌中，优先避让（${resolveLeaseAvoidWindowSec(item.leaseUntil, nowMs)} 秒租约）`;
-        }
-      }
-      const recoveryLayer = leasePartition.preferred.length > 0
-        ? leasePartition.preferred
-        : recoverySource;
-      const recoveryCandidate = recoveryLayer[0] ?? null;
-      if (recoveryCandidate) {
-        selected = recoveryCandidate;
-        selectedPriority = recoveryCandidate.channel.priority ?? 0;
-        recoverySelected = true;
-        for (const candidate of recoveryLayer) {
-          const target = candidateMap.get(candidate.channel.id);
-          if (!target) continue;
-          target.probability = candidate.channel.id === recoveryCandidate.channel.id ? 100 : 0;
-          target.reason = candidate.channel.id === recoveryCandidate.channel.id
-            ? '保守恢复探测（全部优先级近期失败，优先尝试最久未失败通道）'
-            : '保守恢复探测待命';
-        }
-        const recoverySummaryParts = [
-          `优先级 P${selectedPriority}：当前层全部近期失败，已切换保守恢复探测`,
-        ];
-        if (accountLeasePartition.avoided.length > 0) {
-          recoverySummaryParts.push(`${buildAccountAvoidanceSummaryLabel(accountLeasePartition.avoided)} ${accountLeasePartition.avoided.length}`);
-        }
-        if (degradedAcrossPriorityByRecentFailure) {
-          recoverySummaryParts.push('上层最近失败，已自动降级');
-        }
-        summary.push(recoverySummaryParts.join('，'));
-      }
     }
 
     if (!selected) {
@@ -3794,11 +3737,7 @@ export class TokenRouter {
       mappedModel,
       selected.channel.sourceModel,
     );
-    summary.push(
-      recoverySelected
-        ? `最终选择：${selectedLabel}（P${selectedPriority}，保守恢复探测）`
-        : `最终选择：${selectedLabel}（P${selectedPriority}）`,
-    );
+    summary.push(`最终选择：${selectedLabel}（P${selectedPriority}）`);
     if (actualModel !== mappedModel) {
       summary.push(`实际转发模型：${actualModel}`);
     }
@@ -4118,15 +4057,6 @@ export class TokenRouter {
     const available = evaluatedCandidates
       .filter((entry) => entry.reasons.length === 0)
       .map((entry) => entry.candidate);
-    const minAvailablePriority = available.length > 0
-      ? Math.min(...available.map((candidate) => candidate.channel.priority ?? 0))
-      : null;
-    const hasHigherPriorityModelCircuitBlock = minAvailablePriority != null
-      && evaluatedCandidates.some((entry) => (
-        (entry.candidate.channel.priority ?? 0) < minAvailablePriority
-        && entry.reasons.includes('模型熔断中')
-      ));
-
     if (available.length === 0) return null;
 
     if (routeStrategy === 'round_robin') {
@@ -4143,9 +4073,10 @@ export class TokenRouter {
         ? stickyPreference.preferred
         : breakerFiltered.candidates;
       const recentFailurePartition = partitionRecentlyFailedCandidates(stickyCandidates, nowMs);
-      const recoveryCandidates = recentFailurePartition.preferred.length > 0
-        ? recentFailurePartition.preferred
-        : sortCandidatesForRecoveryPreference(recentFailurePartition.avoided);
+      if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
+        return null;
+      }
+      const recoveryCandidates = recentFailurePartition.preferred;
       const accountLeasePartition = partitionAccountSelectionLeases(recoveryCandidates, nowMs);
       const accountLeaseCandidates = accountLeasePartition.preferred;
       const leasePartition = partitionChannelSelectionLeases(
@@ -4201,20 +4132,16 @@ export class TokenRouter {
     }
 
     const sortedPriorities = Array.from(layers.keys()).sort((a, b) => a - b);
-    let sawFullyBlockedByRuntimeBreaker = false;
-    const degradedRecoveryPool: RouteChannelCandidate[] = [];
     for (const priority of sortedPriorities) {
       const rawLayer = layers.get(priority) ?? [];
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
       const fullyBlockedByRuntimeBreaker =
         breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length;
       if (fullyBlockedByRuntimeBreaker) {
-        sawFullyBlockedByRuntimeBreaker = true;
         continue;
       }
       const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        degradedRecoveryPool.push(...recentFailurePartition.avoided);
         continue;
       }
       const stickyLayer = preferStickySessionCandidates(
@@ -4268,48 +4195,6 @@ export class TokenRouter {
 
       const tokenValue = this.resolveChannelTokenValue(selected);
       if (!tokenValue) continue;
-      if (routeStrategy === 'stable_first' && recordSelection) {
-        await this.recordChannelSelection(selected.channel.id);
-      }
-      if (recordSelection) {
-        const leaseMs = resolveChannelSelectionLeaseMs(selected);
-        reserveChannelSelectionLease(selected.channel.id, nowMs, leaseMs);
-        reserveAccountSelectionLease(selected, nowMs, leaseMs);
-        bindStickySessionToCandidate(downstreamPolicy.stickySessionKey, selected, nowMs, leaseMs);
-      }
-
-      const actualModel = resolveActualModelForSelectedChannel(
-        requestedModel,
-        match.route,
-        mappedModel,
-        selected.channel.sourceModel,
-      );
-
-      return {
-        ...selected,
-        tokenValue,
-        tokenName: selected.token?.name || 'default',
-        actualModel,
-      };
-    }
-
-    if (!sawFullyBlockedByRuntimeBreaker && !hasHigherPriorityModelCircuitBlock && degradedRecoveryPool.length > 0) {
-      const recoveryCandidates = sortCandidatesForRecoveryPreference(
-        Array.from(new Map(
-          degradedRecoveryPool.map((candidate) => [candidate.channel.id, candidate]),
-        ).values()),
-      );
-      const accountLeasePartition = partitionAccountSelectionLeases(recoveryCandidates, nowMs);
-      const recoverySource = accountLeasePartition.preferred;
-      const leasePartition = partitionChannelSelectionLeases(recoverySource, nowMs);
-      const recoveryLayer = leasePartition.preferred.length > 0
-        ? leasePartition.preferred
-        : recoverySource;
-      const selected = recoveryLayer[0] ?? null;
-      if (!selected) return null;
-
-      const tokenValue = this.resolveChannelTokenValue(selected);
-      if (!tokenValue) return null;
       if (routeStrategy === 'stable_first' && recordSelection) {
         await this.recordChannelSelection(selected.channel.id);
       }
