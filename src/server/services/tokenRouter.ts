@@ -2440,6 +2440,369 @@ function partitionMostRecentSuccessfulSiteCandidates<
   };
 }
 
+function subtractCandidatesByChannelId<
+  T extends {
+    channel: { id: number };
+  },
+>(
+  source: T[],
+  excluded: T[],
+): T[] {
+  if (source.length === 0 || excluded.length === 0) return source;
+  const excludedIds = new Set(excluded.map((candidate) => candidate.channel.id));
+  return source.filter((candidate) => !excludedIds.has(candidate.channel.id));
+}
+
+function partitionPreferredSuccessfulAccountCandidates<
+  T extends {
+    account: { id: number };
+  },
+>(
+  candidates: T[],
+  nowMs = Date.now(),
+): {
+  anchor: T[];
+  preferred: T[];
+  avoided: T[];
+  anchorAccountIds: Set<number>;
+  preferredAccountIds: Set<number>;
+  source: 'none' | 'account_runtime_success';
+} {
+  if (candidates.length <= 1) {
+    return {
+      anchor: candidates,
+      preferred: candidates,
+      avoided: [],
+      anchorAccountIds: new Set(candidates.map((candidate) => candidate.account.id)),
+      preferredAccountIds: new Set(candidates.map((candidate) => candidate.account.id)),
+      source: 'none',
+    };
+  }
+
+  let latestSuccessAtMs: number | null = null;
+  const anchorAccountIds = new Set<number>();
+  const preferredAccountIds = new Set<number>();
+
+  for (const candidate of candidates) {
+    const state = accountRoutingStates.get(candidate.account.id);
+    const successAtMs = state?.lastSuccessAtMs ?? null;
+    const failureAtMs = state?.lastFailureAtMs ?? null;
+    if (successAtMs == null || successAtMs <= (failureAtMs ?? 0)) continue;
+    preferredAccountIds.add(candidate.account.id);
+    if (latestSuccessAtMs == null || successAtMs > latestSuccessAtMs) {
+      latestSuccessAtMs = successAtMs;
+      anchorAccountIds.clear();
+      anchorAccountIds.add(candidate.account.id);
+      continue;
+    }
+    if (successAtMs === latestSuccessAtMs) {
+      anchorAccountIds.add(candidate.account.id);
+    }
+  }
+
+  if (preferredAccountIds.size === 0) {
+    return {
+      anchor: [],
+      preferred: [],
+      avoided: candidates,
+      anchorAccountIds,
+      preferredAccountIds,
+      source: 'none',
+    };
+  }
+
+  return {
+    anchor: candidates.filter((candidate) => anchorAccountIds.has(candidate.account.id)),
+    preferred: candidates.filter((candidate) => preferredAccountIds.has(candidate.account.id)),
+    avoided: candidates.filter((candidate) => !preferredAccountIds.has(candidate.account.id)),
+    anchorAccountIds,
+    preferredAccountIds,
+    source: 'account_runtime_success',
+  };
+}
+
+function partitionPreferredSuccessfulChannelCandidates<
+  T extends {
+    channel: Pick<ChannelRow, 'id' | 'lastUsedAt' | 'successCount' | 'lastFailAt'>;
+  },
+>(
+  candidates: T[],
+): {
+  anchor: T[];
+  preferred: T[];
+  avoided: T[];
+  anchorChannelIds: Set<number>;
+  preferredChannelIds: Set<number>;
+  source: 'none' | 'channel_persisted_success';
+} {
+  if (candidates.length <= 1) {
+    return {
+      anchor: candidates,
+      preferred: candidates,
+      avoided: [],
+      anchorChannelIds: new Set(candidates.map((candidate) => candidate.channel.id)),
+      preferredChannelIds: new Set(candidates.map((candidate) => candidate.channel.id)),
+      source: 'none',
+    };
+  }
+
+  let latestSuccessAtMs: number | null = null;
+  const anchorChannelIds = new Set<number>();
+  const preferredChannelIds = new Set<number>();
+
+  for (const candidate of candidates) {
+    const successAtMs = getChannelPersistedSuccessAtMs(candidate.channel);
+    const failureAtMs = parseIsoTimeMs(candidate.channel.lastFailAt);
+    if (successAtMs == null || successAtMs <= (failureAtMs ?? 0)) continue;
+    preferredChannelIds.add(candidate.channel.id);
+    if (latestSuccessAtMs == null || successAtMs > latestSuccessAtMs) {
+      latestSuccessAtMs = successAtMs;
+      anchorChannelIds.clear();
+      anchorChannelIds.add(candidate.channel.id);
+      continue;
+    }
+    if (successAtMs === latestSuccessAtMs) {
+      anchorChannelIds.add(candidate.channel.id);
+    }
+  }
+
+  if (preferredChannelIds.size === 0) {
+    return {
+      anchor: [],
+      preferred: [],
+      avoided: candidates,
+      anchorChannelIds,
+      preferredChannelIds,
+      source: 'none',
+    };
+  }
+
+  return {
+    anchor: candidates.filter((candidate) => anchorChannelIds.has(candidate.channel.id)),
+    preferred: candidates.filter((candidate) => preferredChannelIds.has(candidate.channel.id)),
+    avoided: candidates.filter((candidate) => !preferredChannelIds.has(candidate.channel.id)),
+    anchorChannelIds,
+    preferredChannelIds,
+    source: 'channel_persisted_success',
+  };
+}
+
+function partitionPreferredSuccessfulSiteCandidates<
+  T extends {
+    site: { id: number };
+    channel: Pick<ChannelRow, 'id' | 'lastUsedAt' | 'successCount' | 'lastFailAt'>;
+  },
+>(
+  candidates: T[],
+  modelName: string,
+  nowMs = Date.now(),
+): {
+  anchor: T[];
+  preferred: T[];
+  avoided: T[];
+  anchorSiteIds: Set<number>;
+  preferredSiteIds: Set<number>;
+  source: 'none' | 'site_success_pool';
+} {
+  if (candidates.length <= 1) {
+    return {
+      anchor: candidates,
+      preferred: candidates,
+      avoided: [],
+      anchorSiteIds: new Set(candidates.map((candidate) => candidate.site.id)),
+      preferredSiteIds: new Set(candidates.map((candidate) => candidate.site.id)),
+      source: 'none',
+    };
+  }
+
+  const normalizedModel = normalizeModelAlias(modelName || '');
+  const siteSuccessAtMs = new Map<number, number>();
+
+  for (const candidate of candidates) {
+    const siteId = candidate.site.id;
+    const persistedSuccessAtMs = getChannelPersistedSuccessAtMs(candidate.channel);
+    const persistedFailureAtMs = parseIsoTimeMs(candidate.channel.lastFailAt);
+    if (persistedSuccessAtMs != null && persistedSuccessAtMs > (persistedFailureAtMs ?? 0)) {
+      siteSuccessAtMs.set(siteId, Math.max(siteSuccessAtMs.get(siteId) ?? 0, persistedSuccessAtMs));
+    }
+
+    if (!normalizedModel) continue;
+    const state = getSiteModelRuntimeHealthState(siteId, normalizedModel);
+    const runtimeSuccessAtMs = state?.lastSuccessAtMs ?? null;
+    const runtimeFailureAtMs = state?.lastFailureAtMs ?? null;
+    if (runtimeSuccessAtMs == null || runtimeSuccessAtMs <= (runtimeFailureAtMs ?? 0)) continue;
+    if (isRuntimeHealthBreakerOpen(state, nowMs)) continue;
+    siteSuccessAtMs.set(siteId, Math.max(siteSuccessAtMs.get(siteId) ?? 0, runtimeSuccessAtMs));
+  }
+
+  if (siteSuccessAtMs.size === 0) {
+    return {
+      anchor: [],
+      preferred: [],
+      avoided: candidates,
+      anchorSiteIds: new Set<number>(),
+      preferredSiteIds: new Set<number>(),
+      source: 'none',
+    };
+  }
+
+  let latestSuccessAtMs: number | null = null;
+  const anchorSiteIds = new Set<number>();
+  const preferredSiteIds = new Set<number>(siteSuccessAtMs.keys());
+  for (const [siteId, successAtMs] of siteSuccessAtMs.entries()) {
+    if (latestSuccessAtMs == null || successAtMs > latestSuccessAtMs) {
+      latestSuccessAtMs = successAtMs;
+      anchorSiteIds.clear();
+      anchorSiteIds.add(siteId);
+      continue;
+    }
+    if (successAtMs === latestSuccessAtMs) {
+      anchorSiteIds.add(siteId);
+    }
+  }
+
+  return {
+    anchor: candidates.filter((candidate) => anchorSiteIds.has(candidate.site.id)),
+    preferred: candidates.filter((candidate) => preferredSiteIds.has(candidate.site.id)),
+    avoided: candidates.filter((candidate) => !preferredSiteIds.has(candidate.site.id)),
+    anchorSiteIds,
+    preferredSiteIds,
+    source: 'site_success_pool',
+  };
+}
+
+type CandidateSelectionPool = {
+  candidates: RouteChannelCandidate[];
+  scope:
+    | 'anchor_site_recent_channel'
+    | 'anchor_site_success_channel'
+    | 'anchor_site_success_account'
+    | 'anchor_site_other'
+    | 'fallback_site_recent_channel'
+    | 'fallback_site_success_channel'
+    | 'fallback_site_success_account'
+    | 'fallback_site_other'
+    | 'other_site_recent_channel'
+    | 'other_site_success_channel'
+    | 'other_site_success_account'
+    | 'other_site_other';
+};
+
+function describeCandidatePoolScope(scope: CandidateSelectionPool['scope']): {
+  avoidedReason: string;
+  summaryLabel: string;
+} {
+  switch (scope) {
+    case 'anchor_site_recent_channel':
+      return {
+        avoidedReason: '当前优先复用最近成功的站点与账号通道；仅当该通道不可用时才会切同站其他账号或其他站点',
+        summaryLabel: '最近成功通道复用',
+      };
+    case 'anchor_site_success_channel':
+      return {
+        avoidedReason: '当前优先复用最近成功站点内已验证成功的其他通道；仅当这些通道都不可用时才会切同站其他账号或其他站点',
+        summaryLabel: '成功通道池复用',
+      };
+    case 'anchor_site_success_account':
+      return {
+        avoidedReason: '当前优先复用最近成功站点内已验证成功且可用的账号；仅当这些账号都不可用时才会切同站其他账号或其他站点',
+        summaryLabel: '成功账号复用',
+      };
+    case 'anchor_site_other':
+      return {
+        avoidedReason: '当前优先留在最近成功站点内继续尝试其他可用账号/通道；仅当该站点全部不可用时才会切到其他站点',
+        summaryLabel: '同站账号兜底',
+      };
+    case 'fallback_site_recent_channel':
+      return {
+        avoidedReason: '当前优先复用其他已验证成功站点中的最近成功通道；仅当这些站点都不可用时才会扩散到未验证站点',
+        summaryLabel: '其他成功站点最近通道复用',
+      };
+    case 'fallback_site_success_channel':
+      return {
+        avoidedReason: '当前优先复用其他已验证成功站点中的成功通道池；仅当这些站点都不可用时才会扩散到未验证站点',
+        summaryLabel: '其他成功站点通道池复用',
+      };
+    case 'fallback_site_success_account':
+      return {
+        avoidedReason: '当前优先复用其他已验证成功站点中的成功账号；仅当这些站点都不可用时才会扩散到未验证站点',
+        summaryLabel: '其他成功站点账号复用',
+      };
+    case 'fallback_site_other':
+      return {
+        avoidedReason: '当前优先继续尝试其他已验证成功站点；仅当成功站点全部不可用时才会扩散到未验证站点',
+        summaryLabel: '其他成功站点兜底',
+      };
+    case 'other_site_recent_channel':
+      return {
+        avoidedReason: '当前优先先用已验证成功站点；仅当它们都不可用时才会尝试其他站点的最近成功通道',
+        summaryLabel: '其他站点最近通道',
+      };
+    case 'other_site_success_channel':
+      return {
+        avoidedReason: '当前优先先用已验证成功站点；仅当它们都不可用时才会尝试其他站点的成功通道池',
+        summaryLabel: '其他站点成功通道池',
+      };
+    case 'other_site_success_account':
+      return {
+        avoidedReason: '当前优先先用已验证成功站点；仅当它们都不可用时才会尝试其他站点的成功账号',
+        summaryLabel: '其他站点成功账号',
+      };
+    case 'other_site_other':
+      return {
+        avoidedReason: '当前候选属于未验证站点，仅在已验证成功站点全部不可用后才会尝试',
+        summaryLabel: '未验证站点探测',
+      };
+  }
+}
+
+function buildCandidateSelectionPools(
+  candidates: RouteChannelCandidate[],
+  modelName: string,
+  nowMs = Date.now(),
+): {
+  pools: CandidateSelectionPool[];
+  sitePartition: ReturnType<typeof partitionPreferredSuccessfulSiteCandidates<RouteChannelCandidate>>;
+} {
+  const pools: CandidateSelectionPool[] = [];
+  const sitePartition = partitionPreferredSuccessfulSiteCandidates(candidates, modelName, nowMs);
+
+  const pushPool = (scope: CandidateSelectionPool['scope'], rows: RouteChannelCandidate[]) => {
+    if (rows.length === 0) return;
+    pools.push({ scope, candidates: rows });
+  };
+
+  const pushScopedPools = (
+    scopePrefix: 'anchor_site' | 'fallback_site' | 'other_site',
+    scopedCandidates: RouteChannelCandidate[],
+  ) => {
+    if (scopedCandidates.length === 0) return;
+
+    const channelPartition = partitionPreferredSuccessfulChannelCandidates(scopedCandidates);
+    pushPool(`${scopePrefix}_recent_channel`, channelPartition.anchor);
+    const otherSuccessfulChannels = subtractCandidatesByChannelId(channelPartition.preferred, channelPartition.anchor);
+    pushPool(`${scopePrefix}_success_channel`, otherSuccessfulChannels);
+
+    const remainingAfterChannelSuccess = subtractCandidatesByChannelId(scopedCandidates, channelPartition.preferred);
+    const accountPartition = partitionPreferredSuccessfulAccountCandidates(remainingAfterChannelSuccess, nowMs);
+    pushPool(`${scopePrefix}_success_account`, accountPartition.preferred);
+
+    const remaining = subtractCandidatesByChannelId(remainingAfterChannelSuccess, accountPartition.preferred);
+    pushPool(`${scopePrefix}_other`, remaining);
+  };
+
+  if (sitePartition.preferred.length > 0) {
+    pushScopedPools('anchor_site', sitePartition.anchor);
+    pushScopedPools('fallback_site', subtractCandidatesByChannelId(sitePartition.preferred, sitePartition.anchor));
+  }
+  pushScopedPools('other_site', sitePartition.avoided);
+
+  return {
+    pools,
+    sitePartition,
+  };
+}
+
 function partitionModelPreferredSiteCandidates<
   T extends {
     site: { id: number };
@@ -3850,29 +4213,29 @@ export class TokenRouter {
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
         : candidateLayerSource;
-      const recentSuccessPartition = partitionMostRecentSuccessfulSiteCandidates(candidateLayer);
-      const modelPreferredPartition = partitionModelPreferredSiteCandidates(
-        recentSuccessPartition.preferred,
-        mappedModel,
-        nowMs,
-      );
-      if (recentSuccessPartition.avoided.length > 0) {
-        for (const row of recentSuccessPartition.avoided) {
-          const target = candidateMap.get(row.channel.id);
-          if (!target) continue;
-          target.reason = '已有最近成功站点，当前优先复用；仅当这些站点都不可用时才会重试其他站点';
-        }
+      const selectionPools = buildCandidateSelectionPools(candidateLayer, mappedModel, nowMs);
+      let selectedPool: CandidateSelectionPool | null = null;
+      for (const pool of selectionPools.pools) {
+        if (pool.candidates.length === 0) continue;
+        selectedPool = pool;
+        break;
       }
-      if (modelPreferredPartition.avoided.length > 0) {
-        for (const row of modelPreferredPartition.avoided) {
+      if (!selectedPool) continue;
+
+      const selectedPoolChannelIds = new Set(selectedPool.candidates.map((candidate) => candidate.channel.id));
+      for (const pool of selectionPools.pools) {
+        if (pool.scope === selectedPool.scope) continue;
+        const poolDescription = describeCandidatePoolScope(pool.scope);
+        for (const row of pool.candidates) {
+          if (selectedPoolChannelIds.has(row.channel.id)) continue;
           const target = candidateMap.get(row.channel.id);
-          if (!target) continue;
-          target.reason = '已有该模型最近成功站点，当前优先复用；仅当这些站点都不可用时才会重试其他站点';
+          if (!target || !target.eligible || target.avoidedByRecentFailure) continue;
+          target.reason = poolDescription.avoidedReason;
         }
       }
 
       const weighted = this.calculateWeightedSelection(
-        modelPreferredPartition.preferred,
+        selectedPool.candidates,
         useChannelSourceModelForCost ? runtimeModelResolver : mappedModel,
         downstreamPolicy,
         nowMs,
@@ -3906,11 +4269,9 @@ export class TokenRouter {
       if (accountLeasePartition.avoided.length > 0) {
         layerSummaryParts.push(`${buildAccountAvoidanceSummaryLabel(accountLeasePartition.avoided)} ${accountLeasePartition.avoided.length}`);
       }
-      if (recentSuccessPartition.avoided.length > 0) {
-        layerSummaryParts.push(`最近成功站点复用 ${recentSuccessPartition.preferredSiteIds.size}`);
-      }
-      if (modelPreferredPartition.source === 'model_runtime_success' && modelPreferredPartition.avoided.length > 0) {
-        layerSummaryParts.push(`模型成功站点复用 ${modelPreferredPartition.preferredSiteIds.size}`);
+      layerSummaryParts.push(describeCandidatePoolScope(selectedPool.scope).summaryLabel);
+      if (selectionPools.sitePartition.preferredSiteIds.size > 0 && selectionPools.sitePartition.avoided.length > 0) {
+        layerSummaryParts.push(`成功站点池复用 ${selectionPools.sitePartition.preferredSiteIds.size}`);
       }
       if (stickyLayer.stickyReason === 'reused' && stickyLayer.stickyBinding) {
         layerSummaryParts.push(`账号粘性复用 ${stickyLayer.stickyBinding.accountId}`);
@@ -4369,10 +4730,18 @@ export class TokenRouter {
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
         : candidateLayerSource;
-      const recentSuccessPartition = partitionMostRecentSuccessfulSiteCandidates(candidateLayer);
+      const selectionPools = buildCandidateSelectionPools(candidateLayer, mappedModel, nowMs);
+      let selectedPool: CandidateSelectionPool | null = null;
+      for (const pool of selectionPools.pools) {
+        if (pool.candidates.length === 0) continue;
+        selectedPool = pool;
+        break;
+      }
+      if (!selectedPool) continue;
+
       const selected = routeStrategy === 'stable_first'
         ? this.selectWithModelCircuitGuard(
-          recentSuccessPartition.preferred,
+          selectedPool.candidates,
           (items) => this.stableFirstSelect(
             items,
             requestedByDisplayName ? runtimeModelResolver : mappedModel,
@@ -4388,7 +4757,7 @@ export class TokenRouter {
           recordSelection,
         )
         : this.selectWithModelCircuitGuard(
-          recentSuccessPartition.preferred,
+          selectedPool.candidates,
           (items) => this.weightedRandomSelect(
             items,
             requestedByDisplayName ? runtimeModelResolver : mappedModel,

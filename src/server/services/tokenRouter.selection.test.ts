@@ -733,8 +733,8 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.selectedChannelId).toBe(channelPreferred.id);
     expect(preferredCandidate?.probability || 0).toBeGreaterThan(99);
     expect(otherCandidate?.probability || 0).toBe(0);
-    expect((otherCandidate?.reason || '').includes('模型最近成功站点') || (otherCandidate?.reason || '').includes('最近成功站点')).toBe(true);
-    expect(decision.summary.join(' ')).toContain('最近成功站点复用');
+    expect((otherCandidate?.reason || '').includes('已验证成功站点') || (otherCandidate?.reason || '').includes('最近成功站点')).toBe(true);
+    expect(decision.summary.join(' ')).toMatch(/最近成功通道复用|最近成功站点复用/);
   });
 
   it('penalizes the failed model more than unrelated models on the same site', async () => {
@@ -923,8 +923,8 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.selectedChannelId).toBe(channelRecent.id);
     expect(recentCandidate?.probability || 0).toBeGreaterThan(99);
     expect(otherCandidate?.probability || 0).toBe(0);
-    expect(otherCandidate?.reason || '').toContain('最近成功站点');
-    expect(decision.summary.join(' ')).toContain('最近成功站点复用');
+    expect(otherCandidate?.reason || '').toMatch(/已验证成功站点|最近成功站点/);
+    expect(decision.summary.join(' ')).toMatch(/最近成功通道复用|最近成功站点复用/);
   });
 
   it('falls through to the next priority when all higher-priority channels recently failed', async () => {
@@ -1200,7 +1200,7 @@ describe('TokenRouter selection scoring', () => {
     const candidateA = decision.candidates.find((candidate) => candidate.channelId === channelA.id);
     const candidateB = decision.candidates.find((candidate) => candidate.channelId === channelB.id);
     expect((candidateA?.probability || 0)).toBeGreaterThan(candidateB?.probability || 0);
-    expect((candidateA?.reason || '').includes('账号EMA=') || decision.summary.join(' ').includes('最近成功站点复用')).toBe(true);
+    expect((candidateA?.reason || '').includes('账号EMA=') || decision.summary.join(' ').match(/最近成功通道复用|最近成功站点复用|成功账号复用/)).toBeTruthy();
 
     const accountSnapshots = await listAccountRoutingRuntimeSnapshots();
     const snapshotA = accountSnapshots.find((item) => item.accountId === accountA.id);
@@ -1523,7 +1523,7 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.selectedChannelId).toBe(channelRecent.id);
     expect(recentCandidate?.probability || 0).toBeGreaterThan(99);
     expect(otherCandidate?.probability || 0).toBe(0);
-    expect(otherCandidate?.reason || '').toContain('最近成功站点');
+    expect(otherCandidate?.reason || '').toMatch(/已验证成功站点|最近成功站点/);
   });
 
   it('does not fall back to a runtime-breaker-blocked layer when only lower priorities are recently failed', async () => {
