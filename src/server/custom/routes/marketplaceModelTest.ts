@@ -484,6 +484,7 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
       let available = normalizedSet.has(modelName)
         || Array.from(normalizedSet).some((item) => isModelAliasEquivalent(item, modelName));
       let reason = available ? formatProbeReason({ listHit: true, probe: null }) : formatProbeReason({ listHit: false, probe: null });
+      const listHit = available;
       let probeCheckedUrl: string | null = null;
       let probeStatusCode: number | null = null;
       let probeEndpoint: string | null = null;
@@ -516,6 +517,7 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
         siteName: site.name,
         latencyMs: Date.now() - startedAt,
         reason,
+        detectionMethod: listHit ? 'model_list' : (probeEndpoint ? 'realtime_probe' : 'unknown'),
         probeCheckedUrl,
         probeStatusCode,
         probeEndpoint,

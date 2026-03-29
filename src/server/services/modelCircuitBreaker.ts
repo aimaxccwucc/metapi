@@ -164,6 +164,7 @@ export function recordModelCircuitSuccess(channelId: number, modelName: string, 
   entry.openUntil = null;
   entry.lastSuccessAt = nowMs;
   entry.probeInFlight = false;
+  schedulePersistCircuits();
 }
 
 export function recordModelCircuitFailure(
@@ -192,6 +193,7 @@ export function recordModelCircuitFailure(
     entry.openedAt = nowMs;
     entry.openUntil = nowMs + durationMs;
   }
+  schedulePersistCircuits();
 }
 
 export function openModelCircuitImmediately(
@@ -209,6 +211,7 @@ export function openModelCircuitImmediately(
   entry.openUntil = nowMs + durationMs;
   entry.lastErrorAt = nowMs;
   entry.probeInFlight = false;
+  schedulePersistCircuits();
 }
 
 export function resetModelCircuit(channelId: number, modelName: string): void {
@@ -263,5 +266,68 @@ export function getModelCircuitSnapshots(nowMs = Date.now()): ModelCircuitSnapsh
 export function resetAllModelCircuits(): number {
   const cleared = circuitEntries.size;
   circuitEntries.clear();
+  schedulePersistCircuits();
   return cleared;
+}
+
+// ── 持久化 ──────────────────────────────────────────────────────────────────
+
+const CIRCUIT_PERSIST_KEY = 'model_circuit_breaker_v1';
+const CIRCUIT_DEBOUNCE_MS = 1000;
+
+let circuitSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let circuitPersistFn: ((key: string, value: unknown) => Promise<void>) | null = null;
+let circuitLoadFn: ((key: string) => Promise<unknown>) | null = null;
+
+/** 注入持久化函数（由 tokenRouter 或 server 启动时调用，避免循环依赖）。 */
+export function injectCircuitPersistFns(
+  persistFn: (key: string, value: unknown) => Promise<void>,
+  loadFn: (key: string) => Promise<unknown>,
+): void {
+  circuitPersistFn = persistFn;
+  circuitLoadFn = loadFn;
+}
+
+function schedulePersistCircuits(): void {
+  if (!circuitPersistFn) return;
+  if (circuitSaveTimer) clearTimeout(circuitSaveTimer);
+  circuitSaveTimer = setTimeout(() => {
+    circuitSaveTimer = null;
+    const entries = Array.from(circuitEntries.values());
+    // 只持久化 open/half_open 状态，closed 且无历史的不存储
+    const toSave = entries.filter((e) => e.state !== 'closed' || e.failCount > 0);
+    circuitPersistFn!(CIRCUIT_PERSIST_KEY, toSave).catch(() => {});
+  }, CIRCUIT_DEBOUNCE_MS);
+}
+
+/** 启动时从持久化存储恢复熔断状态。 */
+export async function loadPersistedModelCircuits(): Promise<void> {
+  if (!circuitLoadFn) return;
+  try {
+    const raw = await circuitLoadFn(CIRCUIT_PERSIST_KEY);
+    if (!Array.isArray(raw)) return;
+    const nowMs = Date.now();
+    for (const item of raw) {
+      if (typeof item?.channelId !== 'number' || typeof item?.modelName !== 'string') continue;
+      // 已过期的 open 状态直接转为 half_open
+      const state: ModelCircuitState =
+        item.state === 'open' && item.openUntil && nowMs >= item.openUntil
+          ? 'half_open'
+          : (item.state ?? 'closed');
+      const entry: CircuitEntry = {
+        channelId: item.channelId,
+        modelName: item.modelName,
+        state,
+        failCount: item.failCount ?? 0,
+        openedAt: item.openedAt ?? null,
+        openUntil: item.openUntil ?? null,
+        lastErrorAt: item.lastErrorAt ?? null,
+        lastSuccessAt: item.lastSuccessAt ?? null,
+        probeInFlight: false,
+      };
+      circuitEntries.set(getCircuitKey(entry.channelId, entry.modelName), entry);
+    }
+  } catch {
+    // 加载失败不影响正常运行
+  }
 }

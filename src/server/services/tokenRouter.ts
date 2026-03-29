@@ -27,6 +27,8 @@ import {
   resetAllModelCircuits,
   type ModelCircuitFailureCategory,
   type ModelCircuitStatusView,
+  injectCircuitPersistFns,
+  loadPersistedModelCircuits,
 } from './modelCircuitBreaker.js';
 import { classifyProxyFailureCategory } from './proxyRetryPolicy.js';
 
@@ -1320,9 +1322,23 @@ async function ensureAccountRuntimeStateLoaded(): Promise<void> {
   await accountRuntimeLoadPromise;
 }
 
+let circuitPersistInjected = false;
+
 async function ensureRoutingRuntimeStateLoaded(): Promise<void> {
   await ensureSiteRuntimeHealthStateLoaded();
   await ensureAccountRuntimeStateLoaded();
+  if (!circuitPersistInjected) {
+    circuitPersistInjected = true;
+    injectCircuitPersistFns(
+      (key, value) => upsertSetting(key, value),
+      async (key) => {
+        const row = await db.select().from(schema.settings).where(eq(schema.settings.key, key)).get();
+        if (!row) return null;
+        try { return JSON.parse(row.value); } catch { return null; }
+      },
+    );
+    await loadPersistedModelCircuits();
+  }
 }
 
 function recordSiteRuntimeFailure(siteId: number, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
@@ -3372,6 +3388,7 @@ function matchesRouteRequestModel(model: string, route: RouteRow): boolean {
 }
 
 function findPreferredRouteForModel(routes: RouteRow[], model: string): RouteRow | undefined {
+  // explicit_group 按显示名命中时优先（e9628ae：覆盖/重定向旧的精确路由）
   return routes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
     || routes.find((route) => (
       !isExplicitGroupRoute(route)

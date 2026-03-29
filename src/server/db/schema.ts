@@ -310,6 +310,23 @@ export const siteAnnouncements = sqliteTable('site_announcements', {
   readAtIdx: index('site_announcements_read_at_idx').on(table.readAt),
 }));
 
+export const responseCache = sqliteTable('response_cache', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  cacheKey: text('cache_key').notNull(),
+  model: text('model').notNull(),
+  responseBody: text('response_body').notNull(),
+  isStream: integer('is_stream', { mode: 'boolean' }).notNull().default(false),
+  promptTokens: integer('prompt_tokens').default(0),
+  completionTokens: integer('completion_tokens').default(0),
+  hitCount: integer('hit_count').notNull().default(0),
+  createdAt: text('created_at').notNull(),
+  expiresAt: text('expires_at').notNull(),
+}, (table) => ({
+  cacheKeyIdx: uniqueIndex('response_cache_key_idx').on(table.cacheKey),
+  expiresAtIdx: index('response_cache_expires_at_idx').on(table.expiresAt),
+  modelIdx: index('response_cache_model_idx').on(table.model),
+}));
+
 export const events = sqliteTable('events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   type: text('type').notNull(), // 'checkin' | 'balance' | 'token' | 'proxy' | 'status'

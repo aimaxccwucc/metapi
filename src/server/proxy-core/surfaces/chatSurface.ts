@@ -55,6 +55,7 @@ import { dispatchRuntimeRequest } from '../../routes/proxy/runtimeExecutor.js';
 import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/conversationFileCapabilities.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
+import { buildCacheKey, lookupResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
 
 const MAX_RETRIES = 2;
 
@@ -115,6 +116,23 @@ export async function handleChatSurfaceRequest(
     proxyToken: getProxyAuthContext(request)?.token || null,
   });
   const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
+
+  // 精确响应缓存：仅对非流式请求且 temperature=0 时生效
+  const responseCacheKey = !isStream
+    ? buildCacheKey({
+        model: requestedModel,
+        messages: (request.body as Record<string, unknown>)?.messages,
+        temperature: (request.body as Record<string, unknown>)?.temperature as number | null | undefined,
+        top_p: (request.body as Record<string, unknown>)?.top_p as number | null | undefined,
+        max_tokens: (request.body as Record<string, unknown>)?.max_tokens as number | null | undefined,
+      })
+    : null;
+  if (responseCacheKey) {
+    const cached = await lookupResponseCache(responseCacheKey);
+    if (cached) {
+      return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
+    }
+  }
 
   const excludeChannelIds: number[] = [];
   const excludeSiteIds = new Set<number>();
@@ -774,7 +792,17 @@ export async function handleChatSurfaceRequest(
         downstreamApiKeyId,
       );
 
-      return reply.send(downstreamResponse);
+      // 异步写入精确缓存（不阻塞响应）
+      if (responseCacheKey && !isStream) {
+        writeResponseCache(responseCacheKey, requestedModel, {
+          body: JSON.stringify(downstreamResponse),
+          isStream: false,
+          promptTokens: resolvedUsage.promptTokens,
+          completionTokens: resolvedUsage.completionTokens,
+        }).catch(() => {});
+      }
+
+      return reply.header('X-Cache', 'MISS').send(downstreamResponse);
     } catch (err: any) {
       await tokenRouter.recordFailure(selected.channel.id, {
         errorText: err?.message,

@@ -1,0 +1,54 @@
+# 前端交互与卡顿优化状态账本
+
+- 任务ID：frontend-interaction-optimization
+- 目标：在不影响现有功能的前提下，分析并优化 PC / 移动端前端交互卡顿问题，提升点击响应与滚动/展开等操作的流畅度。
+- 范围：`src/web` 前端入口、布局组件、通用交互组件、热点页面及必要样式。
+- 完成定义：
+  - 明确主要性能瓶颈来源
+  - 完成针对性优化且不改变功能
+  - 至少完成桌面端与移动端关键交互验证
+  - 记录验证命令、结果、剩余风险
+- 里程碑：
+  - M1 已验证：结构与热点分析，定位主要瓶颈
+  - M2 已验证：制定最小侵入优化方案
+  - M3 已验证：实现渲染/交互优化
+  - M4 已验证：桌面端与移动端验证
+  - M5 已验证：收口与风险说明
+- 当前阶段：第 4 轮优化已验证，进入提交与上线
+- 已完成：
+  - 将主页面路由树从 `AppShell` 高频交互状态中隔离为 `memo(AppMainContent)`
+  - 将未读通知与运行态轮询更新改为 `startTransition` 低优先级更新
+  - 降低顶栏、侧栏、按钮、卡片等高频控件的过重 `transition: all`
+  - 去除顶栏/抽屉/模态/Toast 的部分模糊背景，缩短抽屉、模态、Toast、页面切换动画时长
+  - 缩短 `MobileDrawer` 关闭时长，使动画时序与样式一致
+  - 增加桌面用户菜单与移动抽屉不会触发主页面重渲染的回归测试
+  - `Dashboard` 站点测速改为批量状态提交，减少一键测速时按站点逐个 `setState` 带来的连续重渲染
+  - `Dashboard` 单站测速统一走共享测速 helper，并将测速结果更新降为低优先级提交
+  - `TokenRoutes` 显式群组来源健康汇总改为仅基于当前筛选结果计算，减少搜索/筛选时的无效全量派生
+  - `TokenRoutes` 故障总览对候选通道的 4 次重复过滤改为单次遍历累计，降低统计开销
+  - `ModelAnalysisPanel`、`SiteDistributionChart`、`SiteTrendChart`、`DownstreamKeyTrendChart` 的图表切换改为 `startTransition`，并关闭首挂载重动画
+  - `SiteTrendChart` 在数据点较多时关闭点渲染，降低大趋势图初次挂载与切换成本
+  - `Accounts`、`Sites`、`Settings`、`ImportExport` 残留的高频 `transition: all` 已收敛为精确属性过渡
+  - `Tokens`、`Accounts`、`Sites`、`ProgramLogs`、`SiteAnnouncements` 的大列表逐行入场动画已去除，减少筛选、排序、重排时的瞬时布局与绘制压力
+  - `Dashboard` 图表区重复入场动画与高阶延迟已减轻，降低页面进入和图表区首次出现时的分段卡顿感
+- 关键结论：
+  - 主因是 `AppShell` 承载过多全局状态，点击顶部/抽屉类交互会带动整页主内容重渲染
+  - 样式层的大量 `transition: all`、模糊背景和较慢开合动画放大了卡顿体感
+- 最近验证：
+  - `npx vitest run --root . src/web/App.shell-render-optimization.test.tsx src/web/App.mobile-layout.test.tsx src/web/App.runtime-banner.test.tsx src/web/App.topbar-tooltips.test.ts`
+  - `npx vitest run --root . src/web/pages/dashboard.site-speed-button.test.tsx src/web/pages/dashboard.performance-card.test.tsx src/web/pages/dashboard.site-observability.test.tsx src/web/pages/dashboardHookOrder.test.tsx`
+  - `npx vitest run --root . src/web/pages/dashboard.mobile-layout.test.tsx`
+  - `npx vitest run --root . src/web/pages/tokenRoutes.group-collapse.test.tsx src/web/pages/tokenRoutes.mobile-layout.test.tsx src/web/pages/tokenRoutes.routing-strategy.test.tsx src/web/pages/tokenRoutes.refresh-decision.test.tsx`
+  - `npx vitest run --root . src/web/pages/tokenRoutes.refresh-decision.test.tsx src/web/pages/tokenRoutes.group-collapse.test.tsx src/web/pages/tokenRoutes.mobile-layout.test.tsx`
+  - `npx vitest run --root . src/web/components/ModelAnalysisPanel.test.tsx src/web/components/charts/SiteDistributionChart.test.tsx src/web/pages/dashboard.performance-card.test.tsx src/web/pages/accounts.edit-panel.test.tsx src/web/pages/ImportExport.test.tsx`
+  - `npx vitest run --root . src/web/pages/tokens.edit-and-select.test.tsx src/web/pages/accounts.edit-panel.test.tsx src/web/pages/sites.table-sort.test.tsx src/web/pages/sites.mobile-actions.test.tsx src/web/pages/ProgramLogs.status.test.tsx src/web/pages/siteAnnouncements.test.tsx src/web/pages/dashboard.performance-card.test.tsx src/web/pages/dashboard.site-speed-button.test.tsx`
+  - `npm run build:web`
+  - Playwright 实测：桌面端登录后验证用户菜单、通知面板、搜索弹层；移动端验证抽屉开合与设置页跳转；控制台无 error
+- 关键命令/文件：
+  - 文件：`src/web/App.tsx`、`src/web/index.css`、`src/web/components/MobileDrawer.tsx`、`src/web/App.shell-render-optimization.test.tsx`
+  - 临时验证环境：`AUTH_TOKEN=admin-test-token PORT=4100 FRONTEND_PORT=5174 npm run dev`
+  - 实际生效管理员令牌来自运行时设置：`new-admin-token-2-456`
+- 剩余风险：
+  - 构建仍有 `vchart-core` / `vchart-render` 大包告警，但当前图表已按页面和可见区做延迟挂载，体感热点已优先处理
+  - 若后续仍需进一步压缩首屏与图表首挂载成本，可再做更细粒度的图表 vendor chunk 拆分
+- 阻塞项：无

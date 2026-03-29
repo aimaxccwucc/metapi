@@ -265,7 +265,7 @@ describe('Models marketplace text', () => {
       });
       await flushMicrotasks();
 
-      expect(collectText(root!.root)).toContain('复制成功 Key');
+      expect(collectText(root!.root)).toContain('复制 Key');
       expect(collectText(root!.root)).toContain('复制诊断摘要');
     } finally {
       await unmountRoot(root);
@@ -777,12 +777,12 @@ describe('Models marketplace text', () => {
       expect(cardText).toContain('已自动补 Key');
       expect(cardText).toContain('自动补 Key: vip / mk-gpt-4o');
       expect(cardText).toContain('前往账号令牌管理');
-      expect(cardText).toContain('复制成功 Key');
+      expect(cardText).toContain('复制 Key');
       expect(cardText).toContain('复制诊断摘要');
 
       const cardCopyButton = root!.root.find((node) => (
         node.type === 'button'
-        && collectText(node).includes('复制成功 Key')
+        && collectText(node).includes('复制 Key')
       ));
       await act(async () => {
         await cardCopyButton.props.onClick();
@@ -804,7 +804,7 @@ describe('Models marketplace text', () => {
       expect(tableText).toContain('可用性检测');
       expect(tableText).toContain('前往账号令牌管理');
       expect(tableText).toContain('$12.50');
-      expect(tableText.includes('复制成功 Key') || tableText.includes('已复制')).toBe(true);
+      expect(tableText.includes('复制 Key') || tableText.includes('已复制')).toBe(true);
     } finally {
       await unmountRoot(root);
     }

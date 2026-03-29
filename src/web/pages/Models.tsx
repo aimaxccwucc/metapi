@@ -83,10 +83,12 @@ type AvailabilityCheckState = {
   latencyMs?: number;
   probeEndpoint?: string | null;
   probeClassification?: string | null;
+  detectionMethod?: string | null;
   autoKeyCreated?: boolean;
   autoKeyName?: string | null;
   autoKeyGroup?: string | null;
   autoKeyTokenId?: number | null;
+  resolvedTokenId?: number | null;
 };
 
 const TOKEN_MANAGEMENT_PATH = '/accounts?segment=tokens';
@@ -150,7 +152,10 @@ function summarizeAvailabilityMessage(input: {
   probeClassification?: string | null;
   probeEndpoint?: string | null;
 }): string {
-  if (input.available) return '模型可用';
+  if (input.available) {
+    const endpointLabel = input.probeEndpoint ? `（${humanizeProbeEndpoint(input.probeEndpoint)} 探测）` : '';
+    return `模型可用${endpointLabel}`;
+  }
 
   const endpointLabel = input.probeEndpoint ? `（${humanizeProbeEndpoint(input.probeEndpoint)}）` : '';
   if (input.probeClassification === 'credential') {
@@ -216,11 +221,17 @@ function buildAvailabilityDetail(input: {
   reason?: string | null;
   probeEndpoint?: string | null;
   probeClassification?: string | null;
+  detectionMethod?: string | null;
   autoKeyCreated?: boolean;
   autoKeyName?: string | null;
   autoKeyGroup?: string | null;
 }): string | null {
   const parts: string[] = [];
+  if (input.detectionMethod === 'model_list') {
+    parts.push('检测方式：上游模型列表匹配（未发起实际 API 调用，结果仅供参考）');
+  } else if (input.probeEndpoint) {
+    parts.push(`检测方式：实时 API 探测 ${humanizeProbeEndpoint(input.probeEndpoint)}（max_tokens=1 最小请求）`);
+  }
   if (input.probeClassification) {
     const labelMap: Record<string, string> = {
       supported: '探测结果：已支持',
@@ -231,7 +242,7 @@ function buildAvailabilityDetail(input: {
     };
     parts.push(labelMap[input.probeClassification] || `探测结果：${input.probeClassification}`);
   }
-  if (input.probeEndpoint) parts.push(`探测方式：${humanizeProbeEndpoint(input.probeEndpoint)}`);
+  if (input.probeEndpoint && !input.detectionMethod) parts.push(`探测方式：${humanizeProbeEndpoint(input.probeEndpoint)}`);
   if (input.autoKeyCreated) {
     const autoKeyParts = ['已自动补 Key'];
     if (input.autoKeyName) autoKeyParts.push(`名称 ${input.autoKeyName}`);
@@ -564,19 +575,19 @@ export default function Models() {
     }
   };
 
-  const copyResolvedToken = async (key: string, autoKeyTokenId?: number | null) => {
-    if (!(typeof autoKeyTokenId === 'number' && Number.isFinite(autoKeyTokenId) && autoKeyTokenId > 0)) {
-      toast.error('未找到可复制的自动补齐 Key');
+  const copyResolvedToken = async (key: string, tokenId?: number | null) => {
+    if (!(typeof tokenId === 'number' && Number.isFinite(tokenId) && tokenId > 0)) {
+      toast.error('未找到可复制的 Key');
       return;
     }
     try {
-      const res = await api.getAccountTokenValue(autoKeyTokenId) as { token?: string };
+      const res = await api.getAccountTokenValue(tokenId) as { token?: string };
       const tokenValue = typeof res?.token === 'string' ? res.token.trim() : '';
       if (!tokenValue) {
-        throw new Error('自动补齐的令牌为空');
+        throw new Error('令牌值为空，可能已被删除');
       }
       await navigator.clipboard.writeText(tokenValue);
-      toast.success('已复制自动补齐的令牌');
+      toast.success('已复制 Key');
       setCopied(`token:${key}`);
       setTimeout(() => setCopied((current) => (current === `token:${key}` ? null : current)), 1500);
     } catch (error: any) {
@@ -612,6 +623,7 @@ export default function Models() {
             style={actionButtonStyle}
             onClick={() => { void testModelAvailability(modelName, account); }}
             disabled={checking}
+            title="通过模型列表查询或实时 API 探测（max_tokens=1）验证可用性，与真实请求路由（tokenRouter）路径不同，结果仅供参考"
           >
             {checking ? tr('检测中...') : tr('检测')}
           </button>
@@ -623,6 +635,15 @@ export default function Models() {
             >
               {check.status === 'available' ? tr('可用') : (check.status === 'unavailable' ? tr('不可用') : tr('失败'))}
               {check.latencyMs != null ? ` ${check.latencyMs}ms` : ''}
+            </span>
+          ) : null}
+          {check ? (
+            <span
+              className="badge badge-muted"
+              style={{ fontSize: 10, flexShrink: 0 }}
+              title={check.probeEndpoint ? `本次探测使用的请求协议：${humanizeProbeEndpoint(check.probeEndpoint)}` : '通过上游模型列表匹配，未发起实时探测'}
+            >
+              {check.detectionMethod === 'model_list' ? '列表匹配' : (check.probeEndpoint ? humanizeProbeEndpoint(check.probeEndpoint) : '探测')}
             </span>
           ) : null}
           {check?.autoKeyCreated ? (
@@ -663,13 +684,13 @@ export default function Models() {
                 {expandedDetail ? tr('收起详情') : tr('查看详情')}
               </button>
             ) : null}
-            {check.autoKeyCreated ? (
+            {check.status === 'available' && check.resolvedTokenId ? (
               <button
                 className="btn btn-ghost"
                 style={actionButtonStyle}
-                onClick={() => { void copyResolvedToken(key, check.autoKeyTokenId); }}
+                onClick={() => { void copyResolvedToken(key, check.resolvedTokenId); }}
               >
-                {copied === `token:${key}` ? tr('已复制') : tr('复制成功 Key')}
+                {copied === `token:${key}` ? tr('已复制') : tr('复制 Key')}
               </button>
             ) : null}
             <button
@@ -766,6 +787,7 @@ export default function Models() {
         latencyMs?: number;
         probeEndpoint?: string | null;
         probeClassification?: string | null;
+        detectionMethod?: string | null;
         autoKeyCreated?: boolean;
         autoKeyName?: string | null;
         autoKeyGroup?: string | null;
@@ -784,6 +806,7 @@ export default function Models() {
           reason: res?.reason,
           probeClassification: res?.probeClassification,
           probeEndpoint: res?.probeEndpoint,
+          detectionMethod: typeof res?.detectionMethod === 'string' ? res.detectionMethod : null,
           autoKeyCreated: res?.autoKeyCreated === true,
           autoKeyName: typeof res?.autoKeyName === 'string' ? res.autoKeyName : null,
           autoKeyGroup: typeof res?.autoKeyGroup === 'string' ? res.autoKeyGroup : null,
@@ -791,12 +814,16 @@ export default function Models() {
         latencyMs: Number.isFinite(res?.latencyMs as number) ? Number(res?.latencyMs) : undefined,
         probeEndpoint: typeof res?.probeEndpoint === 'string' ? res.probeEndpoint : null,
         probeClassification: typeof res?.probeClassification === 'string' ? res.probeClassification : null,
+        detectionMethod: typeof res?.detectionMethod === 'string' ? res.detectionMethod : null,
         autoKeyCreated: res?.autoKeyCreated === true,
         autoKeyName: typeof res?.autoKeyName === 'string' ? res.autoKeyName : null,
         autoKeyGroup: typeof res?.autoKeyGroup === 'string' ? res.autoKeyGroup : null,
         autoKeyTokenId: typeof res?.autoKeyTokenId === 'number' && Number.isFinite(res.autoKeyTokenId)
           ? res.autoKeyTokenId
           : null,
+        resolvedTokenId: typeof res?.autoKeyTokenId === 'number' && Number.isFinite(res.autoKeyTokenId)
+          ? res.autoKeyTokenId
+          : (account.tokens[0]?.id ?? null),
       };
       setAvailabilityChecks((prev) => ({
         ...prev,

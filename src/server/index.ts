@@ -46,6 +46,7 @@ import {
   ensureProxyLogClientColumns,
   ensureProxyLogDownstreamApiKeyIdColumn,
   ensureProxyLogBillingDetailsColumn,
+  ensureResponseCacheTable,
   ensureRouteGroupingCompatibilityColumns,
   ensureSiteCompatibilityColumns,
   runtimeDbDialect,
@@ -347,6 +348,7 @@ try {
   await ensureSiteCompatibilityColumns();
   await ensureRouteGroupingCompatibilityColumns();
   await ensureProxyFileCompatibilityColumns();
+  await ensureResponseCacheTable();
   await ensureProxyLogClientColumns();
   await ensureProxyLogDownstreamApiKeyIdColumn();
   const finalRows = await db.select().from(schema.settings).all();

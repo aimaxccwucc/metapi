@@ -10,6 +10,7 @@ import { sendNotification } from './notifyService.js';
 import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dailySummaryService.js';
 import { cleanupConfiguredLogs, normalizeLogCleanupRetentionDays } from './logCleanupService.js';
 import { executeRefreshSiteReachability } from './siteHealthService.js';
+import { pruneResponseCache } from './responseCacheService.js';
 
 export type CheckinScheduleMode = 'cron' | 'interval';
 
@@ -19,6 +20,7 @@ let balanceTask: cron.ScheduledTask | null = null;
 let dailySummaryTask: cron.ScheduledTask | null = null;
 let logCleanupTask: cron.ScheduledTask | null = null;
 let siteHealthTask: cron.ScheduledTask | null = null;
+let responseCacheCleanupTask: cron.ScheduledTask | null = null;
 let siteHealthRefreshRunning = false;
 const intervalAttemptByAccount = new Map<number, number>();
 let intervalCheckinPassRunning = false;
@@ -258,6 +260,16 @@ function createLogCleanupTask(cronExpr: string) {
   });
 }
 
+function createResponseCacheCleanupTask(cronExpr: string) {
+  return cron.schedule(cronExpr, async () => {
+    try {
+      await pruneResponseCache();
+    } catch (err) {
+      console.error('[Scheduler] Response cache cleanup error:', err);
+    }
+  });
+}
+
 function createSiteHealthTask(cronExpr: string) {
   return cron.schedule(cronExpr, async () => {
     if (siteHealthRefreshRunning) {
@@ -320,11 +332,13 @@ export async function startScheduler() {
   dailySummaryTask?.stop();
   logCleanupTask?.stop();
   siteHealthTask?.stop();
+  responseCacheCleanupTask?.stop();
   startCheckinSchedule();
   balanceTask = createBalanceTask(activeBalanceCron);
   siteHealthTask = createSiteHealthTask(activeSiteHealthCron);
   dailySummaryTask = createDailySummaryTask(activeDailySummaryCron);
   logCleanupTask = createLogCleanupTask(activeLogCleanupCron);
+  responseCacheCleanupTask = createResponseCacheCleanupTask('0 * * * *');
 
   console.log(`[Scheduler] Check-in schedule: ${config.checkinScheduleMode} (${config.checkinScheduleMode === 'cron' ? activeCheckinCron : `${config.checkinIntervalHours}h`})`);
   console.log(`[Scheduler] Balance refresh cron: ${activeBalanceCron}`);

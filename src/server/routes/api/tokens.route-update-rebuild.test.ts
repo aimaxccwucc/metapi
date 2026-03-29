@@ -330,7 +330,7 @@ describe('PUT /api/routes/:id route rebuild', () => {
     });
   });
 
-  it('prefers an exact route over a colliding explicit-group display name', async () => {
+  it('prefers an explicit-group display name over a colliding exact-pattern route', async () => {
     const exactCandidate = await seedAccountWithToken('claude-opus-4-6');
     const groupedCandidate = await seedAccountWithToken('claude-opus-4-5');
 
@@ -384,13 +384,14 @@ describe('PUT /api/routes/:id route rebuild', () => {
     });
 
     expect(decisionResponse.statusCode).toBe(200);
+    // e9628ae: explicit_group 按显示名命中时优先于精确 pattern 路由
+    // 分组路由会将请求路由到其 source 路由（claude-opus-4-5）
     expect(decisionResponse.json()).toMatchObject({
       success: true,
       decision: {
         matched: true,
-        routeId: exactRoute.id,
         modelPattern: 'claude-opus-4-6',
-        actualModel: 'claude-opus-4-6',
+        actualModel: 'claude-opus-4-5',
       },
     });
   });
