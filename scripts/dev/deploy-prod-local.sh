@@ -118,7 +118,7 @@ else
   sleep 2
   docker compose ps metapi
   curl -fsS -I --max-time 15 http://127.0.0.1:4000/ | sed -n '1,6p'
-  curl -fsS -I --max-time 20 https://metapi.aimax.ccwu.cc/sites | sed -n '1,8p'
+  curl -fsS -I --max-time 20 https://metapi.808039.xyz/sites | sed -n '1,8p'
 fi
 
 echo "Deploy done"
