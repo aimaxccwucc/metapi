@@ -29,7 +29,7 @@ function round6(value: number): number {
 }
 
 export async function collectDailySummaryMetrics(now = new Date()): Promise<DailySummaryMetrics> {
-  const proxyLogBaseFields = getProxyLogBaseSelectFields();
+  const proxyLogBaseFields = await getProxyLogBaseSelectFields();
   const { localDay, startUtc, endUtc } = getLocalDayRangeUtc(now);
 
   const accountRows = await db.select().from(schema.accounts)

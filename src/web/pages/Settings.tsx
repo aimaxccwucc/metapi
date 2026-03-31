@@ -51,6 +51,10 @@ type RuntimeSettings = {
   routingFallbackUnitCost: number;
   routingWeights: RoutingWeights;
   systemProxyUrl: string;
+  disableCrossProtocolFallback: boolean;
+  globalAllowedModels: string[];
+  proxyDebugTraceEnabled: boolean;
+  proxyDebugTraceMaxEntries: number;
   proxyErrorKeywords: string[];
   proxyEmptyContentFailEnabled: boolean;
   proxyTokenMasked?: string;
@@ -221,11 +225,16 @@ export default function Settings() {
     routingFallbackUnitCost: 1,
     routingWeights: defaultWeights,
     systemProxyUrl: '',
+    disableCrossProtocolFallback: false,
+    globalAllowedModels: [],
+    proxyDebugTraceEnabled: false,
+    proxyDebugTraceMaxEntries: 300,
     proxyErrorKeywords: [],
     proxyEmptyContentFailEnabled: false,
   });
   const [proxyTokenSuffix, setProxyTokenSuffix] = useState('');
   const [proxyErrorKeywordsText, setProxyErrorKeywordsText] = useState('');
+  const [globalAllowedModelsText, setGlobalAllowedModelsText] = useState('');
   const [maskedToken, setMaskedToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [savingSchedule, setSavingSchedule] = useState(false);
@@ -484,6 +493,14 @@ export default function Settings() {
           ...(runtimeInfo.routingWeights || {}),
         },
         systemProxyUrl: typeof runtimeInfo.systemProxyUrl === 'string' ? runtimeInfo.systemProxyUrl : '',
+        disableCrossProtocolFallback: !!runtimeInfo.disableCrossProtocolFallback,
+        globalAllowedModels: Array.isArray(runtimeInfo.globalAllowedModels)
+          ? runtimeInfo.globalAllowedModels.filter((item: unknown) => typeof item === 'string')
+          : [],
+        proxyDebugTraceEnabled: !!runtimeInfo.proxyDebugTraceEnabled,
+        proxyDebugTraceMaxEntries: Number(runtimeInfo.proxyDebugTraceMaxEntries) >= 10
+          ? Math.trunc(Number(runtimeInfo.proxyDebugTraceMaxEntries))
+          : 300,
         proxyErrorKeywords: Array.isArray(runtimeInfo.proxyErrorKeywords)
           ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string')
           : [],
@@ -497,6 +514,11 @@ export default function Settings() {
       setProxyErrorKeywordsText(
         Array.isArray(runtimeInfo.proxyErrorKeywords)
           ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string').join('\n')
+          : '',
+      );
+      setGlobalAllowedModelsText(
+        Array.isArray(runtimeInfo.globalAllowedModels)
+          ? runtimeInfo.globalAllowedModels.filter((item: unknown) => typeof item === 'string').join('\n')
           : '',
       );
       setAdminIpAllowlistText(
@@ -554,6 +576,11 @@ export default function Settings() {
     .split(/\r?\n|,/g)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+
+  const parseModelPatternList = (raw: string) => raw
+    .split(/\r?\n|,/g)
+    .map((item) => item.trim())
+    .filter((item, index, arr) => item.length > 0 && arr.indexOf(item) === index);
 
   const saveSchedule = async () => {
     setSavingSchedule(true);
@@ -657,21 +684,40 @@ export default function Settings() {
     setSavingProxyFailureRules(true);
     try {
       const keywords = parseProxyErrorKeywords(proxyErrorKeywordsText);
+      const globalAllowedModels = parseModelPatternList(globalAllowedModelsText);
       const res = await api.updateRuntimeSettings({
+        disableCrossProtocolFallback: runtime.disableCrossProtocolFallback,
+        globalAllowedModels,
+        proxyDebugTraceEnabled: runtime.proxyDebugTraceEnabled,
+        proxyDebugTraceMaxEntries: runtime.proxyDebugTraceMaxEntries,
         proxyErrorKeywords: keywords,
         proxyEmptyContentFailEnabled: runtime.proxyEmptyContentFailEnabled,
       });
       const nextKeywords = Array.isArray(res?.proxyErrorKeywords)
         ? res.proxyErrorKeywords
         : keywords;
+      const nextGlobalAllowedModels = Array.isArray(res?.globalAllowedModels)
+        ? res.globalAllowedModels.filter((item: unknown) => typeof item === 'string')
+        : globalAllowedModels;
       setRuntime((prev) => ({
         ...prev,
+        disableCrossProtocolFallback: typeof res?.disableCrossProtocolFallback === 'boolean'
+          ? res.disableCrossProtocolFallback
+          : prev.disableCrossProtocolFallback,
+        globalAllowedModels: nextGlobalAllowedModels,
+        proxyDebugTraceEnabled: typeof res?.proxyDebugTraceEnabled === 'boolean'
+          ? res.proxyDebugTraceEnabled
+          : prev.proxyDebugTraceEnabled,
+        proxyDebugTraceMaxEntries: Number(res?.proxyDebugTraceMaxEntries) >= 10
+          ? Math.trunc(Number(res.proxyDebugTraceMaxEntries))
+          : prev.proxyDebugTraceMaxEntries,
         proxyErrorKeywords: nextKeywords,
         proxyEmptyContentFailEnabled: typeof res?.proxyEmptyContentFailEnabled === 'boolean'
           ? res.proxyEmptyContentFailEnabled
           : prev.proxyEmptyContentFailEnabled,
       }));
       setProxyErrorKeywordsText(nextKeywords.join('\n'));
+      setGlobalAllowedModelsText(nextGlobalAllowedModels.join('\n'));
       toast.success('代理失败规则已保存');
     } catch (err: any) {
       toast.error(err?.message || '保存失败');
@@ -1251,6 +1297,57 @@ export default function Settings() {
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>代理失败判定</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
             命中任一关键词或空内容时判定失败，可触发重试。
+          </div>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-text-secondary)', marginBottom: 12 }}>
+            <input
+              type={'checkbox'}
+              checked={runtime.disableCrossProtocolFallback}
+              onChange={(e) => setRuntime((prev) => ({ ...prev, disableCrossProtocolFallback: e.target.checked }))}
+            />
+            禁用跨协议回退（chat / responses / messages 之间不自动切换）
+          </label>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+            全局允许的对外模型名，一行一个或逗号分隔，支持 glob / re: 正则。
+          </div>
+          <textarea
+            value={globalAllowedModelsText}
+            onChange={(e) => setGlobalAllowedModelsText(e.target.value)}
+            placeholder={'例如：gpt-*\nclaude-sonnet-*\nre:^gemini-(1\\.5|2\\.0)-.*$'}
+            style={{
+              ...inputStyle,
+              fontFamily: 'var(--font-mono)',
+              minHeight: 88,
+              resize: 'vertical',
+              marginBottom: 12,
+            }}
+          />
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--color-text-secondary)', marginBottom: 12 }}>
+            <input
+              type={'checkbox'}
+              checked={runtime.proxyDebugTraceEnabled}
+              onChange={(e) => setRuntime((prev) => ({ ...prev, proxyDebugTraceEnabled: e.target.checked }))}
+            />
+            启用代理调试 Trace（记录通道选择、降级、重试与最终失败）
+          </label>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>Trace 保留条数（10-2000）</div>
+            <input
+              type={'number'}
+              min={10}
+              max={2000}
+              step={10}
+              value={runtime.proxyDebugTraceMaxEntries}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setRuntime((prev) => ({
+                  ...prev,
+                  proxyDebugTraceMaxEntries: Number.isFinite(next)
+                    ? Math.max(10, Math.min(2000, Math.trunc(next)))
+                    : prev.proxyDebugTraceMaxEntries,
+                }));
+              }}
+              style={{ ...inputStyle, maxWidth: 220, marginBottom: 0 }}
+            />
           </div>
           <textarea
             value={proxyErrorKeywordsText}

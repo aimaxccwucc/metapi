@@ -174,6 +174,10 @@ describe('stats proxy logs routes', () => {
       failedCount: 2,
       totalCost: 0.6,
       totalTokensAll: 49,
+      cacheHitCount: 0,
+      cacheMissCount: 0,
+      cacheStaleCount: 0,
+      cacheSavedCost: 0,
     });
   });
 
@@ -529,6 +533,10 @@ describe('stats proxy logs routes', () => {
       failedCount: 1,
       totalCost: 0.33,
       totalTokensAll: 30,
+      cacheHitCount: 0,
+      cacheMissCount: 0,
+      cacheStaleCount: 0,
+      cacheSavedCost: 0,
     });
   });
 

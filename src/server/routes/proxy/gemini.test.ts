@@ -74,6 +74,8 @@ vi.mock('../../services/downstreamApiKeyService.js', () => ({
   authorizeDownstreamToken: (...args: unknown[]) => authorizeDownstreamTokenMock(...args),
   consumeManagedKeyRequest: (...args: unknown[]) => consumeManagedKeyRequestMock(...args),
   isModelAllowedByPolicyOrAllowedRoutes: (...args: unknown[]) => isModelAllowedByPolicyOrAllowedRoutesMock(...args),
+  getDefaultGlobalPolicy: () => ({}),
+  recordManagedKeyCostUsage: async () => undefined,
 }));
 
 vi.mock('../../db/index.js', () => ({
@@ -82,6 +84,7 @@ vi.mock('../../db/index.js', () => ({
     insert: (arg: unknown) => dbInsertMock(arg),
   },
   hasProxyLogBillingDetailsColumn: async () => false,
+  hasProxyLogCacheColumns: async () => false,
   hasProxyLogClientColumns: async () => false,
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
   schema: {

@@ -737,8 +737,8 @@ export default function ModelTester() {
   const restoredSessionRef = useRef<ReturnType<typeof parseModelTesterSession>>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamStopRequestedRef = useRef(false);
-  const sessionPersistTimerRef = useRef<number | null>(null);
-  const historyPersistTimerRef = useRef<number | null>(null);
+  const sessionPersistTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
+  const historyPersistTimerRef = useRef<ReturnType<typeof globalThis.setTimeout> | null>(null);
   const latestSessionSnapshotRef = useRef<string>('');
   const latestHistorySnapshotRef = useRef<string>('');
   const conversationFileCapability = useMemo(

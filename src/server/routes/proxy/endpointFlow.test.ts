@@ -156,6 +156,61 @@ describe('executeEndpointFlow', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('blocks cross-protocol downgrade when disableCrossProtocolFallback is enabled', async () => {
+    fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({
+      error: { message: 'unsupported endpoint', type: 'invalid_request_error' },
+    }), {
+      status: 404,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const onDowngrade = vi.fn();
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      endpointCandidates: ['responses', 'messages'],
+      buildRequest: (endpoint) => endpoint === 'responses'
+        ? requestFor('/v1/responses')
+        : { ...requestFor('/v1/messages'), endpoint },
+      shouldDowngrade: () => true,
+      disableCrossProtocolFallback: true,
+      onDowngrade,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(onDowngrade).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still allows same-family fallback when disableCrossProtocolFallback is enabled', async () => {
+    fetchMock
+      .mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({
+        error: { message: 'unsupported endpoint', type: 'invalid_request_error' },
+      }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      })))
+      .mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })));
+
+    const onDowngrade = vi.fn();
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      endpointCandidates: ['responses', 'chat'],
+      buildRequest: (endpoint) => endpoint === 'responses'
+        ? requestFor('/v1/responses')
+        : { ...requestFor('/v1/chat/completions'), endpoint },
+      shouldDowngrade: () => true,
+      disableCrossProtocolFallback: true,
+      onDowngrade,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(onDowngrade).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('emits attempt callbacks for failed and successful endpoint probes', async () => {
     fetchMock
       .mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({

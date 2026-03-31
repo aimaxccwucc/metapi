@@ -680,6 +680,8 @@ export type ProxyLogListItem = {
   promptTokens?: number | null;
   completionTokens?: number | null;
   estimatedCost?: number | null;
+  cacheStatus?: string | null;
+  cacheSavedCost?: number | null;
 };
 
 export type ProxyLogDetail = ProxyLogListItem & {
@@ -695,6 +697,10 @@ export type ProxyLogsSummary = {
   failedCount: number;
   totalCost: number;
   totalTokensAll: number;
+  cacheHitCount: number;
+  cacheMissCount: number;
+  cacheStaleCount: number;
+  cacheSavedCost: number;
 };
 
 export type ProxyLogsQuery = {

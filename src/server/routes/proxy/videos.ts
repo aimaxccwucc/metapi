@@ -23,6 +23,7 @@ import {
   refreshProxyVideoTaskSnapshot,
   saveProxyVideoTask,
 } from '../../services/proxyVideoTaskStore.js';
+import { createRequestBudget, shouldRetryWithinBudget } from './requestBudget.js';
 
 const MAX_RETRIES = 2;
 
@@ -64,8 +65,19 @@ export async function videosProxyRoute(app: FastifyInstance) {
     const excludeChannelIds: number[] = [];
     const excludeSiteIds = new Set<number>();
     let retryCount = 0;
+    const requestBudget = createRequestBudget();
 
     while (retryCount <= MAX_RETRIES) {
+      if (requestBudget.isExpired()) {
+        await reportProxyAllFailed({
+          model: requestedModel,
+          reason: requestBudget.buildTimeoutMessage(),
+        });
+        return reply.code(504).send({
+          error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
+        });
+      }
+
       let selected = retryCount === 0
         ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
         : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
@@ -158,7 +170,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
               detail: `HTTP ${upstream.status}`,
             });
           }
-          if (shouldRetryProxyRequest(upstream.status, text) && retryCount < MAX_RETRIES) {
+          if (shouldRetryProxyRequest(upstream.status, text) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
             retryCount += 1;
             continue;
           }
@@ -265,7 +277,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
           downstreamPath,
           '/v1/videos',
         );
-        if (retryCount < MAX_RETRIES) {
+        if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
           retryCount += 1;
           continue;
         }

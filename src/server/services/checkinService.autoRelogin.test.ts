@@ -335,6 +335,42 @@ describe('checkinService auto relogin', () => {
     expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({ lastCheckinAt: expect.any(String) }));
   });
 
+  it('retries checkin when structured auth failure is detected even without explicit token keywords', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 19,
+          username: 'linuxdo_9911',
+          accessToken: 'expired-token',
+          status: 'active',
+          extraConfig: JSON.stringify({
+            autoRelogin: { username: 'linuxdo_9911', passwordCipher: 'cipher' },
+          }),
+        },
+        sites: {
+          id: 19,
+          name: 'demo',
+          url: 'https://example.com',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.checkin
+      .mockResolvedValueOnce({ success: false, message: 'unauthorized', status: 401 })
+      .mockResolvedValueOnce({ success: true, message: 'checked in' });
+    decryptPasswordMock.mockReturnValue('plain-password');
+    adapterMock.login.mockResolvedValue({ success: true, accessToken: 'fresh-token' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(19);
+
+    expect(result.success).toBe(true);
+    expect(adapterMock.login).toHaveBeenCalledTimes(1);
+    expect(adapterMock.checkin).toHaveBeenCalledTimes(2);
+    expect(adapterMock.checkin.mock.calls[1][1]).toBe('fresh-token');
+  });
+
   it('treats unsupported checkin endpoint responses as skipped', async () => {
     selectAllMock.mockReturnValue([
       {

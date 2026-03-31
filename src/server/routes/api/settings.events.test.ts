@@ -39,6 +39,7 @@ describe('settings and auth events', () => {
     resetRequestRateLimitStore();
     await db.delete(schema.events).run();
     await db.delete(schema.settings).run();
+    await db.delete(schema.sites).run();
 
     config.trustProxy = false;
     config.authToken = 'old-admin-token-123';
@@ -49,6 +50,10 @@ describe('settings and auth events', () => {
     (config as any).checkinIntervalHours = 6;
     config.balanceRefreshCron = '0 * * * *';
     (config as any).siteHealthRefreshCron = '*/15 * * * *';
+    config.disableCrossProtocolFallback = false;
+    config.globalAllowedModels = [];
+    config.proxyDebugTraceEnabled = false;
+    config.proxyDebugTraceMaxEntries = 300;
     config.logCleanupConfigured = false;
     config.logCleanupCron = '0 6 * * *';
     config.logCleanupUsageLogsEnabled = false;
@@ -137,6 +142,63 @@ describe('settings and auth events', () => {
     expect(getResponse.statusCode).toBe(200);
     const runtime = getResponse.json() as { siteHealthRefreshCron?: string };
     expect(runtime.siteHealthRefreshCron).toBe('*/30 * * * *');
+  });
+
+  it('persists gateway runtime flags for downgrade/model whitelist/debug trace', async () => {
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        disableCrossProtocolFallback: true,
+        globalAllowedModels: ['gpt-*', 'claude-sonnet-*'],
+        proxyDebugTraceEnabled: true,
+        proxyDebugTraceMaxEntries: 512,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      disableCrossProtocolFallback?: boolean;
+      globalAllowedModels?: string[];
+      proxyDebugTraceEnabled?: boolean;
+      proxyDebugTraceMaxEntries?: number;
+    };
+    expect(body.disableCrossProtocolFallback).toBe(true);
+    expect(body.globalAllowedModels).toEqual(['gpt-*', 'claude-sonnet-*']);
+    expect(body.proxyDebugTraceEnabled).toBe(true);
+    expect(body.proxyDebugTraceMaxEntries).toBe(512);
+
+    expect(config.disableCrossProtocolFallback).toBe(true);
+    expect(config.globalAllowedModels).toEqual(['gpt-*', 'claude-sonnet-*']);
+    expect(config.proxyDebugTraceEnabled).toBe(true);
+    expect(config.proxyDebugTraceMaxEntries).toBe(512);
+
+    const savedWhitelist = await db.select().from(schema.settings).where(eq(schema.settings.key, 'global_allowed_models')).get();
+    const savedDowngrade = await db.select().from(schema.settings).where(eq(schema.settings.key, 'disable_cross_protocol_fallback')).get();
+    const savedTraceEnabled = await db.select().from(schema.settings).where(eq(schema.settings.key, 'proxy_debug_trace_enabled')).get();
+    const savedTraceMax = await db.select().from(schema.settings).where(eq(schema.settings.key, 'proxy_debug_trace_max_entries')).get();
+    expect(savedWhitelist?.value).toBe(JSON.stringify(['gpt-*', 'claude-sonnet-*']));
+    expect(savedDowngrade?.value).toBe(JSON.stringify(true));
+    expect(savedTraceEnabled?.value).toBe(JSON.stringify(true));
+    expect(savedTraceMax?.value).toBe(JSON.stringify(512));
+  });
+
+  it('clamps proxy debug trace retention to the supported max entries', async () => {
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        proxyDebugTraceMaxEntries: 99999,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { proxyDebugTraceMaxEntries?: number };
+    expect(body.proxyDebugTraceMaxEntries).toBe(5000);
+    expect(config.proxyDebugTraceMaxEntries).toBe(5000);
+
+    const savedTraceMax = await db.select().from(schema.settings).where(eq(schema.settings.key, 'proxy_debug_trace_max_entries')).get();
+    expect(savedTraceMax?.value).toBe(JSON.stringify(5000));
   });
 
   it('rejects invalid site health refresh cron expression', async () => {
@@ -543,7 +605,7 @@ describe('settings and auth events', () => {
   it('invalidates cached site proxy resolution when system proxy url changes', async () => {
     await db.insert(schema.sites).values({
       name: 'proxy-site',
-      url: 'https://proxy-site.example.com',
+      url: 'https://proxy-site-runtime.example.com',
       platform: 'new-api',
       useSystemProxy: true,
     }).run();
@@ -558,7 +620,7 @@ describe('settings and auth events', () => {
       },
     });
     expect(firstUpdate.statusCode).toBe(200);
-    expect(await resolveSiteProxyUrlByRequestUrl('https://proxy-site.example.com/v1/chat/completions')).toBe('http://127.0.0.1:7890');
+    expect(await resolveSiteProxyUrlByRequestUrl('https://proxy-site-runtime.example.com/v1/chat/completions')).toBe('http://127.0.0.1:7890');
 
     const secondUpdate = await app.inject({
       method: 'PUT',
@@ -568,7 +630,7 @@ describe('settings and auth events', () => {
       },
     });
     expect(secondUpdate.statusCode).toBe(200);
-    expect(await resolveSiteProxyUrlByRequestUrl('https://proxy-site.example.com/v1/chat/completions')).toBe('http://127.0.0.1:7891');
+    expect(await resolveSiteProxyUrlByRequestUrl('https://proxy-site-runtime.example.com/v1/chat/completions')).toBe('http://127.0.0.1:7891');
   });
 
   it('rejects allowlist update that does not include current request IP', async () => {

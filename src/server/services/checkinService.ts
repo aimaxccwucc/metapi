@@ -15,7 +15,7 @@ import {
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
-import { resolveCheckinExecution } from './failureReasonService.js';
+import { classifyFailureReason, resolveCheckinExecution } from './failureReasonService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
 import {
@@ -32,9 +32,17 @@ function isSiteDisabled(status?: string | null): boolean {
 }
 
 
-function shouldAttemptAutoRelogin(message?: string | null): boolean {
+function shouldAttemptAutoRelogin(input: { message?: string | null; status?: number | null }): boolean {
+  const message = input.message;
   if (!message) return false;
-  if (isTokenExpiredError({ message })) return true;
+
+  const structured = classifyFailureReason({
+    message,
+    status: 'failed',
+    httpStatus: input.status,
+  });
+  if (structured.code === 'token_expired' || structured.category === 'auth') return true;
+  if (isTokenExpiredError({ status: input.status ?? undefined, message })) return true;
 
   const text = message.toLowerCase();
   if (text.includes('new-api-user')) return true;
@@ -116,6 +124,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       message: resolution.logMessage,
       createdAt,
     }).run();
+    const snapshotNow = new Date().toISOString();
     await db.update(schema.accounts)
       .set({
         extraConfig: mergeCheckinSnapshot(account.extraConfig, {
@@ -125,7 +134,8 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
           retryable: resolution.retryable,
           requiresManual: resolution.requiresManual,
           unsupported: resolution.unsupported,
-          lastAttemptAt: new Date().toISOString(),
+          lastAttemptAt: snapshotNow,
+          lastIntervalAttemptAt: options?.scheduleMode === 'interval' ? snapshotNow : null,
           lastSuccessAt: extractCheckinSnapshot(account.extraConfig)?.lastSuccessAt ?? null,
           nextRetryAt: null,
           message: resolution.logMessage,
@@ -171,7 +181,12 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   let result = await withAccountProxyOverride(accountProxyUrl,
     () => adapter.checkin(site.url, activeAccessToken, platformUserId));
 
-  if (!result.success && (account.status === 'expired' || shouldAttemptAutoRelogin(result.message))) {
+  if (!result.success && (account.status === 'expired' || shouldAttemptAutoRelogin({
+    message: result.message,
+    status: typeof result.status === 'number'
+      ? result.status
+      : (typeof result.httpStatus === 'number' ? result.httpStatus : null),
+  }))) {
     const refreshedAccessToken = await tryAutoRelogin(account, site);
     if (refreshedAccessToken) {
       activeAccessToken = refreshedAccessToken;
@@ -226,6 +241,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     const lastSuccessAt = resolution.normalizedStatus === 'success'
       ? (shouldAdvanceLastCheckinAt ? new Date().toISOString() : (extractCheckinSnapshot(account.extraConfig)?.lastSuccessAt ?? null))
       : extractCheckinSnapshot(account.extraConfig)?.lastSuccessAt ?? null;
+    const snapshotNow = new Date().toISOString();
     updates.extraConfig = mergeCheckinSnapshot(account.extraConfig, {
       version: 1,
       status: resolution.checkinSnapshotStatus,
@@ -233,7 +249,8 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       retryable: resolution.retryable,
       requiresManual: resolution.requiresManual,
       unsupported: resolution.unsupported,
-      lastAttemptAt: new Date().toISOString(),
+      lastAttemptAt: snapshotNow,
+      lastIntervalAttemptAt: options?.scheduleMode === 'interval' ? snapshotNow : null,
       lastSuccessAt,
       nextRetryAt: null,
       message: resolution.logMessage,
@@ -251,6 +268,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     const nextRetryAt = resolution.retryable
       ? new Date(Date.now() + (options?.scheduleMode === 'interval' ? 60 * 60 * 1000 : 30 * 60 * 1000)).toISOString()
       : null;
+    const snapshotNow = new Date().toISOString();
     await db.update(schema.accounts)
       .set({
         extraConfig: mergeCheckinSnapshot(account.extraConfig, {
@@ -260,7 +278,8 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
           retryable: resolution.retryable,
           requiresManual: resolution.requiresManual,
           unsupported: resolution.unsupported,
-          lastAttemptAt: new Date().toISOString(),
+          lastAttemptAt: snapshotNow,
+          lastIntervalAttemptAt: options?.scheduleMode === 'interval' ? snapshotNow : null,
           lastSuccessAt: extractCheckinSnapshot(account.extraConfig)?.lastSuccessAt ?? null,
           nextRetryAt,
           message: resolution.logMessage,

@@ -4,6 +4,17 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
+import { vi } from 'vitest';
+
+const undiciFetchMock = vi.fn();
+
+vi.mock('undici', async () => {
+  const actual = await vi.importActual<typeof import('undici')>('undici');
+  return {
+    ...actual,
+    fetch: (...args: unknown[]) => undiciFetchMock(...args),
+  };
+});
 
 type DbModule = typeof import('../../db/index.js');
 
@@ -30,6 +41,8 @@ describe('sites health and cleanup routes', () => {
   });
 
   beforeEach(async () => {
+    undiciFetchMock.mockReset();
+    undiciFetchMock.mockRejectedValue(new Error('socket hang up'));
     const taskModule = await import('../../services/backgroundTaskService.js');
     taskModule.__resetBackgroundTasksForTests();
     await db.delete(schema.events).run();

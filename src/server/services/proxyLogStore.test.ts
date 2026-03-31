@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   hasProxyLogBillingDetailsColumnMock,
+  hasProxyLogCacheColumnsMock,
   hasProxyLogClientColumnsMock,
   hasProxyLogDownstreamApiKeyIdColumnMock,
   dbInsertMock,
@@ -10,6 +11,7 @@ const {
   proxyLogsSchema,
 } = vi.hoisted(() => ({
   hasProxyLogBillingDetailsColumnMock: vi.fn(),
+  hasProxyLogCacheColumnsMock: vi.fn(),
   hasProxyLogClientColumnsMock: vi.fn(),
   hasProxyLogDownstreamApiKeyIdColumnMock: vi.fn(),
   dbInsertMock: vi.fn(),
@@ -30,6 +32,8 @@ const {
     totalTokens: 'total_tokens',
     estimatedCost: 'estimated_cost',
     billingDetails: 'billing_details',
+    cacheStatus: 'cache_status',
+    cacheSavedCost: 'cache_saved_cost',
     clientFamily: 'client_family',
     clientAppId: 'client_app_id',
     clientAppName: 'client_app_name',
@@ -48,6 +52,7 @@ vi.mock('../db/index.js', () => ({
     proxyLogs: proxyLogsSchema,
   },
   hasProxyLogBillingDetailsColumn: (...args: unknown[]) => hasProxyLogBillingDetailsColumnMock(...args),
+  hasProxyLogCacheColumns: (...args: unknown[]) => hasProxyLogCacheColumnsMock(...args),
   hasProxyLogClientColumns: (...args: unknown[]) => hasProxyLogClientColumnsMock(...args),
   hasProxyLogDownstreamApiKeyIdColumn: (...args: unknown[]) => hasProxyLogDownstreamApiKeyIdColumnMock(...args),
 }));
@@ -57,12 +62,14 @@ import { insertProxyLog, withProxyLogSelectFields } from './proxyLogStore.js';
 describe('proxyLogStore', () => {
   beforeEach(() => {
     hasProxyLogBillingDetailsColumnMock.mockReset();
+    hasProxyLogCacheColumnsMock.mockReset();
     hasProxyLogClientColumnsMock.mockReset();
     hasProxyLogDownstreamApiKeyIdColumnMock.mockReset();
     dbInsertMock.mockReset();
     dbInsertValuesMock.mockReset();
     dbInsertRunMock.mockReset();
     hasProxyLogBillingDetailsColumnMock.mockResolvedValue(false);
+    hasProxyLogCacheColumnsMock.mockResolvedValue(false);
     hasProxyLogClientColumnsMock.mockResolvedValue(false);
     hasProxyLogDownstreamApiKeyIdColumnMock.mockResolvedValue(false);
 
@@ -192,5 +199,47 @@ describe('proxyLogStore', () => {
     expect(dbInsertValuesMock.mock.calls[1][0].clientAppId).toBeUndefined();
     expect(dbInsertValuesMock.mock.calls[1][0].clientAppName).toBeUndefined();
     expect(dbInsertValuesMock.mock.calls[1][0].clientConfidence).toBeUndefined();
+  });
+
+  it('writes cache fields when the schema supports them', async () => {
+    hasProxyLogCacheColumnsMock.mockResolvedValue(true);
+
+    await insertProxyLog({
+      modelRequested: 'gpt-5',
+      cacheStatus: 'hit',
+      cacheSavedCost: 0.42,
+    });
+
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(1);
+    expect(dbInsertValuesMock.mock.calls[0][0]).toMatchObject({
+      modelRequested: 'gpt-5',
+      cacheStatus: 'hit',
+      cacheSavedCost: 0.42,
+    });
+  });
+
+  it('retries proxy log inserts without cache fields when those columns are missing', async () => {
+    hasProxyLogCacheColumnsMock.mockResolvedValue(true);
+    dbInsertRunMock
+      .mockRejectedValueOnce(new Error('column proxy_logs.cache_status does not exist'))
+      .mockResolvedValueOnce(undefined);
+
+    await insertProxyLog({
+      modelRequested: 'gpt-5',
+      cacheStatus: 'miss',
+      cacheSavedCost: 0.12,
+    });
+
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(2);
+    expect(dbInsertValuesMock.mock.calls[0][0]).toMatchObject({
+      modelRequested: 'gpt-5',
+      cacheStatus: 'miss',
+      cacheSavedCost: 0.12,
+    });
+    expect(dbInsertValuesMock.mock.calls[1][0]).toMatchObject({
+      modelRequested: 'gpt-5',
+    });
+    expect(dbInsertValuesMock.mock.calls[1][0].cacheStatus).toBeUndefined();
+    expect(dbInsertValuesMock.mock.calls[1][0].cacheSavedCost).toBeUndefined();
   });
 });

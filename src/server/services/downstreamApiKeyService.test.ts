@@ -33,6 +33,7 @@ describe('downstreamApiKeyService', () => {
     await db.delete(schema.downstreamApiKeys).run();
     await db.delete(schema.tokenRoutes).run();
     config.proxyToken = 'sk-global-proxy-token';
+    config.globalAllowedModels = [];
   });
 
   afterAll(() => {
@@ -46,6 +47,33 @@ describe('downstreamApiKeyService', () => {
       expect(result.key).toBeNull();
       expect(result.policy.allowedRouteIds).toEqual([]);
       expect(result.policy.supportedModels).toEqual([]);
+      expect(result.policy.globalAllowedModels).toEqual([]);
+    }
+  });
+
+  it('applies global allowed model patterns to managed and global policies', async () => {
+    config.globalAllowedModels = ['gpt-*', 'claude-sonnet-*'];
+    const row = await db.insert(schema.downstreamApiKeys).values({
+      name: 'project-b',
+      key: 'sk-project-b',
+      enabled: true,
+      supportedModels: JSON.stringify(['gpt-4o-mini', 'claude-opus-4-6']),
+    }).returning().get();
+
+    const managed = await service.authorizeDownstreamToken(row.key);
+    expect(managed.ok).toBe(true);
+    if (managed.ok) {
+      expect(managed.policy.globalAllowedModels).toEqual(['gpt-*', 'claude-sonnet-*']);
+      expect(service.isModelAllowedByPolicy('gpt-4o-mini', managed.policy)).toBe(true);
+      expect(service.isModelAllowedByPolicy('claude-opus-4-6', managed.policy)).toBe(false);
+    }
+
+    const global = await service.authorizeDownstreamToken('sk-global-proxy-token');
+    expect(global.ok).toBe(true);
+    if (global.ok) {
+      expect(global.policy.globalAllowedModels).toEqual(['gpt-*', 'claude-sonnet-*']);
+      expect(service.isModelAllowedByPolicy('gpt-4o-mini', global.policy)).toBe(true);
+      expect(service.isModelAllowedByPolicy('claude-opus-4-6', global.policy)).toBe(false);
     }
   });
 

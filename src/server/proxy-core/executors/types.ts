@@ -10,6 +10,7 @@ import {
   type RequestInit as UndiciRequestInit,
   type Response as UndiciResponse,
 } from 'undici';
+import { config } from '../../config.js';
 
 export type ProxyRuntimeRequest = {
   endpoint: 'chat' | 'messages' | 'responses';
@@ -37,6 +38,72 @@ export type RuntimeResponse = UndiciResponse;
 export type RuntimeExecutor = {
   dispatch(input: RuntimeDispatchInput): Promise<RuntimeResponse>;
 };
+
+type TimeoutWrappedSignal = {
+  signal: AbortSignal;
+  cleanup: () => void;
+  didTimeout: () => boolean;
+};
+
+function mergeAbortSignals(
+  originalSignal: AbortSignal | null | undefined,
+  timeoutMs: number,
+): TimeoutWrappedSignal {
+  const timeoutController = new AbortController();
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    timeoutController.abort(new Error(`upstream timeout after ${timeoutMs}ms`));
+  }, timeoutMs);
+  const cleanupTimeout = () => clearTimeout(timeoutId);
+
+  if (!originalSignal) {
+    timeoutController.signal.addEventListener('abort', cleanupTimeout, { once: true });
+    return {
+      signal: timeoutController.signal,
+      cleanup: cleanupTimeout,
+      didTimeout: () => timedOut,
+    };
+  }
+
+  if (originalSignal.aborted) {
+    cleanupTimeout();
+    return {
+      signal: originalSignal,
+      cleanup: cleanupTimeout,
+      didTimeout: () => false,
+    };
+  }
+
+  const combinedController = new AbortController();
+  const abortFrom = (signal: AbortSignal) => {
+    cleanupTimeout();
+    combinedController.abort(signal.reason);
+  };
+  const onOriginalAbort = () => abortFrom(originalSignal);
+  const onTimeoutAbort = () => abortFrom(timeoutController.signal);
+
+  originalSignal.addEventListener('abort', onOriginalAbort, { once: true });
+  timeoutController.signal.addEventListener('abort', onTimeoutAbort, { once: true });
+  combinedController.signal.addEventListener('abort', () => {
+    cleanupTimeout();
+    originalSignal.removeEventListener('abort', onOriginalAbort);
+    timeoutController.signal.removeEventListener('abort', onTimeoutAbort);
+  }, { once: true });
+
+  return {
+    signal: combinedController.signal,
+    cleanup: cleanupTimeout,
+    didTimeout: () => timedOut,
+  };
+}
+
+function resolveRuntimeRequestTimeoutMs(request: ProxyRuntimeRequest): number {
+  if (request.runtime?.stream) {
+    return config.upstreamStreamFirstByteTimeoutMs;
+  }
+  return config.upstreamRequestTimeoutMs;
+}
 
 export function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -66,7 +133,21 @@ export async function performFetch(
   requestUrl = input.targetUrl || buildUpstreamUrl(input.siteUrl, request.path),
 ): Promise<RuntimeResponse> {
   const init = await input.buildInit(requestUrl, request);
-  return fetch(requestUrl, init);
+  const timeoutMs = resolveRuntimeRequestTimeoutMs(request);
+  const timeoutSignal = mergeAbortSignals(init.signal ?? null, timeoutMs);
+  try {
+    return await fetch(requestUrl, {
+      ...init,
+      signal: timeoutSignal.signal,
+    });
+  } catch (error) {
+    if (timeoutSignal.didTimeout()) {
+      throw new Error(`upstream timeout after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    timeoutSignal.cleanup();
+  }
 }
 
 function hasZstdContentEncoding(contentEncoding: string | null): boolean {

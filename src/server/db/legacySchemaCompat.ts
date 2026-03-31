@@ -69,6 +69,8 @@ const LEGACY_COMPAT_COLUMNS = new Set([
   'downstream_api_keys.group_name',
   'downstream_api_keys.tags',
   'proxy_logs.billing_details',
+  'proxy_logs.cache_status',
+  'proxy_logs.cache_saved_cost',
   'proxy_logs.client_family',
   'proxy_logs.client_app_id',
   'proxy_logs.client_app_name',

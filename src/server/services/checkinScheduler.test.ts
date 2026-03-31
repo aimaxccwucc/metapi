@@ -178,6 +178,50 @@ describe('checkinScheduler', () => {
     ], 6, now)).toEqual([3]);
   });
 
+  it('uses persisted lastIntervalAttemptAt to suppress interval retries after restart', async () => {
+    const scheduler = await import('./checkinScheduler.js');
+    const now = new Date('2026-03-20T12:00:00.000Z');
+
+    expect(scheduler.selectDueIntervalCheckinAccountIds([
+      {
+        id: 9,
+        lastCheckinAt: null,
+        extraConfig: JSON.stringify({
+          checkinSnapshot: {
+            version: 1,
+            status: 'already_checked',
+            reasonCode: 'already_checked_in',
+            retryable: false,
+            requiresManual: false,
+            unsupported: false,
+            lastAttemptAt: '2026-03-20T07:00:00.000Z',
+            lastIntervalAttemptAt: '2026-03-20T10:30:00.000Z',
+            message: 'today already checked in',
+            source: 'checkin',
+          },
+        }),
+      },
+      {
+        id: 10,
+        lastCheckinAt: null,
+        extraConfig: JSON.stringify({
+          checkinSnapshot: {
+            version: 1,
+            status: 'already_checked',
+            reasonCode: 'already_checked_in',
+            retryable: false,
+            requiresManual: false,
+            unsupported: false,
+            lastAttemptAt: '2026-03-20T01:00:00.000Z',
+            lastIntervalAttemptAt: '2026-03-20T04:30:00.000Z',
+            message: 'old interval attempt',
+            source: 'checkin',
+          },
+        }),
+      },
+    ], 6, now)).toEqual([10]);
+  });
+
   it('reschedules site health refresh cron and validates cron expression', async () => {
     const scheduler = await import('./checkinScheduler.js');
 

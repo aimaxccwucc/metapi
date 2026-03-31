@@ -1,6 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getProxyAuthContext } from '../../middleware/auth.js';
-import { isModelAllowedByPolicyOrAllowedRoutes, recordManagedKeyCostUsage } from '../../services/downstreamApiKeyService.js';
+import { getDefaultGlobalPolicy, isModelAllowedByPolicyOrAllowedRoutes, recordManagedKeyCostUsage } from '../../services/downstreamApiKeyService.js';
 import { EMPTY_DOWNSTREAM_ROUTING_POLICY, type DownstreamRoutingPolicy } from '../../services/downstreamPolicyTypes.js';
 import { detectDownstreamClientContext } from './downstreamClientContext.js';
 
@@ -44,8 +44,11 @@ export function getDownstreamRoutingPolicy(request: FastifyRequest): DownstreamR
       publicRoutesOnly: true,
     };
   }
+  const basePolicy = authContext.source === 'global'
+    ? getDefaultGlobalPolicy()
+    : authContext.policy;
   return {
-    ...authContext.policy,
+    ...basePolicy,
     stickySessionKey: buildStickySessionKey(request),
     publicRoutesOnly: true,
   };

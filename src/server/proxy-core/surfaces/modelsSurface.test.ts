@@ -3,18 +3,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { listModelsSurface } from './modelsSurface.js';
 
 describe('listModelsSurface', () => {
-  it('returns OpenAI list shape and hides models without a resolvable channel', async () => {
+  it('returns OpenAI list shape for allowed public models', async () => {
     const result = await listModelsSurface({
       downstreamPolicy: { type: 'all' },
       responseFormat: 'openai',
       tokenRouter: {
         getAvailableModels: vi.fn().mockResolvedValue(['routable-model', 'orphan-model']),
-        explainSelection: vi.fn()
-          .mockResolvedValueOnce({ selectedChannelId: null })
-          .mockResolvedValueOnce({ selectedChannelId: 11 }),
       },
       refreshModelsAndRebuildRoutes: vi.fn(),
-      isModelAllowed: vi.fn().mockResolvedValue(true),
+      isModelAllowed: vi.fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false),
       now: () => new Date('2026-03-19T00:00:00.000Z'),
     });
 
@@ -22,7 +21,7 @@ describe('listModelsSurface', () => {
       object: 'list',
       data: [
         {
-          id: 'routable-model',
+          id: 'orphan-model',
           object: 'model',
           created: 1773878400,
           owned_by: 'metapi',
@@ -37,7 +36,6 @@ describe('listModelsSurface', () => {
       responseFormat: 'claude',
       tokenRouter: {
         getAvailableModels: vi.fn().mockResolvedValue(['claude-opus-4-6']),
-        explainSelection: vi.fn().mockResolvedValue({ selectedChannelId: 22 }),
       },
       refreshModelsAndRebuildRoutes: vi.fn(),
       isModelAllowed: vi.fn().mockResolvedValue(true),
@@ -59,22 +57,38 @@ describe('listModelsSurface', () => {
     });
   });
 
-  it('applies downstream policy filtering before selection checks and refreshes once when the first read is empty', async () => {
+  it('refreshes only when public models are absent and skips refresh when policy filtering alone makes the list empty', async () => {
     const getAvailableModels = vi.fn()
       .mockResolvedValueOnce(['blocked-model'])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce(['allowed-model']);
     const refreshModelsAndRebuildRoutes = vi.fn().mockResolvedValue(undefined);
     const isModelAllowed = vi.fn()
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
-    const explainSelection = vi.fn().mockResolvedValue({ selectedChannelId: 33 });
 
-    const result = await listModelsSurface({
+    const first = await listModelsSurface({
       downstreamPolicy: { type: 'whitelist' },
       responseFormat: 'openai',
       tokenRouter: {
         getAvailableModels,
-        explainSelection,
+      },
+      refreshModelsAndRebuildRoutes,
+      isModelAllowed,
+      now: () => new Date('2026-03-19T00:00:00.000Z'),
+    });
+
+    expect(first).toEqual({
+      object: 'list',
+      data: [],
+    });
+    expect(refreshModelsAndRebuildRoutes).not.toHaveBeenCalled();
+
+    const second = await listModelsSurface({
+      downstreamPolicy: { type: 'whitelist' },
+      responseFormat: 'openai',
+      tokenRouter: {
+        getAvailableModels,
       },
       refreshModelsAndRebuildRoutes,
       isModelAllowed,
@@ -82,7 +96,7 @@ describe('listModelsSurface', () => {
     });
 
     expect(refreshModelsAndRebuildRoutes).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({
+    expect(second).toEqual({
       object: 'list',
       data: [
         {
@@ -92,6 +106,28 @@ describe('listModelsSurface', () => {
           owned_by: 'metapi',
         },
       ],
+    });
+  });
+
+  it('can skip refresh when the caller needs a fast read-only model listing', async () => {
+    const refreshModelsAndRebuildRoutes = vi.fn().mockResolvedValue(undefined);
+
+    const result = await listModelsSurface({
+      downstreamPolicy: { type: 'public-surface-only' },
+      responseFormat: 'openai',
+      tokenRouter: {
+        getAvailableModels: vi.fn().mockResolvedValue([]),
+      },
+      refreshModelsAndRebuildRoutes,
+      isModelAllowed: vi.fn(),
+      allowRefreshOnEmpty: false,
+      now: () => new Date('2026-03-19T00:00:00.000Z'),
+    });
+
+    expect(refreshModelsAndRebuildRoutes).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      object: 'list',
+      data: [],
     });
   });
 });

@@ -36,6 +36,7 @@ function resolveLatencyFactor(avgLatencyMs: number | null): number {
   if (avgLatencyMs <= 5_000) return 0.96;
   if (avgLatencyMs <= 10_000) return 0.9;
   if (avgLatencyMs <= 20_000) return 0.82;
+  if (avgLatencyMs <= 35_000) return 0.7;
   return 0.72;
 }
 

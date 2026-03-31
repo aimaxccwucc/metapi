@@ -7,6 +7,7 @@ const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const DEFAULT_CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const DEFAULT_GEMINI_CLI_CLIENT_ID = '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
+export const MAX_PROXY_DEBUG_TRACE_ENTRIES = 5_000;
 
 function createGeneratedToken(prefix: string): string {
   return `${prefix}${randomBytes(24).toString('base64url')}`;
@@ -36,6 +37,12 @@ function parseCsvList(value: string | undefined): string[] {
     .split(',')
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function parseModelPatternList(value: string | undefined): string[] {
+  return parseCsvList(value)
+    .map((item) => item.trim())
+    .filter((item, index, arr) => item.length > 0 && arr.indexOf(item) === index);
 }
 
 function parseOptionalSecret(value: string | undefined): string {
@@ -121,7 +128,18 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     dbSsl: parseBoolean(env.DB_SSL, false),
     requestBodyLimit: DEFAULT_REQUEST_BODY_LIMIT,
     routingFallbackUnitCost: Math.max(1e-6, parseNumber(env.ROUTING_FALLBACK_UNIT_COST, 1)),
+    disableCrossProtocolFallback: parseBoolean(env.DISABLE_CROSS_PROTOCOL_FALLBACK, false),
+    globalAllowedModels: parseModelPatternList(env.GLOBAL_ALLOWED_MODELS),
+    proxyDebugTraceEnabled: parseBoolean(env.PROXY_DEBUG_TRACE_ENABLED, false),
+    proxyDebugTraceMaxEntries: Math.max(10, Math.min(MAX_PROXY_DEBUG_TRACE_ENTRIES, Math.trunc(parseNumber(env.PROXY_DEBUG_TRACE_MAX_ENTRIES, 300)))),
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
+    upstreamRequestTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_REQUEST_TIMEOUT_MS, 20_000))),
+    upstreamStreamFirstByteTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_STREAM_FIRST_BYTE_TIMEOUT_MS, 15_000))),
+    upstreamRequestBudgetMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_REQUEST_BUDGET_MS, 30_000))),
+    upstreamStreamIdleTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS, 20_000))),
+    responseCacheStaleIfErrorMs: Math.max(1_000, Math.trunc(parseNumber(env.RESPONSE_CACHE_STALE_IF_ERROR_MS, 10 * 60 * 1000))),
+    slowSuccessLatencyThresholdMs: Math.max(1_000, Math.trunc(parseNumber(env.SLOW_SUCCESS_LATENCY_THRESHOLD_MS, 15_000))),
+    slowSuccessPenaltyScore: Math.max(0, parseNumber(env.SLOW_SUCCESS_PENALTY_SCORE, 0.25)),
     proxyLogRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_DAYS, 30))),
     proxyLogRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_PRUNE_INTERVAL_MINUTES, 30))),
     proxyFileRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_FILE_RETENTION_DAYS, 30))),

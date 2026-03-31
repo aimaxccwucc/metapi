@@ -111,7 +111,11 @@ export function selectDueIntervalCheckinAccountIds(
         return false;
       }
       const lastCheckinMs = row.lastCheckinAt ? Date.parse(row.lastCheckinAt) : Number.NaN;
-      const lastAttemptMs = attemptState.get(row.id);
+      const persistedAttemptMs = snapshot?.lastIntervalAttemptAt ? Date.parse(snapshot.lastIntervalAttemptAt) : Number.NaN;
+      const memoryAttemptMs = attemptState.get(row.id);
+      const lastAttemptMs = Number.isFinite(persistedAttemptMs)
+        ? persistedAttemptMs
+        : memoryAttemptMs;
       if (Number.isFinite(lastCheckinMs)) {
         if (nowMs - lastCheckinMs < intervalMs) return false;
         if (typeof lastAttemptMs === 'number' && lastAttemptMs >= lastCheckinMs && nowMs - lastAttemptMs < intervalMs) {

@@ -18,6 +18,7 @@ import { detectDownstreamClientContext, type DownstreamClientContext } from './d
 import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { markTokenModelUnavailable } from '../../services/mediaRoutingSupport.js';
+import { createRequestBudget, shouldRetryWithinBudget } from './requestBudget.js';
 
 const MAX_RETRIES = 2;
 
@@ -51,8 +52,19 @@ export async function imagesProxyRoute(app: FastifyInstance) {
     const excludeChannelIds: number[] = [];
     const excludeSiteIds = new Set<number>();
     let retryCount = 0;
+    const requestBudget = createRequestBudget();
 
     while (retryCount <= MAX_RETRIES) {
+      if (requestBudget.isExpired()) {
+        await reportProxyAllFailed({
+          model: requestedModel,
+          reason: requestBudget.buildTimeoutMessage(),
+        });
+        return reply.code(504).send({
+          error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
+        });
+      }
+
       let selected = retryCount === 0
         ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
         : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
@@ -133,7 +145,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
               detail: `HTTP ${upstream.status}`,
             });
           }
-          if (shouldRetryProxyRequest(upstream.status, text) && retryCount < MAX_RETRIES) {
+          if (shouldRetryProxyRequest(upstream.status, text) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
             retryCount++;
             continue;
           }
@@ -182,7 +194,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           downstreamPath,
           clientContext,
         );
-        if (retryCount < MAX_RETRIES) {
+        if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
           retryCount++;
           continue;
         }
@@ -218,8 +230,19 @@ export async function imagesProxyRoute(app: FastifyInstance) {
     const excludeChannelIds: number[] = [];
     const excludeSiteIds = new Set<number>();
     let retryCount = 0;
+    const requestBudget = createRequestBudget();
 
     while (retryCount <= MAX_RETRIES) {
+      if (requestBudget.isExpired()) {
+        await reportProxyAllFailed({
+          model: requestedModel,
+          reason: requestBudget.buildTimeoutMessage(),
+        });
+        return reply.code(504).send({
+          error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
+        });
+      }
+
       let selected = retryCount === 0
         ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
         : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
@@ -312,7 +335,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
               detail: `HTTP ${upstream.status}`,
             });
           }
-          if (shouldRetryProxyRequest(upstream.status, text) && retryCount < MAX_RETRIES) {
+          if (shouldRetryProxyRequest(upstream.status, text) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
             retryCount++;
             continue;
           }
@@ -361,7 +384,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           downstreamPath,
           clientContext,
         );
-        if (retryCount < MAX_RETRIES) {
+        if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
           retryCount++;
           continue;
         }

@@ -237,15 +237,9 @@ function resolveTokenGroupLabel(tokenGroup: string | null, tokenName: string | n
   return name;
 }
 
-function buildAutoTokenName(modelName: string, preferredGroup: string): string {
+function buildAutoTokenName(preferredGroup: string): string {
   const normalizedGroup = preferredGroup.trim() || 'default';
-  const normalizedModel = modelName
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 36) || 'model';
-  return `metapi-${normalizedGroup}-${normalizedModel}`.slice(0, 64);
+  return `metapi-${normalizedGroup}-shared`.slice(0, 64);
 }
 
 function selectPreferredTokenGroupForModel(
@@ -389,6 +383,19 @@ async function ensurePreferredTokenCoverageForPattern(modelPattern: string): Pro
         ),
       )
       .all();
+    const existingAccountTokens = await db.select({
+      tokenGroup: schema.accountTokens.tokenGroup,
+      tokenName: schema.accountTokens.name,
+    })
+      .from(schema.accountTokens)
+      .where(
+        and(
+          eq(schema.accountTokens.accountId, context.accountId),
+          eq(schema.accountTokens.enabled, true),
+          eq(schema.accountTokens.valueStatus, ACCOUNT_TOKEN_VALUE_STATUS_READY),
+        ),
+      )
+      .all();
 
     let createdAny = false;
     const createdGroups: string[] = [];
@@ -405,6 +412,12 @@ async function ensurePreferredTokenCoverageForPattern(modelPattern: string): Pro
       );
       const preferredGroupKey = preferredGroup.trim().toLowerCase() || 'default';
 
+      const hasReusableTokenInGroup = existingAccountTokens.some((item) => {
+        const groupLabel = resolveTokenGroupLabel(item.tokenGroup, item.tokenName);
+        return (groupLabel || 'default').trim().toLowerCase() === preferredGroupKey;
+      }) || createdGroups.some((group) => (group || '').trim().toLowerCase() === preferredGroupKey);
+      if (hasReusableTokenInGroup) continue;
+
       const hasPreferredCoverage = coverageRows.some((item) => {
         const availableModelName = (item.availableModelName || '').trim();
         if (!availableModelName) return false;
@@ -417,7 +430,7 @@ async function ensurePreferredTokenCoverageForPattern(modelPattern: string): Pro
       if (hasPreferredCoverage) continue;
 
       const created = await adapter.createApiToken(context.site.url, context.accessToken, platformUserId, {
-        name: buildAutoTokenName(normalizedModelName, preferredGroup),
+        name: buildAutoTokenName(preferredGroup),
         group: preferredGroup,
       });
       if (!created) continue;

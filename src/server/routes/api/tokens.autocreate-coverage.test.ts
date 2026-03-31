@@ -191,7 +191,7 @@ describe('POST /api/routes auto token coverage', () => {
     });
     createApiTokenMock.mockResolvedValue(true);
     getApiTokensMock.mockResolvedValue([
-      { name: 'metapi-vip-kimi-k2-5', key: 'sk-vip-created', enabled: true, tokenGroup: 'vip' },
+      { name: 'metapi-vip-shared', key: 'sk-vip-created', enabled: true, tokenGroup: 'vip' },
     ]);
     getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
       if (credential === 'sk-vip-created') return ['kimi-k2.5'];
@@ -321,7 +321,7 @@ describe('POST /api/routes auto token coverage', () => {
     });
     createApiTokenMock.mockResolvedValue(true);
     getApiTokensMock.mockResolvedValue([
-      { name: 'metapi-cheap-group-target-model', key: 'sk-group-created', enabled: true, tokenGroup: 'cheap' },
+      { name: 'metapi-cheap-shared', key: 'sk-group-created', enabled: true, tokenGroup: 'cheap' },
     ]);
     getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
       if (credential === 'sk-group-created') return ['group-target-model'];
@@ -419,7 +419,7 @@ describe('POST /api/routes auto token coverage', () => {
     });
     createApiTokenMock.mockResolvedValue(true);
     getApiTokensMock.mockResolvedValue([
-      { name: 'metapi-cheap-new-group-model', key: 'sk-update-created', enabled: true, tokenGroup: 'cheap' },
+      { name: 'metapi-cheap-shared', key: 'sk-update-created', enabled: true, tokenGroup: 'cheap' },
     ]);
     getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
       if (credential === 'sk-update-created') return ['new-group-model'];
@@ -454,5 +454,96 @@ describe('POST /api/routes auto token coverage', () => {
       .where(eq(schema.routeGroupSources.groupRouteId, groupRoute.id))
       .all();
     expect(storedSources.map((item: RouteGroupSourceRow) => item.sourceRouteId)).toEqual([newSourceRoute.id]);
+  });
+
+  it('reuses one shared token per group for multiple exact models', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'shared-group-site',
+      url: 'https://shared-group-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'shared-group-user',
+      accessToken: 'shared-group-session',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: account.id,
+        modelName: 'shared-model-a',
+        available: true,
+      },
+      {
+        accountId: account.id,
+        modelName: 'shared-model-b',
+        available: true,
+      },
+    ]).run();
+
+    getUserGroupsMock.mockResolvedValue(['default', 'vip']);
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      groupRatio: { default: 1, vip: 0.2 },
+      models: [
+        {
+          modelName: 'shared-model-a',
+          quotaType: 0,
+          modelDescription: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          ownerBy: null,
+          enableGroups: ['default', 'vip'],
+          groupPricing: {},
+        },
+        {
+          modelName: 'shared-model-b',
+          quotaType: 0,
+          modelDescription: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          ownerBy: null,
+          enableGroups: ['default', 'vip'],
+          groupPricing: {},
+        },
+      ],
+    });
+    createApiTokenMock.mockResolvedValue(true);
+    getApiTokensMock.mockResolvedValue([
+      { name: 'metapi-vip-shared', key: 'sk-shared-created', enabled: true, tokenGroup: 'vip' },
+    ]);
+    getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
+      if (credential === 'sk-shared-created') return ['shared-model-a', 'shared-model-b'];
+      return [];
+    });
+
+    const responseA = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        modelPattern: 'shared-model-a',
+        enabled: true,
+      },
+    });
+
+    const responseB = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        modelPattern: 'shared-model-b',
+        enabled: true,
+      },
+    });
+
+    expect(responseA.statusCode).toBe(200);
+    expect(responseB.statusCode).toBe(200);
+    expect(createApiTokenMock).toHaveBeenCalledTimes(1);
+    expect(createApiTokenMock.mock.calls[0]?.[3]).toMatchObject({
+      group: 'vip',
+      name: 'metapi-vip-shared',
+    });
   });
 });

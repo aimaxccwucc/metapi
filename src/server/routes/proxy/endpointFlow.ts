@@ -1,4 +1,5 @@
 import { fetch } from 'undici';
+import { config } from '../../config.js';
 import { readRuntimeResponseText } from '../../proxy-core/executors/types.js';
 import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
 import { summarizeUpstreamError } from './upstreamError.js';
@@ -41,6 +42,11 @@ export type EndpointRecoverResult = {
   upstreamPath: string;
 } | null;
 
+export type EndpointDowngradeDecision = {
+  allowDowngrade: boolean;
+  reason?: string | null;
+};
+
 export type EndpointFlowResult =
   | {
     ok: true;
@@ -67,11 +73,40 @@ type ExecuteEndpointFlowInput = {
     targetUrl: string,
   ) => Promise<Awaited<ReturnType<typeof fetch>>>;
   tryRecover?: (ctx: EndpointAttemptContext) => Promise<EndpointRecoverResult>;
-  shouldDowngrade?: (ctx: EndpointAttemptContext) => boolean;
+  shouldDowngrade?: (ctx: EndpointAttemptContext) => boolean | EndpointDowngradeDecision;
   onDowngrade?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<void>;
   onAttemptFailure?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<void>;
   onAttemptSuccess?: (ctx: EndpointAttemptSuccessContext) => void | Promise<void>;
+  disableCrossProtocolFallback?: boolean;
 };
+
+function resolveEndpointDowngradeDecision(
+  decision: boolean | EndpointDowngradeDecision | undefined,
+): EndpointDowngradeDecision {
+  if (typeof decision === 'boolean') {
+    return {
+      allowDowngrade: decision,
+      reason: decision ? null : 'endpoint_strategy_denied',
+    };
+  }
+
+  if (decision && typeof decision === 'object') {
+    return {
+      allowDowngrade: decision.allowDowngrade === true,
+      reason: typeof decision.reason === 'string' ? decision.reason.trim() || null : null,
+    };
+  }
+
+  return {
+    allowDowngrade: false,
+    reason: 'endpoint_strategy_denied',
+  };
+}
+
+function isCrossProtocolDowngrade(current: UpstreamEndpoint, next: UpstreamEndpoint | undefined): boolean {
+  if (!next) return false;
+  return (current === 'messages') !== (next === 'messages');
+}
 
 export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Promise<EndpointFlowResult> {
   const endpointCount = input.endpointCandidates.length;
@@ -156,7 +191,16 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
     });
 
     const isLastEndpoint = endpointIndex >= endpointCount - 1;
-    const shouldDowngrade = !isLastEndpoint && !!input.shouldDowngrade?.(baseContext);
+    const downgradeDecision = resolveEndpointDowngradeDecision(input.shouldDowngrade?.(baseContext));
+    const nextEndpoint = !isLastEndpoint
+      ? input.endpointCandidates[endpointIndex + 1] as UpstreamEndpoint | undefined
+      : undefined;
+    const crossProtocolFallbackDisabled = (input.disableCrossProtocolFallback ?? config.disableCrossProtocolFallback) === true;
+    const blockedByCrossProtocolSetting = crossProtocolFallbackDisabled
+      && isCrossProtocolDowngrade(baseContext.request.endpoint, nextEndpoint);
+    const shouldDowngrade = !isLastEndpoint
+      && downgradeDecision.allowDowngrade
+      && !blockedByCrossProtocolSetting;
     if (shouldDowngrade) {
       await input.onDowngrade?.({
         ...baseContext,

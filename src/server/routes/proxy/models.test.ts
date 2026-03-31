@@ -1,20 +1,26 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+const refreshModelsAndRebuildRoutesMock = vi.fn(async () => undefined);
+
+vi.mock('../../services/modelService.js', () => ({
+  refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
+}));
+
 type DbModule = typeof import('../../db/index.js');
-type ProxyRouterModule = typeof import('./router.js');
+type ModelsRouteModule = typeof import('./models.js');
 type TokenRouterModule = typeof import('../../services/tokenRouter.js');
-type TokensRoutesModule = typeof import('../api/tokens.js');
 type ConfigModule = typeof import('../../config.js');
+type AuthModule = typeof import('../../middleware/auth.js');
 
 describe('/v1/models route', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
-  let proxyRoutes: ProxyRouterModule['proxyRoutes'];
-  let tokensRoutes: TokensRoutesModule['tokensRoutes'];
+  let modelsProxyRoute: ModelsRouteModule['modelsProxyRoute'];
+  let proxyAuthMiddleware: AuthModule['proxyAuthMiddleware'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
   let config: ConfigModule['config'];
   let app: FastifyInstance;
@@ -26,26 +32,30 @@ describe('/v1/models route', () => {
 
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');
-    const proxyRouterModule = await import('./router.js');
+    const modelsRouteModule = await import('./models.js');
+    const authModule = await import('../../middleware/auth.js');
     const tokenRouterModule = await import('../../services/tokenRouter.js');
-    const tokensRoutesModule = await import('../api/tokens.js');
     const configModule = await import('../../config.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
-    proxyRoutes = proxyRouterModule.proxyRoutes;
-    tokensRoutes = tokensRoutesModule.tokensRoutes;
+    modelsProxyRoute = modelsRouteModule.modelsProxyRoute;
+    proxyAuthMiddleware = authModule.proxyAuthMiddleware;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
     config = configModule.config;
     config.proxyToken = 'sk-global-proxy-token';
 
     app = Fastify();
-    await app.register(tokensRoutes);
-    await app.register(proxyRoutes);
-  });
+    app.addHook('onRequest', async (request, reply) => {
+      await proxyAuthMiddleware(request, reply);
+    });
+    await app.register(modelsProxyRoute);
+  }, 20000);
 
   beforeEach(async () => {
     invalidateTokenRouterCache();
+    refreshModelsAndRebuildRoutesMock.mockClear();
+    config.globalAllowedModels = [];
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.routeGroupSources).run();
     await db.delete(schema.tokenRoutes).run();
@@ -58,7 +68,9 @@ describe('/v1/models route', () => {
   });
 
   afterAll(async () => {
-    await app.close();
+    if (app) {
+      await app.close();
+    }
     delete process.env.DATA_DIR;
   });
 
@@ -421,6 +433,73 @@ describe('/v1/models route', () => {
     expect(body.data).toEqual([]);
   });
 
+  it('filters models by globalAllowedModels for global proxy token', async () => {
+    config.globalAllowedModels = ['gpt-*'];
+
+    const site = await db.insert(schema.sites).values({
+      name: 'global-filter-site',
+      url: 'https://global-filter.example.com',
+      platform: 'openai',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'global-filter-access-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'global-filter-api-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const gptRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      displayName: 'gpt-4o-mini',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+    const claudeRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-sonnet-4-6',
+      displayName: 'claude-sonnet-4-6',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values([
+      {
+        routeId: gptRoute.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: 'gpt-4o-mini',
+        enabled: true,
+      },
+      {
+        routeId: claudeRoute.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: 'claude-sonnet-4-6',
+        enabled: true,
+      },
+    ]).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        authorization: 'Bearer sk-global-proxy-token',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { data: Array<{ id: string }> };
+    expect(body.data.map((item) => item.id)).toEqual(['gpt-4o-mini']);
+  });
+
   it('returns only explicit-group public name while hiding source exact routes', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'explicit-group-site',
@@ -489,23 +568,29 @@ describe('/v1/models route', () => {
       enabled: true,
     }).run();
 
-    const groupResponse = await app.inject({
-      method: 'POST',
-      url: '/api/routes',
-      payload: {
-        routeMode: 'explicit_group',
-        displayName: 'claude-opus-4-6',
-        sourceRouteIds: [sourceRouteA.id, sourceRouteB.id],
+    const groupRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-opus-4-6',
+      displayName: 'claude-opus-4-6',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeGroupSources).values([
+      {
+        groupRouteId: groupRoute.id,
+        sourceRouteId: sourceRouteA.id,
       },
-    });
-    expect(groupResponse.statusCode).toBe(200);
-    const groupId = (groupResponse.json() as { id: number }).id;
+      {
+        groupRouteId: groupRoute.id,
+        sourceRouteId: sourceRouteB.id,
+      },
+    ]).run();
 
     await db.insert(schema.downstreamApiKeys).values({
       name: 'managed-explicit-group-key',
       key: 'sk-managed-explicit-group',
       enabled: true,
-      allowedRouteIds: JSON.stringify([groupId]),
+      allowedRouteIds: JSON.stringify([groupRoute.id]),
     }).run();
 
     const response = await app.inject({
@@ -526,6 +611,58 @@ describe('/v1/models route', () => {
     expect(ids).toContain('claude-opus-4-6');
     expect(ids).not.toContain('claude-opus-4-5');
     expect(ids).not.toContain('claude-sonnet-4-5');
+  });
+
+  it('does not rebuild routes when visible models exist but policy filtering removes them all', async () => {
+    config.globalAllowedModels = ['gpt-*'];
+
+    const site = await db.insert(schema.sites).values({
+      name: 'policy-empty-site',
+      url: 'https://policy-empty.example.com',
+      platform: 'openai',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      accessToken: 'policy-empty-access-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'policy-empty-api-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-sonnet-4-6',
+      displayName: 'claude-sonnet-4-6',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'claude-sonnet-4-6',
+      enabled: true,
+    }).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: {
+        authorization: 'Bearer sk-global-proxy-token',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { data: Array<{ id: string }> };
+    expect(body.data).toEqual([]);
   });
 
   it('returns no models when only automatic routes remain after filtering pseudo models', async () => {

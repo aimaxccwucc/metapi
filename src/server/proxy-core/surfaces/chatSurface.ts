@@ -27,6 +27,7 @@ import { detectProxyFailure } from '../../routes/proxy/proxyFailureJudge.js';
 import { buildUpstreamUrl } from '../../routes/proxy/upstreamUrl.js';
 import { logProxyNoChannelFailure } from '../../routes/proxy/proxyNoChannelLog.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
+import { config } from '../../config.js';
 import { resolveProxyLogBilling } from '../../routes/proxy/proxyBilling.js';
 import { openAiChatTransformer } from '../../transformers/openai/chat/index.js';
 import { anthropicMessagesTransformer } from '../../transformers/anthropic/messages/index.js';
@@ -52,10 +53,13 @@ import {
   unwrapGeminiCliPayload,
 } from '../../routes/proxy/geminiCliCompat.js';
 import { dispatchRuntimeRequest } from '../../routes/proxy/runtimeExecutor.js';
+import { createRequestBudget, shouldRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
+import { wrapReaderWithIdleTimeout } from '../../routes/proxy/streamTimeout.js';
 import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/conversationFileCapabilities.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
+import { recordProxyDebugTrace } from '../../routes/proxy/proxyDebugTrace.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
-import { buildCacheKey, lookupResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
+import { buildCacheKey, lookupResponseCache, lookupStaleResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
 
 const MAX_RETRIES = 2;
 
@@ -130,6 +134,29 @@ export async function handleChatSurfaceRequest(
   if (responseCacheKey) {
     const cached = await lookupResponseCache(responseCacheKey);
     if (cached) {
+      await logProxy(
+        {
+          channel: { routeId: null, id: null },
+          account: { id: null, username: 'cache' },
+          actualModel: requestedModel,
+        },
+        requestedModel,
+        'success',
+        200,
+        0,
+        'count_tokens cache hit',
+        0,
+        downstreamPath,
+        0,
+        0,
+        0,
+        0,
+        null,
+        null,
+        clientContext,
+        downstreamApiKeyId,
+        { cacheStatus: 'hit', cacheSavedCost: 0 },
+      );
       return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
     }
   }
@@ -137,8 +164,19 @@ export async function handleChatSurfaceRequest(
   const excludeChannelIds: number[] = [];
   const excludeSiteIds = new Set<number>();
   let retryCount = 0;
+  const requestBudget = createRequestBudget();
 
   while (retryCount <= MAX_RETRIES) {
+    if (requestBudget.isExpired()) {
+      await reportProxyAllFailed({
+        model: requestedModel,
+        reason: requestBudget.buildTimeoutMessage(),
+      });
+      return reply.code(504).send({
+        error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
+      });
+    }
+
     let selected = retryCount === 0
       ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
       : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
@@ -170,6 +208,15 @@ export async function handleChatSurfaceRequest(
     }
 
     excludeChannelIds.push(selected.channel.id);
+    recordProxyDebugTrace({
+      clientContext,
+      kind: 'channel_selected',
+      requestedModel,
+      actualModel: selected.actualModel || requestedModel,
+      downstreamPath,
+      selected,
+      retryCount,
+    });
 
     const modelName = selected.actualModel || requestedModel;
     const oauth = getOauthInfoFromExtraConfig(selected.account.extraConfig);
@@ -321,6 +368,19 @@ export async function handleChatSurfaceRequest(
           },
           shouldDowngrade: endpointStrategy.shouldDowngrade,
           onDowngrade: (ctx) => {
+          recordProxyDebugTrace({
+            clientContext,
+            kind: 'endpoint_downgrade',
+            requestedModel,
+            actualModel: modelName,
+            downstreamPath,
+            selected,
+            endpoint: ctx.request.endpoint,
+            endpointPath: ctx.request.path,
+            status: ctx.response.status,
+            retryCount,
+            reason: ctx.errText,
+          });
           logProxy(
             selected,
             requestedModel,
@@ -342,10 +402,21 @@ export async function handleChatSurfaceRequest(
       },
       });
 
-      if (!endpointResult.ok) {
-        const status = endpointResult.status || 502;
-        const errText = endpointResult.errText || 'unknown error';
-        const rawErrText = endpointResult.rawErrText || errText;
+        if (!endpointResult.ok) {
+          const status = endpointResult.status || 502;
+          const errText = endpointResult.errText || 'unknown error';
+          const rawErrText = endpointResult.rawErrText || errText;
+        recordProxyDebugTrace({
+          clientContext,
+          kind: 'endpoint_final_failure',
+          requestedModel,
+          actualModel: modelName,
+          downstreamPath,
+          selected,
+          status,
+          retryCount,
+          reason: errText,
+        });
         await tokenRouter.recordFailure(selected.channel.id, {
           status,
           errorText: rawErrText,
@@ -523,7 +594,7 @@ export async function handleChatSurfaceRequest(
               downstreamApiKeyId,
             );
 
-            if (shouldRetryProxyRequest(failure.status, failure.reason) && retryCount < MAX_RETRIES) {
+            if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
               retryCount += 1;
               continue;
             }
@@ -590,7 +661,7 @@ export async function handleChatSurfaceRequest(
               },
             }
             : baseReader;
-          const streamResult = await streamSession.run(reader, reply.raw);
+          const streamResult = await streamSession.run(reader ? wrapReaderWithIdleTimeout(reader) : reader, reply.raw);
           rawText += decoder.decode();
 
           const latency = Date.now() - startTime;
@@ -730,7 +801,7 @@ export async function handleChatSurfaceRequest(
           downstreamApiKeyId,
         );
 
-        if (shouldRetryProxyRequest(failure.status, failure.reason) && retryCount < MAX_RETRIES) {
+        if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
           retryCount += 1;
           continue;
         }
@@ -739,6 +810,36 @@ export async function handleChatSurfaceRequest(
           model: requestedModel,
           reason: failure.reason,
         });
+
+        if (responseCacheKey && !isStream) {
+          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+          if (stale) {
+            await logProxy(
+              {
+                channel: { routeId: null, id: null },
+                account: { id: null, username: 'cache' },
+                actualModel: requestedModel,
+              },
+              requestedModel,
+              'success',
+              200,
+              latency,
+              'served stale cache after upstream failure',
+              retryCount,
+              downstreamPath,
+              stale.promptTokens,
+              stale.completionTokens,
+              stale.promptTokens + stale.completionTokens,
+              0,
+              null,
+              null,
+              clientContext,
+              downstreamApiKeyId,
+              { cacheStatus: 'stale', cacheSavedCost: 0 },
+            );
+            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
+          }
+        }
 
         return reply.code(failure.status).send({
           error: { message: failure.reason, type: 'upstream_error' },
@@ -772,6 +873,17 @@ export async function handleChatSurfaceRequest(
       });
 
       await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+      recordProxyDebugTrace({
+        clientContext,
+        kind: 'proxy_success',
+        requestedModel,
+        actualModel: modelName,
+        downstreamPath,
+        selected,
+        endpointPath: successfulUpstreamPath,
+        status: 200,
+        retryCount,
+      });
       recordDownstreamCostUsage(request, estimatedCost);
       logProxy(
         selected,
@@ -790,6 +902,7 @@ export async function handleChatSurfaceRequest(
         successfulUpstreamPath,
         clientContext,
         downstreamApiKeyId,
+        !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
       );
 
       // 异步写入精确缓存（不阻塞响应）
@@ -807,6 +920,16 @@ export async function handleChatSurfaceRequest(
       await tokenRouter.recordFailure(selected.channel.id, {
         errorText: err?.message,
         modelName,
+      });
+      recordProxyDebugTrace({
+        clientContext,
+        kind: 'proxy_exception',
+        requestedModel,
+        actualModel: modelName,
+        downstreamPath,
+        selected,
+        retryCount,
+        reason: err?.message || 'network failure',
       });
       logProxy(
         selected,
@@ -827,7 +950,7 @@ export async function handleChatSurfaceRequest(
         downstreamApiKeyId,
       );
 
-      if (retryCount < MAX_RETRIES) {
+      if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
         retryCount += 1;
         continue;
       }
@@ -836,6 +959,13 @@ export async function handleChatSurfaceRequest(
         model: requestedModel,
         reason: err?.message || 'network failure',
       });
+
+      if (responseCacheKey && !isStream) {
+        const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+        if (stale) {
+          return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
+        }
+      }
 
       return reply.code(502).send({
         error: {
@@ -903,6 +1033,41 @@ export async function handleClaudeCountTokensSurfaceRequest(
   });
   const downstreamPolicy = getDownstreamRoutingPolicy(request);
   const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
+  const responseCacheKey = buildCacheKey({
+    model: requestedModel,
+    messages: rawBody.messages,
+    temperature: 0,
+    max_tokens: null,
+  });
+  if (responseCacheKey) {
+    const cached = await lookupResponseCache(responseCacheKey);
+    if (cached) {
+      await logProxy(
+        {
+          channel: { routeId: null, id: null },
+          account: { id: null, username: 'cache' },
+          actualModel: requestedModel,
+        },
+        requestedModel,
+        'success',
+        200,
+        0,
+        null,
+        0,
+        downstreamPath,
+        cached.promptTokens,
+        cached.completionTokens,
+        cached.promptTokens + cached.completionTokens,
+        0,
+        null,
+        null,
+        clientContext,
+        downstreamApiKeyId,
+        { cacheStatus: 'hit', cacheSavedCost: 0 },
+      );
+      return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
+    }
+  }
   const excludeChannelIds: number[] = [];
   const excludeSiteIds = new Set<number>();
   let retryCount = 0;
@@ -1067,6 +1232,35 @@ export async function handleClaudeCountTokensSurfaceRequest(
           retryCount += 1;
           continue;
         }
+        if (responseCacheKey) {
+          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+          if (stale) {
+            await logProxy(
+              {
+                channel: { routeId: null, id: null },
+                account: { id: null, username: 'cache' },
+                actualModel: requestedModel,
+              },
+              requestedModel,
+              'success',
+              200,
+              latency,
+              'count_tokens stale cache fallback',
+              retryCount,
+              downstreamPath,
+              0,
+              0,
+              0,
+              0,
+              null,
+              null,
+              clientContext,
+              downstreamApiKeyId,
+              { cacheStatus: 'stale', cacheSavedCost: 0 },
+            );
+            return reply.header('X-Cache', 'STALE').type('application/json').send(JSON.parse(stale.body));
+          }
+        }
         return reply.code(upstream.status).type(contentType).send(payload);
       }
 
@@ -1089,8 +1283,17 @@ export async function handleClaudeCountTokensSurfaceRequest(
         upstreamRequest.path,
         clientContext,
         downstreamApiKeyId,
+        { cacheStatus: 'miss', cacheSavedCost: 0 },
       );
-      return reply.code(upstream.status).type(contentType).send(payload);
+      if (responseCacheKey) {
+        writeResponseCache(responseCacheKey, requestedModel, {
+          body: JSON.stringify(payload),
+          isStream: false,
+          promptTokens: 0,
+          completionTokens: 0,
+        }).catch(() => {});
+      }
+      return reply.header('X-Cache', 'MISS').code(upstream.status).type(contentType).send(payload);
     } catch (error: any) {
       await tokenRouter.recordFailure(selected.channel.id, {
         errorText: error?.message,
@@ -1121,6 +1324,12 @@ export async function handleClaudeCountTokensSurfaceRequest(
         retryCount += 1;
         continue;
       }
+      if (responseCacheKey) {
+        const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+        if (stale) {
+          return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
+        }
+      }
       return reply.code(502).send({
         error: {
           message: `Upstream error: ${error?.message || 'network failure'}`,
@@ -1148,6 +1357,7 @@ async function logProxy(
   upstreamPath: string | null = null,
   clientContext: DownstreamClientContext | null = null,
   downstreamApiKeyId: number | null = null,
+  cacheMeta: { cacheStatus?: string | null; cacheSavedCost?: number | null } | null = null,
 ) {
   try {
     const createdAt = formatUtcSqlDateTime(new Date());
@@ -1176,6 +1386,8 @@ async function logProxy(
       totalTokens,
       estimatedCost,
       billingDetails,
+      cacheStatus: cacheMeta?.cacheStatus || null,
+      cacheSavedCost: cacheMeta?.cacheSavedCost ?? 0,
       clientFamily: clientContext?.clientKind || null,
       clientAppId: clientContext?.clientAppId || null,
       clientAppName: clientContext?.clientAppName || null,

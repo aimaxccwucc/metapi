@@ -5,12 +5,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 
+const fetchModelPricingCatalogMock = vi.fn();
 const getApiTokensMock = vi.fn();
 const getApiTokenMock = vi.fn();
 const createApiTokenMock = vi.fn();
 const getUserGroupsMock = vi.fn();
 const deleteApiTokenMock = vi.fn();
 const getModelsMock = vi.fn();
+
+vi.mock('../../services/modelPricingService.js', async () => {
+  const actual = await vi.importActual<typeof import('../../services/modelPricingService.js')>('../../services/modelPricingService.js');
+  return {
+    ...actual,
+    fetchModelPricingCatalog: (...args: unknown[]) => fetchModelPricingCatalogMock(...args),
+  };
+});
 
 vi.mock('../../services/platforms/index.js', () => ({
   getAdapter: () => ({
@@ -91,6 +100,8 @@ describe('account token coverage refresh', { timeout: 15_000 }, () => {
   });
 
   beforeEach(async () => {
+    fetchModelPricingCatalogMock.mockReset();
+    fetchModelPricingCatalogMock.mockResolvedValue(null);
     getApiTokensMock.mockReset();
     getApiTokenMock.mockReset();
     createApiTokenMock.mockReset();

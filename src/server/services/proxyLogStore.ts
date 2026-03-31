@@ -2,6 +2,7 @@ import {
   db,
   schema,
   hasProxyLogBillingDetailsColumn,
+  hasProxyLogCacheColumns,
   hasProxyLogClientColumns,
   hasProxyLogDownstreamApiKeyIdColumn,
 } from '../db/index.js';
@@ -25,6 +26,8 @@ export type ProxyLogInsertInput = {
   clientAppId?: string | null;
   clientAppName?: string | null;
   clientConfidence?: string | null;
+  cacheStatus?: string | null;
+  cacheSavedCost?: number | null;
   errorMessage?: string | null;
   retryCount?: number | null;
   createdAt?: string | null;
@@ -52,6 +55,13 @@ function buildProxyLogCoreSelectFields() {
   };
 }
 
+function buildProxyLogCacheSelectFields() {
+  return {
+    cacheStatus: schema.proxyLogs.cacheStatus,
+    cacheSavedCost: schema.proxyLogs.cacheSavedCost,
+  };
+}
+
 function buildProxyLogClientSelectFields() {
   return {
     clientFamily: schema.proxyLogs.clientFamily,
@@ -64,16 +74,20 @@ function buildProxyLogClientSelectFields() {
 function buildProxyLogSelectFields(options?: {
   includeBillingDetails?: boolean;
   includeClientFields?: boolean;
+  includeCacheFields?: boolean;
 }) {
   return {
     ...buildProxyLogCoreSelectFields(),
+    ...(options?.includeCacheFields ? buildProxyLogCacheSelectFields() : {}),
     ...(options?.includeClientFields ? buildProxyLogClientSelectFields() : {}),
     ...(options?.includeBillingDetails ? { billingDetails: schema.proxyLogs.billingDetails } : {}),
   };
 }
 
-export function getProxyLogBaseSelectFields() {
-  return buildProxyLogCoreSelectFields();
+export async function getProxyLogBaseSelectFields() {
+  return buildProxyLogSelectFields({
+    includeCacheFields: await hasProxyLogCacheColumns(),
+  });
 }
 
 export type ProxyLogSelectFields = ReturnType<typeof buildProxyLogSelectFields>;
@@ -81,6 +95,7 @@ export type ProxyLogSelectFields = ReturnType<typeof buildProxyLogSelectFields>;
 export type ResolvedProxyLogSelectFields = {
   includeBillingDetails: boolean;
   includeClientFields: boolean;
+  includeCacheFields: boolean;
   fields: ProxyLogSelectFields;
 };
 
@@ -92,13 +107,16 @@ export async function resolveProxyLogSelectFields(options?: {
     && await hasProxyLogBillingDetailsColumn();
   const includeClientFields = options?.includeClientFields !== false
     && await hasProxyLogClientColumns();
+  const includeCacheFields = await hasProxyLogCacheColumns();
 
   return {
     includeBillingDetails,
     includeClientFields,
+    includeCacheFields,
     fields: buildProxyLogSelectFields({
       includeBillingDetails,
       includeClientFields,
+      includeCacheFields,
     }),
   };
 }
@@ -117,9 +135,11 @@ export async function withProxyLogSelectFields<T>(
         selection = {
           includeBillingDetails: false,
           includeClientFields: selection.includeClientFields,
+          includeCacheFields: selection.includeCacheFields,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: false,
             includeClientFields: selection.includeClientFields,
+            includeCacheFields: selection.includeCacheFields,
           }),
         };
         continue;
@@ -129,9 +149,11 @@ export async function withProxyLogSelectFields<T>(
         selection = {
           includeBillingDetails: selection.includeBillingDetails,
           includeClientFields: false,
+          includeCacheFields: selection.includeCacheFields,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: selection.includeBillingDetails,
             includeClientFields: false,
+            includeCacheFields: selection.includeCacheFields,
           }),
         };
         continue;
@@ -199,6 +221,19 @@ export function isMissingProxyLogClientColumnsError(error: unknown): boolean {
     );
 }
 
+export function isMissingProxyLogCacheColumnsError(error: unknown): boolean {
+  const lowered = normalizeProxyLogStoreErrorMessage(error);
+  const hasCacheColumnReference = ['cache_status', 'cache_saved_cost'].some((columnName) => lowered.includes(columnName));
+
+  return hasCacheColumnReference
+    && (
+      lowered.includes('does not exist')
+      || lowered.includes('unknown column')
+      || lowered.includes('no such column')
+      || lowered.includes('has no column named')
+    );
+}
+
 export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> {
   const baseValues = {
     routeId: input.routeId ?? null,
@@ -232,10 +267,12 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
   ].some((value) => value != null && String(value).trim().length > 0);
   const includeClientFields = requestedClientFields
     && await hasProxyLogClientColumns();
+  const includeCacheFields = await hasProxyLogCacheColumns();
 
   let allowBillingDetails = includeBillingDetails;
   let allowDownstreamApiKeyId = includeDownstreamApiKeyId;
   let allowClientFields = includeClientFields;
+  let allowCacheFields = includeCacheFields;
 
   while (true) {
     const values = {
@@ -248,6 +285,12 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
           clientAppId: input.clientAppId ?? null,
           clientAppName: input.clientAppName ?? null,
           clientConfidence: input.clientConfidence ?? null,
+        }
+        : {}),
+      ...(allowCacheFields
+        ? {
+          cacheStatus: input.cacheStatus ?? null,
+          cacheSavedCost: input.cacheSavedCost ?? 0,
         }
         : {}),
     };
@@ -268,6 +311,11 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
 
       if (allowClientFields && isMissingProxyLogClientColumnsError(error)) {
         allowClientFields = false;
+        continue;
+      }
+
+      if (allowCacheFields && isMissingProxyLogCacheColumnsError(error)) {
+        allowCacheFields = false;
         continue;
       }
 

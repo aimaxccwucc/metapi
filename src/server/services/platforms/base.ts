@@ -6,6 +6,8 @@ export interface CheckinResult {
   success: boolean;
   message: string;
   reward?: string;
+  status?: number | string | null;
+  httpStatus?: number | null;
 }
 
 export interface SubscriptionPlanSummary {

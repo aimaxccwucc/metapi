@@ -1,10 +1,14 @@
-import { gzipSync, zstdCompressSync } from 'node:zlib';
+import { gzipSync, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { Response } from 'undici';
 import { describe, expect, it } from 'vitest';
 import { materializeErrorResponse, readRuntimeResponseText } from './types.js';
 
+const itIfZstd = typeof zstdCompressSync === 'function' && typeof zstdDecompressSync === 'function'
+  ? it
+  : it.skip;
+
 describe('readRuntimeResponseText', () => {
-  it('decompresses zstd responses before reading the body text', async () => {
+  itIfZstd('decompresses zstd responses before reading the body text', async () => {
     const payload = JSON.stringify({ ok: true, text: 'hello zstd' });
     const response = new Response(zstdCompressSync(Buffer.from(payload)), {
       status: 200,
@@ -17,7 +21,7 @@ describe('readRuntimeResponseText', () => {
     await expect(readRuntimeResponseText(response)).resolves.toBe(payload);
   });
 
-  it('decompresses stacked content-encodings in reverse order', async () => {
+  itIfZstd('decompresses stacked content-encodings in reverse order', async () => {
     const payload = JSON.stringify({ ok: true, text: 'stacked' });
     const response = new Response(
       zstdCompressSync(gzipSync(Buffer.from(payload))),
@@ -35,7 +39,7 @@ describe('readRuntimeResponseText', () => {
 });
 
 describe('materializeErrorResponse', () => {
-  it('decodes compressed error bodies and strips compression headers', async () => {
+  itIfZstd('decodes compressed error bodies and strips compression headers', async () => {
     const payload = JSON.stringify({ error: { message: 'upstream failed' } });
     const response = new Response(zstdCompressSync(Buffer.from(payload)), {
       status: 503,

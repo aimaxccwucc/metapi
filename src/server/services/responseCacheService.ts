@@ -4,6 +4,7 @@ import { eq, lt, desc } from 'drizzle-orm';
 
 // 默认 TTL：1 小时
 const DEFAULT_TTL_MS = 60 * 60 * 1000;
+const DEFAULT_STALE_IF_ERROR_MS = 10 * 60 * 1000;
 // 缓存最大行数（超出时按 hit_count 升序淘汰）
 const MAX_CACHE_ROWS = 2000;
 
@@ -72,6 +73,43 @@ export async function lookupResponseCache(cacheKey: string): Promise<CachedRespo
     .where(eq(schema.responseCache.cacheKey, cacheKey))
     .run()
     .catch(() => {});
+
+  return {
+    body: row.responseBody,
+    isStream: row.isStream ?? false,
+    promptTokens: row.promptTokens ?? 0,
+    completionTokens: row.completionTokens ?? 0,
+  };
+}
+
+export async function lookupStaleResponseCache(
+  cacheKey: string,
+  maxStaleMs = DEFAULT_STALE_IF_ERROR_MS,
+): Promise<CachedResponse | null> {
+  let row: typeof schema.responseCache.$inferSelect | undefined;
+  try {
+    row = await db
+      .select()
+      .from(schema.responseCache)
+      .where(eq(schema.responseCache.cacheKey, cacheKey))
+      .get();
+  } catch {
+    return null;
+  }
+  if (!row) return null;
+
+  const expiresAtMs = new Date(row.expiresAt).getTime();
+  const nowMs = Date.now();
+  if (Number.isNaN(expiresAtMs)) return null;
+  if (expiresAtMs > nowMs) {
+    return {
+      body: row.responseBody,
+      isStream: row.isStream ?? false,
+      promptTokens: row.promptTokens ?? 0,
+      completionTokens: row.completionTokens ?? 0,
+    };
+  }
+  if ((nowMs - expiresAtMs) > Math.max(1_000, maxStaleMs)) return null;
 
   return {
     body: row.responseBody,

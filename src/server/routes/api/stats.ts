@@ -17,6 +17,7 @@ import {
   parseProxyLogBillingDetails,
   withProxyLogSelectFields,
 } from '../../services/proxyLogStore.js';
+import { listProxyDebugTraces } from '../../services/proxyDebugTraceStore.js';
 import { parseProxyLogMessageMeta } from '../proxy/logPathMeta.js';
 import { requiresManagedAccountTokens } from '../../services/accountExtraConfig.js';
 import { ACCOUNT_TOKEN_VALUE_STATUS_READY } from '../../services/accountTokenService.js';
@@ -491,11 +492,28 @@ function mapProxyLogRow(
     downstreamKeyName: row.downstream_api_keys?.name || null,
     downstreamKeyGroupName: row.downstream_api_keys?.groupName || null,
     downstreamKeyTags: parseDownstreamKeyTags(row.downstream_api_keys?.tags),
+    cacheStatus: typeof row.proxy_logs.cacheStatus === 'string' ? row.proxy_logs.cacheStatus : null,
+    cacheSavedCost: Number(row.proxy_logs.cacheSavedCost || 0),
   };
 }
 
 export async function statsRoutes(app: FastifyInstance) {
-  const proxyLogBaseFields = getProxyLogBaseSelectFields();
+  const proxyLogBaseFields = await getProxyLogBaseSelectFields();
+
+  app.get<{ Querystring: { traceId?: string; sessionId?: string; traceHint?: string; limit?: string } }>('/api/stats/proxy-debug-traces', async (request) => {
+    const limit = Number.parseInt(request.query.limit || '100', 10);
+    const items = listProxyDebugTraces({
+      traceId: request.query.traceId,
+      sessionId: request.query.sessionId,
+      traceHint: request.query.traceHint,
+      limit: Number.isFinite(limit) ? limit : 100,
+    });
+    return {
+      success: true,
+      total: items.length,
+      items,
+    };
+  });
 
   // Dashboard summary
   app.get('/api/stats/dashboard', async () => {
@@ -765,6 +783,10 @@ export async function statsRoutes(app: FastifyInstance) {
       failedCount: sql<number>`coalesce(sum(case when coalesce(${schema.proxyLogs.status}, '') <> 'success' then 1 else 0 end), 0)`,
       totalCost: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.estimatedCost}, 0)), 0)`,
       totalTokensAll: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.totalTokens}, 0)), 0)`,
+      cacheHitCount: sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) = 'hit' then 1 else 0 end), 0)`,
+      cacheMissCount: sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) = 'miss' then 1 else 0 end), 0)`,
+      cacheStaleCount: sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) = 'stale' then 1 else 0 end), 0)`,
+      cacheSavedCost: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.cacheSavedCost}, 0)), 0)`,
     }).from(schema.proxyLogs)
       .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
       .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
@@ -786,6 +808,10 @@ export async function statsRoutes(app: FastifyInstance) {
         failedCount: Number(summaryRow?.failedCount || 0),
         totalCost: toRoundedMicroNumber(summaryRow?.totalCost),
         totalTokensAll: Number(summaryRow?.totalTokensAll || 0),
+        cacheHitCount: Number(summaryRow?.cacheHitCount || 0),
+        cacheMissCount: Number(summaryRow?.cacheMissCount || 0),
+        cacheStaleCount: Number(summaryRow?.cacheStaleCount || 0),
+        cacheSavedCost: toRoundedMicroNumber(summaryRow?.cacheSavedCost),
       },
     };
   });

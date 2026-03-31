@@ -16,6 +16,7 @@ export async function modelsProxyRoute(app: FastifyInstance) {
       tokenRouter,
       refreshModelsAndRebuildRoutes,
       isModelAllowed: isModelAllowedByPolicyOrAllowedRoutes,
+      allowRefreshOnEmpty: false,
     });
   });
 }

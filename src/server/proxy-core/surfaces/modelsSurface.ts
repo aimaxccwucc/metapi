@@ -9,38 +9,42 @@ type ModelsSurfaceInput = {
   responseFormat: 'openai' | 'claude';
   tokenRouter: {
     getAvailableModels(downstreamPolicy?: unknown): Promise<string[]>;
-    explainSelection(modelName: string, excludeChannelIds: number[], downstreamPolicy: unknown): Promise<{
-      selectedChannelId?: number | null;
-    }>;
   };
   refreshModelsAndRebuildRoutes(): Promise<unknown>;
   isModelAllowed(modelName: string, downstreamPolicy: unknown): Promise<boolean>;
+  allowRefreshOnEmpty?: boolean;
   now?: () => Date;
 };
 
-async function readVisibleModels(input: ModelsSurfaceInput): Promise<string[]> {
-  const deduped = Array.from(new Set(await input.tokenRouter.getAvailableModels(input.downstreamPolicy)))
+type VisibleModelsRead = {
+  rawModels: string[];
+  allowedModels: string[];
+};
+
+async function readVisibleModels(input: ModelsSurfaceInput): Promise<VisibleModelsRead> {
+  const rawModels = Array.from(new Set(await input.tokenRouter.getAvailableModels(input.downstreamPolicy)))
     .filter((modelName) => !isSearchPseudoModel(modelName))
     .sort();
-  const allowed: string[] = [];
-  for (const modelName of deduped) {
+  const allowedModels: string[] = [];
+  for (const modelName of rawModels) {
     if (!await input.isModelAllowed(modelName, input.downstreamPolicy)) {
       continue;
     }
-    const decision = await input.tokenRouter.explainSelection(modelName, [], input.downstreamPolicy);
-    if (typeof decision.selectedChannelId === 'number') {
-      allowed.push(modelName);
-    }
+    allowedModels.push(modelName);
   }
-  return allowed;
+  return {
+    rawModels,
+    allowedModels,
+  };
 }
 
 export async function listModelsSurface(input: ModelsSurfaceInput) {
-  let models = await readVisibleModels(input);
-  if (models.length === 0) {
+  let read = await readVisibleModels(input);
+  if (read.rawModels.length === 0 && input.allowRefreshOnEmpty !== false) {
     await input.refreshModelsAndRebuildRoutes();
-    models = await readVisibleModels(input);
+    read = await readVisibleModels(input);
   }
+  const models = read.allowedModels;
 
   const now = input.now?.() ?? new Date();
   if (input.responseFormat === 'claude') {

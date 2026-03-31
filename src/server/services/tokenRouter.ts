@@ -1,5 +1,5 @@
 ﻿import { createHash } from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { minimatch } from 'minimatch';
 import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { upsertSetting } from '../db/upsertSetting.js';
@@ -31,6 +31,7 @@ import {
   loadPersistedModelCircuits,
 } from './modelCircuitBreaker.js';
 import { classifyProxyFailureCategory } from './proxyRetryPolicy.js';
+import { parseCodexQuotaResetHint } from './oauth/quota.js';
 
 interface RouteMatch {
   route: RouteRow;
@@ -138,6 +139,7 @@ const ACCOUNT_RATE_LIMIT_BURST_MIN = 2;
 const ACCOUNT_RATE_LIMIT_BURST_MAX = 6;
 const ACCOUNT_RATE_LIMIT_REFILL_MIN_PER_SEC = 0.15;
 const ACCOUNT_RATE_LIMIT_REFILL_MAX_PER_SEC = 1.2;
+const SHORT_WINDOW_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 
 const SITE_PROTOCOL_FAILURE_PATTERNS: RegExp[] = [
   /unsupported\s+legacy\s+protocol/i,
@@ -202,6 +204,14 @@ const SITE_TRANSIENT_FAILURE_PATTERNS: RegExp[] = [
   /connection\s+refused/i,
   /econnreset/i,
   /econnrefused/i,
+];
+
+const USAGE_LIMIT_RATE_LIMIT_PATTERNS: RegExp[] = [
+  /usage_limit_reached/i,
+  /usage\s+limit\s+has\s+been\s+reached/i,
+  /quota\s+exceeded/i,
+  /rate\s+limit/i,
+  /\blimit\b/i,
 ];
 
 type SiteRuntimeHealthPersistencePayload = {
@@ -529,6 +539,12 @@ function matchesAnyPattern(patterns: RegExp[], input?: string | null): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
 
+function isUsageLimitRateLimitFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  const status = typeof context.status === 'number' ? context.status : 0;
+  if (status !== 429) return false;
+  return matchesAnyPattern(USAGE_LIMIT_RATE_LIMIT_PATTERNS, context.errorText);
+}
+
 function clampNumber(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -555,6 +571,10 @@ function readNullableTimestamp(value: unknown): number | null {
 function resolveSiteRuntimeFailurePenalty(context: SiteRuntimeFailureContext = {}): number {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
+
+  if (isUsageLimitRateLimitFailure({ status, errorText })) {
+    return 0.4;
+  }
 
   if (status >= 500 || matchesAnyPattern(SITE_TRANSIENT_FAILURE_PATTERNS, errorText)) {
     return 2.5;
@@ -666,7 +686,104 @@ function shouldApplySiteModelFailureTracking(context: SiteRuntimeFailureContext 
 function isTransientSiteRuntimeFailure(context: SiteRuntimeFailureContext = {}): boolean {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
+  if (isUsageLimitRateLimitFailure({ status, errorText })) {
+    return false;
+  }
   return status >= 500 || status === 429 || matchesAnyPattern(SITE_TRANSIENT_FAILURE_PATTERNS, errorText);
+}
+
+function buildCredentialScopedCooldownFingerprint(
+  account: typeof schema.accounts.$inferSelect,
+  channel: typeof schema.routeChannels.$inferSelect,
+): string | null {
+  if (typeof channel.tokenId === 'number' && channel.tokenId > 0) {
+    return `token:${channel.tokenId}`;
+  }
+
+  const oauth = getOauthInfoFromExtraConfig(account.extraConfig);
+  if (oauth?.provider) {
+    const accountKey = String(oauth.accountKey || oauth.accountId || oauth.email || '').trim().toLowerCase();
+    if (accountKey) {
+      return `oauth:${oauth.provider}:${accountKey}`;
+    }
+  }
+
+  if (typeof account.id === 'number' && account.id > 0) {
+    return `account:${account.id}`;
+  }
+
+  return null;
+}
+
+function resolveShortWindowLimitCooldownUntil(
+  account: typeof schema.accounts.$inferSelect,
+  context: SiteRuntimeFailureContext = {},
+  nowMs = Date.now(),
+): string | null {
+  const status = typeof context.status === 'number' ? context.status : 0;
+  const errorText = (context.errorText || '').trim();
+  if (!isUsageLimitRateLimitFailure({ status, errorText })) return null;
+
+  const resetHint = parseCodexQuotaResetHint(status, errorText, nowMs);
+  if (resetHint?.resetAt) {
+    const hintMs = Date.parse(resetHint.resetAt);
+    if (Number.isFinite(hintMs) && hintMs > nowMs) {
+      return new Date(hintMs).toISOString();
+    }
+  }
+
+  const oauth = getOauthInfoFromExtraConfig(account.extraConfig);
+  const storedResetAt = oauth?.quota?.lastLimitResetAt;
+  if (storedResetAt) {
+    const storedMs = Date.parse(storedResetAt);
+    if (Number.isFinite(storedMs) && storedMs > nowMs) {
+      return new Date(storedMs).toISOString();
+    }
+  }
+
+  return new Date(nowMs + SHORT_WINDOW_LIMIT_COOLDOWN_MS).toISOString();
+}
+
+async function loadCredentialScopedChannelIds(
+  channel: typeof schema.routeChannels.$inferSelect,
+  account: typeof schema.accounts.$inferSelect,
+): Promise<number[]> {
+  if (typeof channel.tokenId === 'number' && channel.tokenId > 0) {
+    const tokenRows = await db.select({ id: schema.routeChannels.id })
+      .from(schema.routeChannels)
+      .where(eq(schema.routeChannels.tokenId, channel.tokenId))
+      .all();
+    return tokenRows.map((row) => row.id);
+  }
+
+  const credentialScope = buildCredentialScopedCooldownFingerprint(account, channel);
+  if (credentialScope?.startsWith('oauth:')) {
+    const rows = await db.select({
+      channelId: schema.routeChannels.id,
+      accountId: schema.accounts.id,
+      extraConfig: schema.accounts.extraConfig,
+      tokenId: schema.routeChannels.tokenId,
+    })
+      .from(schema.routeChannels)
+      .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
+      .all();
+    return rows
+      .filter((row) => {
+        const currentChannel = { tokenId: row.tokenId } as typeof schema.routeChannels.$inferSelect;
+        const currentAccount = { id: row.accountId, extraConfig: row.extraConfig } as typeof schema.accounts.$inferSelect;
+        return buildCredentialScopedCooldownFingerprint(currentAccount, currentChannel) === credentialScope;
+      })
+      .map((row) => row.channelId);
+  }
+
+  const accountRows = await db.select({ id: schema.routeChannels.id })
+    .from(schema.routeChannels)
+    .where(and(
+      eq(schema.routeChannels.accountId, account.id),
+      isNull(schema.routeChannels.tokenId),
+    ))
+    .all();
+  return accountRows.map((row) => row.id);
 }
 
 function getDecayedSiteRuntimePenalty(state: SiteRuntimeHealthState, nowMs: number): number {
@@ -927,6 +1044,9 @@ function applyRuntimeHealthSuccess(state: SiteRuntimeHealthState, latencyMs: num
     ? normalizedLatencyMs
     : (state.latencyEmaMs * (1 - SITE_RUNTIME_LATENCY_EMA_ALPHA))
       + (normalizedLatencyMs * SITE_RUNTIME_LATENCY_EMA_ALPHA);
+  if (normalizedLatencyMs >= config.slowSuccessLatencyThresholdMs) {
+    state.penaltyScore += config.slowSuccessPenaltyScore;
+  }
 }
 
 function shouldPersistSiteRuntimeHealthState(state: SiteRuntimeHealthState, nowMs = Date.now()): boolean {
@@ -2248,13 +2368,16 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
     if (!isExplicitGroupRoute(route)) {
       return [route.id];
     }
-    return Array.from(new Set(route.sourceRouteIds.filter((routeId) => Number.isFinite(routeId) && routeId > 0)));
+    const sourceRouteIds = Array.from(new Set(route.sourceRouteIds.filter((routeId) => Number.isFinite(routeId) && routeId > 0)));
+    return sourceRouteIds.length > 0 ? sourceRouteIds : [route.id];
   })();
   const enabledSourceRoutes = isExplicitGroupRoute(route)
     ? enabledRoutes.filter((item) => (
       routeIds.includes(item.id)
-      && !isExplicitGroupRoute(item)
-      && isExactRouteModelPattern(item.modelPattern)
+      && (
+        item.id === route.id
+        || (!isExplicitGroupRoute(item) && isExactRouteModelPattern(item.modelPattern))
+      )
     ))
     : enabledRoutes.filter((item) => routeIds.includes(item.id));
   const enabledSourceRouteIds = enabledSourceRoutes.map((item) => item.id);
@@ -3413,8 +3536,7 @@ function buildVisibleEnabledRoutes(routes: RouteRow[]): RouteRow[] {
   return routes.filter((route: RouteRow) => {
     if (!route.enabled) return false;
     if (isExplicitGroupRoute(route)) {
-      return normalizeRouteDisplayName(route.displayName).length > 0
-        && route.sourceRouteIds.length > 0;
+      return normalizeRouteDisplayName(route.displayName).length > 0;
     }
     return hasCustomDisplayName(route);
   });
@@ -3425,6 +3547,9 @@ function buildVisibleEnabledRoutesForPolicy(
   downstreamPolicy: DownstreamRoutingPolicy,
 ): RouteRow[] {
   const visibleRoutes = buildVisibleEnabledRoutes(routes);
+  const globalAllowedPatterns = Array.isArray(downstreamPolicy.globalAllowedModels)
+    ? downstreamPolicy.globalAllowedModels
+    : [];
   const supportedPatterns = Array.isArray(downstreamPolicy.supportedModels)
     ? downstreamPolicy.supportedModels
     : [];
@@ -3434,11 +3559,22 @@ function buildVisibleEnabledRoutesForPolicy(
       : [],
   );
 
-  if (supportedPatterns.length === 0 && allowedRouteIdSet.size === 0) {
+  if (globalAllowedPatterns.length === 0 && supportedPatterns.length === 0 && allowedRouteIdSet.size === 0) {
     return visibleRoutes;
   }
 
-  return visibleRoutes.filter((route) => {
+  const globallyFilteredRoutes = globalAllowedPatterns.length > 0
+    ? visibleRoutes.filter((route) => {
+      const exposedName = getExposedModelNameForRoute(route).trim();
+      return !!exposedName && globalAllowedPatterns.some((pattern) => matchesModelPattern(exposedName, pattern));
+    })
+    : visibleRoutes;
+
+  if (supportedPatterns.length === 0 && allowedRouteIdSet.size === 0) {
+    return globallyFilteredRoutes;
+  }
+
+  return globallyFilteredRoutes.filter((route) => {
     const exposedName = getExposedModelNameForRoute(route).trim();
     if (!exposedName) return false;
     if (supportedPatterns.some((pattern) => matchesModelPattern(exposedName, pattern))) {
@@ -3503,6 +3639,13 @@ function channelSupportsRequestedModel(channelSourceModel: string | null | undef
 }
 
 function isModelAllowedByDownstreamPolicy(requestedModel: string, policy: DownstreamRoutingPolicy): boolean {
+  const globalAllowedPatterns = Array.isArray(policy.globalAllowedModels)
+    ? policy.globalAllowedModels
+    : [];
+  if (globalAllowedPatterns.length > 0 && !globalAllowedPatterns.some((pattern) => matchesModelPattern(requestedModel, pattern))) {
+    return false;
+  }
+
   const supportedPatterns = Array.isArray(policy.supportedModels)
     ? policy.supportedModels
     : [];
@@ -3705,6 +3848,15 @@ function isExplicitTokenChannel(candidate: RouteChannelCandidate): boolean {
 }
 
 export class TokenRouter {
+  async getVisiblePublicModels(): Promise<string[]> {
+    const routes = await loadEnabledRoutes();
+    return Array.from(new Set(
+      buildVisibleEnabledRoutes(routes)
+        .map((route) => getExposedModelNameForRoute(route).trim())
+        .filter((name) => name.length > 0),
+    ));
+  }
+
   /**
    * Find matching route and select a channel for the given model.
    * Returns null if no route/channel available.
@@ -4477,18 +4629,26 @@ export class TokenRouter {
     const route = row.token_routes;
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
-    const failCount = (ch.failCount ?? 0) + 1;
     const normalizedContext: SiteRuntimeFailureContext = typeof context === 'string'
       ? { modelName: context }
       : (context ?? {});
+    const shortWindowLimitCooldownUntil = resolveShortWindowLimitCooldownUntil(account, normalizedContext, nowMs);
+    const failCount = shortWindowLimitCooldownUntil ? 0 : ((ch.failCount ?? 0) + 1);
     const isProtocolFailure = matchesAnyPattern(SITE_PROTOCOL_FAILURE_PATTERNS, normalizedContext.errorText);
     const routeStrategy = resolveRouteStrategy(route);
+    const affectedChannelIds = shortWindowLimitCooldownUntil
+      ? await loadCredentialScopedChannelIds(ch, account)
+      : [channelId];
     let cooldownUntil: string | null = null;
     let consecutiveFailCount = Math.max(0, ch.consecutiveFailCount ?? 0) + 1;
     let cooldownLevel = Math.max(0, ch.cooldownLevel ?? 0);
     const failureCategory = classifyProxyFailureCategory(normalizedContext.status, normalizedContext.errorText);
 
-    if (routeStrategy === 'round_robin') {
+    if (shortWindowLimitCooldownUntil) {
+      cooldownUntil = shortWindowLimitCooldownUntil;
+      consecutiveFailCount = 0;
+      cooldownLevel = 0;
+    } else if (routeStrategy === 'round_robin') {
       if (shouldApplyImmediateRoundRobinCooldown(failureCategory)) {
         cooldownLevel = Math.max(
           cooldownLevel,
@@ -4525,15 +4685,17 @@ export class TokenRouter {
       consecutiveFailCount,
       cooldownLevel,
       cooldownUntil,
-    }).where(eq(schema.routeChannels.id, channelId)).run();
+    }).where(inArray(schema.routeChannels.id, affectedChannelIds)).run();
 
-    patchCachedChannel(channelId, (channel) => {
-      channel.failCount = failCount;
-      channel.lastFailAt = nowIso;
-      channel.cooldownUntil = cooldownUntil;
-      channel.consecutiveFailCount = consecutiveFailCount;
-      channel.cooldownLevel = cooldownLevel;
-    });
+    for (const affectedChannelId of affectedChannelIds) {
+      patchCachedChannel(affectedChannelId, (channel) => {
+        channel.failCount = failCount;
+        channel.lastFailAt = nowIso;
+        channel.cooldownUntil = cooldownUntil;
+        channel.consecutiveFailCount = consecutiveFailCount;
+        channel.cooldownLevel = cooldownLevel;
+      });
+    }
     releaseChannelSelectionLease(channelId);
     releaseAccountSelectionLease(account.id, nowMs);
     clearStickyBindingForChannel(channelId);
@@ -4596,10 +4758,29 @@ export class TokenRouter {
    */
   async getAvailableModels(downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<string[]> {
     const routes = await loadEnabledRoutes();
-    const exposed = buildVisibleEnabledRoutesForPolicy(routes, downstreamPolicy)
-      .map((route) => getExposedModelNameForRoute(route).trim())
-      .filter((name) => name.length > 0);
-    return Array.from(new Set(exposed));
+    const publicSurfaceOnly = downstreamPolicy.publicRoutesOnly === true;
+    const exposedNames = Array.from(new Set(
+      (publicSurfaceOnly
+        ? routes.filter((route) => route.enabled && isExplicitGroupRoute(route) && normalizeRouteDisplayName(route.displayName).length > 0)
+        : buildVisibleEnabledRoutesForPolicy(routes, downstreamPolicy)
+      )
+        .map((route) => getExposedModelNameForRoute(route).trim())
+        .filter((name) => name.length > 0),
+    ));
+
+    const resolutionPolicy = publicSurfaceOnly
+      ? DEFAULT_DOWNSTREAM_POLICY
+      : downstreamPolicy;
+    const routable: string[] = [];
+    for (const modelName of exposedNames) {
+      const match = await this.findRoute(modelName, resolutionPolicy);
+      if (!match) continue;
+      const selected = await this.selectFromMatch(match, modelName, resolutionPolicy, [], false);
+      if (selected) {
+        routable.push(modelName);
+      }
+    }
+    return routable;
   }
 
   // --- Private methods ---
@@ -4827,6 +5008,13 @@ export class TokenRouter {
       routes = buildVisibleEnabledRoutes(routes);
     }
 
+    const globalAllowedPatterns = Array.isArray(downstreamPolicy.globalAllowedModels)
+      ? downstreamPolicy.globalAllowedModels
+      : [];
+    if (globalAllowedPatterns.length > 0 && !globalAllowedPatterns.some((pattern) => matchesModelPattern(model, pattern))) {
+      return null;
+    }
+
     const supportedPatterns = Array.isArray(downstreamPolicy.supportedModels)
       ? downstreamPolicy.supportedModels
       : [];
@@ -4845,12 +5033,20 @@ export class TokenRouter {
   }
 
   private async findRouteById(routeId: number, downstreamPolicy: DownstreamRoutingPolicy): Promise<RouteMatch | null> {
-    if (downstreamPolicy.allowedRouteIds.length > 0 && !downstreamPolicy.allowedRouteIds.includes(routeId)) {
+    const route = (await loadEnabledRoutes()).find((item) => item.id === routeId);
+    if (!route) return null;
+
+    const exposedName = getExposedModelNameForRoute(route).trim();
+    const globalAllowedPatterns = Array.isArray(downstreamPolicy.globalAllowedModels)
+      ? downstreamPolicy.globalAllowedModels
+      : [];
+    if (globalAllowedPatterns.length > 0 && !globalAllowedPatterns.some((pattern) => matchesModelPattern(exposedName, pattern))) {
       return null;
     }
 
-    const route = (await loadEnabledRoutes()).find((item) => item.id === routeId);
-    if (!route) return null;
+    if (downstreamPolicy.allowedRouteIds.length > 0 && !downstreamPolicy.allowedRouteIds.includes(routeId)) {
+      return null;
+    }
 
     return await this.loadRouteMatch(route);
   }

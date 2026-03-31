@@ -55,6 +55,13 @@ describe('buildConfig', () => {
     expect(config.claudeClientSecret).toBe('');
     expect(config.geminiCliClientId).toBe('681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com');
     expect(config.geminiCliClientSecret).toBe('');
+    expect(config.upstreamRequestTimeoutMs).toBe(20_000);
+    expect(config.upstreamStreamFirstByteTimeoutMs).toBe(15_000);
+    expect(config.upstreamRequestBudgetMs).toBe(30_000);
+    expect(config.upstreamStreamIdleTimeoutMs).toBe(20_000);
+    expect(config.responseCacheStaleIfErrorMs).toBe(600_000);
+    expect(config.slowSuccessLatencyThresholdMs).toBe(15_000);
+    expect(config.slowSuccessPenaltyScore).toBe(0.25);
   });
 
   it('allows overriding the codex websocket beta gate from environment', () => {
@@ -63,6 +70,48 @@ describe('buildConfig', () => {
     });
 
     expect(config.codexResponsesWebsocketBeta).toBe('responses_websockets=2099-01-01');
+  });
+
+  it('accepts upstream timeout overrides from environment', () => {
+    const config = buildConfig({
+      UPSTREAM_REQUEST_TIMEOUT_MS: '28000',
+      UPSTREAM_STREAM_FIRST_BYTE_TIMEOUT_MS: '9000',
+      UPSTREAM_REQUEST_BUDGET_MS: '45000',
+      UPSTREAM_STREAM_IDLE_TIMEOUT_MS: '12000',
+      RESPONSE_CACHE_STALE_IF_ERROR_MS: '300000',
+      SLOW_SUCCESS_LATENCY_THRESHOLD_MS: '18000',
+      SLOW_SUCCESS_PENALTY_SCORE: '0.4',
+    });
+
+    expect(config.upstreamRequestTimeoutMs).toBe(28_000);
+    expect(config.upstreamStreamFirstByteTimeoutMs).toBe(9_000);
+    expect(config.upstreamRequestBudgetMs).toBe(45_000);
+    expect(config.upstreamStreamIdleTimeoutMs).toBe(12_000);
+    expect(config.responseCacheStaleIfErrorMs).toBe(300_000);
+    expect(config.slowSuccessLatencyThresholdMs).toBe(18_000);
+    expect(config.slowSuccessPenaltyScore).toBe(0.4);
+  });
+
+  it('parses gateway stability runtime flags from environment', () => {
+    const config = buildConfig({
+      DISABLE_CROSS_PROTOCOL_FALLBACK: 'true',
+      GLOBAL_ALLOWED_MODELS: 'gpt-*, claude-sonnet-*',
+      PROXY_DEBUG_TRACE_ENABLED: 'true',
+      PROXY_DEBUG_TRACE_MAX_ENTRIES: '777',
+    });
+
+    expect(config.disableCrossProtocolFallback).toBe(true);
+    expect(config.globalAllowedModels).toEqual(['gpt-*', 'claude-sonnet-*']);
+    expect(config.proxyDebugTraceEnabled).toBe(true);
+    expect(config.proxyDebugTraceMaxEntries).toBe(777);
+  });
+
+  it('clamps proxy debug trace max entries to the supported upper bound', () => {
+    const config = buildConfig({
+      PROXY_DEBUG_TRACE_MAX_ENTRIES: '99999',
+    });
+
+    expect(config.proxyDebugTraceMaxEntries).toBe(5000);
   });
 
   it('accepts JSON request bodies larger than Fastify default 1 MiB', async () => {

@@ -46,6 +46,7 @@ let pgPool: pg.Pool | null = null;
 let proxyLogBillingDetailsColumnAvailable: boolean | null = null;
 let proxyLogDownstreamApiKeyIdColumnAvailable: boolean | null = null;
 let proxyLogClientColumnsAvailable: boolean | null = null;
+let proxyLogCacheColumnsAvailable: boolean | null = null;
 
 function resolveSqlitePath(): string {
   const raw = (config.dbUrl || '').trim();
@@ -662,6 +663,21 @@ function ensureProxyLogClientSchema() {
   proxyLogClientColumnsAvailable = true;
 }
 
+function ensureProxyLogCacheSchema() {
+  if (!tableExists('proxy_logs')) {
+    return;
+  }
+
+  if (!tableColumnExists('proxy_logs', 'cache_status')) {
+    execSqliteLegacyCompat('ALTER TABLE proxy_logs ADD COLUMN cache_status text;');
+  }
+  if (!tableColumnExists('proxy_logs', 'cache_saved_cost')) {
+    execSqliteLegacyCompat('ALTER TABLE proxy_logs ADD COLUMN cache_saved_cost real DEFAULT 0;');
+  }
+
+  proxyLogCacheColumnsAvailable = true;
+}
+
 function normalizeSchemaErrorMessage(error: unknown): string {
   if (typeof error === 'object' && error && 'message' in error) {
     return String((error as { message?: unknown }).message || '');
@@ -875,6 +891,100 @@ export async function hasProxyLogClientColumns(): Promise<boolean> {
   );
   proxyLogClientColumnsAvailable = requiredColumns.every((columnName) => available.has(columnName));
   return proxyLogClientColumnsAvailable;
+}
+
+export async function hasProxyLogCacheColumns(): Promise<boolean> {
+  const requiredColumns = ['cache_status', 'cache_saved_cost'];
+  if (proxyLogCacheColumnsAvailable !== null) {
+    return proxyLogCacheColumnsAvailable;
+  }
+
+  if (runtimeDbDialect === 'sqlite') {
+    proxyLogCacheColumnsAvailable = tableExists('proxy_logs')
+      && requiredColumns.every((columnName) => tableColumnExists('proxy_logs', columnName));
+    return proxyLogCacheColumnsAvailable;
+  }
+
+  if (runtimeDbDialect === 'mysql') {
+    if (!mysqlPool) return false;
+    const [rows] = await mysqlPool.query(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name IN (?, ?)',
+      ['proxy_logs', ...requiredColumns],
+    ) as [Array<{ column_name?: string }>, unknown];
+    const available = new Set(
+      Array.isArray(rows)
+        ? rows.map((row) => String(row?.column_name || '').trim().toLowerCase()).filter(Boolean)
+        : [],
+    );
+    proxyLogCacheColumnsAvailable = requiredColumns.every((columnName) => available.has(columnName));
+    return proxyLogCacheColumnsAvailable;
+  }
+
+  if (!pgPool) return false;
+  const result = await pgPool.query(
+    'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = ANY($2::text[])',
+    ['proxy_logs', requiredColumns],
+  );
+  const available = new Set(
+    result.rows.map((row) => String((row as { column_name?: string }).column_name || '').trim().toLowerCase()).filter(Boolean),
+  );
+  proxyLogCacheColumnsAvailable = requiredColumns.every((columnName) => available.has(columnName));
+  return proxyLogCacheColumnsAvailable;
+}
+
+export async function ensureProxyLogCacheColumns(): Promise<boolean> {
+  const requiredColumns = [
+    { name: 'cache_status', sqliteType: 'text', mysqlType: 'TEXT NULL', postgresType: 'TEXT' },
+    { name: 'cache_saved_cost', sqliteType: 'real DEFAULT 0', mysqlType: 'DOUBLE NULL DEFAULT 0', postgresType: 'DOUBLE PRECISION DEFAULT 0' },
+  ];
+
+  if (runtimeDbDialect === 'sqlite') {
+    ensureProxyLogCacheSchema();
+    proxyLogCacheColumnsAvailable = tableExists('proxy_logs')
+      && requiredColumns.every((column) => tableColumnExists('proxy_logs', column.name));
+    return proxyLogCacheColumnsAvailable;
+  }
+
+  if (await hasProxyLogCacheColumns()) {
+    return true;
+  }
+
+  try {
+    if (runtimeDbDialect === 'mysql') {
+      if (!mysqlPool) return false;
+      for (const column of requiredColumns) {
+        const [rows] = await mysqlPool.query('SHOW COLUMNS FROM `proxy_logs` LIKE ?', [column.name]);
+        if (Array.isArray(rows) && rows.length > 0) continue;
+        await executeLegacyCompat(
+          (statement) => mysqlPool!.query(statement).then(() => undefined),
+          `ALTER TABLE \`proxy_logs\` ADD COLUMN \`${column.name}\` ${column.mysqlType}`,
+        );
+      }
+    } else {
+      if (!pgPool) return false;
+      for (const column of requiredColumns) {
+        const result = await pgPool.query(
+          'SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2 LIMIT 1',
+          ['proxy_logs', column.name],
+        );
+        if (Number(result.rowCount || 0) > 0) continue;
+        await executeLegacyCompat(
+          (statement) => pgPool!.query(statement).then(() => undefined),
+          `ALTER TABLE "proxy_logs" ADD COLUMN "${column.name}" ${column.postgresType}`,
+        );
+      }
+    }
+    proxyLogCacheColumnsAvailable = true;
+    return true;
+  } catch (error) {
+    if (isDuplicateColumnError(error)) {
+      proxyLogCacheColumnsAvailable = await hasProxyLogCacheColumns();
+      return proxyLogCacheColumnsAvailable;
+    }
+    proxyLogCacheColumnsAvailable = false;
+    console.warn('[db] failed to ensure proxy_logs cache columns', error);
+    return false;
+  }
 }
 
 export async function ensureProxyLogClientColumns(): Promise<boolean> {
@@ -1251,6 +1361,7 @@ function initSqliteDb() {
   ensureRouteGroupingSchema();
   ensureDownstreamApiKeySchema();
   ensureProxyLogBillingDetailsSchema();
+  ensureProxyLogCacheSchema();
   ensureProxyLogClientSchema();
   ensureProxyVideoTaskSchema();
   ensureProxyFileSchema();

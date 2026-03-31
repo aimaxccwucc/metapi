@@ -211,11 +211,14 @@ export function matchesDownstreamModelPattern(model: string, pattern: string): b
 }
 
 export function isModelAllowedByPolicy(model: string, policy: DownstreamRoutingPolicy): boolean {
-  const patterns = Array.isArray(policy.supportedModels)
-    ? policy.supportedModels
-    : [];
+  const patterns = normalizeSupportedModelsInput(policy.supportedModels);
+  const globalPatterns = normalizeSupportedModelsInput(policy.globalAllowedModels);
 
-  if (patterns.length === 0) return true;
+  if (globalPatterns.length > 0 && !globalPatterns.some((pattern) => matchesDownstreamModelPattern(model, pattern))) {
+    return false;
+  }
+
+  if (patterns.length === 0) return policy.denyAllWhenEmpty === true ? false : true;
 
   return patterns.some((pattern) => matchesDownstreamModelPattern(model, pattern));
 }
@@ -240,9 +243,15 @@ async function isModelMatchedByAllowedRoutes(model: string, allowedRouteIds: num
 
 export async function isModelAllowedByPolicyOrAllowedRoutes(model: string, policy: DownstreamRoutingPolicy): Promise<boolean> {
   const patterns = normalizeSupportedModelsInput(policy.supportedModels);
+  const globalPatterns = normalizeSupportedModelsInput(policy.globalAllowedModels);
   const allowedRouteIds = normalizeAllowedRouteIdsInput(policy.allowedRouteIds);
   const hasPatternRules = patterns.length > 0;
+  const hasGlobalPatternRules = globalPatterns.length > 0;
   const hasRouteRules = allowedRouteIds.length > 0;
+
+  if (hasGlobalPatternRules && !globalPatterns.some((pattern) => matchesDownstreamModelPattern(model, pattern))) {
+    return false;
+  }
 
   if (!hasPatternRules && !hasRouteRules) return policy.denyAllWhenEmpty === true ? false : true;
 
@@ -288,6 +297,7 @@ export function toPolicyFromView(view: Pick<DownstreamApiKeyPolicyView, 'support
     supportedModels: normalizeSupportedModelsInput(view.supportedModels),
     allowedRouteIds: normalizeAllowedRouteIdsInput(view.allowedRouteIds),
     siteWeightMultipliers: normalizeSiteWeightMultipliersInput(view.siteWeightMultipliers),
+    globalAllowedModels: normalizeSupportedModelsInput(config.globalAllowedModels),
     denyAllWhenEmpty: true,
   };
 }
@@ -320,7 +330,11 @@ export async function getManagedDownstreamApiKeyByToken(token: string): Promise<
 }
 
 export function getDefaultGlobalPolicy(): DownstreamRoutingPolicy {
-  return EMPTY_DOWNSTREAM_ROUTING_POLICY;
+  return {
+    ...EMPTY_DOWNSTREAM_ROUTING_POLICY,
+    globalAllowedModels: normalizeSupportedModelsInput(config.globalAllowedModels),
+    denyAllWhenEmpty: false,
+  };
 }
 
 export async function authorizeDownstreamToken(token: string): Promise<DownstreamTokenAuthResult> {

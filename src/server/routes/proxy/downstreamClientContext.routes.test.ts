@@ -73,6 +73,7 @@ vi.mock('../../db/index.js', () => ({
     proxyLogs: {},
   },
   hasProxyLogBillingDetailsColumn: async () => false,
+  hasProxyLogCacheColumns: async () => false,
   hasProxyLogClientColumns: async () => false,
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
 }));

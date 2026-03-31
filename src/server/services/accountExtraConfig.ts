@@ -48,6 +48,7 @@ export type StoredCheckinSnapshot = {
   requiresManual: boolean;
   unsupported: boolean;
   lastAttemptAt: string;
+  lastIntervalAttemptAt?: string | null;
   lastSuccessAt?: string | null;
   nextRetryAt?: string | null;
   message: string;
@@ -369,6 +370,7 @@ export function extractCheckinSnapshot(extraConfig?: string | null): StoredCheck
   const retryable = normalizeBoolean(source.retryable) === true;
   const requiresManual = normalizeBoolean(source.requiresManual) === true;
   const unsupported = normalizeBoolean(source.unsupported) === true;
+  const lastIntervalAttemptAt = normalizeIsoDateTime(source.lastIntervalAttemptAt) ?? null;
   const lastSuccessAt = normalizeIsoDateTime(source.lastSuccessAt) ?? null;
   const nextRetryAt = normalizeIsoDateTime(source.nextRetryAt) ?? null;
   const reward = normalizeNonEmptyString(source.reward) ?? null;
@@ -382,6 +384,7 @@ export function extractCheckinSnapshot(extraConfig?: string | null): StoredCheck
     requiresManual,
     unsupported,
     lastAttemptAt,
+    lastIntervalAttemptAt,
     lastSuccessAt,
     nextRetryAt,
     message,

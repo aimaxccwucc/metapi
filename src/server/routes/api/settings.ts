@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import cron from 'node-cron';
 import { fetch } from 'undici';
-import { config } from '../../config.js';
+import { config, MAX_PROXY_DEBUG_TRACE_ENTRIES } from '../../config.js';
 import { db, runtimeDbDialect, schema } from '../../db/index.js';
 import { upsertSetting } from '../../db/upsertSetting.js';
 import {
@@ -39,6 +39,10 @@ type RoutingWeights = typeof config.routingWeights;
 interface RuntimeSettingsBody {
   proxyToken?: string;
   systemProxyUrl?: string;
+  disableCrossProtocolFallback?: boolean;
+  globalAllowedModels?: string[] | string;
+  proxyDebugTraceEnabled?: boolean;
+  proxyDebugTraceMaxEntries?: number;
   checkinCron?: string;
   checkinScheduleMode?: 'cron' | 'interval';
   checkinIntervalHours?: number;
@@ -273,6 +277,23 @@ function parseProxyErrorKeywords(value: unknown): string[] {
   throw new Error('上游错误关键词格式无效：需要 string 或 string[]');
 }
 
+function parseModelPatternList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item, index, arr) => item.length > 0 && arr.indexOf(item) === index);
+  }
+
+  if (typeof value === 'string') {
+    return value
+      .split(/\r?\n|,/)
+      .map((item) => item.trim())
+      .filter((item, index, arr) => item.length > 0 && arr.indexOf(item) === index);
+  }
+
+  throw new Error('模型白名单格式无效：需要 string 或 string[]');
+}
+
 function parseBooleanFlag(value: unknown, label: string): boolean {
   if (typeof value === 'boolean') return value;
   throw new Error(`${label}格式无效：需要 boolean`);
@@ -386,6 +407,30 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
     case 'system_proxy_url': {
       if (typeof value !== 'string') return;
       config.systemProxyUrl = normalizeSiteProxyUrl(value) || '';
+      return;
+    }
+    case 'disable_cross_protocol_fallback': {
+      if (typeof value !== 'boolean') return;
+      config.disableCrossProtocolFallback = value;
+      return;
+    }
+    case 'global_allowed_models': {
+      try {
+        config.globalAllowedModels = parseModelPatternList(value);
+      } catch {
+        return;
+      }
+      return;
+    }
+    case 'proxy_debug_trace_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.proxyDebugTraceEnabled = value;
+      return;
+    }
+    case 'proxy_debug_trace_max_entries': {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 10) return;
+      config.proxyDebugTraceMaxEntries = Math.max(10, Math.min(MAX_PROXY_DEBUG_TRACE_ENTRIES, Math.trunc(n)));
       return;
     }
     case 'proxy_error_keywords': {
@@ -569,6 +614,10 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     currentAdminIp,
     serverTimeZone: getResolvedTimeZone(),
     systemProxyUrl: config.systemProxyUrl,
+    disableCrossProtocolFallback: config.disableCrossProtocolFallback,
+    globalAllowedModels: config.globalAllowedModels,
+    proxyDebugTraceEnabled: config.proxyDebugTraceEnabled,
+    proxyDebugTraceMaxEntries: config.proxyDebugTraceMaxEntries,
     proxyErrorKeywords: config.proxyErrorKeywords,
     proxyEmptyContentFailEnabled: config.proxyEmptyContentFailEnabled,
     proxyTokenMasked: maskSecret(config.proxyToken),
@@ -929,6 +978,73 @@ export async function settingsRoutes(app: FastifyInstance) {
       config.systemProxyUrl = normalizedSystemProxyUrl || '';
       upsertSetting('system_proxy_url', config.systemProxyUrl);
       invalidateSiteProxyCache();
+    }
+
+    if (body.disableCrossProtocolFallback !== undefined) {
+      let nextValue = false;
+      try {
+        nextValue = parseBooleanFlag(body.disableCrossProtocolFallback, '跨协议回退总开关');
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '跨协议回退总开关格式无效',
+        });
+      }
+
+      if (nextValue !== config.disableCrossProtocolFallback) {
+        changedLabels.push('跨协议回退总开关');
+      }
+      config.disableCrossProtocolFallback = nextValue;
+      upsertSetting('disable_cross_protocol_fallback', config.disableCrossProtocolFallback);
+    }
+
+    if (body.globalAllowedModels !== undefined) {
+      let nextPatterns: string[] = [];
+      try {
+        nextPatterns = parseModelPatternList(body.globalAllowedModels);
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '全局模型白名单格式无效',
+        });
+      }
+
+      if (JSON.stringify(nextPatterns) !== JSON.stringify(config.globalAllowedModels || [])) {
+        changedLabels.push('全局模型白名单');
+      }
+      config.globalAllowedModels = nextPatterns;
+      upsertSetting('global_allowed_models', config.globalAllowedModels);
+    }
+
+    if (body.proxyDebugTraceEnabled !== undefined) {
+      let nextValue = false;
+      try {
+        nextValue = parseBooleanFlag(body.proxyDebugTraceEnabled, '代理调试 Trace 开关');
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '代理调试 Trace 开关格式无效',
+        });
+      }
+
+      if (nextValue !== config.proxyDebugTraceEnabled) {
+        changedLabels.push('代理调试 Trace');
+      }
+      config.proxyDebugTraceEnabled = nextValue;
+      upsertSetting('proxy_debug_trace_enabled', config.proxyDebugTraceEnabled);
+    }
+
+    if (body.proxyDebugTraceMaxEntries !== undefined) {
+      const nextValue = Number(body.proxyDebugTraceMaxEntries);
+      if (!Number.isFinite(nextValue) || nextValue < 10) {
+        return reply.code(400).send({ success: false, message: '代理调试 Trace 保留条数必须是大于等于 10 的数字' });
+      }
+      const normalized = Math.max(10, Math.min(MAX_PROXY_DEBUG_TRACE_ENTRIES, Math.trunc(nextValue)));
+      if (normalized !== config.proxyDebugTraceMaxEntries) {
+        changedLabels.push('代理调试 Trace 保留条数');
+      }
+      config.proxyDebugTraceMaxEntries = normalized;
+      upsertSetting('proxy_debug_trace_max_entries', config.proxyDebugTraceMaxEntries);
     }
 
     if (body.proxyErrorKeywords !== undefined) {

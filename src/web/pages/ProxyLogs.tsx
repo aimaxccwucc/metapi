@@ -54,7 +54,44 @@ const EMPTY_SUMMARY: ProxyLogsSummary = {
   failedCount: 0,
   totalCost: 0,
   totalTokensAll: 0,
+  cacheHitCount: 0,
+  cacheMissCount: 0,
+  cacheStaleCount: 0,
+  cacheSavedCost: 0,
 };
+
+function normalizeProxyLogsSummary(summary?: Partial<ProxyLogsSummary> | null): ProxyLogsSummary {
+  return {
+    totalCount: Number(summary?.totalCount || 0),
+    successCount: Number(summary?.successCount || 0),
+    failedCount: Number(summary?.failedCount || 0),
+    totalCost: Number(summary?.totalCost || 0),
+    totalTokensAll: Number(summary?.totalTokensAll || 0),
+    cacheHitCount: Number(summary?.cacheHitCount || 0),
+    cacheMissCount: Number(summary?.cacheMissCount || 0),
+    cacheStaleCount: Number(summary?.cacheStaleCount || 0),
+    cacheSavedCost: Number(summary?.cacheSavedCost || 0),
+  };
+}
+
+function renderCacheBadge(status?: string | null) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized) return null;
+  const label = normalized === 'hit' ? 'HIT' : normalized === 'stale' ? 'STALE' : normalized === 'miss' ? 'MISS' : normalized.toUpperCase();
+  const className = normalized === 'hit'
+    ? 'badge badge-success'
+    : normalized === 'stale'
+      ? 'badge badge-warning'
+      : 'badge';
+  return <span className={className} style={{ fontSize: 10 }}>{label}</span>;
+}
+
+function isNonGenerationSuccess(log: ProxyLogRenderItem) {
+  if (log.status !== 'success') return false;
+  if ((log.promptTokens || 0) > 0 || (log.completionTokens || 0) > 0 || (log.totalTokens || 0) > 0) return false;
+  const message = String(log.errorMessage || '').toLowerCase();
+  return message.includes('count_tokens') || message.includes('cache') || message.includes('/messages/count_tokens');
+}
 
 function formatLatency(ms: number) {
   if (ms >= 1000) {
@@ -467,7 +504,7 @@ export default function ProxyLogs() {
       startTransition(() => {
         setLogs(Array.isArray(data.items) ? data.items : []);
         setTotal(Number(data.total || 0));
-        setSummary(data.summary || EMPTY_SUMMARY);
+        setSummary(normalizeProxyLogsSummary(data.summary));
         setClientOptions(Array.isArray(data.clientOptions) ? data.clientOptions : []);
       });
     } catch (e: any) {
@@ -647,6 +684,15 @@ export default function ProxyLogs() {
           <span className="kpi-chip kpi-chip-warning">
             {summary.totalTokensAll.toLocaleString()} tokens
           </span>
+          <span className="kpi-chip">
+            缓存命中 {summary.cacheHitCount}
+          </span>
+          <span className="kpi-chip kpi-chip-warning">
+            回退 {summary.cacheStaleCount}
+          </span>
+          <span className="kpi-chip kpi-chip-success">
+            节省 ${summary.cacheSavedCost.toFixed(4)}
+          </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <button
@@ -751,6 +797,7 @@ export default function ProxyLogs() {
                 >
                   <div className="mobile-inline-meta-row">
                     <SiteBadgeLink siteId={siteIdByName.get(String(log.siteName || '').trim())} siteName={log.siteName} badgeStyle={{ fontSize: 11 }} />
+                    {renderCacheBadge(log.cacheStatus)}
                     {clientDisplay.primary ? (
                       <span className="badge badge-muted" style={{ fontSize: 10 }}>
                         {clientDisplay.primary}
@@ -778,6 +825,10 @@ export default function ProxyLogs() {
                     <div className="mobile-summary-metric">
                       <div className="mobile-summary-metric-label">花费</div>
                       <div className="mobile-summary-metric-value">{typeof log.estimatedCost === 'number' ? `$${log.estimatedCost.toFixed(6)}` : '-'}</div>
+                    </div>
+                    <div className="mobile-summary-metric">
+                      <div className="mobile-summary-metric-label">缓存节省</div>
+                      <div className="mobile-summary-metric-value">{typeof log.cacheSavedCost === 'number' && log.cacheSavedCost > 0 ? `$${log.cacheSavedCost.toFixed(6)}` : '-'}</div>
                     </div>
                   </div>
                   {isExpanded ? (
@@ -820,6 +871,7 @@ export default function ProxyLogs() {
                 <th style={{ textAlign: 'right' }}>输入</th>
                 <th style={{ textAlign: 'right' }}>输出</th>
                 <th style={{ textAlign: 'right' }}>花费</th>
+                <th style={{ textAlign: 'right' }}>缓存节省</th>
                 <th style={{ textAlign: 'center' }}>重试</th>
               </tr>
             </thead>
@@ -859,6 +911,7 @@ export default function ProxyLogs() {
                       <td>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                           <ModelBadge model={log.modelRequested} style={{ alignSelf: 'flex-start' }} />
+                          {renderCacheBadge(log.cacheStatus)}
                           {downstreamKeySummary ? (
                             <div style={{ fontSize: 11, lineHeight: 1.45, color: 'var(--color-text-muted)' }}>
                               {downstreamKeySummary}
@@ -903,6 +956,9 @@ export default function ProxyLogs() {
                       <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>
                         {typeof log.estimatedCost === 'number' ? `$${log.estimatedCost.toFixed(6)}` : '-'}
                       </td>
+                      <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
+                        {typeof log.cacheSavedCost === 'number' && log.cacheSavedCost > 0 ? `$${log.cacheSavedCost.toFixed(6)}` : '-'}
+                      </td>
                       <td style={{ textAlign: 'center' }}>
                         {log.retryCount > 0 ? (
                           <span className="badge badge-warning" style={{ fontSize: 11 }}>{log.retryCount}</span>
@@ -913,7 +969,7 @@ export default function ProxyLogs() {
                     </tr>
                     {expanded === log.id && (
                       <tr style={{ background: 'var(--color-bg)' }}>
-                        <td colSpan={11} style={{ padding: 0 }}>
+                        <td colSpan={12} style={{ padding: 0 }}>
                           <div className="anim-collapse is-open">
                             <div className="anim-collapse-inner">
                               <div className="animate-fade-in" style={{
@@ -938,6 +994,11 @@ export default function ProxyLogs() {
                                         <>
                                           ，站点: <strong style={{ color: 'var(--color-text-primary)' }}>{detailLog.siteName || '未知站点'}</strong>
                                           ，账号: <strong style={{ color: 'var(--color-text-primary)' }}>{detailLog.username || '未知账号'}</strong>
+                                        </>
+                                      )}
+                                      {isNonGenerationSuccess(detailLog) && (
+                                        <>
+                                          ，类型: <strong style={{ color: 'var(--color-warning)' }}>非生成型成功</strong>
                                         </>
                                       )}
                                     </div>

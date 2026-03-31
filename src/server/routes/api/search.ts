@@ -34,7 +34,7 @@ function matchesApiKeyDisplayLabel(query: string): boolean {
 }
 
 export async function searchRoutes(app: FastifyInstance) {
-  const proxyLogBaseFields = getProxyLogBaseSelectFields();
+  const proxyLogBaseFields = await getProxyLogBaseSelectFields();
 
   app.post<{ Body: { query: string; limit?: number } }>('/api/search', async (request) => {
     const { query, limit = 20 } = request.body;
