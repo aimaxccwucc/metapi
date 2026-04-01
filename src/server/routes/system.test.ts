@@ -8,6 +8,8 @@ type SystemRoutesModule = typeof import('./system.js');
 
 const listBackgroundTasksMock = vi.fn();
 const getOAuthLoopbackCallbackServerStatesMock = vi.fn();
+const getRetryBackoffMetricsMock = vi.fn();
+const getOnDemandRefreshMetricsMock = vi.fn();
 
 vi.mock('../services/backgroundTaskService.js', () => ({
   listBackgroundTasks: (...args: unknown[]) => listBackgroundTasksMock(...args),
@@ -16,6 +18,22 @@ vi.mock('../services/backgroundTaskService.js', () => ({
 vi.mock('../services/oauth/localCallbackServer.js', () => ({
   getOAuthLoopbackCallbackServerStates: (...args: unknown[]) => getOAuthLoopbackCallbackServerStatesMock(...args),
 }));
+
+vi.mock('./proxy/requestBudget.js', async () => {
+  const actual = await vi.importActual<typeof import('./proxy/requestBudget.js')>('./proxy/requestBudget.js');
+  return {
+    ...actual,
+    getRetryBackoffMetrics: (...args: unknown[]) => getRetryBackoffMetricsMock(...args),
+  };
+});
+
+vi.mock('../services/modelService.js', async () => {
+  const actual = await vi.importActual<typeof import('../services/modelService.js')>('../services/modelService.js');
+  return {
+    ...actual,
+    getOnDemandRefreshMetrics: (...args: unknown[]) => getOnDemandRefreshMetricsMock(...args),
+  };
+});
 
 describe('system routes', () => {
   let systemRoutes: SystemRoutesModule['systemRoutes'];
@@ -33,6 +51,8 @@ describe('system routes', () => {
   afterEach(() => {
     listBackgroundTasksMock.mockReset();
     getOAuthLoopbackCallbackServerStatesMock.mockReset();
+    getRetryBackoffMetricsMock.mockReset();
+    getOnDemandRefreshMetricsMock.mockReset();
   });
 
   afterAll(() => {
@@ -61,6 +81,14 @@ describe('system routes', () => {
         redirectUri: 'http://localhost:1455/callback',
       },
     ]);
+    getRetryBackoffMetricsMock.mockReturnValue({
+      totalMs: 1200,
+      count: 3,
+    });
+    getOnDemandRefreshMetricsMock.mockReturnValue({
+      triggeredTotal: 2,
+      skippedTotal: 5,
+    });
 
     const app = Fastify();
     await app.register(systemRoutes, {
@@ -103,6 +131,9 @@ describe('system routes', () => {
     expect(metrics.body).toContain('metapi_ready 1');
     expect(metrics.body).toContain('metapi_response_cache_ready 1');
     expect(metrics.body).toContain('metapi_response_cache_failures_total{kind="write"} 0');
+    expect(metrics.body).toContain('metapi_retry_backoff_ms_total 1200');
+    expect(metrics.body).toContain('metapi_refresh_triggered_total 2');
+    expect(metrics.body).toContain('metapi_on_demand_refresh_skipped_total 5');
 
     await app.close();
   });
@@ -110,6 +141,14 @@ describe('system routes', () => {
   it('exposes protected runtime overview summary', async () => {
     listBackgroundTasksMock.mockReturnValue([]);
     getOAuthLoopbackCallbackServerStatesMock.mockReturnValue([]);
+    getRetryBackoffMetricsMock.mockReturnValue({
+      totalMs: 0,
+      count: 0,
+    });
+    getOnDemandRefreshMetricsMock.mockReturnValue({
+      triggeredTotal: 0,
+      skippedTotal: 0,
+    });
 
     const app = Fastify();
     await app.register(systemRoutes, {
@@ -128,6 +167,12 @@ describe('system routes', () => {
       responseCache: {
         ready: true,
         availabilityChecked: true,
+      },
+      gatewayRouting: {
+        retryBackoffMs: 0,
+        retryBackoffCount: 0,
+        onDemandRefreshTriggeredTotal: 0,
+        onDemandRefreshSkippedTotal: 0,
       },
       backgroundTasks: {
         total: 0,

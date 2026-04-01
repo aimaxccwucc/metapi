@@ -43,6 +43,7 @@ vi.mock('../../services/tokenRouter.js', () => ({
 
 vi.mock('../../services/modelService.js', () => ({
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
+  refreshModelsAndRebuildRoutesOnDemand: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
 }));
 
 vi.mock('../../services/alertService.js', () => ({
@@ -496,6 +497,40 @@ describe('responses proxy codex oauth refresh', () => {
         },
       }),
     });
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 429,
+      retryAfterHeader: null,
+    }));
+  });
+
+  it('passes endpoint Retry-After headers into final responses failure tracking', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      error: {
+        type: 'rate_limit_error',
+        message: 'rate limited',
+      },
+    }), {
+      status: 429,
+      headers: {
+        'content-type': 'application/json',
+        'retry-after': '19',
+      },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'gpt-5.2-codex',
+        input: 'hello codex',
+      },
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 429,
+      retryAfterHeader: '19',
+    }));
   });
 
   it('forces codex upstream responses requests to stream and aggregates the SSE payload for non-stream downstream callers', async () => {

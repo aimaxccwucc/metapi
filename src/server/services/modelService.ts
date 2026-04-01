@@ -1,6 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import { fetch } from 'undici';
 import { db, schema } from '../db/index.js';
+import { config } from '../config.js';
 import { getAdapter } from './platforms/index.js';
 import {
   ACCOUNT_TOKEN_VALUE_STATUS_READY,
@@ -54,6 +55,11 @@ let inFlightRefreshModelsAndRebuildRoutes: Promise<{
   refresh: ModelRefreshResult[];
   rebuild: Awaited<ReturnType<typeof rebuildTokenRoutesFromAvailability>>;
 }> | null = null;
+let lastOnDemandRefreshStartedAtMs = 0;
+const onDemandRefreshMetricsState = {
+  triggeredTotal: 0,
+  skippedTotal: 0,
+};
 
 type ModelRefreshErrorCode = 'timeout' | 'unauthorized' | 'empty_models' | 'unknown';
 type ModelRefreshSkipCode = 'site_disabled' | 'adapter_or_status';
@@ -1292,3 +1298,36 @@ export async function refreshModelsAndRebuildRoutes() {
 
   return inFlightRefreshModelsAndRebuildRoutes;
 }
+
+export async function refreshModelsAndRebuildRoutesOnDemand() {
+  const nowMs = Date.now();
+  const cooldownMs = Math.max(0, config.onDemandModelRefreshCooldownMs);
+  if (inFlightRefreshModelsAndRebuildRoutes) {
+    onDemandRefreshMetricsState.skippedTotal += 1;
+    return inFlightRefreshModelsAndRebuildRoutes;
+  }
+  if (cooldownMs > 0 && (nowMs - lastOnDemandRefreshStartedAtMs) < cooldownMs) {
+    onDemandRefreshMetricsState.skippedTotal += 1;
+    return null;
+  }
+  lastOnDemandRefreshStartedAtMs = nowMs;
+  onDemandRefreshMetricsState.triggeredTotal += 1;
+  return await refreshModelsAndRebuildRoutes();
+}
+
+export function getOnDemandRefreshMetrics() {
+  return {
+    triggeredTotal: onDemandRefreshMetricsState.triggeredTotal,
+    skippedTotal: onDemandRefreshMetricsState.skippedTotal,
+  };
+}
+
+export const __modelServiceTestUtils = {
+  resetOnDemandRefreshWindow(): void {
+    lastOnDemandRefreshStartedAtMs = 0;
+  },
+  resetOnDemandRefreshMetrics(): void {
+    onDemandRefreshMetricsState.triggeredTotal = 0;
+    onDemandRefreshMetricsState.skippedTotal = 0;
+  },
+};

@@ -8,6 +8,7 @@ const refreshModelsAndRebuildRoutesMock = vi.fn(async () => undefined);
 
 vi.mock('../../services/modelService.js', () => ({
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
+  refreshModelsAndRebuildRoutesOnDemand: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
 }));
 
 type DbModule = typeof import('../../db/index.js');

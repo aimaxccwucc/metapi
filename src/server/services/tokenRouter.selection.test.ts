@@ -1640,6 +1640,42 @@ describe('TokenRouter selection scoring', () => {
     expect(cooldownMs).toBeGreaterThanOrEqual(29 * 60 * 1000);
   });
 
+  it('pushes Retry-After 429 windows into channel cooldown and account rate-limit avoidance', async () => {
+    const route = await createRoute('gpt-retry-after-window');
+
+    const site = await createSite('retry-after-site');
+    const account = await createAccount(site.id, 'retry-after-user');
+    const token = await createToken(account.id, 'retry-after-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const beforeMs = Date.now();
+    await router.recordFailure(channel.id, {
+      status: 429,
+      errorText: 'rate limited',
+      modelName: 'gpt-retry-after-window',
+      retryAfterHeader: '12',
+    });
+
+    const stored = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    const cooldownMs = stored?.cooldownUntil ? Date.parse(stored.cooldownUntil) - beforeMs : 0;
+    expect(cooldownMs).toBeGreaterThanOrEqual(11_000);
+
+    const snapshots = await listAccountRoutingRuntimeSnapshots(beforeMs + 500);
+    const accountSnapshot = snapshots.find((entry) => entry.accountId === account.id);
+    expect(accountSnapshot?.rateLimited).toBe(true);
+    expect(accountSnapshot?.rateLimitedUntilMs ?? 0).toBeGreaterThanOrEqual(beforeMs + 11_000);
+  });
+
   it('hard-skips the same channel for the failing model while preserving other models on that channel', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,

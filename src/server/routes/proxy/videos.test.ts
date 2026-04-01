@@ -35,6 +35,7 @@ vi.mock('../../services/tokenRouter.js', () => ({
 
 vi.mock('../../services/modelService.js', () => ({
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
+  refreshModelsAndRebuildRoutesOnDemand: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
 }));
 
 vi.mock('../../services/alertService.js', () => ({
@@ -306,11 +307,11 @@ describe('/v1/videos routes', () => {
     });
 
     expect(response.statusCode).toBe(400);
-    expect(recordFailureMock).toHaveBeenCalledWith(11, {
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
       status: 400,
       errorText: 'model not supported',
       modelName: 'sora-2',
-    });
+    }));
     expect(insertProxyLogMock).toHaveBeenCalledWith(expect.objectContaining({
       routeId: 22,
       channelId: 11,

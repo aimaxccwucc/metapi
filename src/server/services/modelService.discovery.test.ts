@@ -46,6 +46,8 @@ describe('refreshModelsForAccount credential discovery', () => {
   let schema: DbModule['schema'];
   let refreshModelsForAccount: ModelServiceModule['refreshModelsForAccount'];
   let refreshModelsAndRebuildRoutes: ModelServiceModule['refreshModelsAndRebuildRoutes'];
+  let refreshModelsAndRebuildRoutesOnDemand: ModelServiceModule['refreshModelsAndRebuildRoutesOnDemand'];
+  let modelServiceTestUtils: ModelServiceModule['__modelServiceTestUtils'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -60,6 +62,8 @@ describe('refreshModelsForAccount credential discovery', () => {
     schema = dbModule.schema;
     refreshModelsForAccount = modelService.refreshModelsForAccount;
     refreshModelsAndRebuildRoutes = modelService.refreshModelsAndRebuildRoutes;
+    refreshModelsAndRebuildRoutesOnDemand = modelService.refreshModelsAndRebuildRoutesOnDemand;
+    modelServiceTestUtils = modelService.__modelServiceTestUtils;
   });
 
   beforeEach(async () => {
@@ -68,6 +72,8 @@ describe('refreshModelsForAccount credential discovery', () => {
     undiciFetchMock.mockReset();
     proxyAgentCtorMock.mockReset();
     refreshOauthAccessTokenSingleflightMock.mockReset();
+    modelServiceTestUtils.resetOnDemandRefreshWindow();
+    modelServiceTestUtils.resetOnDemandRefreshMetrics();
 
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
@@ -225,6 +231,65 @@ describe('refreshModelsForAccount credential discovery', () => {
       .where(eq(schema.tokenModelAvailability.tokenId, token!.id))
       .all();
     expect(tokenRows.map((row) => row.modelName)).toEqual(['gpt-5-nano']);
+  });
+
+  it('throttles on-demand full refresh calls within the cooldown window', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-31T09:50:00.000Z'));
+    try {
+      getApiTokenMock.mockResolvedValue(null);
+      getModelsMock.mockResolvedValue(['gpt-5-nano']);
+
+      const site = await db.insert(schema.sites).values({
+        name: 'site-on-demand-refresh',
+        url: 'https://site-on-demand-refresh.example.com',
+        platform: 'new-api',
+        status: 'active',
+      }).returning().get();
+
+      const account = await db.insert(schema.accounts).values({
+        siteId: site.id,
+        username: 'on-demand-refresh-user',
+        accessToken: 'shared-credential',
+        apiToken: 'shared-credential',
+        status: 'active',
+        extraConfig: JSON.stringify({ credentialMode: 'session' }),
+      }).returning().get();
+
+      await db.insert(schema.accountTokens).values({
+        accountId: account.id,
+        name: 'default',
+        token: 'shared-credential',
+        source: 'manual',
+        enabled: true,
+        isDefault: true,
+      }).run();
+
+      await expect(refreshModelsAndRebuildRoutesOnDemand()).resolves.not.toBeNull();
+      await expect(refreshModelsAndRebuildRoutesOnDemand()).resolves.toBeNull();
+      expect(getModelsMock).toHaveBeenCalledTimes(2);
+
+      const modelService = await import('./modelService.js');
+      expect(modelService.getOnDemandRefreshMetrics()).toEqual({
+        triggeredTotal: 1,
+        skippedTotal: 1,
+      });
+
+      vi.advanceTimersByTime(15_000);
+      await expect(refreshModelsAndRebuildRoutesOnDemand()).resolves.not.toBeNull();
+      expect(getModelsMock).toHaveBeenCalledTimes(4);
+      expect(modelService.getOnDemandRefreshMetrics()).toEqual({
+        triggeredTotal: 2,
+        skippedTotal: 1,
+      });
+
+      const modelRows = await db.select().from(schema.modelAvailability)
+        .where(eq(schema.modelAvailability.accountId, account.id))
+        .all();
+      expect(modelRows.map((row) => row.modelName)).toEqual(['gpt-5-nano']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('marks runtime health unhealthy when model discovery fails', async () => {

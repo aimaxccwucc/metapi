@@ -5,6 +5,8 @@ import { config } from '../config.js';
 import { getOAuthLoopbackCallbackServerStates } from '../services/oauth/localCallbackServer.js';
 import { listBackgroundTasks } from '../services/backgroundTaskService.js';
 import { getResponseCacheRuntimeStatus, isResponseCacheAvailable } from '../services/responseCacheService.js';
+import { getRetryBackoffMetrics } from './proxy/requestBudget.js';
+import { getOnDemandRefreshMetrics } from '../services/modelService.js';
 
 type RuntimeStatusRouteOptions = {
   startedAt: Date;
@@ -29,6 +31,12 @@ type RuntimeOverviewResponse = {
     dialect: string;
   };
   responseCache: ReturnType<typeof getResponseCacheRuntimeStatus>;
+  gatewayRouting: {
+    retryBackoffMs: number;
+    retryBackoffCount: number;
+    onDemandRefreshTriggeredTotal: number;
+    onDemandRefreshSkippedTotal: number;
+  };
   oauthLoopback: {
     total: number;
     ready: number;
@@ -124,6 +132,8 @@ async function buildRuntimeOverview(startedAt: Date): Promise<RuntimeOverviewRes
     buildRecentActivity(),
   ]);
   const responseCache = getResponseCacheRuntimeStatus();
+  const retryBackoffMetrics = getRetryBackoffMetrics();
+  const onDemandRefreshMetrics = getOnDemandRefreshMetrics();
   const oauthStates = getOAuthLoopbackCallbackServerStates();
   const readyOauthCount = oauthStates.filter((state) => state.ready).length;
   const attemptedOauthCount = oauthStates.filter((state) => state.attempted).length;
@@ -148,6 +158,12 @@ async function buildRuntimeOverview(startedAt: Date): Promise<RuntimeOverviewRes
       dialect: runtimeDbDialect,
     },
     responseCache,
+    gatewayRouting: {
+      retryBackoffMs: retryBackoffMetrics.totalMs,
+      retryBackoffCount: retryBackoffMetrics.count,
+      onDemandRefreshTriggeredTotal: onDemandRefreshMetrics.triggeredTotal,
+      onDemandRefreshSkippedTotal: onDemandRefreshMetrics.skippedTotal,
+    },
     oauthLoopback: {
       total: oauthStates.length,
       ready: readyOauthCount,
@@ -199,6 +215,18 @@ function buildMetricsPayload(overview: RuntimeOverviewResponse): string {
     '# TYPE metapi_response_cache_prune_deleted_total gauge',
     `metapi_response_cache_prune_deleted_total{reason="expired"} ${overview.responseCache.pruneDeletedExpiredRows}`,
     `metapi_response_cache_prune_deleted_total{reason="overflow"} ${overview.responseCache.pruneDeletedOverflowRows}`,
+    '# HELP metapi_retry_backoff_ms_total Total retry backoff delay applied before retries.',
+    '# TYPE metapi_retry_backoff_ms_total gauge',
+    `metapi_retry_backoff_ms_total ${overview.gatewayRouting.retryBackoffMs}`,
+    '# HELP metapi_retry_backoff_count Total retry backoff events applied before retries.',
+    '# TYPE metapi_retry_backoff_count gauge',
+    `metapi_retry_backoff_count ${overview.gatewayRouting.retryBackoffCount}`,
+    '# HELP metapi_refresh_triggered_total Total on-demand route refreshes actually triggered.',
+    '# TYPE metapi_refresh_triggered_total gauge',
+    `metapi_refresh_triggered_total ${overview.gatewayRouting.onDemandRefreshTriggeredTotal}`,
+    '# HELP metapi_on_demand_refresh_skipped_total Total on-demand route refresh calls skipped by cooldown or singleflight reuse.',
+    '# TYPE metapi_on_demand_refresh_skipped_total gauge',
+    `metapi_on_demand_refresh_skipped_total ${overview.gatewayRouting.onDemandRefreshSkippedTotal}`,
     '# TYPE metapi_uptime_seconds gauge',
     `metapi_uptime_seconds ${overview.service.uptimeSec}`,
     '# HELP metapi_background_tasks Number of in-memory background tasks by status.',

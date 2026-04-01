@@ -2,7 +2,7 @@
 import { fetch } from 'undici';
 import { config } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
-import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
+import { refreshModelsAndRebuildRoutesOnDemand } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
@@ -19,7 +19,8 @@ import { detectDownstreamClientContext, type DownstreamClientContext } from './d
 import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { markTokenModelUnavailable } from '../../services/mediaRoutingSupport.js';
-import { createRequestBudget, shouldRetryWithinBudget } from './requestBudget.js';
+import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
+import { DefaultProxyConductor } from '../../proxy-core/conductor/DefaultProxyConductor.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
 
@@ -35,95 +36,102 @@ function shouldMarkImageModelUnavailable(status: number, errorText: string): boo
   return false;
 }
 
-export async function imagesProxyRoute(app: FastifyInstance) {
-  ensureMultipartBufferParser(app);
+async function executeImageProxyRequest(params: {
+  request: FastifyRequest;
+  reply: FastifyReply;
+  requestedModel: string;
+  downstreamPolicy: ReturnType<typeof getDownstreamRoutingPolicy>;
+  downstreamApiKeyId: number | null;
+  downstreamPath: string;
+  clientContext: DownstreamClientContext | null;
+  requestBudget: ReturnType<typeof createRequestBudget>;
+  buildRequest: (selected: any, actualModel: string) => Promise<{ targetUrl: string; requestInit: any }> | { targetUrl: string; requestInit: any };
+}) {
+  const {
+    request,
+    reply,
+    requestedModel,
+    downstreamPolicy,
+    downstreamApiKeyId,
+    downstreamPath,
+    clientContext,
+    requestBudget,
+    buildRequest,
+  } = params;
+  let reportedNoChannel = false;
 
-  app.post('/v1/images/generations', async (request: FastifyRequest, reply: FastifyReply) => {
-    const body = request.body as any;
-    const requestedModel = body?.model || 'gpt-image-1';
-    if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
-    const downstreamPolicy = getDownstreamRoutingPolicy(request);
-    const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
-    const downstreamPath = '/v1/images/generations';
-    const clientContext = detectDownstreamClientContext({
-      downstreamPath,
-      headers: request.headers as Record<string, unknown>,
-      body,
-    });
-    const excludeChannelIds: number[] = [];
-    const excludeSiteIds = new Set<number>();
-    let retryCount = 0;
-    const requestBudget = createRequestBudget();
+  const conductor = new DefaultProxyConductor({
+    selectChannel: (model, policy) => tokenRouter.selectChannel(model, policy as any),
+    selectNextChannel: (model, excludeChannelIds, policy, excludeSiteIds) => tokenRouter.selectNextChannel(
+      model,
+      excludeChannelIds,
+      policy as any,
+      excludeSiteIds,
+    ),
+  });
 
-    while (retryCount <= MAX_RETRIES) {
+  const execution = await conductor.execute({
+    requestedModel,
+    downstreamPolicy,
+    maxAttempts: MAX_RETRIES + 1,
+    refreshSelection: async () => {
+      await refreshModelsAndRebuildRoutesOnDemand();
+      return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
+    },
+    onNoChannel: async ({ attempts }) => {
+      reportedNoChannel = true;
+      await reportProxyAllFailed({
+        model: requestedModel,
+        reason: 'No available channels after retries',
+      });
+      if (attempts === 0) {
+        await logProxyNoChannelFailure({
+          modelRequested: requestedModel,
+          httpStatus: 503,
+          errorMessage: 'No available channels for this model',
+          retryCount: 0,
+          downstreamPath,
+          clientContext,
+          downstreamApiKeyId,
+        });
+      }
+    },
+    getFailoverSiteId: (selected, failure) => {
+      if (!shouldAvoidSiteForRequest(
+        typeof failure.status === 'number' ? failure.status : 0,
+        typeof failure.rawErrorText === 'string' ? failure.rawErrorText : undefined,
+      )) return null;
+      const siteId = Number((selected.site as { id?: unknown }).id);
+      return Number.isFinite(siteId) ? Math.trunc(siteId) : null;
+    },
+    attempt: async ({ selected, attemptIndex }) => {
+      const retryCount = attemptIndex;
       if (requestBudget.isExpired()) {
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: requestBudget.buildTimeoutMessage(),
-        });
-        return reply.code(504).send({
-          error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
-        });
+        return {
+          ok: false,
+          action: 'stop',
+          status: 504,
+          rawErrorText: requestBudget.buildTimeoutMessage(),
+        };
       }
 
-      let selected = retryCount === 0
-        ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
-
-      if (!selected && retryCount === 0) {
-        await refreshModelsAndRebuildRoutes();
-        selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
-      }
-
-      if (!selected) {
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: 'No available channels after retries',
-        });
-        if (retryCount === 0) {
-          await logProxyNoChannelFailure({
-            modelRequested: requestedModel,
-            httpStatus: 503,
-            errorMessage: 'No available channels for this model',
-            retryCount,
-            downstreamPath,
-            clientContext,
-            downstreamApiKeyId,
-          });
-        }
-        return reply.code(503).send({
-          error: { message: 'No available channels for this model', type: 'server_error' },
-        });
-      }
-
-      excludeChannelIds.push(selected.channel.id);
-
-      const targetUrl = buildUpstreamUrl(selected.site.url, '/v1/images/generations');
-      const forwardBody = { ...body, model: selected.actualModel };
+      const actualModel = selected.actualModel || requestedModel;
+      const { targetUrl, requestInit } = await buildRequest(selected, actualModel);
       const startTime = Date.now();
 
       try {
-        const upstream = await fetch(targetUrl, withSiteRecordProxyRequestInit(selected.site, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${selected.tokenValue}`,
-          },
-          body: JSON.stringify(forwardBody),
-        }, getProxyUrlFromExtraConfig(selected.account.extraConfig)));
-
+        const upstream = await fetch(targetUrl, requestInit);
         const text = await upstream.text();
         if (!upstream.ok) {
+          const retryAfterHeader = upstream.headers.get('retry-after');
           await tokenRouter.recordFailure(selected.channel.id, {
             status: upstream.status,
             errorText: text,
             modelName: selected.actualModel,
+            retryAfterHeader,
           });
-          if (shouldAvoidSiteForRequest(upstream.status, text)) {
-            excludeSiteIds.add(selected.site.id);
-          }
           if (shouldMarkImageModelUnavailable(upstream.status, text)) {
-            await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
+            await markTokenModelUnavailable(selected.token?.id, actualModel);
           }
           logProxy(
             selected,
@@ -146,15 +154,31 @@ export async function imagesProxyRoute(app: FastifyInstance) {
               detail: `HTTP ${upstream.status}`,
             });
           }
-          if (shouldRetryProxyRequest(upstream.status, text) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-            retryCount++;
-            continue;
+          if (
+            shouldRetryProxyRequest(upstream.status, text)
+            && await waitForRetryWithinBudget({
+              retryCount,
+              maxRetries: MAX_RETRIES,
+              budget: requestBudget,
+              status: upstream.status,
+              retryAfterHeader,
+            })
+          ) {
+            return {
+              ok: false,
+              action: 'failover',
+              status: upstream.status,
+              rawErrorText: text,
+              retryAfterHeader,
+            };
           }
-          await reportProxyAllFailed({
-            model: requestedModel,
-            reason: `upstream returned HTTP ${upstream.status}`,
-          });
-          return reply.code(upstream.status).send({ error: { message: text, type: 'upstream_error' } });
+          return {
+            ok: false,
+            action: 'stop',
+            status: upstream.status,
+            rawErrorText: text,
+            retryAfterHeader,
+          };
         }
 
         let data: any = {};
@@ -164,7 +188,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
         const estimatedCost = await estimateProxyCost({
           site: selected.site,
           account: selected.account,
-          modelName: selected.actualModel || requestedModel,
+          modelName: actualModel,
           promptTokens: 0,
           completionTokens: 0,
           totalTokens: 0,
@@ -172,42 +196,114 @@ export async function imagesProxyRoute(app: FastifyInstance) {
         await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(selected, requestedModel, 'success', upstream.status, latency, null, retryCount, downstreamApiKeyId, estimatedCost, downstreamPath, clientContext);
-        return reply.code(upstream.status).send(data);
+        reply.code(upstream.status).send(data);
+        return { ok: true, response: upstream, latencyMs: latency, cost: estimatedCost };
       } catch (err: any) {
+        const errorMessage = err?.message || 'network failure';
         await tokenRouter.recordFailure(selected.channel.id, {
           status: 0,
-          errorText: err.message,
+          errorText: errorMessage,
           modelName: selected.actualModel,
         });
-        if (shouldAvoidSiteForRequest(0, err?.message)) {
-          excludeSiteIds.add(selected.site.id);
-        }
         logProxy(
           selected,
           requestedModel,
           'failed',
           0,
           Date.now() - startTime,
-          err.message,
+          errorMessage,
           retryCount,
           downstreamApiKeyId,
           0,
           downstreamPath,
           clientContext,
         );
-        if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-          retryCount++;
-          continue;
+        if (await waitForRetryWithinBudget({
+          retryCount,
+          maxRetries: MAX_RETRIES,
+          budget: requestBudget,
+          status: 0,
+        })) {
+          return {
+            ok: false,
+            action: 'failover',
+            status: 502,
+            rawErrorText: errorMessage,
+          };
         }
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: err.message || 'network failure',
-        });
-        return reply.code(502).send({
-          error: { message: `Upstream error: ${err.message}`, type: 'upstream_error' },
-        });
+        return {
+          ok: false,
+          action: 'stop',
+          status: 502,
+          rawErrorText: errorMessage,
+        };
       }
-    }
+    },
+  });
+
+  if (execution.ok) {
+    return;
+  }
+
+  const finalStatus = execution.reason === 'no_channel'
+    ? 503
+    : (execution.status ?? 502);
+  const finalMessage = execution.reason === 'no_channel'
+    ? 'No available channels for this model'
+    : (execution.rawErrorText || 'upstream request failed');
+
+  if (!reportedNoChannel) {
+    await reportProxyAllFailed({
+      model: requestedModel,
+      reason: finalStatus === 504 ? requestBudget.buildTimeoutMessage() : finalMessage,
+    });
+  }
+
+  return reply.code(finalStatus).send({
+    error: {
+      message: finalStatus === 502 ? `Upstream error: ${finalMessage}` : finalMessage,
+      type: execution.reason === 'no_channel' ? 'server_error' : 'upstream_error',
+    },
+  });
+}
+
+export async function imagesProxyRoute(app: FastifyInstance) {
+  ensureMultipartBufferParser(app);
+
+  app.post('/v1/images/generations', async (request: FastifyRequest, reply: FastifyReply) => {
+    const body = request.body as any;
+    const requestedModel = body?.model || 'gpt-image-1';
+    if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+    const downstreamPolicy = getDownstreamRoutingPolicy(request);
+    const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
+    const downstreamPath = '/v1/images/generations';
+    const clientContext = detectDownstreamClientContext({
+      downstreamPath,
+      headers: request.headers as Record<string, unknown>,
+      body,
+    });
+    const requestBudget = createRequestBudget();
+    return await executeImageProxyRequest({
+      request,
+      reply,
+      requestedModel,
+      downstreamPolicy,
+      downstreamApiKeyId,
+      downstreamPath,
+      clientContext,
+      requestBudget,
+      buildRequest: (selected, actualModel) => ({
+        targetUrl: buildUpstreamUrl(selected.site.url, '/v1/images/generations'),
+        requestInit: withSiteRecordProxyRequestInit(selected.site, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${selected.tokenValue}`,
+          },
+          body: JSON.stringify({ ...body, model: actualModel }),
+        }, getProxyUrlFromExtraConfig(selected.account.extraConfig)),
+      }),
+    });
   });
 
   app.post('/v1/images/edits', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -228,65 +324,26 @@ export async function imagesProxyRoute(app: FastifyInstance) {
       headers: request.headers as Record<string, unknown>,
       body: jsonBody || Object.fromEntries(multipartForm?.entries?.() || []),
     });
-    const excludeChannelIds: number[] = [];
-    const excludeSiteIds = new Set<number>();
-    let retryCount = 0;
     const requestBudget = createRequestBudget();
-
-    while (retryCount <= MAX_RETRIES) {
-      if (requestBudget.isExpired()) {
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: requestBudget.buildTimeoutMessage(),
-        });
-        return reply.code(504).send({
-          error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
-        });
-      }
-
-      let selected = retryCount === 0
-        ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
-
-      if (!selected && retryCount === 0) {
-        await refreshModelsAndRebuildRoutes();
-        selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
-      }
-
-      if (!selected) {
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: 'No available channels after retries',
-        });
-        if (retryCount === 0) {
-          await logProxyNoChannelFailure({
-            modelRequested: requestedModel,
-            httpStatus: 503,
-            errorMessage: 'No available channels for this model',
-            retryCount,
-            downstreamPath,
-            clientContext,
-            downstreamApiKeyId,
-          });
-        }
-        return reply.code(503).send({
-          error: { message: 'No available channels for this model', type: 'server_error' },
-        });
-      }
-
-      excludeChannelIds.push(selected.channel.id);
-      const targetUrl = buildUpstreamUrl(selected.site.url, '/v1/images/edits');
-      const startTime = Date.now();
-
-      try {
-        const requestInit = multipartForm
+    return await executeImageProxyRequest({
+      request,
+      reply,
+      requestedModel,
+      downstreamPolicy,
+      downstreamApiKeyId,
+      downstreamPath,
+      clientContext,
+      requestBudget,
+      buildRequest: (selected, actualModel) => ({
+        targetUrl: buildUpstreamUrl(selected.site.url, '/v1/images/edits'),
+        requestInit: multipartForm
           ? withSiteRecordProxyRequestInit(selected.site, {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${selected.tokenValue}`,
             },
             body: cloneFormDataWithOverrides(multipartForm, {
-              model: selected.actualModel || requestedModel,
+              model: actualModel,
             }) as any,
           }, getProxyUrlFromExtraConfig(selected.account.extraConfig))
           : withSiteRecordProxyRequestInit(selected.site, {
@@ -297,107 +354,11 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             },
             body: JSON.stringify({
               ...(jsonBody || {}),
-              model: selected.actualModel || requestedModel,
+              model: actualModel,
             }),
-          }, getProxyUrlFromExtraConfig(selected.account.extraConfig));
-
-        const upstream = await fetch(targetUrl, requestInit);
-        const text = await upstream.text();
-        if (!upstream.ok) {
-          await tokenRouter.recordFailure(selected.channel.id, {
-            status: upstream.status,
-            errorText: text,
-            modelName: selected.actualModel,
-          });
-          if (shouldAvoidSiteForRequest(upstream.status, text)) {
-            excludeSiteIds.add(selected.site.id);
-          }
-          if (shouldMarkImageModelUnavailable(upstream.status, text)) {
-            await markTokenModelUnavailable(selected.token?.id, selected.actualModel || requestedModel);
-          }
-          logProxy(
-            selected,
-            requestedModel,
-            'failed',
-            upstream.status,
-            Date.now() - startTime,
-            text,
-            retryCount,
-            downstreamApiKeyId,
-            0,
-            downstreamPath,
-            clientContext,
-          );
-          if (isTokenExpiredError({ status: upstream.status, message: text })) {
-            await reportTokenExpired({
-              accountId: selected.account.id,
-              username: selected.account.username,
-              siteName: selected.site.name,
-              detail: `HTTP ${upstream.status}`,
-            });
-          }
-          if (shouldRetryProxyRequest(upstream.status, text) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-            retryCount++;
-            continue;
-          }
-          await reportProxyAllFailed({
-            model: requestedModel,
-            reason: `upstream returned HTTP ${upstream.status}`,
-          });
-          return reply.code(upstream.status).send({ error: { message: text, type: 'upstream_error' } });
-        }
-
-        let data: any = {};
-        try { data = JSON.parse(text); } catch { data = { data: [] }; }
-
-        const latency = Date.now() - startTime;
-        const estimatedCost = await estimateProxyCost({
-          site: selected.site,
-          account: selected.account,
-          modelName: selected.actualModel || requestedModel,
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: 0,
-        });
-        await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
-        recordDownstreamCostUsage(request, estimatedCost);
-        logProxy(selected, requestedModel, 'success', upstream.status, latency, null, retryCount, downstreamApiKeyId, estimatedCost, downstreamPath, clientContext);
-        return reply.code(upstream.status).send(data);
-      } catch (err: any) {
-        await tokenRouter.recordFailure(selected.channel.id, {
-          status: 0,
-          errorText: err.message,
-          modelName: selected.actualModel,
-        });
-        if (shouldAvoidSiteForRequest(0, err?.message)) {
-          excludeSiteIds.add(selected.site.id);
-        }
-        logProxy(
-          selected,
-          requestedModel,
-          'failed',
-          0,
-          Date.now() - startTime,
-          err.message,
-          retryCount,
-          downstreamApiKeyId,
-          0,
-          downstreamPath,
-          clientContext,
-        );
-        if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-          retryCount++;
-          continue;
-        }
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: err.message || 'network failure',
-        });
-        return reply.code(502).send({
-          error: { message: `Upstream error: ${err.message}`, type: 'upstream_error' },
-        });
-      }
-    }
+          }, getProxyUrlFromExtraConfig(selected.account.extraConfig)),
+      }),
+    });
   });
 
   app.post('/v1/images/variations', async (_request: FastifyRequest, reply: FastifyReply) => {

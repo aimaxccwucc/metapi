@@ -23,6 +23,12 @@ export class DefaultProxyConductor {
     const excludeSiteIds = new Set<number>();
     const maxAttempts = Math.max(1, Math.trunc(input.maxAttempts ?? 1));
     let attempts = 0;
+    let lastFailure: {
+      status?: number;
+      rawErrorText?: string;
+      retryAfterHeader?: string | null;
+      retryAfterMs?: number | null;
+    } | null = null;
 
     await input.onBeforeInitialSelect?.();
     let selected = await this.deps.selectChannel(input.requestedModel, input.downstreamPolicy);
@@ -62,15 +68,19 @@ export class DefaultProxyConductor {
       }
 
       const action = failureActionOf(result);
-      await recordFailedAttempt(this.deps, selected.channel.id, {
+      lastFailure = {
         status: result.status,
         rawErrorText: result.rawErrorText,
+        retryAfterHeader: result.retryAfterHeader ?? null,
+        retryAfterMs: result.retryAfterMs ?? null,
+      };
+      await recordFailedAttempt(this.deps, selected.channel.id, {
+        ...lastFailure,
       });
 
       if (isTerminalFailure(action)) {
         await input.onTerminalFailure?.(selected, {
-          status: result.status,
-          rawErrorText: result.rawErrorText,
+          ...lastFailure,
         });
         return {
           ok: false,
@@ -78,6 +88,8 @@ export class DefaultProxyConductor {
           selected,
           status: result.status,
           rawErrorText: result.rawErrorText,
+          ...(result.retryAfterHeader != null ? { retryAfterHeader: result.retryAfterHeader } : {}),
+          ...(result.retryAfterMs != null ? { retryAfterMs: result.retryAfterMs } : {}),
           attempts,
         };
       }
@@ -88,8 +100,7 @@ export class DefaultProxyConductor {
 
       if (shouldRefreshAuth(action) && this.deps.refreshAuth) {
         const refreshed = await this.deps.refreshAuth(selected, {
-          status: result.status,
-          rawErrorText: result.rawErrorText,
+          ...lastFailure,
         });
         if (refreshed && attempts < maxAttempts) {
           selected = refreshed;
@@ -100,8 +111,7 @@ export class DefaultProxyConductor {
       if (shouldFailover(action)) {
         excludeChannelIds.push(selected.channel.id);
         const failoverSiteId = input.getFailoverSiteId?.(selected, {
-          status: result.status,
-          rawErrorText: result.rawErrorText,
+          ...lastFailure,
         });
         if (typeof failoverSiteId === 'number' && Number.isFinite(failoverSiteId)) {
           excludeSiteIds.add(Math.trunc(failoverSiteId));
@@ -123,6 +133,8 @@ export class DefaultProxyConductor {
             selected,
             status: result.status,
             rawErrorText: result.rawErrorText,
+            ...(result.retryAfterHeader != null ? { retryAfterHeader: result.retryAfterHeader } : {}),
+            ...(result.retryAfterMs != null ? { retryAfterMs: result.retryAfterMs } : {}),
             attempts,
           };
         }
@@ -136,6 +148,8 @@ export class DefaultProxyConductor {
         selected,
         status: result.status,
         rawErrorText: result.rawErrorText,
+        ...(result.retryAfterHeader != null ? { retryAfterHeader: result.retryAfterHeader } : {}),
+        ...(result.retryAfterMs != null ? { retryAfterMs: result.retryAfterMs } : {}),
         attempts,
       };
     }
@@ -144,6 +158,10 @@ export class DefaultProxyConductor {
       ok: false,
       reason: 'failed',
       selected,
+      status: lastFailure?.status,
+      rawErrorText: lastFailure?.rawErrorText,
+      ...(lastFailure?.retryAfterHeader != null ? { retryAfterHeader: lastFailure.retryAfterHeader } : {}),
+      ...(lastFailure?.retryAfterMs != null ? { retryAfterMs: lastFailure.retryAfterMs } : {}),
       attempts,
     };
   }

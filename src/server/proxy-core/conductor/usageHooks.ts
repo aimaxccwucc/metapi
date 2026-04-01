@@ -14,7 +14,12 @@ export async function recordSuccessfulAttempt(
 export async function recordFailedAttempt(
   deps: ProxyConductorDependencies,
   channelId: number,
-  failure: { status?: number; rawErrorText?: string },
+  failure: {
+    status?: number;
+    rawErrorText?: string;
+    retryAfterHeader?: string | null;
+    retryAfterMs?: number | null;
+  },
 ): Promise<void> {
   await deps.recordFailure?.(channelId, failure);
 }

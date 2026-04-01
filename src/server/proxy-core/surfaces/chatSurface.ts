@@ -1,7 +1,7 @@
 import { TextDecoder } from 'node:util';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { tokenRouter } from '../../services/tokenRouter.js';
-import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
+import { refreshModelsAndRebuildRoutesOnDemand } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
@@ -53,7 +53,7 @@ import {
   unwrapGeminiCliPayload,
 } from '../../routes/proxy/geminiCliCompat.js';
 import { dispatchRuntimeRequest } from '../../routes/proxy/runtimeExecutor.js';
-import { createRequestBudget, shouldRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
+import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
 import { wrapReaderWithIdleTimeout } from '../../routes/proxy/streamTimeout.js';
 import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/conversationFileCapabilities.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
@@ -204,7 +204,7 @@ export async function handleChatSurfaceRequest(
     downstreamPolicy,
     maxAttempts: MAX_RETRIES + 1,
     refreshSelection: async () => {
-      await refreshModelsAndRebuildRoutes();
+      await refreshModelsAndRebuildRoutesOnDemand();
       return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
     },
     onNoChannel: async ({ attempts }) => {
@@ -442,6 +442,7 @@ export async function handleChatSurfaceRequest(
           const status = endpointResult.status || 502;
           const errText = endpointResult.errText || 'unknown error';
           const rawErrText = endpointResult.rawErrText || errText;
+          const retryAfterHeader = endpointResult.retryAfterHeader ?? null;
           recordProxyDebugTrace({
             clientContext,
             kind: 'endpoint_final_failure',
@@ -457,6 +458,7 @@ export async function handleChatSurfaceRequest(
             status,
             errorText: rawErrText,
             modelName,
+            retryAfterHeader,
           });
           logProxy(
             selected,
@@ -491,12 +493,22 @@ export async function handleChatSurfaceRequest(
             });
           }
 
-          if (shouldRetryProxyRequest(status, errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+          if (
+            shouldRetryProxyRequest(status, errText)
+            && await waitForRetryWithinBudget({
+              retryCount,
+              maxRetries: MAX_RETRIES,
+              budget: requestBudget,
+              status,
+              retryAfterHeader,
+            })
+          ) {
             return {
               ok: false,
               action: 'failover',
               status,
               rawErrorText: errText,
+              retryAfterHeader,
             };
           }
 
@@ -505,6 +517,7 @@ export async function handleChatSurfaceRequest(
             action: 'stop',
             status,
             rawErrorText: errText,
+            retryAfterHeader,
           };
         }
 
@@ -625,7 +638,15 @@ export async function handleChatSurfaceRequest(
                 );
 
                 const failureMessage = `[upstream:${successfulUpstreamPath}] ${failure.reason}`;
-              if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+              if (
+                shouldRetryProxyRequest(failure.status, failure.reason)
+                && await waitForRetryWithinBudget({
+                  retryCount,
+                  maxRetries: MAX_RETRIES,
+                  budget: requestBudget,
+                  status: failure.status,
+                })
+              ) {
                 return {
                   ok: false,
                   action: 'failover',
@@ -832,7 +853,15 @@ export async function handleChatSurfaceRequest(
           );
 
           const failureMessage = `[upstream:${successfulUpstreamPath}] ${failure.reason}`;
-          if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+          if (
+            shouldRetryProxyRequest(failure.status, failure.reason)
+            && await waitForRetryWithinBudget({
+              retryCount,
+              maxRetries: MAX_RETRIES,
+              budget: requestBudget,
+              status: failure.status,
+            })
+          ) {
             return {
               ok: false,
               action: 'failover',
@@ -959,7 +988,12 @@ export async function handleChatSurfaceRequest(
           downstreamApiKeyId,
         );
 
-        if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+        if (await waitForRetryWithinBudget({
+          retryCount,
+          maxRetries: MAX_RETRIES,
+          budget: requestBudget,
+          status: 0,
+        })) {
           return {
             ok: false,
             action: 'failover',
@@ -1152,13 +1186,14 @@ export async function handleClaudeCountTokensSurfaceRequest(
     recordResponseCacheMiss();
   }
 
+  const requestBudget = createRequestBudget();
   let reportedNoChannel = false;
   const execution = await conductor.execute({
     requestedModel,
     downstreamPolicy,
     maxAttempts: MAX_RETRIES + 1,
     refreshSelection: async () => {
-      await refreshModelsAndRebuildRoutes();
+      await refreshModelsAndRebuildRoutesOnDemand();
       return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
     },
     onNoChannel: async ({ attempts }) => {
@@ -1308,7 +1343,16 @@ export async function handleClaudeCountTokensSurfaceRequest(
               detail: `HTTP ${upstream.status}`,
             });
           }
-          if (shouldRetryProxyRequest(upstream.status, errorText) && retryCount < MAX_RETRIES) {
+          if (
+            shouldRetryProxyRequest(upstream.status, errorText)
+            && await waitForRetryWithinBudget({
+              retryCount,
+              maxRetries: MAX_RETRIES,
+              budget: requestBudget,
+              status: upstream.status,
+              retryAfterHeader: upstream.headers.get('retry-after'),
+            })
+          ) {
             return {
               ok: false,
               action: 'failover',
@@ -1386,7 +1430,12 @@ export async function handleClaudeCountTokensSurfaceRequest(
           clientContext,
           downstreamApiKeyId,
         );
-        if (retryCount < MAX_RETRIES) {
+        if (await waitForRetryWithinBudget({
+          retryCount,
+          maxRetries: MAX_RETRIES,
+          budget: requestBudget,
+          status: 0,
+        })) {
           return {
             ok: false,
             action: 'failover',

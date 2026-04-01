@@ -39,6 +39,7 @@ vi.mock('../../services/tokenRouter.js', () => ({
 
 vi.mock('../../services/modelService.js', () => ({
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
+  refreshModelsAndRebuildRoutesOnDemand: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
 }));
 
 vi.mock('../../services/alertService.js', () => ({

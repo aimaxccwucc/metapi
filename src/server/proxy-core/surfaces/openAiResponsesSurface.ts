@@ -2,7 +2,7 @@ import { TextDecoder } from 'node:util';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { config } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
-import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
+import { refreshModelsAndRebuildRoutesOnDemand } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
@@ -26,7 +26,7 @@ import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { resolveProxyLogBilling } from '../../routes/proxy/proxyBilling.js';
 import { getProxyAuthContext, getProxyResourceOwner } from '../../middleware/auth.js';
 import { dispatchRuntimeRequest } from '../../routes/proxy/runtimeExecutor.js';
-import { createRequestBudget, shouldRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
+import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
 import { wrapReaderWithIdleTimeout } from '../../routes/proxy/streamTimeout.js';
 import { normalizeInputFileBlock } from '../../transformers/shared/inputFile.js';
 import {
@@ -276,7 +276,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
     downstreamPolicy,
     maxAttempts: MAX_RETRIES + 1,
     refreshSelection: async () => {
-      await refreshModelsAndRebuildRoutes();
+      await refreshModelsAndRebuildRoutesOnDemand();
       return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
     },
     onNoChannel: async ({ attempts }) => {
@@ -546,6 +546,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           const status = endpointResult.status || 502;
           const errText = endpointResult.errText || 'unknown error';
           const rawErrText = endpointResult.rawErrText || errText;
+          const retryAfterHeader = endpointResult.retryAfterHeader ?? null;
           recordProxyDebugTrace({
             clientContext,
             kind: 'endpoint_final_failure',
@@ -561,6 +562,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             status,
             errorText: rawErrText,
             modelName,
+            retryAfterHeader,
           });
           logProxy(
             selected,
@@ -595,12 +597,22 @@ export async function handleOpenAiResponsesSurfaceRequest(
             });
           }
 
-          if (shouldRetryProxyRequest(status, errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+          if (
+            shouldRetryProxyRequest(status, errText)
+            && await waitForRetryWithinBudget({
+              retryCount,
+              maxRetries: MAX_RETRIES,
+              budget: requestBudget,
+              status,
+              retryAfterHeader,
+            })
+          ) {
             return {
               ok: false,
               action: 'failover',
               status,
               rawErrorText: errText,
+              retryAfterHeader,
             };
           }
 
@@ -609,6 +621,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             action: 'stop',
             status,
             rawErrorText: errText,
+            retryAfterHeader,
           };
         }
 
@@ -812,7 +825,15 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 downstreamApiKeyId,
               );
 
-              if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+              if (
+                shouldRetryProxyRequest(failure.status, failure.reason)
+                && await waitForRetryWithinBudget({
+                  retryCount,
+                  maxRetries: MAX_RETRIES,
+                  budget: requestBudget,
+                  status: failure.status,
+                })
+              ) {
                 return {
                   ok: false,
                   action: 'failover',
@@ -980,7 +1001,15 @@ export async function handleOpenAiResponsesSurfaceRequest(
             downstreamApiKeyId,
           );
 
-          if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+          if (
+            shouldRetryProxyRequest(failure.status, failure.reason)
+            && await waitForRetryWithinBudget({
+              retryCount,
+              maxRetries: MAX_RETRIES,
+              budget: requestBudget,
+              status: failure.status,
+            })
+          ) {
             return {
               ok: false,
               action: 'failover',
@@ -1114,7 +1143,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
           downstreamApiKeyId,
         );
 
-        if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+        if (await waitForRetryWithinBudget({
+          retryCount,
+          maxRetries: MAX_RETRIES,
+          budget: requestBudget,
+          status: 0,
+        })) {
           return {
             ok: false,
             action: 'failover',

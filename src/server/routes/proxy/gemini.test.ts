@@ -53,6 +53,7 @@ vi.mock('../../services/modelPricingService.js', () => ({
 
 vi.mock('../../services/modelService.js', () => ({
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
+  refreshModelsAndRebuildRoutesOnDemand: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
 }));
 
 vi.mock('../../services/oauth/refreshSingleflight.js', () => ({

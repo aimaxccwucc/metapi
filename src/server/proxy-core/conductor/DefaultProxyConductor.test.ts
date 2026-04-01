@@ -89,6 +89,8 @@ describe('DefaultProxyConductor', () => {
     expect(recordFailure).toHaveBeenCalledWith(11, {
       status: 429,
       rawErrorText: 'rate limited',
+      retryAfterHeader: null,
+      retryAfterMs: null,
     });
   });
 
@@ -136,6 +138,8 @@ describe('DefaultProxyConductor', () => {
     expect(recordFailure).toHaveBeenCalledWith(11, {
       status: 503,
       rawErrorText: 'upstream unavailable',
+      retryAfterHeader: null,
+      retryAfterMs: null,
     });
     expect(recordSuccess).toHaveBeenCalledWith(12, {
       latencyMs: null,
@@ -182,6 +186,8 @@ describe('DefaultProxyConductor', () => {
     expect(refreshAuth).toHaveBeenCalledWith(baseSelectedChannel, {
       status: 401,
       rawErrorText: 'expired token',
+      retryAfterHeader: null,
+      retryAfterMs: null,
     });
   });
 
@@ -260,7 +266,7 @@ describe('DefaultProxyConductor', () => {
       maxAttempts: 2,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: false,
       reason: 'terminal',
       selected: baseSelectedChannel,
@@ -271,6 +277,47 @@ describe('DefaultProxyConductor', () => {
     expect(onTerminalFailure).toHaveBeenCalledWith(baseSelectedChannel, {
       status: 502,
       rawErrorText: 'stream disconnected before completion',
+      retryAfterHeader: null,
+      retryAfterMs: null,
+    });
+  });
+
+  it('propagates Retry-After failure metadata to hooks and results', async () => {
+    const recordFailure = vi.fn().mockResolvedValue(undefined);
+    const conductor = new DefaultProxyConductor({
+      selectChannel: vi.fn().mockResolvedValue(baseSelectedChannel),
+      selectNextChannel: vi.fn().mockResolvedValue(null),
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+      recordFailure,
+    });
+
+    const result = await conductor.execute({
+      requestedModel: 'gpt-5.4',
+      maxAttempts: 1,
+      attempt: vi.fn().mockResolvedValue({
+        ok: false,
+        action: 'failover',
+        status: 429,
+        rawErrorText: 'rate limited',
+        retryAfterHeader: '12',
+        retryAfterMs: 12_000,
+      }),
+    });
+
+    expect(recordFailure).toHaveBeenCalledWith(11, {
+      status: 429,
+      rawErrorText: 'rate limited',
+      retryAfterHeader: '12',
+      retryAfterMs: 12_000,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'failed',
+      status: 429,
+      rawErrorText: 'rate limited',
+      retryAfterHeader: '12',
+      retryAfterMs: 12_000,
+      attempts: 1,
     });
   });
 });

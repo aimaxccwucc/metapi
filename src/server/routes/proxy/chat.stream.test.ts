@@ -43,6 +43,7 @@ vi.mock('../../services/tokenRouter.js', () => ({
 
 vi.mock('../../services/modelService.js', () => ({
   refreshModelsAndRebuildRoutes: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
+  refreshModelsAndRebuildRoutesOnDemand: (...args: unknown[]) => refreshModelsAndRebuildRoutesMock(...args),
 }));
 
 vi.mock('../../services/alertService.js', () => ({
@@ -4231,5 +4232,37 @@ describe('chat proxy stream behavior', () => {
     const body = response.json();
     expect(body?.error?.message).toContain('[upstream:/v1/chat/completions]');
     expect(body?.error?.message).toContain('Invalid API key');
+  });
+
+  it('passes endpoint Retry-After headers into final chat failure tracking', async () => {
+    shouldRetryProxyRequestMock.mockReturnValue(false);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      error: {
+        message: 'rate limited',
+        type: 'rate_limit_error',
+      },
+    }), {
+      status: 429,
+      headers: {
+        'content-type': 'application/json',
+        'retry-after': '23',
+      },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-4o-mini',
+        stream: false,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 429,
+      retryAfterHeader: '23',
+    }));
   });
 });

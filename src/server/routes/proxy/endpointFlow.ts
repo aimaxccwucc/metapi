@@ -58,6 +58,7 @@ export type EndpointFlowResult =
     status: number;
     errText: string;
     rawErrText?: string;
+    retryAfterHeader?: string | null;
   };
 
 export function withUpstreamPath(path: string, message: string): string {
@@ -121,6 +122,7 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
   let finalStatus = 0;
   let finalErrText = 'unknown error';
   let finalRawErrText: string | undefined;
+  let finalRetryAfterHeader: string | null | undefined;
 
   for (let endpointIndex = 0; endpointIndex < endpointCount; endpointIndex += 1) {
     const endpoint = input.endpointCandidates[endpointIndex] as UpstreamEndpoint;
@@ -212,6 +214,7 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
     finalStatus = response.status;
     finalErrText = errText;
     finalRawErrText = rawErrText;
+    finalRetryAfterHeader = response.headers.get('retry-after');
     break;
   }
 
@@ -220,5 +223,6 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
     status: finalStatus || 502,
     errText: finalErrText || 'unknown error',
     rawErrText: finalRawErrText,
+    retryAfterHeader: finalRetryAfterHeader ?? null,
   };
 }

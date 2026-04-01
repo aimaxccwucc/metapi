@@ -117,6 +117,7 @@ describe('TokenRouter oauth usage-limit cooldown fanout', () => {
         },
       }),
       modelName: 'gpt-5.2-codex',
+      retryAfterHeader: '90',
     });
 
     const rows = await db.select({
@@ -133,6 +134,7 @@ describe('TokenRouter oauth usage-limit cooldown fanout', () => {
       expect(row.id === channelA.id || row.id === channelB.id).toBe(true);
       expect(typeof row.cooldownUntil).toBe('string');
       expect(Date.parse(String(row.cooldownUntil))).toBeGreaterThan(Date.now());
+      expect(Date.parse(String(row.cooldownUntil))).toBeGreaterThanOrEqual(Date.now() + 85_000);
       expect(row.failCount ?? 0).toBe(0);
       expect(row.consecutiveFailCount ?? 0).toBe(0);
     }
@@ -199,6 +201,74 @@ describe('TokenRouter oauth usage-limit cooldown fanout', () => {
       status: 401,
       errorText: 'expired token',
       modelName: 'gpt-5.2-codex',
+    });
+
+    const rowA = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelA.id)).get();
+    const rowB = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelB.id)).get();
+
+    expect(rowA?.cooldownUntil).toBeTruthy();
+    expect(rowB?.cooldownUntil ?? null).toBeNull();
+  });
+
+  it('does not fan out retry-after auth failures across oauth siblings', async () => {
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.2-codex',
+      enabled: true,
+    }).returning().get();
+
+    const site = await db.insert(schema.sites).values({
+      name: 'codex-auth-retry-after-site',
+      url: 'https://codex-auth-retry-after-site.example.com',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const extraConfig = JSON.stringify({
+      oauth: {
+        provider: 'codex',
+        accountId: 'auth-retry-after-shared',
+        accountKey: 'auth-retry-after-shared',
+      },
+    });
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'auth-retry-after-a',
+      accessToken: 'auth-retry-after-access-a',
+      status: 'active',
+      extraConfig,
+    }).returning().get();
+
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'auth-retry-after-b',
+      accessToken: 'auth-retry-after-access-b',
+      status: 'active',
+      extraConfig,
+    }).returning().get();
+
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const channelB = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channelA.id, {
+      status: 401,
+      errorText: 'expired token',
+      modelName: 'gpt-5.2-codex',
+      retryAfterHeader: '45',
     });
 
     const rowA = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channelA.id)).get();

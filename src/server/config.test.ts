@@ -59,6 +59,7 @@ describe('buildConfig', () => {
     expect(config.upstreamStreamFirstByteTimeoutMs).toBe(15_000);
     expect(config.upstreamRequestBudgetMs).toBe(30_000);
     expect(config.upstreamStreamIdleTimeoutMs).toBe(20_000);
+    expect(config.onDemandModelRefreshCooldownMs).toBe(15_000);
     expect(config.proxyMaxRetries).toBe(2);
     expect(config.responseCacheTtlMs).toBe(3_600_000);
     expect(config.responseCacheMaxRows).toBe(2_000);
@@ -81,6 +82,7 @@ describe('buildConfig', () => {
       UPSTREAM_STREAM_FIRST_BYTE_TIMEOUT_MS: '9000',
       UPSTREAM_REQUEST_BUDGET_MS: '45000',
       UPSTREAM_STREAM_IDLE_TIMEOUT_MS: '12000',
+      ON_DEMAND_MODEL_REFRESH_COOLDOWN_MS: '22000',
       PROXY_MAX_RETRIES: '5',
       RESPONSE_CACHE_TTL_MS: '1800000',
       RESPONSE_CACHE_MAX_ROWS: '1200',
@@ -93,6 +95,7 @@ describe('buildConfig', () => {
     expect(config.upstreamStreamFirstByteTimeoutMs).toBe(9_000);
     expect(config.upstreamRequestBudgetMs).toBe(45_000);
     expect(config.upstreamStreamIdleTimeoutMs).toBe(12_000);
+    expect(config.onDemandModelRefreshCooldownMs).toBe(22_000);
     expect(config.proxyMaxRetries).toBe(5);
     expect(config.responseCacheTtlMs).toBe(1_800_000);
     expect(config.responseCacheMaxRows).toBe(1_200);

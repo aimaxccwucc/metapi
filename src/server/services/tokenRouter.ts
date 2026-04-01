@@ -81,6 +81,8 @@ type SiteRuntimeFailureContext = {
   status?: number | null;
   errorText?: string | null;
   modelName?: string | null;
+  retryAfterHeader?: string | null;
+  retryAfterMs?: number | null;
 };
 
 type SiteRuntimeHealthState = {
@@ -568,6 +570,30 @@ function readNullableTimestamp(value: unknown): number | null {
   return normalized;
 }
 
+function parseRetryAfterMs(rawValue?: string | null, nowMs = Date.now()): number | null {
+  const normalized = typeof rawValue === 'string' ? rawValue.trim() : '';
+  if (!normalized) return null;
+
+  const seconds = Number(normalized);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.max(0, Math.trunc(seconds * 1000));
+  }
+
+  const retryAtMs = Date.parse(normalized);
+  if (!Number.isFinite(retryAtMs)) return null;
+  return Math.max(0, retryAtMs - nowMs);
+}
+
+function resolveRetryAfterMsFromContext(
+  context: SiteRuntimeFailureContext = {},
+  nowMs = Date.now(),
+): number | null {
+  if (typeof context.retryAfterMs === 'number' && Number.isFinite(context.retryAfterMs) && context.retryAfterMs >= 0) {
+    return Math.trunc(context.retryAfterMs);
+  }
+  return parseRetryAfterMs(context.retryAfterHeader, nowMs);
+}
+
 function resolveSiteRuntimeFailurePenalty(context: SiteRuntimeFailureContext = {}): number {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
@@ -723,6 +749,11 @@ function resolveShortWindowLimitCooldownUntil(
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
   if (!isUsageLimitRateLimitFailure({ status, errorText })) return null;
+
+  const explicitRetryAfterMs = resolveRetryAfterMsFromContext(context, nowMs);
+  if (explicitRetryAfterMs != null && explicitRetryAfterMs > 0) {
+    return new Date(nowMs + explicitRetryAfterMs).toISOString();
+  }
 
   const resetHint = parseCodexQuotaResetHint(status, errorText, nowMs);
   if (resetHint?.resetAt) {
@@ -997,12 +1028,13 @@ function shouldOpenImmediateRuntimeBreaker(context: SiteRuntimeFailureContext = 
 function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
   state.penaltyScore += resolveSiteRuntimeFailurePenalty(context);
   const immediateBreakerMs = resolveImmediateModelBreakerDurationMs(context);
+  const retryAfterMs = resolveRetryAfterMsFromContext(context, nowMs);
   if (immediateBreakerMs > 0 && shouldOpenImmediateRuntimeBreaker(context)) {
     state.breakerLevel = Math.min(
       SITE_RUNTIME_BREAKER_LEVELS_MS.length - 1,
       state.breakerLevel + 1,
     );
-    state.breakerUntilMs = nowMs + immediateBreakerMs;
+    state.breakerUntilMs = nowMs + Math.max(immediateBreakerMs, retryAfterMs ?? 0);
     state.transientFailureStreak = 0;
     state.lastTransientFailureAtMs = null;
     state.lastFailureAtMs = nowMs;
@@ -1022,12 +1054,16 @@ function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteR
     if (state.transientFailureStreak >= SITE_RUNTIME_BREAKER_STREAK_THRESHOLD) {
       state.breakerLevel = Math.min(state.breakerLevel + 1, SITE_RUNTIME_BREAKER_LEVELS_MS.length - 1);
       const breakerMs = resolveSiteRuntimeBreakerMs(state.breakerLevel);
-      state.breakerUntilMs = breakerMs > 0 ? nowMs + breakerMs : null;
+      const effectiveBreakerMs = Math.max(breakerMs, retryAfterMs ?? 0);
+      state.breakerUntilMs = effectiveBreakerMs > 0 ? nowMs + effectiveBreakerMs : null;
       state.transientFailureStreak = 0;
     }
   } else {
     state.transientFailureStreak = 0;
     state.lastTransientFailureAtMs = null;
+  }
+  if (retryAfterMs != null && retryAfterMs > 0) {
+    state.breakerUntilMs = Math.max(state.breakerUntilMs ?? 0, nowMs + retryAfterMs);
   }
   state.lastFailureAtMs = nowMs;
 }
@@ -4632,6 +4668,10 @@ export class TokenRouter {
     const normalizedContext: SiteRuntimeFailureContext = typeof context === 'string'
       ? { modelName: context }
       : (context ?? {});
+    const retryAfterMs = resolveRetryAfterMsFromContext(normalizedContext, nowMs);
+    const retryAfterUntil = retryAfterMs != null && retryAfterMs > 0
+      ? new Date(nowMs + retryAfterMs).toISOString()
+      : null;
     const shortWindowLimitCooldownUntil = resolveShortWindowLimitCooldownUntil(account, normalizedContext, nowMs);
     const failCount = shortWindowLimitCooldownUntil ? 0 : ((ch.failCount ?? 0) + 1);
     const isProtocolFailure = matchesAnyPattern(SITE_PROTOCOL_FAILURE_PATTERNS, normalizedContext.errorText);
@@ -4677,6 +4717,9 @@ export class TokenRouter {
       if (!cooldownUntil || authCooldownUntil > cooldownUntil) {
         cooldownUntil = authCooldownUntil;
       }
+    }
+    if (retryAfterUntil && (!cooldownUntil || retryAfterUntil > cooldownUntil)) {
+      cooldownUntil = retryAfterUntil;
     }
 
     await db.update(schema.routeChannels).set({
@@ -4743,6 +4786,12 @@ export class TokenRouter {
     budgetState.capacity = resolveAccountRateLimitCapacity(accountState);
     budgetState.refillPerSec = resolveAccountRateLimitRefillPerSec(accountState);
     budgetState.tokens = clampNumber(budgetState.tokens * 0.6, 0, budgetState.capacity);
+    if (retryAfterMs != null && retryAfterMs > 0) {
+      budgetState.denyUntilMs = Math.max(
+        budgetState.denyUntilMs ?? 0,
+        nowMs + retryAfterMs,
+      );
+    }
     if (!isProtocolFailure && (failureCategory === 'auth' || failureCategory === 'rate_limit')) {
       budgetState.denyUntilMs = Math.max(
         budgetState.denyUntilMs ?? 0,
@@ -5433,4 +5482,3 @@ export class TokenRouter {
 }
 
 export const tokenRouter = new TokenRouter();
-

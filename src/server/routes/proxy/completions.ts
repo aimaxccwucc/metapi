@@ -2,7 +2,7 @@
 import { fetch } from 'undici';
 import { config } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
-import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
+import { refreshModelsAndRebuildRoutesOnDemand } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
@@ -20,7 +20,7 @@ import { buildUpstreamUrl } from './upstreamUrl.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from './downstreamClientContext.js';
 import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
-import { createRequestBudget, shouldRetryWithinBudget } from './requestBudget.js';
+import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
 import { wrapReaderWithIdleTimeout } from './streamTimeout.js';
 import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, recordResponseCacheMiss, writeResponseCache } from '../../services/responseCacheService.js';
 import { DefaultProxyConductor } from '../../proxy-core/conductor/DefaultProxyConductor.js';
@@ -107,7 +107,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       downstreamPolicy,
       maxAttempts: MAX_RETRIES + 1,
       refreshSelection: async () => {
-        await refreshModelsAndRebuildRoutes();
+        await refreshModelsAndRebuildRoutesOnDemand();
         return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
       },
       onNoChannel: async ({ attempts }) => {
@@ -195,7 +195,16 @@ export async function completionsProxyRoute(app: FastifyInstance) {
               });
             }
 
-            if (shouldRetryProxyRequest(upstream.status, errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+            if (
+              shouldRetryProxyRequest(upstream.status, errText)
+              && await waitForRetryWithinBudget({
+                retryCount,
+                maxRetries: MAX_RETRIES,
+                budget: requestBudget,
+                status: upstream.status,
+                retryAfterHeader: upstream.headers.get('retry-after'),
+              })
+            ) {
               return {
                 ok: false,
                 action: 'failover',
@@ -351,7 +360,15 @@ export async function completionsProxyRoute(app: FastifyInstance) {
               downstreamPath,
             );
 
-            if (shouldRetryProxyRequest(failure.status, errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+            if (
+              shouldRetryProxyRequest(failure.status, errText)
+              && await waitForRetryWithinBudget({
+                retryCount,
+                maxRetries: MAX_RETRIES,
+                budget: requestBudget,
+                status: failure.status,
+              })
+            ) {
               return {
                 ok: false,
                 action: 'failover',
@@ -452,7 +469,12 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             downstreamPath,
           );
 
-          if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+          if (await waitForRetryWithinBudget({
+            retryCount,
+            maxRetries: MAX_RETRIES,
+            budget: requestBudget,
+            status: 0,
+          })) {
             return {
               ok: false,
               action: 'failover',
@@ -571,4 +593,3 @@ async function logProxy(
     console.warn('[proxy/completions] failed to write proxy log', error);
   }
 }
-

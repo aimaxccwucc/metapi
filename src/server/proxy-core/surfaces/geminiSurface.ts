@@ -13,7 +13,7 @@ import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
 import { getOauthInfoFromExtraConfig } from '../../services/oauth/oauthAccount.js';
 import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refreshSingleflight.js';
 import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
-import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
+import { refreshModelsAndRebuildRoutesOnDemand } from '../../services/modelService.js';
 import { getDownstreamRoutingPolicy } from '../../routes/proxy/downstreamPolicy.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../../routes/proxy/endpointFlow.js';
 import { composeProxyLogMessage } from '../../routes/proxy/logPathMeta.js';
@@ -40,7 +40,7 @@ import { recordProxyDebugTrace } from '../../routes/proxy/proxyDebugTrace.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/conversationFileCapabilities.js';
 import { readRuntimeResponseText } from '../executors/types.js';
-import { createRequestBudget, shouldRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
+import { createRequestBudget, waitForRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
 import { wrapReaderWithIdleTimeout } from '../../routes/proxy/streamTimeout.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
@@ -315,7 +315,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         if (!isDirectGeminiFamilyPlatform(selected.site.platform)) {
           let models = await readRouteAwareGeminiModels(request);
           if (models.length <= 0) {
-            await refreshModelsAndRebuildRoutes();
+            await refreshModelsAndRebuildRoutesOnDemand();
             models = await readRouteAwareGeminiModels(request);
           }
           return reply.code(200).send({ models });
@@ -335,17 +335,28 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         );
         const text = await readRuntimeResponseText(upstream);
         if (!upstream.ok) {
+          const retryAfterHeader = upstream.headers.get('retry-after');
           lastStatus = upstream.status;
           lastText = text;
           lastContentType = upstream.headers.get('content-type') || 'application/json';
           await tokenRouter.recordFailure?.(selected.channel.id, {
             status: upstream.status,
             errorText: text,
+            retryAfterHeader,
           });
           if (shouldAvoidSiteForRequest(upstream.status, text)) {
             excludeSiteIds.add(selected.site.id);
           }
-          if (shouldRetryGeminiRequest(upstream.status, text) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+          if (
+            shouldRetryGeminiRequest(upstream.status, text)
+            && await waitForRetryWithinBudget({
+              retryCount,
+              maxRetries: MAX_RETRIES,
+              budget: requestBudget,
+              status: upstream.status,
+              retryAfterHeader,
+            })
+          ) {
             retryCount += 1;
             continue;
           }
@@ -373,7 +384,15 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             type: 'upstream_error',
           },
         });
-        if (shouldRetryGeminiRequest(0, error instanceof Error ? error.message : 'Gemini upstream request failed') && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+        if (
+          shouldRetryGeminiRequest(0, error instanceof Error ? error.message : 'Gemini upstream request failed')
+          && await waitForRetryWithinBudget({
+            retryCount,
+            maxRetries: MAX_RETRIES,
+            budget: requestBudget,
+            status: 0,
+          })
+        ) {
           retryCount += 1;
           continue;
         }
@@ -610,6 +629,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             }
           }
           if (!upstream.ok) {
+            const retryAfterHeader = upstream.headers.get('retry-after');
             lastStatus = upstream.status;
             lastContentType = contentType;
             lastText = await readRuntimeResponseText(upstream);
@@ -630,6 +650,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               status: upstream.status,
               errorText: lastText,
               modelName: actualModel,
+              retryAfterHeader,
             });
             if (shouldAvoidSiteForRequest(upstream.status, lastText)) {
               excludeSiteIds.add(selected.site.id);
@@ -646,7 +667,16 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               upstreamPath,
               clientContext,
             );
-            if (shouldRetryGeminiRequest(upstream.status, lastText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+            if (
+              shouldRetryGeminiRequest(upstream.status, lastText)
+              && await waitForRetryWithinBudget({
+                retryCount,
+                maxRetries: MAX_RETRIES,
+                budget: requestBudget,
+                status: upstream.status,
+                retryAfterHeader,
+              })
+            ) {
               retryCount += 1;
               continue;
             }
@@ -971,6 +1001,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           },
         });
         if (!endpointResult.ok) {
+          const retryAfterHeader = endpointResult.retryAfterHeader ?? null;
           lastStatus = endpointResult.status;
           lastContentType = 'application/json';
           lastText = JSON.stringify({
@@ -994,6 +1025,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             status: endpointResult.status,
             errorText: endpointResult.rawErrText || endpointResult.errText,
             modelName: actualModel,
+            retryAfterHeader,
           });
           if (shouldAvoidSiteForRequest(endpointResult.status, endpointResult.rawErrText || endpointResult.errText)) {
             excludeSiteIds.add(selected.site.id);
@@ -1010,7 +1042,16 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             null,
             clientContext,
           );
-          if (shouldRetryGeminiRequest(endpointResult.status, endpointResult.rawErrText || endpointResult.errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+          if (
+            shouldRetryGeminiRequest(endpointResult.status, endpointResult.rawErrText || endpointResult.errText)
+            && await waitForRetryWithinBudget({
+              retryCount,
+              maxRetries: MAX_RETRIES,
+              budget: requestBudget,
+              status: endpointResult.status,
+              retryAfterHeader,
+            })
+          ) {
             retryCount += 1;
             continue;
           }
@@ -1112,7 +1153,15 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           upstreamPath || null,
           clientContext,
         );
-        if (shouldRetryGeminiRequest(0, error instanceof Error ? error.message : 'Gemini upstream request failed') && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+        if (
+          shouldRetryGeminiRequest(0, error instanceof Error ? error.message : 'Gemini upstream request failed')
+          && await waitForRetryWithinBudget({
+            retryCount,
+            maxRetries: MAX_RETRIES,
+            budget: requestBudget,
+            status: 0,
+          })
+        ) {
           retryCount += 1;
           continue;
         }

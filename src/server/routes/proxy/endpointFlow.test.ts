@@ -296,4 +296,28 @@ describe('executeEndpointFlow', () => {
       expect(result.errText).toContain('Upstream returned HTTP 400');
     }
   });
+
+  it('preserves Retry-After header on final failed endpoint result', async () => {
+    fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({
+      error: { message: 'rate limited', type: 'rate_limit_error' },
+    }), {
+      status: 429,
+      headers: {
+        'content-type': 'application/json',
+        'retry-after': '17',
+      },
+    })));
+
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      endpointCandidates: ['responses'],
+      buildRequest: () => requestFor('/v1/responses'),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(429);
+      expect(result.retryAfterHeader).toBe('17');
+    }
+  });
 });

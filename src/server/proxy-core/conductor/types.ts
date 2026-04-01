@@ -2,6 +2,7 @@ export type SelectedChannelLike = {
   channel: { id: number; routeId?: number; [key: string]: any };
   site: any;
   account: any;
+  token?: any;
   tokenName?: string;
   tokenValue?: string;
   actualModel?: string;
@@ -26,6 +27,8 @@ export type AttemptFailure = {
   action: AttemptFailureAction;
   status?: number;
   rawErrorText?: string;
+  retryAfterHeader?: string | null;
+  retryAfterMs?: number | null;
   error?: unknown;
 };
 
@@ -49,10 +52,20 @@ export type ProxyConductorDependencies = {
     excludeSiteIds?: ReadonlySet<number>,
   ) => Promise<SelectedChannelLike | null>;
   recordSuccess?: (channelId: number, metrics: { latencyMs: number | null; cost: number | null }) => Promise<void> | void;
-  recordFailure?: (channelId: number, failure: { status?: number; rawErrorText?: string }) => Promise<void> | void;
+  recordFailure?: (channelId: number, failure: {
+    status?: number;
+    rawErrorText?: string;
+    retryAfterHeader?: string | null;
+    retryAfterMs?: number | null;
+  }) => Promise<void> | void;
   refreshAuth?: (
     selected: SelectedChannelLike,
-    failure: { status?: number; rawErrorText?: string },
+    failure: {
+      status?: number;
+      rawErrorText?: string;
+      retryAfterHeader?: string | null;
+      retryAfterMs?: number | null;
+    },
   ) => Promise<SelectedChannelLike | null>;
 };
 
@@ -63,11 +76,21 @@ export type ExecuteInput = {
   onBeforeInitialSelect?: () => Promise<void> | void;
   refreshSelection?: () => Promise<SelectedChannelLike | null>;
   onNoChannel?: (context: { attempts: number }) => Promise<void> | void;
-  getFailoverSiteId?: (selected: SelectedChannelLike, failure: { status?: number; rawErrorText?: string }) => number | null;
+  getFailoverSiteId?: (selected: SelectedChannelLike, failure: {
+    status?: number;
+    rawErrorText?: string;
+    retryAfterHeader?: string | null;
+    retryAfterMs?: number | null;
+  }) => number | null;
   attempt: (context: ExecuteAttemptContext) => Promise<AttemptResult>;
   onTerminalFailure?: (
     selected: SelectedChannelLike,
-    failure: { status?: number; rawErrorText?: string },
+    failure: {
+      status?: number;
+      rawErrorText?: string;
+      retryAfterHeader?: string | null;
+      retryAfterMs?: number | null;
+    },
   ) => Promise<void> | void;
 };
 
@@ -84,5 +107,7 @@ export type ExecuteResult =
     selected?: SelectedChannelLike;
     status?: number;
     rawErrorText?: string;
+    retryAfterHeader?: string | null;
+    retryAfterMs?: number | null;
     attempts: number;
   };
