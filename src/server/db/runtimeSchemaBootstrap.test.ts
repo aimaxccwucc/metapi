@@ -70,7 +70,21 @@ describe('runtime schema bootstrap', () => {
       currentContract,
     );
 
-    await ensureRuntimeDatabaseSchema(createStubClient('mysql', executedSql), {
+    await ensureRuntimeDatabaseSchema({
+      ...createStubClient('mysql', executedSql),
+      queryScalar: async (sqlText: string, params: unknown[] = []) => {
+        if (sqlText.includes('legacy_manual_route_probe_policy_backfill_v1')) {
+          return 1;
+        }
+        if (sqlText.includes('information_schema') || sqlText.includes('sqlite_master') || sqlText.includes('pragma_table_info')) {
+          return 1;
+        }
+        if (params.length > 0) {
+          return 1;
+        }
+        return 0;
+      },
+    }, {
       currentContract,
       liveContract: currentContract,
     });
@@ -78,6 +92,40 @@ describe('runtime schema bootstrap', () => {
     expect(expectedUpgradeSql).toEqual([]);
     expect(executedSql.every((sqlText) => classifyLegacyCompatMutation(sqlText) === 'legacy')).toBe(true);
   });
+
+  it.each(['mysql', 'postgres'] as const)('runs one-time legacy explicit-group backfill when marker is missing for %s', async (dialect) => {
+    const executedSql: string[] = [];
+
+    await ensureRuntimeDatabaseSchema({
+      ...createStubClient(dialect, executedSql),
+      queryScalar: async (sqlText: string, params: unknown[] = []) => {
+        if (sqlText.includes('legacy_manual_route_probe_policy_backfill_v1')) {
+          return 0;
+        }
+        if (sqlText.includes('information_schema') || sqlText.includes('sqlite_master') || sqlText.includes('pragma_table_info')) {
+          return 1;
+        }
+        if (params.length > 0) {
+          return 1;
+        }
+        return 0;
+      },
+    }, {
+      currentContract,
+      liveContract: currentContract,
+    });
+
+    const expectedBackfillSql = dialect === 'mysql'
+      ? "UPDATE `token_routes` SET `probe_policy` = 'manual' WHERE COALESCE(`route_mode`, 'pattern') = 'explicit_group' AND COALESCE(`probe_policy`, 'system') = 'system'"
+      : "UPDATE \"token_routes\" SET \"probe_policy\" = 'manual' WHERE COALESCE(\"route_mode\", 'pattern') = 'explicit_group' AND COALESCE(\"probe_policy\", 'system') = 'system'";
+    const expectedMarkerSql = dialect === 'mysql'
+      ? "INSERT INTO `settings` (`key`, `value`) VALUES ('legacy_manual_route_probe_policy_backfill_v1', 'true') ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)"
+      : "INSERT INTO \"settings\" (\"key\", \"value\") VALUES ('legacy_manual_route_probe_policy_backfill_v1', 'true') ON CONFLICT (\"key\") DO UPDATE SET \"value\" = EXCLUDED.\"value\"";
+
+    expect(executedSql).toContain(expectedBackfillSql);
+    expect(executedSql).toContain(expectedMarkerSql);
+  });
+
 
   it('tolerates non-additive live-schema drift and still emits additive runtime patch statements', () => {
     const driftedLiveContract = __runtimeSchemaBootstrapTestUtils.cloneContract(currentContract);

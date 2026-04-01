@@ -620,6 +620,66 @@ function buildExternalUpgradeStatements(
   }));
 }
 
+const LEGACY_MANUAL_ROUTE_PROBE_POLICY_BACKFILL_KEY = 'legacy_manual_route_probe_policy_backfill_v1';
+
+async function hasLegacyManualRouteProbePolicyBackfillMarker(
+  client: RuntimeSchemaClient,
+): Promise<boolean> {
+  if (client.dialect === 'sqlite') {
+    return true;
+  }
+
+  const sqlText = client.dialect === 'mysql'
+    ? `SELECT COUNT(*) FROM \`settings\` WHERE \`key\` = '${LEGACY_MANUAL_ROUTE_PROBE_POLICY_BACKFILL_KEY}'`
+    : `SELECT COUNT(*) FROM "settings" WHERE "key" = '${LEGACY_MANUAL_ROUTE_PROBE_POLICY_BACKFILL_KEY}'`;
+
+  return (await client.queryScalar(sqlText)) > 0;
+}
+
+async function recordLegacyManualRouteProbePolicyBackfillMarker(
+  client: RuntimeSchemaClient,
+): Promise<void> {
+  if (client.dialect === 'sqlite') {
+    return;
+  }
+
+  const serializedValue = 'true';
+  const sqlText = client.dialect === 'mysql'
+    ? `INSERT INTO \`settings\` (\`key\`, \`value\`) VALUES ('${LEGACY_MANUAL_ROUTE_PROBE_POLICY_BACKFILL_KEY}', '${serializedValue}') ON DUPLICATE KEY UPDATE \`value\` = VALUES(\`value\`)`
+    : `INSERT INTO "settings" ("key", "value") VALUES ('${LEGACY_MANUAL_ROUTE_PROBE_POLICY_BACKFILL_KEY}', '${serializedValue}') ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value"`;
+
+  await client.execute(sqlText);
+}
+
+async function backfillLegacyManualRouteProbePolicy(
+  client: RuntimeSchemaClient,
+): Promise<void> {
+  if (client.dialect === 'sqlite') {
+    return;
+  }
+
+  const sqlText = client.dialect === 'mysql'
+    ? "UPDATE `token_routes` SET `probe_policy` = 'manual' WHERE COALESCE(`route_mode`, 'pattern') = 'explicit_group' AND COALESCE(`probe_policy`, 'system') = 'system'"
+    : "UPDATE \"token_routes\" SET \"probe_policy\" = 'manual' WHERE COALESCE(\"route_mode\", 'pattern') = 'explicit_group' AND COALESCE(\"probe_policy\", 'system') = 'system'";
+
+  await client.execute(sqlText);
+}
+
+async function ensureLegacyManualRouteProbePolicyBackfill(
+  client: RuntimeSchemaClient,
+): Promise<void> {
+  if (client.dialect === 'sqlite') {
+    return;
+  }
+
+  if (await hasLegacyManualRouteProbePolicyBackfillMarker(client)) {
+    return;
+  }
+
+  await backfillLegacyManualRouteProbePolicy(client);
+  await recordLegacyManualRouteProbePolicyBackfillMarker(client);
+}
+
 export async function ensureRuntimeDatabaseSchema(
   client: RuntimeSchemaClient,
   options: EnsureRuntimeDatabaseSchemaOptions = {},
@@ -647,6 +707,7 @@ export async function ensureRuntimeDatabaseSchema(
     await executeBootstrapStatement(client, sqlText);
   }
 
+  await ensureLegacyManualRouteProbePolicyBackfill(client);
   await ensureLegacySchemaCompatibility(createLegacySchemaInspector(client));
 }
 
