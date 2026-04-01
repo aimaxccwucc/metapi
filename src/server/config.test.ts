@@ -60,7 +60,7 @@ describe('buildConfig', () => {
     expect(config.upstreamRequestBudgetMs).toBe(30_000);
     expect(config.upstreamStreamIdleTimeoutMs).toBe(20_000);
     expect(config.onDemandModelRefreshCooldownMs).toBe(15_000);
-    expect(config.proxyMaxRetries).toBe(2);
+    expect(config.proxyMaxRetries).toBe(4);
     expect(config.responseCacheTtlMs).toBe(3_600_000);
     expect(config.responseCacheMaxRows).toBe(2_000);
     expect(config.responseCacheStaleIfErrorMs).toBe(600_000);

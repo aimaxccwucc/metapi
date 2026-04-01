@@ -32,6 +32,18 @@ describe('proxyRetryPolicy', () => {
     ).toBe(false);
   });
 
+  it('retries channel-local 404 wrappers that usually come from gateway compatibility layers', () => {
+    expect(
+      shouldRetryProxyRequest(404, '{"error":{"message":"openai_error","type":"bad_response_status_code","code":"bad_response_status_code"}}'),
+    ).toBe(true);
+    expect(
+      shouldRetryProxyRequest(404, '{"error":{"message":"Not Found","type":"not_found_error"}}'),
+    ).toBe(true);
+    expect(
+      shouldRetryProxyRequest(404, 'unrecognized request url: POST /v1/chat/completions'),
+    ).toBe(true);
+  });
+
   it('keeps retrying channel-local compatibility and auth failures', () => {
     expect(
       shouldRetryProxyRequest(401, '{"error":{"message":"invalid access token"}}'),

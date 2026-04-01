@@ -1,3 +1,5 @@
+import { hasExplicitEndpointCompatibilitySignal } from '../transformers/shared/endpointCompatibility.js';
+
 export type RetryFailureCategory =
   | 'network'
   | 'server'
@@ -88,6 +90,12 @@ const RETRYABLE_UPSTREAM_COMPATIBILITY_400_PATTERNS: RegExp[] = [
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]\.name['"]?/i,
 ];
 
+const RETRYABLE_CHANNEL_LOCAL_404_PATTERNS: RegExp[] = [
+  /\bopenai_error\b/i,
+  /\bbad_response_status_code\b/i,
+  /not[_\s-]?found[_\s-]?error/i,
+];
+
 function isModelUnsupportedErrorMessage(rawMessage?: string | null): boolean {
   const text = (rawMessage || '').trim();
   if (!text) return false;
@@ -102,6 +110,11 @@ function matchesAnyPattern(patterns: RegExp[], rawMessage?: string | null): bool
 
 function isRetryableUpstreamCompatibility400(rawMessage?: string | null): boolean {
   return matchesAnyPattern(RETRYABLE_UPSTREAM_COMPATIBILITY_400_PATTERNS, rawMessage);
+}
+
+function isRetryableChannelLocal404(rawMessage?: string | null): boolean {
+  return matchesAnyPattern(RETRYABLE_CHANNEL_LOCAL_404_PATTERNS, rawMessage)
+    || hasExplicitEndpointCompatibilitySignal(rawMessage);
 }
 
 export function classifyProxyFailureCategory(status?: number | null, upstreamErrorText?: string | null): RetryFailureCategory {
@@ -138,6 +151,7 @@ export function shouldRetryProxyRequest(status: number, upstreamErrorText?: stri
   if (status === 401 || status === 403) return true;
   if (isModelUnsupportedErrorMessage(upstreamErrorText)) return true;
   if (status === 400 && isRetryableUpstreamCompatibility400(upstreamErrorText)) return true;
+  if (status === 404 && isRetryableChannelLocal404(upstreamErrorText)) return true;
   if (matchesAnyPattern(NON_RETRYABLE_REQUEST_PATTERNS, upstreamErrorText)) return false;
   if (matchesAnyPattern(RETRYABLE_CHANNEL_LOCAL_PATTERNS, upstreamErrorText)) return true;
   if (status === 400 || status === 404 || status === 422) return false;

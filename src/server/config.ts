@@ -138,7 +138,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     upstreamRequestBudgetMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_REQUEST_BUDGET_MS, 30_000))),
     upstreamStreamIdleTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS, 20_000))),
     onDemandModelRefreshCooldownMs: Math.max(0, Math.trunc(parseNumber(env.ON_DEMAND_MODEL_REFRESH_COOLDOWN_MS, 15_000))),
-    proxyMaxRetries: Math.max(0, Math.min(8, Math.trunc(parseNumber(env.PROXY_MAX_RETRIES, 2)))),
+    proxyMaxRetries: Math.max(0, Math.min(8, Math.trunc(parseNumber(env.PROXY_MAX_RETRIES, 4)))),
     responseCacheTtlMs: Math.max(1_000, Math.trunc(parseNumber(env.RESPONSE_CACHE_TTL_MS, 60 * 60 * 1000))),
     responseCacheMaxRows: Math.max(100, Math.trunc(parseNumber(env.RESPONSE_CACHE_MAX_ROWS, 2_000))),
     responseCacheStaleIfErrorMs: Math.max(1_000, Math.trunc(parseNumber(env.RESPONSE_CACHE_STALE_IF_ERROR_MS, 10 * 60 * 1000))),
