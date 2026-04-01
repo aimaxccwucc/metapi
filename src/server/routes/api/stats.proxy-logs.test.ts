@@ -653,4 +653,87 @@ describe('stats proxy logs routes', () => {
     expect(detailBody.clientAppId).toBe(null);
     expect(detailBody.clientAppName).toBe(null);
   });
+
+  it('returns proxy log summary even when legacy databases do not have cache columns', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'legacy-cache-site',
+      url: 'https://legacy-cache.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'legacy-cache-user',
+      accessToken: 'legacy-cache-token',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.proxyLogs).values([
+      {
+        accountId: account.id,
+        modelRequested: 'gpt-4o',
+        modelActual: 'gpt-4o',
+        status: 'success',
+        totalTokens: 16,
+        estimatedCost: 0.16,
+        createdAt: formatUtcSqlDateTime(new Date('2026-03-09T11:00:00.000Z')),
+      },
+      {
+        accountId: account.id,
+        modelRequested: 'gpt-4.1',
+        modelActual: 'gpt-4.1',
+        status: 'failed',
+        totalTokens: 8,
+        estimatedCost: 0.08,
+        createdAt: formatUtcSqlDateTime(new Date('2026-03-09T11:05:00.000Z')),
+      },
+    ]).run();
+
+    await db.run('ALTER TABLE proxy_logs DROP COLUMN cache_status');
+    await db.run('ALTER TABLE proxy_logs DROP COLUMN cache_saved_cost');
+
+    const legacyApp = Fastify();
+    const routesModule = await import('./stats.js');
+    await legacyApp.register(routesModule.statsRoutes);
+
+    try {
+      const response = await legacyApp.inject({
+        method: 'GET',
+        url: '/api/stats/proxy-logs?limit=50&offset=0&status=all',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json() as {
+        total: number;
+        items: Array<Record<string, unknown>>;
+        summary: {
+          totalCount: number;
+          successCount: number;
+          failedCount: number;
+          totalCost: number;
+          totalTokensAll: number;
+          cacheHitCount: number;
+          cacheMissCount: number;
+          cacheStaleCount: number;
+          cacheSavedCost: number;
+        };
+      };
+
+      expect(body.total).toBe(2);
+      expect(body.items).toHaveLength(2);
+      expect(body.summary).toEqual({
+        totalCount: 2,
+        successCount: 1,
+        failedCount: 1,
+        totalCost: 0.24,
+        totalTokensAll: 24,
+        cacheHitCount: 0,
+        cacheMissCount: 0,
+        cacheStaleCount: 0,
+        cacheSavedCost: 0,
+      });
+    } finally {
+      await legacyApp.close();
+    }
+  });
 });

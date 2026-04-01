@@ -1101,6 +1101,7 @@ function resetSchemaCapabilityCache() {
   proxyLogBillingDetailsColumnAvailable = null;
   proxyLogDownstreamApiKeyIdColumnAvailable = null;
   proxyLogClientColumnsAvailable = null;
+  proxyLogCacheColumnsAvailable = null;
 }
 
 async function sqliteProxyQuery(sqlText: string, params: unknown[], method: SqlMethod) {

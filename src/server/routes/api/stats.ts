@@ -777,24 +777,44 @@ export async function statsRoutes(app: FastifyInstance) {
       clientAppName?: string | null;
     }>;
 
-    let summaryQuery = db.select({
-      totalCount: sql<number>`count(*)`,
-      successCount: sql<number>`coalesce(sum(case when ${schema.proxyLogs.status} = 'success' then 1 else 0 end), 0)`,
-      failedCount: sql<number>`coalesce(sum(case when coalesce(${schema.proxyLogs.status}, '') <> 'success' then 1 else 0 end), 0)`,
-      totalCost: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.estimatedCost}, 0)), 0)`,
-      totalTokensAll: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.totalTokens}, 0)), 0)`,
-      cacheHitCount: sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) = 'hit' then 1 else 0 end), 0)`,
-      cacheMissCount: sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) = 'miss' then 1 else 0 end), 0)`,
-      cacheStaleCount: sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) = 'stale' then 1 else 0 end), 0)`,
-      cacheSavedCost: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.cacheSavedCost}, 0)), 0)`,
-    }).from(schema.proxyLogs)
-      .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
-      .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-      .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
-    if (summaryWhere) {
-      summaryQuery = summaryQuery.where(summaryWhere) as typeof summaryQuery;
-    }
-    const summaryRow = await summaryQuery.get();
+    const summaryRow = await withProxyLogSelectFields(({ includeCacheFields }) => {
+      let summaryQuery = db.select({
+        totalCount: sql<number>`count(*)`,
+        successCount: sql<number>`coalesce(sum(case when ${schema.proxyLogs.status} = 'success' then 1 else 0 end), 0)`,
+        failedCount: sql<number>`coalesce(sum(case when coalesce(${schema.proxyLogs.status}, '') <> 'success' then 1 else 0 end), 0)`,
+        totalCost: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.estimatedCost}, 0)), 0)`,
+        totalTokensAll: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.totalTokens}, 0)), 0)`,
+        cacheHitCount: includeCacheFields
+          ? sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) = 'hit' then 1 else 0 end), 0)`
+          : sql<number>`0`,
+        cacheMissCount: includeCacheFields
+          ? sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) = 'miss' then 1 else 0 end), 0)`
+          : sql<number>`0`,
+        cacheStaleCount: includeCacheFields
+          ? sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) = 'stale' then 1 else 0 end), 0)`
+          : sql<number>`0`,
+        cacheSavedCost: includeCacheFields
+          ? sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.cacheSavedCost}, 0)), 0)`
+          : sql<number>`0`,
+      }).from(schema.proxyLogs)
+        .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+        .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+        .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
+      if (summaryWhere) {
+        summaryQuery = summaryQuery.where(summaryWhere) as typeof summaryQuery;
+      }
+      return summaryQuery.get();
+    }, { includeBillingDetails: false, includeClientFields: false }) as {
+      totalCount?: number;
+      successCount?: number;
+      failedCount?: number;
+      totalCost?: number;
+      totalTokensAll?: number;
+      cacheHitCount?: number;
+      cacheMissCount?: number;
+      cacheStaleCount?: number;
+      cacheSavedCost?: number;
+    } | undefined;
 
     return {
       items: listRows.map((row) => mapProxyLogRow(row)),

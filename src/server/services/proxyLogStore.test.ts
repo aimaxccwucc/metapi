@@ -96,6 +96,23 @@ describe('proxyLogStore', () => {
     expect(runner.mock.calls[1][0].fields.billingDetails).toBeUndefined();
   });
 
+  it('retries proxy log selects without cache fields when those columns are missing', async () => {
+    hasProxyLogCacheColumnsMock.mockResolvedValue(true);
+    const runner = vi.fn()
+      .mockRejectedValueOnce(new Error('column proxy_logs.cache_status does not exist'))
+      .mockResolvedValueOnce([{ id: 1 }]);
+
+    await expect(withProxyLogSelectFields(runner)).resolves.toEqual([{ id: 1 }]);
+
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(runner.mock.calls[0][0].includeCacheFields).toBe(true);
+    expect(runner.mock.calls[0][0].fields.cacheStatus).toBe('cache_status');
+    expect(runner.mock.calls[0][0].fields.cacheSavedCost).toBe('cache_saved_cost');
+    expect(runner.mock.calls[1][0].includeCacheFields).toBe(false);
+    expect(runner.mock.calls[1][0].fields.cacheStatus).toBeUndefined();
+    expect(runner.mock.calls[1][0].fields.cacheSavedCost).toBeUndefined();
+  });
+
   it('retries proxy log inserts without billing details when the column is missing', async () => {
     hasProxyLogBillingDetailsColumnMock.mockResolvedValue(true);
     dbInsertRunMock

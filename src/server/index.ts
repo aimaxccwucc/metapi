@@ -43,6 +43,7 @@ import { normalizeLogCleanupRetentionDays } from './services/logCleanupService.j
 import {
   db,
   ensureProxyFileCompatibilityColumns,
+  ensureProxyLogCacheColumns,
   ensureProxyLogClientColumns,
   ensureProxyLogDownstreamApiKeyIdColumn,
   ensureProxyLogBillingDetailsColumn,
@@ -348,9 +349,14 @@ try {
   await ensureSiteCompatibilityColumns();
   await ensureRouteGroupingCompatibilityColumns();
   await ensureProxyFileCompatibilityColumns();
-  await ensureResponseCacheTable();
+  await ensureProxyLogCacheColumns();
   await ensureProxyLogClientColumns();
   await ensureProxyLogDownstreamApiKeyIdColumn();
+  try {
+    await ensureResponseCacheTable();
+  } catch (error) {
+    console.warn(`Failed to ensure response cache table: ${(error as Error)?.message || 'unknown error'}`);
+  }
   const finalRows = await db.select().from(schema.settings).all();
   const finalMap = toSettingsMap(finalRows);
   await ensureBootstrapSecrets(finalMap);

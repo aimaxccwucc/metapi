@@ -159,6 +159,20 @@ export async function withProxyLogSelectFields<T>(
         continue;
       }
 
+      if (selection.includeCacheFields && isMissingProxyLogCacheColumnsError(error)) {
+        selection = {
+          includeBillingDetails: selection.includeBillingDetails,
+          includeClientFields: selection.includeClientFields,
+          includeCacheFields: false,
+          fields: buildProxyLogSelectFields({
+            includeBillingDetails: selection.includeBillingDetails,
+            includeClientFields: selection.includeClientFields,
+            includeCacheFields: false,
+          }),
+        };
+        continue;
+      }
+
       throw error;
     }
   }
@@ -175,10 +189,25 @@ export function parseProxyLogBillingDetails(value: unknown): Record<string, unkn
 }
 
 function normalizeProxyLogStoreErrorMessage(error: unknown): string {
-  const message = typeof error === 'object' && error && 'message' in error
-    ? String((error as { message?: unknown }).message || '')
-    : String(error || '');
-  return message.toLowerCase();
+  const parts: string[] = [];
+
+  if (typeof error === 'object' && error) {
+    if ('message' in error) {
+      parts.push(String((error as { message?: unknown }).message || ''));
+    }
+    if ('cause' in error) {
+      const cause = (error as { cause?: unknown }).cause;
+      if (cause instanceof Error) {
+        parts.push(cause.message);
+      } else if (cause != null) {
+        parts.push(String(cause));
+      }
+    }
+  } else {
+    parts.push(String(error || ''));
+  }
+
+  return parts.join(' ').toLowerCase();
 }
 
 export function isMissingBillingDetailsColumnError(error: unknown): boolean {
