@@ -4,6 +4,7 @@ import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { config } from '../config.js';
 import { getOAuthLoopbackCallbackServerStates } from '../services/oauth/localCallbackServer.js';
 import { listBackgroundTasks } from '../services/backgroundTaskService.js';
+import { getResponseCacheRuntimeStatus, isResponseCacheAvailable } from '../services/responseCacheService.js';
 
 type RuntimeStatusRouteOptions = {
   startedAt: Date;
@@ -27,6 +28,7 @@ type RuntimeOverviewResponse = {
     ready: boolean;
     dialect: string;
   };
+  responseCache: ReturnType<typeof getResponseCacheRuntimeStatus>;
   oauthLoopback: {
     total: number;
     ready: number;
@@ -116,10 +118,12 @@ async function buildRecentActivity() {
 }
 
 async function buildRuntimeOverview(startedAt: Date): Promise<RuntimeOverviewResponse> {
+  await isResponseCacheAvailable();
   const [databaseReady, recentActivity] = await Promise.all([
     checkDatabaseReady(),
     buildRecentActivity(),
   ]);
+  const responseCache = getResponseCacheRuntimeStatus();
   const oauthStates = getOAuthLoopbackCallbackServerStates();
   const readyOauthCount = oauthStates.filter((state) => state.ready).length;
   const attemptedOauthCount = oauthStates.filter((state) => state.attempted).length;
@@ -143,6 +147,7 @@ async function buildRuntimeOverview(startedAt: Date): Promise<RuntimeOverviewRes
       ready: databaseReady,
       dialect: runtimeDbDialect,
     },
+    responseCache,
     oauthLoopback: {
       total: oauthStates.length,
       ready: readyOauthCount,
@@ -171,6 +176,29 @@ function buildMetricsPayload(overview: RuntimeOverviewResponse): string {
     '# TYPE metapi_ready gauge',
     `metapi_ready ${overview.database.ready ? 1 : 0}`,
     '# HELP metapi_uptime_seconds Service uptime in seconds.',
+    '# HELP metapi_response_cache_ready Response cache readiness state.',
+    '# TYPE metapi_response_cache_ready gauge',
+    `metapi_response_cache_ready ${overview.responseCache.ready ? 1 : 0}`,
+    '# HELP metapi_response_cache_failures_total Response cache failures by operation.',
+    '# TYPE metapi_response_cache_failures_total gauge',
+    `metapi_response_cache_failures_total{kind="read"} ${overview.responseCache.readFailures}`,
+    `metapi_response_cache_failures_total{kind="write"} ${overview.responseCache.writeFailures}`,
+    `metapi_response_cache_failures_total{kind="prune"} ${overview.responseCache.pruneFailures}`,
+    '# HELP metapi_response_cache_hits_total Response cache hits by kind.',
+    '# TYPE metapi_response_cache_hits_total gauge',
+    `metapi_response_cache_hits_total{kind="hit"} ${overview.responseCache.hits}`,
+    `metapi_response_cache_hits_total{kind="stale"} ${overview.responseCache.staleHits}`,
+    `metapi_response_cache_hits_total{kind="miss"} ${overview.responseCache.misses}`,
+    '# HELP metapi_response_cache_saved_tokens_total Response cache saved tokens.',
+    '# TYPE metapi_response_cache_saved_tokens_total gauge',
+    `metapi_response_cache_saved_tokens_total ${overview.responseCache.savedTokens}`,
+    '# HELP metapi_response_cache_saved_cost_total Response cache saved cost.',
+    '# TYPE metapi_response_cache_saved_cost_total gauge',
+    `metapi_response_cache_saved_cost_total ${overview.responseCache.savedCost}`,
+    '# HELP metapi_response_cache_prune_deleted_total Response cache deleted rows during prune by reason.',
+    '# TYPE metapi_response_cache_prune_deleted_total gauge',
+    `metapi_response_cache_prune_deleted_total{reason="expired"} ${overview.responseCache.pruneDeletedExpiredRows}`,
+    `metapi_response_cache_prune_deleted_total{reason="overflow"} ${overview.responseCache.pruneDeletedOverflowRows}`,
     '# TYPE metapi_uptime_seconds gauge',
     `metapi_uptime_seconds ${overview.service.uptimeSec}`,
     '# HELP metapi_background_tasks Number of in-memory background tasks by status.',
@@ -214,6 +242,11 @@ export async function systemRoutes(app: FastifyInstance, options: RuntimeStatusR
     return {
       ok: ready,
       database: overview.database,
+      responseCache: {
+        ready: overview.responseCache.ready,
+        availabilityChecked: overview.responseCache.availabilityChecked,
+        lastError: overview.responseCache.lastError,
+      },
       oauthLoopback: {
         ready: overview.oauthLoopback.ready,
         total: overview.oauthLoopback.total,

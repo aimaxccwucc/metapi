@@ -81,6 +81,10 @@ describe('system routes', () => {
       database: {
         ready: true,
       },
+      responseCache: {
+        ready: true,
+        availabilityChecked: true,
+      },
       oauthLoopback: {
         ready: 1,
         total: 1,
@@ -97,6 +101,8 @@ describe('system routes', () => {
     expect(metrics.headers['content-type']).toContain('text/plain');
     expect(metrics.body).toContain('metapi_up 1');
     expect(metrics.body).toContain('metapi_ready 1');
+    expect(metrics.body).toContain('metapi_response_cache_ready 1');
+    expect(metrics.body).toContain('metapi_response_cache_failures_total{kind="write"} 0');
 
     await app.close();
   });
@@ -118,6 +124,10 @@ describe('system routes', () => {
       },
       database: {
         ready: true,
+      },
+      responseCache: {
+        ready: true,
+        availabilityChecked: true,
       },
       backgroundTasks: {
         total: 0,

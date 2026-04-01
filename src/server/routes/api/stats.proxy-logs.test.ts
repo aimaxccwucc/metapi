@@ -178,6 +178,7 @@ describe('stats proxy logs routes', () => {
       cacheMissCount: 0,
       cacheStaleCount: 0,
       cacheSavedCost: 0,
+      cacheSavedTokens: 0,
     });
   });
 
@@ -537,6 +538,7 @@ describe('stats proxy logs routes', () => {
       cacheMissCount: 0,
       cacheStaleCount: 0,
       cacheSavedCost: 0,
+      cacheSavedTokens: 0,
     });
   });
 
@@ -716,6 +718,7 @@ describe('stats proxy logs routes', () => {
           cacheMissCount: number;
           cacheStaleCount: number;
           cacheSavedCost: number;
+          cacheSavedTokens: number;
         };
       };
 
@@ -731,6 +734,7 @@ describe('stats proxy logs routes', () => {
         cacheMissCount: 0,
         cacheStaleCount: 0,
         cacheSavedCost: 0,
+      cacheSavedTokens: 0,
       });
     } finally {
       await legacyApp.close();

@@ -1,13 +1,53 @@
 import crypto from 'crypto';
-import { and, desc, eq, lt, sql } from 'drizzle-orm';
+import { desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import { config } from '../config.js';
 import * as dbIndex from '../db/index.js';
 
 let responseCacheAvailable: boolean | null = null;
+let responseCacheAvailabilityRetryAtMs = 0;
+const RESPONSE_CACHE_AVAILABILITY_RETRY_MS = 30_000;
 type ResponseCacheTable = typeof dbIndex.schema.responseCache;
 type ResponseCacheRow = ResponseCacheTable['$inferSelect'];
 
 type DbClient = typeof dbIndex.db;
+
+type ResponseCacheFailureKind = 'read' | 'write' | 'prune';
+
+export type ResponseCacheRuntimeStatus = {
+  ready: boolean;
+  availabilityChecked: boolean;
+  lastError: string | null;
+  readFailures: number;
+  writeFailures: number;
+  pruneFailures: number;
+  pruneDeletedExpiredRows: number;
+  pruneDeletedOverflowRows: number;
+  savedTokens: number;
+  savedCost: number;
+  hits: number;
+  staleHits: number;
+  misses: number;
+};
+
+function buildInitialRuntimeStatus(): ResponseCacheRuntimeStatus {
+  return {
+    ready: false,
+    availabilityChecked: false,
+    lastError: null,
+    readFailures: 0,
+    writeFailures: 0,
+    pruneFailures: 0,
+    pruneDeletedExpiredRows: 0,
+    pruneDeletedOverflowRows: 0,
+    savedTokens: 0,
+    savedCost: 0,
+    hits: 0,
+    staleHits: 0,
+    misses: 0,
+  };
+}
+
+const responseCacheRuntimeStatus = buildInitialRuntimeStatus();
 
 function getDb(): DbClient | null {
   return ((dbIndex as { db?: DbClient }).db) ?? null;
@@ -31,6 +71,61 @@ function getHasResponseCacheTable(): (() => Promise<boolean>) | null {
   return typeof candidate === 'function' ? candidate as () => Promise<boolean> : null;
 }
 
+function normalizeErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+  if (typeof error === 'string' && error.trim().length > 0) {
+    return error.trim();
+  }
+  return fallback;
+}
+
+function markResponseCacheReady(): void {
+  responseCacheAvailable = true;
+  responseCacheAvailabilityRetryAtMs = 0;
+  responseCacheRuntimeStatus.availabilityChecked = true;
+  responseCacheRuntimeStatus.ready = true;
+  responseCacheRuntimeStatus.lastError = null;
+}
+
+function markResponseCacheUnavailable(reason: string): void {
+  responseCacheAvailable = false;
+  responseCacheAvailabilityRetryAtMs = Date.now() + RESPONSE_CACHE_AVAILABILITY_RETRY_MS;
+  responseCacheRuntimeStatus.availabilityChecked = true;
+  responseCacheRuntimeStatus.ready = false;
+  responseCacheRuntimeStatus.lastError = reason;
+}
+
+function recordRuntimeFailure(kind: ResponseCacheFailureKind, error: unknown): void {
+  const message = normalizeErrorMessage(error, `response cache ${kind} failed`);
+  if (kind === 'read') responseCacheRuntimeStatus.readFailures += 1;
+  if (kind === 'write') responseCacheRuntimeStatus.writeFailures += 1;
+  if (kind === 'prune') responseCacheRuntimeStatus.pruneFailures += 1;
+  markResponseCacheUnavailable(message);
+}
+
+function recordSavedCacheResponse(kind: 'hit' | 'stale', response: CachedResponse): void {
+  if (kind === 'hit') {
+    responseCacheRuntimeStatus.hits += 1;
+  } else {
+    responseCacheRuntimeStatus.staleHits += 1;
+  }
+  responseCacheRuntimeStatus.savedTokens += Math.max(0, response.promptTokens + response.completionTokens);
+  responseCacheRuntimeStatus.savedCost = roundCost(responseCacheRuntimeStatus.savedCost + response.estimatedCost);
+}
+
+export function recordResponseCacheMiss(): void {
+  responseCacheRuntimeStatus.misses += 1;
+}
+
+export function getResponseCacheRuntimeStatus(): ResponseCacheRuntimeStatus {
+  return {
+    ...responseCacheRuntimeStatus,
+    savedCost: roundCost(responseCacheRuntimeStatus.savedCost),
+  };
+}
+
 export interface CacheableRequest {
   model: string;
   messages: unknown;
@@ -46,6 +141,8 @@ export interface CacheableRequest {
   modalities?: unknown;
   input?: unknown;
   routeScope?: string | null;
+  surface?: string | null;
+  requestFingerprint?: unknown;
   [key: string]: unknown;
 }
 
@@ -88,19 +185,40 @@ function roundCost(value: unknown): number {
 
 export async function isResponseCacheAvailable(): Promise<boolean> {
   if (responseCacheAvailable !== null) {
-    return responseCacheAvailable;
+    const now = Date.now();
+    if (responseCacheAvailable === false && now >= responseCacheAvailabilityRetryAtMs) {
+      responseCacheAvailable = null;
+    } else {
+      responseCacheRuntimeStatus.availabilityChecked = true;
+      responseCacheRuntimeStatus.ready = responseCacheAvailable;
+      return responseCacheAvailable;
+    }
   }
+
   const hasResponseCacheTable = getHasResponseCacheTable();
   if (!hasResponseCacheTable || !getResponseCacheTable()) {
-    responseCacheAvailable = false;
-    return responseCacheAvailable;
+    markResponseCacheUnavailable('response cache schema capability is unavailable');
+    return false;
   }
-  responseCacheAvailable = await hasResponseCacheTable();
-  return responseCacheAvailable;
+
+  try {
+    responseCacheAvailable = await hasResponseCacheTable();
+    if (responseCacheAvailable) {
+      markResponseCacheReady();
+    } else {
+      markResponseCacheUnavailable('response cache table is missing');
+    }
+    return responseCacheAvailable;
+  } catch (error) {
+    recordRuntimeFailure('read', error);
+    return false;
+  }
 }
 
 export function resetResponseCacheAvailabilityForTests(): void {
   responseCacheAvailable = null;
+  responseCacheAvailabilityRetryAtMs = 0;
+  Object.assign(responseCacheRuntimeStatus, buildInitialRuntimeStatus());
 }
 
 export function buildRouteScope(input: {
@@ -123,13 +241,16 @@ export function buildRouteScope(input: {
 
 /**
  * 生成缓存 key（SHA256，64 字符十六进制）。
- * 仅对确定性非流式请求生效；routeScope 用于隔离不同上游路由/站点的响应差异。
+ * 仅对确定性非流式请求生效；routeScope/surface/requestFingerprint 用于隔离不同 surface、上游路由和完整请求体差异。
  */
 export function buildCacheKey(req: CacheableRequest): string | null {
   const temp = req.temperature;
   if (typeof temp === 'number' && temp > 0) return null;
+  const topP = req.top_p;
+  if (typeof topP === 'number' && topP > 0 && topP < 1) return null;
 
   const payload = JSON.stringify(stableSortValue({
+    surface: typeof req.surface === 'string' && req.surface.trim().length > 0 ? req.surface.trim() : null,
     routeScope: typeof req.routeScope === 'string' && req.routeScope.trim().length > 0 ? req.routeScope.trim() : null,
     model: req.model,
     messages: req.messages ?? req.input ?? null,
@@ -143,6 +264,7 @@ export function buildCacheKey(req: CacheableRequest): string | null {
     response_format: req.response_format ?? null,
     reasoning: req.reasoning ?? null,
     modalities: req.modalities ?? null,
+    requestFingerprint: req.requestFingerprint ?? null,
   }));
 
   return crypto.createHash('sha256').update(payload).digest('hex');
@@ -155,13 +277,13 @@ async function readCachedRow(cacheKey: string): Promise<ResponseCacheRow | null>
 
   const responseCacheTable = getResponseCacheTable();
   if (!responseCacheTable) {
-    responseCacheAvailable = false;
+    markResponseCacheUnavailable('response cache schema is unavailable at runtime');
     return null;
   }
 
   const db = getDb();
   if (!db) {
-    responseCacheAvailable = false;
+    markResponseCacheUnavailable('response cache database handle is unavailable');
     return null;
   }
 
@@ -172,8 +294,8 @@ async function readCachedRow(cacheKey: string): Promise<ResponseCacheRow | null>
       .where(eq(responseCacheTable.cacheKey, cacheKey))
       .get();
     return row ?? null;
-  } catch {
-    responseCacheAvailable = false;
+  } catch (error) {
+    recordRuntimeFailure('read', error);
     return null;
   }
 }
@@ -194,13 +316,13 @@ export async function lookupResponseCache(cacheKey: string): Promise<CachedRespo
 
   const responseCacheTable = getResponseCacheTable();
   if (!responseCacheTable) {
-    responseCacheAvailable = false;
+    markResponseCacheUnavailable('response cache schema is unavailable at runtime');
     return null;
   }
 
   const db = getDb();
   if (!db) {
-    responseCacheAvailable = false;
+    markResponseCacheUnavailable('response cache database handle is unavailable');
     return null;
   }
 
@@ -219,7 +341,9 @@ export async function lookupResponseCache(cacheKey: string): Promise<CachedRespo
     .run()
     .catch(() => {});
 
-  return mapCachedRow(row);
+  const cached = mapCachedRow(row);
+  recordSavedCacheResponse('hit', cached);
+  return cached;
 }
 
 export async function lookupStaleResponseCache(
@@ -234,7 +358,9 @@ export async function lookupStaleResponseCache(
   if (Number.isNaN(expiresAtMs)) return null;
   if ((nowMs - expiresAtMs) > Math.max(1_000, maxStaleMs)) return null;
 
-  return mapCachedRow(row);
+  const cached = mapCachedRow(row);
+  recordSavedCacheResponse('stale', cached);
+  return cached;
 }
 
 export async function writeResponseCache(
@@ -249,13 +375,13 @@ export async function writeResponseCache(
 
   const responseCacheTable = getResponseCacheTable();
   if (!responseCacheTable) {
-    responseCacheAvailable = false;
+    markResponseCacheUnavailable('response cache schema is unavailable at runtime');
     return;
   }
 
   const db = getDb();
   if (!db) {
-    responseCacheAvailable = false;
+    markResponseCacheUnavailable('response cache database handle is unavailable');
     return;
   }
 
@@ -290,6 +416,7 @@ export async function writeResponseCache(
       } else {
         await db.insert(responseCacheTable).values(values).run();
       }
+      markResponseCacheReady();
       return;
     }
 
@@ -299,8 +426,9 @@ export async function writeResponseCache(
         set: values,
       })
       .run();
-  } catch {
-    responseCacheAvailable = false;
+    markResponseCacheReady();
+  } catch (error) {
+    recordRuntimeFailure('write', error);
   }
 }
 
@@ -315,22 +443,30 @@ export async function pruneResponseCache(): Promise<void> {
 
   const responseCacheTable = getResponseCacheTable();
   if (!responseCacheTable) {
-    responseCacheAvailable = false;
+    markResponseCacheUnavailable('response cache schema is unavailable at runtime');
     return;
   }
 
   const db = getDb();
   if (!db) {
-    responseCacheAvailable = false;
+    markResponseCacheUnavailable('response cache database handle is unavailable');
     return;
   }
 
   const now = new Date().toISOString();
   try {
-    await db
-      .delete(responseCacheTable)
+    const expiredRows = await db
+      .select({ id: responseCacheTable.id })
+      .from(responseCacheTable)
       .where(lt(responseCacheTable.expiresAt, now))
-      .run();
+      .all();
+    if (expiredRows.length > 0) {
+      await db
+        .delete(responseCacheTable)
+        .where(inArray(responseCacheTable.id, expiredRows.map((row: { id: number }) => row.id)))
+        .run();
+      responseCacheRuntimeStatus.pruneDeletedExpiredRows += expiredRows.length;
+    }
 
     const rows = await db
       .select({ id: responseCacheTable.id })
@@ -340,14 +476,14 @@ export async function pruneResponseCache(): Promise<void> {
 
     if (rows.length > config.responseCacheMaxRows) {
       const idsToDelete = rows.slice(config.responseCacheMaxRows).map((row: { id: number }) => row.id);
-      for (const id of idsToDelete) {
-        await db
-          .delete(responseCacheTable)
-          .where(and(eq(responseCacheTable.id, id)))
-          .run();
-      }
+      await db
+        .delete(responseCacheTable)
+        .where(inArray(responseCacheTable.id, idsToDelete))
+        .run();
+      responseCacheRuntimeStatus.pruneDeletedOverflowRows += idsToDelete.length;
     }
-  } catch {
-    responseCacheAvailable = false;
+    markResponseCacheReady();
+  } catch (error) {
+    recordRuntimeFailure('prune', error);
   }
 }

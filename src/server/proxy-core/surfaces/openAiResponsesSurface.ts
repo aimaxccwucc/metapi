@@ -57,7 +57,8 @@ import {
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
 import { recordProxyDebugTrace } from '../../routes/proxy/proxyDebugTrace.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
-import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
+import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, recordResponseCacheMiss, writeResponseCache } from '../../services/responseCacheService.js';
+import { DefaultProxyConductor } from '../conductor/DefaultProxyConductor.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
 
@@ -161,145 +162,160 @@ export async function handleOpenAiResponsesSurfaceRequest(
   reply: FastifyReply,
   downstreamPath: '/v1/responses' | '/v1/responses/compact',
 ) {
-    const body = request.body as Record<string, unknown>;
-    const clientContext = detectDownstreamClientContext({
-      downstreamPath,
-      headers: request.headers as Record<string, unknown>,
-      body,
+  const body = request.body as Record<string, unknown>;
+  const clientContext = detectDownstreamClientContext({
+    downstreamPath,
+    headers: request.headers as Record<string, unknown>,
+    body,
+  });
+  const defaultEncryptedReasoningInclude = isCodexResponsesSurface(
+    request.headers as Record<string, unknown>,
+  );
+  const parsedRequestEnvelope = openAiResponsesTransformer.transformRequest(body, {
+    defaultEncryptedReasoningInclude,
+  });
+  if (parsedRequestEnvelope.error) {
+    return reply.code(parsedRequestEnvelope.error.statusCode).send(parsedRequestEnvelope.error.payload);
+  }
+  const requestEnvelope = parsedRequestEnvelope.value!;
+  const requestedModel = requestEnvelope.model;
+  const isStream = requestEnvelope.stream;
+  const isCompactRequest = downstreamPath === '/v1/responses/compact';
+  if (isCompactRequest && isStream) {
+    return reply.code(400).send({
+      error: {
+        message: 'stream is not supported on /v1/responses/compact',
+        type: 'invalid_request_error',
+      },
     });
-    const defaultEncryptedReasoningInclude = isCodexResponsesSurface(
-      request.headers as Record<string, unknown>,
-    );
-    const parsedRequestEnvelope = openAiResponsesTransformer.transformRequest(body, {
-      defaultEncryptedReasoningInclude,
-    });
-    if (parsedRequestEnvelope.error) {
-      return reply.code(parsedRequestEnvelope.error.statusCode).send(parsedRequestEnvelope.error.payload);
-    }
-    const requestEnvelope = parsedRequestEnvelope.value!;
-    const requestedModel = requestEnvelope.model;
-    const isStream = requestEnvelope.stream;
-    const isCompactRequest = downstreamPath === '/v1/responses/compact';
-    if (isCompactRequest && isStream) {
-      return reply.code(400).send({
-        error: {
-          message: 'stream is not supported on /v1/responses/compact',
-          type: 'invalid_request_error',
+  }
+  if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+
+  const downstreamPolicy = getDownstreamRoutingPolicy(request);
+  const conductor = new DefaultProxyConductor({
+    selectChannel: (model, policy) => tokenRouter.selectChannel(model, policy as any),
+    previewSelectedChannel: typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
+      ? (model, policy) => tokenRouter.previewSelectedChannel(model, policy as any)
+      : undefined,
+    selectNextChannel: (model, excludeChannelIds, policy, excludeSiteIds) => tokenRouter.selectNextChannel(
+      model,
+      excludeChannelIds,
+      policy as any,
+      excludeSiteIds,
+    ),
+  });
+  const previewSelected = !isStream
+    ? await conductor.previewSelectedChannel(requestedModel, downstreamPolicy)
+    : null;
+  const routeScope = previewSelected
+    ? buildRouteScope({
+        routeId: previewSelected.channel.routeId,
+        siteId: previewSelected.site.id,
+        actualModel: previewSelected.actualModel || requestedModel,
+      })
+    : null;
+  const responseCacheKey = !isStream
+    ? buildCacheKey({
+        surface: isCompactRequest ? 'responses:compact' : 'responses:default',
+        model: requestedModel,
+        messages: requestEnvelope.parsed.normalizedBody.input,
+        input: requestEnvelope.parsed.normalizedBody.input,
+        temperature: (body.temperature as number | null | undefined),
+        top_p: (body.top_p as number | null | undefined),
+        max_tokens: ((body.max_output_tokens ?? body.max_tokens) as number | null | undefined),
+        stop: body.stop,
+        seed: body.seed as number | null | undefined,
+        tools: body.tools,
+        tool_choice: body.tool_choice,
+        response_format: body.text,
+        reasoning: body.reasoning,
+        modalities: body.modalities,
+        routeScope,
+        requestFingerprint: requestEnvelope.parsed.normalizedBody,
+      })
+    : null;
+  const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
+
+  if (responseCacheKey) {
+    const cached = await lookupResponseCache(responseCacheKey);
+    if (cached) {
+      await logProxy(
+        {
+          channel: { routeId: null, id: null },
+          account: { id: null, username: 'cache' },
+          actualModel: requestedModel,
+          site: { name: '本地缓存', url: '', platform: 'cache' },
         },
-      });
+        requestedModel,
+        'success',
+        200,
+        0,
+        null,
+        0,
+        downstreamPath,
+        cached.promptTokens,
+        cached.completionTokens,
+        cached.promptTokens + cached.completionTokens,
+        0,
+        null,
+        null,
+        clientContext,
+        downstreamApiKeyId,
+        { cacheStatus: 'hit', cacheSavedCost: cached.estimatedCost },
+      );
+      return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
     }
-    if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
-    const downstreamPolicy = getDownstreamRoutingPolicy(request);
-    const previewSelected = !isStream && typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
-      ? await tokenRouter.previewSelectedChannel(requestedModel, downstreamPolicy)
-      : null;
-    const routeScope = previewSelected
-      ? buildRouteScope({
-          routeId: previewSelected.channel.routeId,
-          siteId: previewSelected.site.id,
-          actualModel: previewSelected.actualModel || requestedModel,
-        })
-      : null;
-    const responseCacheKey = !isStream
-      ? buildCacheKey({
-          model: requestedModel,
-          messages: requestEnvelope.parsed.normalizedBody.input,
-          temperature: (body.temperature as number | null | undefined),
-          top_p: (body.top_p as number | null | undefined),
-          max_tokens: ((body.max_output_tokens ?? body.max_tokens) as number | null | undefined),
-          routeScope,
-        })
-      : null;
-    const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
-    if (responseCacheKey) {
-      const cached = await lookupResponseCache(responseCacheKey);
-      if (cached) {
-        await logProxy(
-          {
-            channel: { routeId: null, id: null },
-            account: { id: null, username: 'cache' },
-            actualModel: requestedModel,
-            site: { name: '本地缓存', url: '', platform: 'cache' },
-          },
-          requestedModel,
-          'success',
-          200,
-          0,
-          null,
-          0,
+    recordResponseCacheMiss();
+  }
+
+  const requestBudget = createRequestBudget();
+  let reportedNoChannel = false;
+
+  const execution = await conductor.execute({
+    requestedModel,
+    downstreamPolicy,
+    maxAttempts: MAX_RETRIES + 1,
+    refreshSelection: async () => {
+      await refreshModelsAndRebuildRoutes();
+      return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
+    },
+    onNoChannel: async ({ attempts }) => {
+      reportedNoChannel = true;
+      await reportProxyAllFailed({
+        model: requestedModel,
+        reason: 'No available channels after retries',
+      });
+      if (attempts === 0) {
+        await logProxyNoChannelFailure({
+          modelRequested: requestedModel,
+          httpStatus: 503,
+          errorMessage: 'No available channels for this model',
+          retryCount: 0,
           downstreamPath,
-          cached.promptTokens,
-          cached.completionTokens,
-          cached.promptTokens + cached.completionTokens,
-          0,
-          null,
-          null,
           clientContext,
           downstreamApiKeyId,
-          { cacheStatus: 'hit', cacheSavedCost: cached.estimatedCost },
-        );
-        return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
+        });
       }
-    }
-    const excludeChannelIds: number[] = [];
-    const excludeSiteIds = new Set<number>();
-    let retryCount = 0;
-    const requestBudget = createRequestBudget();
-
-    while (retryCount <= MAX_RETRIES) {
+    },
+    getFailoverSiteId: (selected, failure) => {
+      if (!shouldAvoidSiteForRequest(
+        typeof failure.status === 'number' ? failure.status : 0,
+        typeof failure.rawErrorText === 'string' ? failure.rawErrorText : undefined,
+      )) return null;
+      const siteId = Number((selected.site as { id?: unknown }).id);
+      return Number.isFinite(siteId) ? Math.trunc(siteId) : null;
+    },
+    attempt: async ({ selected, attemptIndex }) => {
+      const retryCount = attemptIndex;
       if (requestBudget.isExpired()) {
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: requestBudget.buildTimeoutMessage(),
-        });
-        if (responseCacheKey && !isStream) {
-          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-          if (stale) {
-            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-          }
-        }
-        return reply.code(504).send({
-          error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
-        });
+        return {
+          ok: false,
+          action: 'stop',
+          status: 504,
+          rawErrorText: requestBudget.buildTimeoutMessage(),
+        };
       }
 
-      let selected = retryCount === 0
-        ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
-
-      if (!selected && retryCount === 0) {
-        await refreshModelsAndRebuildRoutes();
-        selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
-      }
-
-      if (!selected) {
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: 'No available channels after retries',
-        });
-        if (retryCount === 0) {
-          await logProxyNoChannelFailure({
-            modelRequested: requestedModel,
-            httpStatus: 503,
-            errorMessage: 'No available channels for this model',
-            retryCount,
-            downstreamPath,
-            clientContext,
-            downstreamApiKeyId,
-          });
-        }
-        if (responseCacheKey && !isStream) {
-          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-          if (stale) {
-            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-          }
-        }
-        return reply.code(503).send({
-          error: { message: 'No available channels for this model', type: 'server_error' },
-        });
-      }
-
-      excludeChannelIds.push(selected.channel.id);
       recordProxyDebugTrace({
         clientContext,
         kind: 'channel_selected',
@@ -327,11 +343,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
           normalizedResponsesBody = await resolveResponsesBodyInputFiles(normalizedResponsesBody, owner);
         } catch (error) {
           if (error instanceof ProxyInputFileResolutionError) {
-            return reply.code(error.statusCode).send(error.payload);
+            reply.code(error.statusCode).send(error.payload);
+            return { ok: true, response: null };
           }
           throw error;
         }
       }
+
       const openAiBody = openAiResponsesTransformer.inbound.toOpenAiBody(
         normalizedResponsesBody,
         modelName,
@@ -361,6 +379,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
       if (endpointCandidates.length === 0) {
         endpointCandidates.push('responses', 'chat', 'messages');
       }
+
       const endpointRuntimeContext = {
         siteId: selected.site.id,
         accountId: selected.account.id,
@@ -388,7 +407,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           endpoint,
           modelName,
           stream: upstreamStream,
-          tokenValue: selected.tokenValue,
+          tokenValue: selected.tokenValue || '',
           oauthProvider: oauth?.provider,
           oauthProjectId: oauth?.projectId,
           sitePlatform: selected.site.platform,
@@ -543,9 +562,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
             errorText: rawErrText,
             modelName,
           });
-          if (shouldAvoidSiteForRequest(status, rawErrText)) {
-            excludeSiteIds.add(selected.site.id);
-          }
           logProxy(
             selected,
             requestedModel,
@@ -579,88 +595,104 @@ export async function handleOpenAiResponsesSurfaceRequest(
             });
           }
 
-          if (shouldRetryProxyRequest(status, errText) && retryCount < MAX_RETRIES) {
-            retryCount += 1;
-            continue;
+          if (shouldRetryProxyRequest(status, errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+            return {
+              ok: false,
+              action: 'failover',
+              status,
+              rawErrorText: errText,
+            };
           }
 
-          await reportProxyAllFailed({
-            model: requestedModel,
-            reason: `upstream returned HTTP ${status}`,
-          });
-          return reply.code(status).send({ error: { message: errText, type: 'upstream_error' } });
-        }
-
-      const upstream = endpointResult.upstream;
-      const successfulUpstreamPath = endpointResult.upstreamPath;
-      const finalizeStreamSuccess = async (parsedUsage: UsageSummary, latency: number) => {
-        let usageForLog = {
-          promptTokens: parsedUsage.promptTokens,
-          completionTokens: parsedUsage.completionTokens,
-          totalTokens: parsedUsage.totalTokens,
-        };
-        let estimatedCost = 0;
-        let billingDetails: unknown = null;
-
-        try {
-          const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
-            site: selected.site,
-            account: selected.account,
-            tokenValue: selected.tokenValue,
-            tokenName: selected.tokenName,
-            modelName: selected.actualModel || requestedModel,
-            requestStartedAtMs: startTime,
-            requestEndedAtMs: startTime + latency,
-            localLatencyMs: latency,
-            usage: {
-              promptTokens: parsedUsage.promptTokens,
-              completionTokens: parsedUsage.completionTokens,
-              totalTokens: parsedUsage.totalTokens,
-            },
-          });
-          usageForLog = {
-            promptTokens: resolvedUsage.promptTokens,
-            completionTokens: resolvedUsage.completionTokens,
-            totalTokens: resolvedUsage.totalTokens,
+          return {
+            ok: false,
+            action: 'stop',
+            status,
+            rawErrorText: errText,
           };
-          const billing = await resolveProxyLogBilling({
-            site: selected.site,
-            account: selected.account,
-            modelName: selected.actualModel || requestedModel,
-            parsedUsage,
-            resolvedUsage,
-          });
-          estimatedCost = billing.estimatedCost;
-          billingDetails = billing.billingDetails;
-        } catch (error) {
-          console.error('[responses] post-stream bookkeeping failed:', error);
         }
 
-        try {
-          await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
-          recordProxyDebugTrace({
-            clientContext,
-            kind: 'proxy_success',
-            requestedModel,
-            actualModel: modelName,
-            downstreamPath,
-            selected,
-            endpointPath: successfulUpstreamPath,
-            status: 200,
-            retryCount,
-          });
-          recordDownstreamCostUsage(request, estimatedCost);
-          logProxy(
-            selected, requestedModel, 'success', 200, latency, null, retryCount, downstreamPath,
-            usageForLog.promptTokens, usageForLog.completionTokens, usageForLog.totalTokens, estimatedCost, billingDetails,
-            successfulUpstreamPath,
-            clientContext,
-            downstreamApiKeyId,
-          );
-        } catch (error) {
-          console.error('[responses] post-stream success logging failed:', error);
-        }
-      };
+        const upstream = endpointResult.upstream;
+        const successfulUpstreamPath = endpointResult.upstreamPath;
+        const finalizeStreamSuccess = async (parsedUsage: UsageSummary, latency: number) => {
+          let usageForLog = {
+            promptTokens: parsedUsage.promptTokens,
+            completionTokens: parsedUsage.completionTokens,
+            totalTokens: parsedUsage.totalTokens,
+          };
+          let estimatedCost = 0;
+          let billingDetails: unknown = null;
+
+          try {
+            const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+              site: selected.site,
+              account: selected.account,
+              tokenValue: selected.tokenValue || '',
+              tokenName: selected.tokenName,
+              modelName: selected.actualModel || requestedModel,
+              requestStartedAtMs: startTime,
+              requestEndedAtMs: startTime + latency,
+              localLatencyMs: latency,
+              usage: {
+                promptTokens: parsedUsage.promptTokens,
+                completionTokens: parsedUsage.completionTokens,
+                totalTokens: parsedUsage.totalTokens,
+              },
+            });
+            usageForLog = {
+              promptTokens: resolvedUsage.promptTokens,
+              completionTokens: resolvedUsage.completionTokens,
+              totalTokens: resolvedUsage.totalTokens,
+            };
+            const billing = await resolveProxyLogBilling({
+              site: selected.site,
+              account: selected.account,
+              modelName: selected.actualModel || requestedModel,
+              parsedUsage,
+              resolvedUsage,
+            });
+            estimatedCost = billing.estimatedCost;
+            billingDetails = billing.billingDetails;
+          } catch (error) {
+            console.error('[responses] post-stream bookkeeping failed:', error);
+          }
+
+          try {
+            await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+            recordProxyDebugTrace({
+              clientContext,
+              kind: 'proxy_success',
+              requestedModel,
+              actualModel: modelName,
+              downstreamPath,
+              selected,
+              endpointPath: successfulUpstreamPath,
+              status: 200,
+              retryCount,
+            });
+            recordDownstreamCostUsage(request, estimatedCost);
+            logProxy(
+              selected,
+              requestedModel,
+              'success',
+              200,
+              latency,
+              null,
+              retryCount,
+              downstreamPath,
+              usageForLog.promptTokens,
+              usageForLog.completionTokens,
+              usageForLog.totalTokens,
+              estimatedCost,
+              billingDetails,
+              successfulUpstreamPath,
+              clientContext,
+              downstreamApiKeyId,
+            );
+          } catch (error) {
+            console.error('[responses] post-stream success logging failed:', error);
+          }
+        };
 
         if (isStream) {
           const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
@@ -701,6 +733,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               reply.raw.write(chunk);
             },
           });
+
           if (!upstreamContentType.includes('text/event-stream')) {
             const rawText = await upstream.text();
             if (looksLikeResponsesSseText(rawText)) {
@@ -716,9 +749,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
                   errorText: streamResult.errorMessage,
                   modelName,
                 });
-                if (shouldAvoidSiteForRequest(502, streamResult.errorMessage)) {
-                  excludeSiteIds.add(selected.site.id);
-                }
                 logProxy(
                   selected,
                   requestedModel,
@@ -737,12 +767,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
                   clientContext,
                   downstreamApiKeyId,
                 );
-                return;
+                return { ok: true, response: upstream };
               }
 
               await finalizeStreamSuccess(parsedUsage, latency);
-              return;
+              return { ok: true, response: upstream, latencyMs: latency };
             }
+
             let upstreamData: unknown = rawText;
             try {
               upstreamData = JSON.parse(rawText);
@@ -762,9 +793,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 errorText: failure.reason,
                 modelName,
               });
-              if (shouldAvoidSiteForRequest(failure.status, failure.reason)) {
-                excludeSiteIds.add(selected.site.id);
-              }
               logProxy(
                 selected,
                 requestedModel,
@@ -785,15 +813,20 @@ export async function handleOpenAiResponsesSurfaceRequest(
               );
 
               if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-                retryCount += 1;
-                continue;
+                return {
+                  ok: false,
+                  action: 'failover',
+                  status: failure.status,
+                  rawErrorText: failure.reason,
+                };
               }
 
-              await reportProxyAllFailed({
-                model: requestedModel,
-                reason: failure.reason,
-              });
-              return reply.code(failure.status).send({ error: { message: failure.reason, type: 'upstream_error' } });
+              return {
+                ok: false,
+                action: 'stop',
+                status: failure.status,
+                rawErrorText: failure.reason,
+              };
             }
 
             startSseResponse();
@@ -804,9 +837,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 errorText: streamResult.errorMessage,
                 modelName,
               });
-              if (shouldAvoidSiteForRequest(502, streamResult.errorMessage)) {
-                excludeSiteIds.add(selected.site.id);
-              }
               logProxy(
                 selected,
                 requestedModel,
@@ -825,11 +855,11 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 clientContext,
                 downstreamApiKeyId,
               );
-              return;
+              return { ok: true, response: upstream };
             }
 
             await finalizeStreamSuccess(parsedUsage, latency);
-            return;
+            return { ok: true, response: upstream, latencyMs: latency };
           }
 
           startSseResponse();
@@ -867,9 +897,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
               errorText: streamResult.errorMessage,
               modelName,
             });
-            if (shouldAvoidSiteForRequest(502, streamResult.errorMessage)) {
-              excludeSiteIds.add(selected.site.id);
-            }
             logProxy(
               selected,
               requestedModel,
@@ -888,16 +915,11 @@ export async function handleOpenAiResponsesSurfaceRequest(
               clientContext,
               downstreamApiKeyId,
             );
-            return;
+            return { ok: true, response: upstream };
           }
 
-          // Once SSE has been hijacked and bytes may already be on the wire, we
-          // must not attempt to convert stream failures into a fresh HTTP error
-          // response or retry on another channel. Responses stream failures are
-          // handled in-band by the proxy stream session.
-
           await finalizeStreamSuccess(parsedUsage, latency);
-          return;
+          return { ok: true, response: upstream, latencyMs: latency };
         }
 
         const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
@@ -929,6 +951,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
           upstreamData = unwrapGeminiCliPayload(upstreamData);
         }
+
         const latency = Date.now() - startTime;
         const parsedUsage = parseProxyUsage(upstreamData);
         const failure = detectProxyFailure({ rawText, usage: parsedUsage });
@@ -938,9 +961,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
             errorText: failure.reason,
             modelName,
           });
-          if (shouldAvoidSiteForRequest(failure.status, failure.reason)) {
-            excludeSiteIds.add(selected.site.id);
-          }
           logProxy(
             selected,
             requestedModel,
@@ -959,47 +979,24 @@ export async function handleOpenAiResponsesSurfaceRequest(
             clientContext,
             downstreamApiKeyId,
           );
+
           if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-            retryCount += 1;
-            continue;
+            return {
+              ok: false,
+              action: 'failover',
+              status: failure.status,
+              rawErrorText: failure.reason,
+            };
           }
 
-          await reportProxyAllFailed({
-            model: requestedModel,
-            reason: failure.reason,
-          });
-          if (responseCacheKey && !isStream) {
-            const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-            if (stale) {
-              await logProxy(
-                {
-                  channel: { routeId: null, id: null },
-                  account: { id: null, username: 'cache' },
-                  actualModel: requestedModel,
-                  site: { name: '本地缓存', url: '', platform: 'cache' },
-                },
-                requestedModel,
-                'success',
-                200,
-                latency,
-                'served stale cache after upstream failure',
-                retryCount,
-                downstreamPath,
-                stale.promptTokens,
-                stale.completionTokens,
-                stale.promptTokens + stale.completionTokens,
-                0,
-                null,
-                null,
-                clientContext,
-                downstreamApiKeyId,
-                { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
-              );
-              return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-            }
-          }
-          return reply.code(failure.status).send({ error: { message: failure.reason, type: 'upstream_error' } });
+          return {
+            ok: false,
+            action: 'stop',
+            status: failure.status,
+            rawErrorText: failure.reason,
+          };
         }
+
         const normalized = openAiResponsesTransformer.transformFinalResponse(
           upstreamData,
           modelName,
@@ -1014,7 +1011,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
           site: selected.site,
           account: selected.account,
-          tokenValue: selected.tokenValue,
+          tokenValue: selected.tokenValue || '',
           tokenName: selected.tokenName,
           modelName: selected.actualModel || requestedModel,
           requestStartedAtMs: startTime,
@@ -1048,8 +1045,19 @@ export async function handleOpenAiResponsesSurfaceRequest(
         });
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
-          selected, requestedModel, 'success', 200, latency, null, retryCount, downstreamPath,
-          resolvedUsage.promptTokens, resolvedUsage.completionTokens, resolvedUsage.totalTokens, estimatedCost, billingDetails,
+          selected,
+          requestedModel,
+          'success',
+          200,
+          latency,
+          null,
+          retryCount,
+          downstreamPath,
+          resolvedUsage.promptTokens,
+          resolvedUsage.completionTokens,
+          resolvedUsage.totalTokens,
+          estimatedCost,
+          billingDetails,
           successfulUpstreamPath,
           clientContext,
           downstreamApiKeyId,
@@ -1064,10 +1072,17 @@ export async function handleOpenAiResponsesSurfaceRequest(
             estimatedCost,
           }).catch(() => {});
         }
-        return reply.header('X-Cache', 'MISS').send(downstreamData);
+        reply.header('X-Cache', 'MISS').send(downstreamData);
+        return {
+          ok: true,
+          response: upstream,
+          latencyMs: latency,
+          cost: estimatedCost,
+        };
       } catch (err: any) {
+        const errorMessage = err?.message || 'network failure';
         await tokenRouter.recordFailure(selected.channel.id, {
-          errorText: err?.message,
+          errorText: errorMessage,
           modelName,
         });
         recordProxyDebugTrace({
@@ -1078,18 +1093,15 @@ export async function handleOpenAiResponsesSurfaceRequest(
           downstreamPath,
           selected,
           retryCount,
-          reason: err?.message || 'network failure',
+          reason: errorMessage,
         });
-        if (shouldAvoidSiteForRequest(0, err?.message)) {
-          excludeSiteIds.add(selected.site.id);
-        }
         logProxy(
           selected,
           requestedModel,
           'failed',
           0,
           Date.now() - startTime,
-          err.message,
+          errorMessage,
           retryCount,
           downstreamPath,
           0,
@@ -1101,25 +1113,83 @@ export async function handleOpenAiResponsesSurfaceRequest(
           clientContext,
           downstreamApiKeyId,
         );
+
         if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-          retryCount += 1;
-          continue;
+          return {
+            ok: false,
+            action: 'failover',
+            status: 502,
+            rawErrorText: errorMessage,
+          };
         }
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: err.message || 'network failure',
-        });
-        if (responseCacheKey && !isStream) {
-          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-          if (stale) {
-            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-          }
-        }
-        return reply.code(502).send({
-          error: { message: `Upstream error: ${err.message}`, type: 'upstream_error' },
-        });
+
+        return {
+          ok: false,
+          action: 'stop',
+          status: 502,
+          rawErrorText: errorMessage,
+        };
       }
+    },
+  });
+
+  if (execution.ok) {
+    return;
+  }
+
+  const finalStatus = execution.reason === 'no_channel'
+    ? 503
+    : (execution.status ?? 502);
+  const finalMessage = execution.reason === 'no_channel'
+    ? 'No available channels for this model'
+    : (execution.rawErrorText || 'upstream request failed');
+  const retryCount = Math.max(0, execution.attempts - 1);
+
+  if (!reportedNoChannel) {
+    await reportProxyAllFailed({
+      model: requestedModel,
+      reason: finalStatus === 504 ? requestBudget.buildTimeoutMessage() : finalMessage,
+    });
+  }
+
+  if (responseCacheKey && !isStream) {
+    const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+    if (stale) {
+      await logProxy(
+        {
+          channel: { routeId: null, id: null },
+          account: { id: null, username: 'cache' },
+          actualModel: requestedModel,
+          site: { name: '本地缓存', url: '', platform: 'cache' },
+        },
+        requestedModel,
+        'success',
+        200,
+        0,
+        finalStatus === 504 ? requestBudget.buildTimeoutMessage() : 'served stale cache after upstream failure',
+        retryCount,
+        downstreamPath,
+        stale.promptTokens,
+        stale.completionTokens,
+        stale.promptTokens + stale.completionTokens,
+        0,
+        null,
+        null,
+        clientContext,
+        downstreamApiKeyId,
+        { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
+      );
+      return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
     }
+  }
+
+  const errorType = execution.reason === 'no_channel' ? 'server_error' : 'upstream_error';
+  return reply.code(finalStatus).send({
+    error: {
+      message: finalStatus === 502 ? `Upstream error: ${finalMessage}` : finalMessage,
+      type: errorType,
+    },
+  });
 }
 
 async function logProxy(

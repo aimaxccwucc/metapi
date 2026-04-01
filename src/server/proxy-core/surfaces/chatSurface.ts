@@ -59,7 +59,8 @@ import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/con
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
 import { recordProxyDebugTrace } from '../../routes/proxy/proxyDebugTrace.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
-import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
+import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, recordResponseCacheMiss, writeResponseCache } from '../../services/responseCacheService.js';
+import { DefaultProxyConductor } from '../conductor/DefaultProxyConductor.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
 
@@ -98,7 +99,21 @@ export async function handleChatSurfaceRequest(
     claudeOriginalBody,
   } = requestEnvelope.parsed;
   if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+
   const downstreamPolicy = getDownstreamRoutingPolicy(request);
+  const conductor = new DefaultProxyConductor({
+    selectChannel: (model, policy) => tokenRouter.selectChannel(model, policy as any),
+    previewSelectedChannel: typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
+      ? (model, policy) => tokenRouter.previewSelectedChannel(model, policy as any)
+      : undefined,
+    selectNextChannel: (model, excludeChannelIds, policy, excludeSiteIds) => tokenRouter.selectNextChannel(
+      model,
+      excludeChannelIds,
+      policy as any,
+      excludeSiteIds,
+    ),
+  });
+
   const owner = getProxyResourceOwner(request);
   let resolvedOpenAiBody = upstreamBody;
   if (owner) {
@@ -121,9 +136,8 @@ export async function handleChatSurfaceRequest(
   });
   const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
 
-  // 精确响应缓存：仅对非流式请求且 temperature=0 时生效
-  const previewSelected = !isStream && typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
-    ? await tokenRouter.previewSelectedChannel(requestedModel, downstreamPolicy)
+  const previewSelected = !isStream
+    ? await conductor.previewSelectedChannel(requestedModel, downstreamPolicy)
     : null;
   const routeScope = previewSelected
     ? buildRouteScope({
@@ -134,12 +148,21 @@ export async function handleChatSurfaceRequest(
     : null;
   const responseCacheKey = !isStream
     ? buildCacheKey({
+        surface: `chat:${downstreamFormat}`,
         model: requestedModel,
         messages: (request.body as Record<string, unknown>)?.messages,
         temperature: (request.body as Record<string, unknown>)?.temperature as number | null | undefined,
         top_p: (request.body as Record<string, unknown>)?.top_p as number | null | undefined,
         max_tokens: (request.body as Record<string, unknown>)?.max_tokens as number | null | undefined,
+        stop: (request.body as Record<string, unknown>)?.stop,
+        seed: (request.body as Record<string, unknown>)?.seed as number | null | undefined,
+        tools: (request.body as Record<string, unknown>)?.tools,
+        tool_choice: (request.body as Record<string, unknown>)?.tool_choice,
+        response_format: (request.body as Record<string, unknown>)?.response_format,
+        reasoning: (request.body as Record<string, unknown>)?.reasoning,
+        modalities: (request.body as Record<string, unknown>)?.modalities,
         routeScope,
+        requestFingerprint: request.body,
       })
     : null;
   if (responseCacheKey) {
@@ -155,12 +178,12 @@ export async function handleChatSurfaceRequest(
         'success',
         200,
         0,
-        'count_tokens cache hit',
+        'response cache hit',
         0,
         downstreamPath,
-        0,
-        0,
-        0,
+        cached.promptTokens,
+        cached.completionTokens,
+        cached.promptTokens + cached.completionTokens,
         0,
         null,
         null,
@@ -170,205 +193,195 @@ export async function handleChatSurfaceRequest(
       );
       return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
     }
+    recordResponseCacheMiss();
   }
 
-  const excludeChannelIds: number[] = [];
-  const excludeSiteIds = new Set<number>();
-  let retryCount = 0;
   const requestBudget = createRequestBudget();
+  let reportedNoChannel = false;
 
-  while (retryCount <= MAX_RETRIES) {
-    if (requestBudget.isExpired()) {
-      await reportProxyAllFailed({
-        model: requestedModel,
-        reason: requestBudget.buildTimeoutMessage(),
-      });
-      if (responseCacheKey) {
-        const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-        if (stale) {
-          return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-        }
-      }
-      return reply.code(504).send({
-        error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
-      });
-    }
-
-    let selected = retryCount === 0
-      ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-      : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
-
-    if (!selected && retryCount === 0) {
+  const execution = await conductor.execute({
+    requestedModel,
+    downstreamPolicy,
+    maxAttempts: MAX_RETRIES + 1,
+    refreshSelection: async () => {
       await refreshModelsAndRebuildRoutes();
-      selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
-    }
-
-    if (!selected) {
+      return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
+    },
+    onNoChannel: async ({ attempts }) => {
+      reportedNoChannel = true;
       await reportProxyAllFailed({
         model: requestedModel,
         reason: 'No available channels after retries',
       });
-      if (retryCount === 0) {
+      if (attempts === 0) {
         await logProxyNoChannelFailure({
           modelRequested: requestedModel,
           httpStatus: 503,
           errorMessage: 'No available channels for this model',
-          retryCount,
+          retryCount: 0,
           downstreamPath,
           clientContext,
           downstreamApiKeyId,
         });
       }
-      if (responseCacheKey) {
-        const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-        if (stale) {
-          return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-        }
+    },
+    getFailoverSiteId: (selected, failure) => {
+      if (!shouldAvoidSiteForRequest(
+        typeof failure.status === 'number' ? failure.status : 0,
+        typeof failure.rawErrorText === 'string' ? failure.rawErrorText : undefined,
+      )) return null;
+      const siteId = Number((selected.site as { id?: unknown }).id);
+      return Number.isFinite(siteId) ? Math.trunc(siteId) : null;
+    },
+    attempt: async ({ selected, attemptIndex }) => {
+      const retryCount = attemptIndex;
+      if (requestBudget.isExpired()) {
+        return {
+          ok: false,
+          action: 'stop',
+          status: 504,
+          rawErrorText: requestBudget.buildTimeoutMessage(),
+        };
       }
-      return reply.code(503).send({
-        error: { message: 'No available channels for this model', type: 'server_error' },
+
+      recordProxyDebugTrace({
+        clientContext,
+        kind: 'channel_selected',
+        requestedModel,
+        actualModel: selected.actualModel || requestedModel,
+        downstreamPath,
+        selected,
+        retryCount,
       });
-    }
 
-    excludeChannelIds.push(selected.channel.id);
-    recordProxyDebugTrace({
-      clientContext,
-      kind: 'channel_selected',
-      requestedModel,
-      actualModel: selected.actualModel || requestedModel,
-      downstreamPath,
-      selected,
-      retryCount,
-    });
-
-    const modelName = selected.actualModel || requestedModel;
-    const oauth = getOauthInfoFromExtraConfig(selected.account.extraConfig);
-    const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
-    const endpointCandidates = [
-      ...await resolveUpstreamEndpointCandidates(
-        {
-          site: selected.site,
-          account: selected.account,
-        },
+      const modelName = selected.actualModel || requestedModel;
+      const oauth = getOauthInfoFromExtraConfig(selected.account.extraConfig);
+      const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
+      const endpointCandidates = [
+        ...await resolveUpstreamEndpointCandidates(
+          {
+            site: selected.site,
+            account: selected.account,
+          },
+          modelName,
+          downstreamFormat,
+          requestedModel,
+          {
+            hasNonImageFileInput,
+            conversationFileSummary,
+          },
+        ),
+      ];
+      const endpointRuntimeContext = {
+        siteId: selected.site.id,
+        accountId: selected.account.id,
+        accountAccessToken: selected.account.accessToken ?? null,
+        accountApiToken: (selected.account as { apiToken?: string | null }).apiToken ?? null,
+        siteApiKey: selected.site.apiKey ?? null,
         modelName,
         downstreamFormat,
-        requestedModel,
-        {
+        requestedModelHint: requestedModel,
+        requestCapabilities: {
           hasNonImageFileInput,
           conversationFileSummary,
         },
-      ),
-    ];
-    const endpointRuntimeContext = {
-      siteId: selected.site.id,
-      accountId: selected.account.id,
-      accountAccessToken: selected.account.accessToken ?? null,
-      accountApiToken: (selected.account as { apiToken?: string | null }).apiToken ?? null,
-      siteApiKey: selected.site.apiKey ?? null,
-      modelName,
-      downstreamFormat,
-      requestedModelHint: requestedModel,
-      requestCapabilities: {
-        hasNonImageFileInput,
-        conversationFileSummary,
-      },
-    };
-    const buildProviderHeaders = () => (
-      buildOauthProviderHeaders({
-        extraConfig: typeof selected.account.extraConfig === 'string' ? selected.account.extraConfig : null,
-        downstreamHeaders: request.headers as Record<string, unknown>,
-      })
-    );
-    const buildEndpointRequest = (
-      endpoint: 'chat' | 'messages' | 'responses',
-      options: { forceNormalizeClaudeBody?: boolean } = {},
-    ) => {
-      const upstreamStream = isStream || (isCodexSite && endpoint === 'responses');
-      const endpointRequest = buildUpstreamEndpointRequest({
-        endpoint,
-        modelName,
-        stream: upstreamStream,
-        tokenValue: selected.tokenValue,
-        oauthProvider: oauth?.provider,
-        oauthProjectId: oauth?.projectId,
-        sitePlatform: selected.site.platform,
-        siteUrl: selected.site.url,
-        openaiBody: resolvedOpenAiBody,
-        downstreamFormat,
-        claudeOriginalBody,
-        forceNormalizeClaudeBody: options.forceNormalizeClaudeBody,
-        downstreamHeaders: request.headers as Record<string, unknown>,
-        providerHeaders: buildProviderHeaders(),
-        codexSessionCacheKey,
-      });
-      return {
-        endpoint,
-        path: endpointRequest.path,
-        headers: endpointRequest.headers,
-        body: endpointRequest.body as Record<string, unknown>,
-        runtime: endpointRequest.runtime,
       };
-    };
-    const channelProxyUrl = resolveChannelProxyUrl(selected.site, selected.account.extraConfig);
-    const dispatchRequest = (
-      compatibilityRequest: BuiltEndpointRequest,
-      targetUrl?: string,
-    ) => (
-      dispatchRuntimeRequest({
-        siteUrl: selected.site.url,
-        targetUrl,
-        request: compatibilityRequest,
-        buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
-          method: 'POST',
-          headers: requestForFetch.headers,
-          body: JSON.stringify(requestForFetch.body),
-        }, channelProxyUrl),
-      })
-    );
-    const endpointStrategy = downstreamTransformer.compatibility.createEndpointStrategy({
-      downstreamFormat,
-      endpointCandidates,
-      modelName,
-      requestedModelHint: requestedModel,
-      sitePlatform: selected.site.platform,
-      isStream: isStream || isCodexSite,
-      buildRequest: ({ endpoint, forceNormalizeClaudeBody }) => buildEndpointRequest(
-        endpoint,
-        { forceNormalizeClaudeBody },
-      ),
-      dispatchRequest,
-    });
-    const tryRecover = async (ctx: Parameters<NonNullable<typeof endpointStrategy.tryRecover>>[0]) => {
-      if ((ctx.response.status === 401 || ctx.response.status === 403) && oauth) {
-        try {
-          const refreshed = await refreshOauthAccessTokenSingleflight(selected.account.id);
-          selected.tokenValue = refreshed.accessToken;
-          selected.account = {
-            ...selected.account,
-            accessToken: refreshed.accessToken,
-            extraConfig: refreshed.extraConfig ?? selected.account.extraConfig,
-          };
-          const refreshedRequest = buildEndpointRequest(ctx.request.endpoint);
-          const refreshedTargetUrl = buildUpstreamUrl(selected.site.url, refreshedRequest.path);
-          const refreshedResponse = await dispatchRequest(refreshedRequest, refreshedTargetUrl);
-          if (refreshedResponse.ok) {
-            return {
-              upstream: refreshedResponse,
-              upstreamPath: refreshedRequest.path,
+      const buildProviderHeaders = () => (
+        buildOauthProviderHeaders({
+          extraConfig: typeof selected.account.extraConfig === 'string' ? selected.account.extraConfig : null,
+          downstreamHeaders: request.headers as Record<string, unknown>,
+        })
+      );
+      const buildEndpointRequest = (
+        endpoint: 'chat' | 'messages' | 'responses',
+        options: { forceNormalizeClaudeBody?: boolean } = {},
+      ) => {
+        const upstreamStream = isStream || (isCodexSite && endpoint === 'responses');
+        const endpointRequest = buildUpstreamEndpointRequest({
+          endpoint,
+          modelName,
+          stream: upstreamStream,
+          tokenValue: selected.tokenValue || '',
+          oauthProvider: oauth?.provider,
+          oauthProjectId: oauth?.projectId,
+          sitePlatform: selected.site.platform,
+          siteUrl: selected.site.url,
+          openaiBody: resolvedOpenAiBody,
+          downstreamFormat,
+          claudeOriginalBody,
+          forceNormalizeClaudeBody: options.forceNormalizeClaudeBody,
+          downstreamHeaders: request.headers as Record<string, unknown>,
+          providerHeaders: buildProviderHeaders(),
+          codexSessionCacheKey,
+        });
+        return {
+          endpoint,
+          path: endpointRequest.path,
+          headers: endpointRequest.headers,
+          body: endpointRequest.body as Record<string, unknown>,
+          runtime: endpointRequest.runtime,
+        };
+      };
+      const channelProxyUrl = resolveChannelProxyUrl(selected.site, selected.account.extraConfig);
+      const dispatchRequest = (
+        compatibilityRequest: BuiltEndpointRequest,
+        targetUrl?: string,
+      ) => (
+        dispatchRuntimeRequest({
+          siteUrl: selected.site.url,
+          targetUrl,
+          request: compatibilityRequest,
+          buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
+            method: 'POST',
+            headers: requestForFetch.headers,
+            body: JSON.stringify(requestForFetch.body),
+          }, channelProxyUrl),
+        })
+      );
+      const endpointStrategy = downstreamTransformer.compatibility.createEndpointStrategy({
+        downstreamFormat,
+        endpointCandidates,
+        modelName,
+        requestedModelHint: requestedModel,
+        sitePlatform: selected.site.platform,
+        isStream: isStream || isCodexSite,
+        buildRequest: ({ endpoint, forceNormalizeClaudeBody }) => buildEndpointRequest(
+          endpoint,
+          { forceNormalizeClaudeBody },
+        ),
+        dispatchRequest,
+      });
+      const tryRecover = async (ctx: Parameters<NonNullable<typeof endpointStrategy.tryRecover>>[0]) => {
+        if ((ctx.response.status === 401 || ctx.response.status === 403) && oauth) {
+          try {
+            const refreshed = await refreshOauthAccessTokenSingleflight(selected.account.id);
+            selected.tokenValue = refreshed.accessToken;
+            selected.account = {
+              ...selected.account,
+              accessToken: refreshed.accessToken,
+              extraConfig: refreshed.extraConfig ?? selected.account.extraConfig,
             };
+            const refreshedRequest = buildEndpointRequest(ctx.request.endpoint);
+            const refreshedTargetUrl = buildUpstreamUrl(selected.site.url, refreshedRequest.path);
+            const refreshedResponse = await dispatchRequest(refreshedRequest, refreshedTargetUrl);
+            if (refreshedResponse.ok) {
+              return {
+                upstream: refreshedResponse,
+                upstreamPath: refreshedRequest.path,
+              };
+            }
+            ctx.request = refreshedRequest;
+            ctx.response = refreshedResponse;
+            ctx.rawErrText = await refreshedResponse.text().catch(() => 'unknown error');
+          } catch {
+            return endpointStrategy.tryRecover(ctx);
           }
-          ctx.request = refreshedRequest;
-          ctx.response = refreshedResponse;
-          ctx.rawErrText = await refreshedResponse.text().catch(() => 'unknown error');
-        } catch {
-          return endpointStrategy.tryRecover(ctx);
         }
-      }
-      return endpointStrategy.tryRecover(ctx);
-    };
-    let startTime = Date.now();
+        return endpointStrategy.tryRecover(ctx);
+      };
+      const startTime = Date.now();
 
-    try {
+      try {
         const endpointResult = await executeEndpointFlow({
           siteUrl: selected.site.url,
           endpointCandidates,
@@ -391,165 +404,302 @@ export async function handleChatSurfaceRequest(
           },
           shouldDowngrade: endpointStrategy.shouldDowngrade,
           onDowngrade: (ctx) => {
-          recordProxyDebugTrace({
-            clientContext,
-            kind: 'endpoint_downgrade',
-            requestedModel,
-            actualModel: modelName,
-            downstreamPath,
-            selected,
-            endpoint: ctx.request.endpoint,
-            endpointPath: ctx.request.path,
-            status: ctx.response.status,
-            retryCount,
-            reason: ctx.errText,
-          });
-          logProxy(
-            selected,
-            requestedModel,
-            'failed',
-            ctx.response.status,
-            Date.now() - startTime,
-            ctx.errText,
-            retryCount,
-            downstreamPath,
-          0,
-          0,
-          0,
-          0,
-          null,
-          null,
-          clientContext,
-          downstreamApiKeyId,
-        );
-      },
-      });
+            recordProxyDebugTrace({
+              clientContext,
+              kind: 'endpoint_downgrade',
+              requestedModel,
+              actualModel: modelName,
+              downstreamPath,
+              selected,
+              endpoint: ctx.request.endpoint,
+              endpointPath: ctx.request.path,
+              status: ctx.response.status,
+              retryCount,
+              reason: ctx.errText,
+            });
+            logProxy(
+              selected,
+              requestedModel,
+              'failed',
+              ctx.response.status,
+              Date.now() - startTime,
+              ctx.errText,
+              retryCount,
+              downstreamPath,
+              0,
+              0,
+              0,
+              0,
+              null,
+              null,
+              clientContext,
+              downstreamApiKeyId,
+            );
+          },
+        });
 
         if (!endpointResult.ok) {
           const status = endpointResult.status || 502;
           const errText = endpointResult.errText || 'unknown error';
           const rawErrText = endpointResult.rawErrText || errText;
-        recordProxyDebugTrace({
-          clientContext,
-          kind: 'endpoint_final_failure',
-          requestedModel,
-          actualModel: modelName,
-          downstreamPath,
-          selected,
-          status,
-          retryCount,
-          reason: errText,
-        });
-        await tokenRouter.recordFailure(selected.channel.id, {
-          status,
-          errorText: rawErrText,
-          modelName,
-        });
-        if (shouldAvoidSiteForRequest(status, rawErrText)) {
-          excludeSiteIds.add(selected.site.id);
-        }
-        logProxy(
-          selected,
-          requestedModel,
-          'failed',
-          status,
-          Date.now() - startTime,
-          errText,
-          retryCount,
-          downstreamPath,
-          0,
-          0,
-          0,
-          0,
-          null,
-          null,
-          clientContext,
-          downstreamApiKeyId,
-        );
-        await recordOauthQuotaResetHint({
-          accountId: selected.account.id,
-          statusCode: status,
-          errorText: rawErrText,
-        });
-
-        if (isTokenExpiredError({ status, message: errText })) {
-          await reportTokenExpired({
-            accountId: selected.account.id,
-            username: selected.account.username,
-            siteName: selected.site.name,
-            detail: `HTTP ${status}`,
+          recordProxyDebugTrace({
+            clientContext,
+            kind: 'endpoint_final_failure',
+            requestedModel,
+            actualModel: modelName,
+            downstreamPath,
+            selected,
+            status,
+            retryCount,
+            reason: errText,
           });
-        }
+          await tokenRouter.recordFailure(selected.channel.id, {
+            status,
+            errorText: rawErrText,
+            modelName,
+          });
+          logProxy(
+            selected,
+            requestedModel,
+            'failed',
+            status,
+            Date.now() - startTime,
+            errText,
+            retryCount,
+            downstreamPath,
+            0,
+            0,
+            0,
+            0,
+            null,
+            null,
+            clientContext,
+            downstreamApiKeyId,
+          );
+          await recordOauthQuotaResetHint({
+            accountId: selected.account.id,
+            statusCode: status,
+            errorText: rawErrText,
+          });
 
-        if (shouldRetryProxyRequest(status, errText) && retryCount < MAX_RETRIES) {
-          retryCount += 1;
-          continue;
-        }
-
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: `upstream returned HTTP ${status}`,
-        });
-
-        return reply.code(status).send({
-          error: { message: errText, type: 'upstream_error' },
-        });
-      }
-
-      const upstream = endpointResult.upstream;
-      const successfulUpstreamPath = endpointResult.upstreamPath;
-
-      if (isStream) {
-        const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
-        const startSseResponse = () => {
-          reply.hijack();
-          reply.raw.statusCode = 200;
-          reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-          reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-          reply.raw.setHeader('Connection', 'keep-alive');
-          reply.raw.setHeader('X-Accel-Buffering', 'no');
-        };
-
-        let parsedUsage: ReturnType<typeof parseProxyUsage> = {
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: 0,
-          cacheReadTokens: 0,
-          cacheCreationTokens: 0,
-          promptTokensIncludeCache: null,
-        };
-
-        const writeLines = (lines: string[]) => {
-          for (const line of lines) {
-            reply.raw.write(line);
+          if (isTokenExpiredError({ status, message: errText })) {
+            await reportTokenExpired({
+              accountId: selected.account.id,
+              username: selected.account.username,
+              siteName: selected.site.name,
+              detail: `HTTP ${status}`,
+            });
           }
-        };
-        const streamSession = openAiChatTransformer.proxyStream.createSession({
-          downstreamFormat,
-          modelName,
-          successfulUpstreamPath,
-          onParsedPayload: (payload) => {
-            if (payload && typeof payload === 'object') {
-              parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(payload));
+
+          if (shouldRetryProxyRequest(status, errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+            return {
+              ok: false,
+              action: 'failover',
+              status,
+              rawErrorText: errText,
+            };
+          }
+
+          return {
+            ok: false,
+            action: 'stop',
+            status,
+            rawErrorText: errText,
+          };
+        }
+
+        const upstream = endpointResult.upstream as any;
+        const successfulUpstreamPath = endpointResult.upstreamPath;
+
+        if (isStream) {
+          const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
+          const startSseResponse = () => {
+            reply.hijack();
+            reply.raw.statusCode = 200;
+            reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+            reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+            reply.raw.setHeader('Connection', 'keep-alive');
+            reply.raw.setHeader('X-Accel-Buffering', 'no');
+          };
+
+          let parsedUsage: ReturnType<typeof parseProxyUsage> = {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            promptTokensIncludeCache: null,
+          };
+          const writeLines = (lines: string[]) => {
+            for (const line of lines) {
+              reply.raw.write(line);
             }
-          },
-          writeLines,
-          writeRaw: (chunk) => {
-            reply.raw.write(chunk);
-          },
-        });
-        let rawText = '';
-        if (!upstreamContentType.includes('text/event-stream')) {
-          const fallbackText = await upstream.text();
-          rawText = fallbackText;
-          if (looksLikeResponsesSseText(fallbackText)) {
+          };
+          const streamSession = openAiChatTransformer.proxyStream.createSession({
+            downstreamFormat,
+            modelName,
+            successfulUpstreamPath,
+            onParsedPayload: (payload) => {
+              if (payload && typeof payload === 'object') {
+                parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(payload));
+              }
+            },
+            writeLines,
+            writeRaw: (chunk) => {
+              reply.raw.write(chunk);
+            },
+          });
+          let rawText = '';
+          if (!upstreamContentType.includes('text/event-stream')) {
+            const fallbackText = await upstream.text();
+            rawText = fallbackText;
+            if (looksLikeResponsesSseText(fallbackText)) {
+              startSseResponse();
+              const streamResult = await streamSession.run(
+                createSingleChunkStreamReader(fallbackText),
+                reply.raw,
+              );
+              if (streamResult.status === 'failed') {
+                const latency = Date.now() - startTime;
+                await tokenRouter.recordFailure(selected.channel.id, {
+                  status: 502,
+                  errorText: streamResult.errorMessage,
+                  modelName,
+                });
+                logProxy(
+                  selected,
+                  requestedModel,
+                  'failed',
+                  200,
+                  latency,
+                  streamResult.errorMessage,
+                  retryCount,
+                  downstreamPath,
+                  parsedUsage.promptTokens,
+                  parsedUsage.completionTokens,
+                  parsedUsage.totalTokens,
+                  0,
+                  null,
+                  successfulUpstreamPath,
+                  clientContext,
+                  downstreamApiKeyId,
+                );
+                return { ok: true, response: upstream };
+              }
+            } else {
+              let fallbackData: unknown = null;
+              try {
+                fallbackData = JSON.parse(fallbackText);
+              } catch {
+                fallbackData = fallbackText;
+              }
+              if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
+                fallbackData = unwrapGeminiCliPayload(fallbackData);
+              }
+              parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(fallbackData));
+              const failure = detectProxyFailure({ rawText, usage: parsedUsage });
+              if (failure) {
+                const latency = Date.now() - startTime;
+                await tokenRouter.recordFailure(selected.channel.id, {
+                  status: failure.status,
+                  errorText: failure.reason,
+                  modelName,
+                });
+                logProxy(
+                  selected,
+                  requestedModel,
+                  'failed',
+                  failure.status,
+                  latency,
+                  failure.reason,
+                  retryCount,
+                  downstreamPath,
+                  parsedUsage.promptTokens,
+                  parsedUsage.completionTokens,
+                  parsedUsage.totalTokens,
+                  0,
+                  null,
+                  successfulUpstreamPath,
+                  clientContext,
+                  downstreamApiKeyId,
+                );
+
+                const failureMessage = `[upstream:${successfulUpstreamPath}] ${failure.reason}`;
+              if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+                return {
+                  ok: false,
+                  action: 'failover',
+                  status: failure.status,
+                  rawErrorText: failureMessage,
+                };
+              }
+
+              return {
+                ok: false,
+                action: 'stop',
+                status: failure.status,
+                rawErrorText: failureMessage,
+              };
+              }
+
+              startSseResponse();
+              const streamResult = streamSession.consumeUpstreamFinalPayload(fallbackData, fallbackText, reply.raw);
+              if (streamResult.status === 'failed') {
+                const latency = Date.now() - startTime;
+                await tokenRouter.recordFailure(selected.channel.id, {
+                  status: 502,
+                  errorText: streamResult.errorMessage,
+                  modelName,
+                });
+                logProxy(
+                  selected,
+                  requestedModel,
+                  'failed',
+                  200,
+                  latency,
+                  streamResult.errorMessage,
+                  retryCount,
+                  downstreamPath,
+                  parsedUsage.promptTokens,
+                  parsedUsage.completionTokens,
+                  parsedUsage.totalTokens,
+                  0,
+                  null,
+                  successfulUpstreamPath,
+                  clientContext,
+                  downstreamApiKeyId,
+                );
+                return { ok: true, response: upstream };
+              }
+            }
+          } else {
             startSseResponse();
-            const streamResult = await streamSession.run(
-              createSingleChunkStreamReader(fallbackText),
-              reply.raw,
-            );
-            const latency = Date.now() - startTime;
+            const upstreamReader = upstream.body?.getReader();
+            const baseReader = String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli' && upstreamReader
+              ? createGeminiCliStreamReader(upstreamReader)
+              : upstreamReader;
+            const decoder = new TextDecoder();
+            const reader = baseReader
+              ? {
+                async read() {
+                  const result = await baseReader.read();
+                  if (result.value) {
+                    rawText += decoder.decode(result.value, { stream: true });
+                  }
+                  return result;
+                },
+                async cancel(reason?: unknown) {
+                  return baseReader.cancel(reason);
+                },
+                releaseLock() {
+                  return baseReader.releaseLock();
+                },
+              }
+              : baseReader;
+            const streamResult = await streamSession.run(reader ? wrapReaderWithIdleTimeout(reader) : reader, reply.raw);
+            rawText += decoder.decode();
             if (streamResult.status === 'failed') {
+              const latency = Date.now() - startTime;
               await tokenRouter.recordFailure(selected.channel.id, {
                 status: 502,
                 errorText: streamResult.errorMessage,
@@ -573,159 +723,138 @@ export async function handleChatSurfaceRequest(
                 clientContext,
                 downstreamApiKeyId,
               );
-              return;
+              return { ok: true, response: upstream };
             }
-            return;
           }
-          let fallbackData: unknown = null;
-          try {
-            fallbackData = JSON.parse(fallbackText);
-          } catch {
-            fallbackData = fallbackText;
-          }
-          if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
-            fallbackData = unwrapGeminiCliPayload(fallbackData);
-          }
-          parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(fallbackData));
+
           const latency = Date.now() - startTime;
-          const failure = detectProxyFailure({ rawText, usage: parsedUsage });
-          if (failure) {
-            await tokenRouter.recordFailure(selected.channel.id, {
-              status: failure.status,
-              errorText: failure.reason,
-              modelName,
-            });
-            if (shouldAvoidSiteForRequest(failure.status, failure.reason)) {
-              excludeSiteIds.add(selected.site.id);
-            }
-            logProxy(
-              selected,
-              requestedModel,
-              'failed',
-              failure.status,
-              latency,
-              failure.reason,
-              retryCount,
-              downstreamPath,
-              parsedUsage.promptTokens,
-              parsedUsage.completionTokens,
-              parsedUsage.totalTokens,
-              0,
-              null,
-              successfulUpstreamPath,
-              clientContext,
-              downstreamApiKeyId,
-            );
+          const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+            site: selected.site,
+            account: selected.account,
+            tokenValue: selected.tokenValue || '',
+            tokenName: selected.tokenName,
+            modelName,
+            requestStartedAtMs: startTime,
+            requestEndedAtMs: startTime + latency,
+            localLatencyMs: latency,
+            usage: {
+              promptTokens: parsedUsage.promptTokens,
+              completionTokens: parsedUsage.completionTokens,
+              totalTokens: parsedUsage.totalTokens,
+            },
+          });
+          const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
+            site: selected.site,
+            account: selected.account,
+            modelName,
+            parsedUsage,
+            resolvedUsage,
+          });
 
-            if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-              retryCount += 1;
-              continue;
-            }
+          await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+          recordDownstreamCostUsage(request, estimatedCost);
+          logProxy(
+            selected,
+            requestedModel,
+            'success',
+            200,
+            latency,
+            null,
+            retryCount,
+            downstreamPath,
+            resolvedUsage.promptTokens,
+            resolvedUsage.completionTokens,
+            resolvedUsage.totalTokens,
+            estimatedCost,
+            billingDetails,
+            successfulUpstreamPath,
+            clientContext,
+            downstreamApiKeyId,
+          );
+          return {
+            ok: true,
+            response: upstream,
+            latencyMs: latency,
+            cost: estimatedCost,
+          };
+        }
 
-            await reportProxyAllFailed({
-              model: requestedModel,
-              reason: failure.reason,
-            });
-
-            return reply.code(failure.status).send({
-              error: { message: failure.reason, type: 'upstream_error' },
-            });
-          }
-
-          startSseResponse();
-          const streamResult = streamSession.consumeUpstreamFinalPayload(fallbackData, fallbackText, reply.raw);
-          if (streamResult.status === 'failed') {
-            await tokenRouter.recordFailure(selected.channel.id, {
-              status: 502,
-              errorText: streamResult.errorMessage,
-              modelName,
-            });
-            logProxy(
-              selected,
-              requestedModel,
-              'failed',
-              200,
-              latency,
-              streamResult.errorMessage,
-              retryCount,
-              downstreamPath,
-              parsedUsage.promptTokens,
-              parsedUsage.completionTokens,
-              parsedUsage.totalTokens,
-              0,
-              null,
-              successfulUpstreamPath,
-              clientContext,
-              downstreamApiKeyId,
-            );
-            return;
-          }
+        const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
+        let rawText = '';
+        let upstreamData: unknown;
+        if (upstreamContentType.includes('text/event-stream') && successfulUpstreamPath.endsWith('/responses')) {
+          const collected = await collectResponsesFinalPayloadFromSse(upstream, modelName);
+          rawText = collected.rawText;
+          upstreamData = collected.payload;
         } else {
-          startSseResponse();
-          const upstreamReader = upstream.body?.getReader();
-          const baseReader = String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli' && upstreamReader
-            ? createGeminiCliStreamReader(upstreamReader)
-            : upstreamReader;
-          const decoder = new TextDecoder();
-          const reader = baseReader
-            ? {
-              async read() {
-                const result = await baseReader.read();
-                if (result.value) {
-                  rawText += decoder.decode(result.value, { stream: true });
-                }
-                return result;
-              },
-              async cancel(reason?: unknown) {
-                return baseReader.cancel(reason);
-              },
-              releaseLock() {
-                return baseReader.releaseLock();
-              },
+          rawText = await upstream.text();
+          if (looksLikeResponsesSseText(rawText)) {
+            upstreamData = collectResponsesFinalPayloadFromSseText(rawText, modelName).payload;
+          } else {
+            upstreamData = rawText;
+            try {
+              upstreamData = JSON.parse(rawText);
+            } catch {
+              upstreamData = rawText;
             }
-            : baseReader;
-          const streamResult = await streamSession.run(reader ? wrapReaderWithIdleTimeout(reader) : reader, reply.raw);
-          rawText += decoder.decode();
-
-          const latency = Date.now() - startTime;
-          if (streamResult.status === 'failed') {
-            await tokenRouter.recordFailure(selected.channel.id, {
-              status: 502,
-              errorText: streamResult.errorMessage,
-              modelName,
-            });
-            logProxy(
-              selected,
-              requestedModel,
-              'failed',
-              200,
-              latency,
-              streamResult.errorMessage,
-              retryCount,
-              downstreamPath,
-              parsedUsage.promptTokens,
-              parsedUsage.completionTokens,
-              parsedUsage.totalTokens,
-              0,
-              null,
-              successfulUpstreamPath,
-              clientContext,
-              downstreamApiKeyId,
-            );
-            return;
           }
-
-          // Once SSE has been hijacked and streamed downstream, we can no longer
-          // safely fall back to an HTTP error response or retry by switching the
-          // channel mid-flight. Stream-level failures must be handled in-band by
-          // the proxy stream session itself.
+        }
+        if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
+          upstreamData = unwrapGeminiCliPayload(upstreamData);
         }
 
         const latency = Date.now() - startTime;
+        const parsedUsage = parseProxyUsage(upstreamData);
+        const failure = detectProxyFailure({ rawText, usage: parsedUsage });
+        if (failure) {
+          await tokenRouter.recordFailure(selected.channel.id, {
+            status: failure.status,
+            errorText: failure.reason,
+            modelName,
+          });
+          logProxy(
+            selected,
+            requestedModel,
+            'failed',
+            failure.status,
+            latency,
+            failure.reason,
+            retryCount,
+            downstreamPath,
+            parsedUsage.promptTokens,
+            parsedUsage.completionTokens,
+            parsedUsage.totalTokens,
+            0,
+            null,
+            successfulUpstreamPath,
+            clientContext,
+            downstreamApiKeyId,
+          );
+
+          const failureMessage = `[upstream:${successfulUpstreamPath}] ${failure.reason}`;
+          if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+            return {
+              ok: false,
+              action: 'failover',
+              status: failure.status,
+              rawErrorText: failureMessage,
+            };
+          }
+
+          return {
+            ok: false,
+            action: 'stop',
+            status: failure.status,
+            rawErrorText: failureMessage,
+          };
+        }
+
+        const normalizedFinal = downstreamTransformer.transformFinalResponse(upstreamData, modelName, rawText);
+        const downstreamResponse = downstreamTransformer.serializeFinalResponse(normalizedFinal, parsedUsage);
         const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
           site: selected.site,
           account: selected.account,
-          tokenValue: selected.tokenValue,
+          tokenValue: selected.tokenValue || '',
           tokenName: selected.tokenName,
           modelName,
           requestStartedAtMs: startTime,
@@ -737,7 +866,6 @@ export async function handleChatSurfaceRequest(
             totalTokens: parsedUsage.totalTokens,
           },
         });
-
         const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
           site: selected.site,
           account: selected.account,
@@ -747,6 +875,17 @@ export async function handleChatSurfaceRequest(
         });
 
         await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+        recordProxyDebugTrace({
+          clientContext,
+          kind: 'proxy_success',
+          requestedModel,
+          actualModel: modelName,
+          downstreamPath,
+          selected,
+          endpointPath: successfulUpstreamPath,
+          status: 200,
+          retryCount,
+        });
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected,
@@ -765,240 +904,136 @@ export async function handleChatSurfaceRequest(
           successfulUpstreamPath,
           clientContext,
           downstreamApiKeyId,
+          !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: estimatedCost } : null,
         );
-        return;
-      }
 
-      const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
-      let rawText = '';
-      let upstreamData: unknown;
-      if (upstreamContentType.includes('text/event-stream') && successfulUpstreamPath.endsWith('/responses')) {
-        const collected = await collectResponsesFinalPayloadFromSse(upstream, modelName);
-        rawText = collected.rawText;
-        upstreamData = collected.payload;
-      } else {
-        rawText = await upstream.text();
-        if (looksLikeResponsesSseText(rawText)) {
-          upstreamData = collectResponsesFinalPayloadFromSseText(rawText, modelName).payload;
-        } else {
-          upstreamData = rawText;
-          try {
-            upstreamData = JSON.parse(rawText);
-          } catch {
-            upstreamData = rawText;
-          }
+        if (responseCacheKey && !isStream) {
+          writeResponseCache(responseCacheKey, requestedModel, {
+            body: JSON.stringify(downstreamResponse),
+            isStream: false,
+            promptTokens: resolvedUsage.promptTokens,
+            completionTokens: resolvedUsage.completionTokens,
+            estimatedCost,
+          }).catch(() => {});
         }
-      }
-      if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
-        upstreamData = unwrapGeminiCliPayload(upstreamData);
-      }
 
-      const latency = Date.now() - startTime;
-      const parsedUsage = parseProxyUsage(upstreamData);
-      const failure = detectProxyFailure({ rawText, usage: parsedUsage });
-      if (failure) {
+        reply.header('X-Cache', 'MISS').send(downstreamResponse);
+        return {
+          ok: true,
+          response: upstream,
+          latencyMs: latency,
+          cost: estimatedCost,
+        };
+      } catch (err: any) {
+        const errorMessage = err?.message || 'network failure';
         await tokenRouter.recordFailure(selected.channel.id, {
-          status: failure.status,
-          errorText: failure.reason,
+          errorText: errorMessage,
           modelName,
         });
-        if (shouldAvoidSiteForRequest(failure.status, failure.reason)) {
-          excludeSiteIds.add(selected.site.id);
-        }
+        recordProxyDebugTrace({
+          clientContext,
+          kind: 'proxy_exception',
+          requestedModel,
+          actualModel: modelName,
+          downstreamPath,
+          selected,
+          retryCount,
+          reason: errorMessage,
+        });
         logProxy(
           selected,
           requestedModel,
           'failed',
-          failure.status,
-          latency,
-          failure.reason,
+          0,
+          Date.now() - startTime,
+          errorMessage,
           retryCount,
           downstreamPath,
-          parsedUsage.promptTokens,
-          parsedUsage.completionTokens,
-          parsedUsage.totalTokens,
+          0,
+          0,
+          0,
           0,
           null,
-          successfulUpstreamPath,
+          null,
           clientContext,
           downstreamApiKeyId,
         );
 
-        if (shouldRetryProxyRequest(failure.status, failure.reason) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-          retryCount += 1;
-          continue;
+        if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+          return {
+            ok: false,
+            action: 'failover',
+            status: 502,
+            rawErrorText: errorMessage,
+          };
         }
 
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: failure.reason,
-        });
-
-        if (responseCacheKey && !isStream) {
-          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-          if (stale) {
-            await logProxy(
-              {
-                channel: { routeId: null, id: null },
-                account: { id: null, username: 'cache' },
-                actualModel: requestedModel,
-              },
-              requestedModel,
-              'success',
-              200,
-              latency,
-              'served stale cache after upstream failure',
-              retryCount,
-              downstreamPath,
-              stale.promptTokens,
-              stale.completionTokens,
-              stale.promptTokens + stale.completionTokens,
-              0,
-              null,
-              null,
-              clientContext,
-              downstreamApiKeyId,
-              { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
-            );
-            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-          }
-        }
-
-        return reply.code(failure.status).send({
-          error: { message: failure.reason, type: 'upstream_error' },
-        });
+        return {
+          ok: false,
+          action: 'stop',
+          status: 502,
+          rawErrorText: errorMessage,
+        };
       }
-      const normalizedFinal = downstreamTransformer.transformFinalResponse(upstreamData, modelName, rawText);
-      const downstreamResponse = downstreamTransformer.serializeFinalResponse(normalizedFinal, parsedUsage);
+    },
+  });
 
-      const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
-        site: selected.site,
-        account: selected.account,
-        tokenValue: selected.tokenValue,
-        tokenName: selected.tokenName,
-        modelName,
-        requestStartedAtMs: startTime,
-        requestEndedAtMs: startTime + latency,
-        localLatencyMs: latency,
-        usage: {
-          promptTokens: parsedUsage.promptTokens,
-          completionTokens: parsedUsage.completionTokens,
-          totalTokens: parsedUsage.totalTokens,
+  if (execution.ok) {
+    return;
+  }
+
+  const finalStatus = execution.reason === 'no_channel'
+    ? 503
+    : (execution.status ?? 502);
+  const finalMessage = execution.reason === 'no_channel'
+    ? 'No available channels for this model'
+    : (execution.rawErrorText || 'upstream request failed');
+  const retryCount = Math.max(0, execution.attempts - 1);
+
+  if (!reportedNoChannel) {
+    await reportProxyAllFailed({
+      model: requestedModel,
+      reason: finalStatus === 504 ? requestBudget.buildTimeoutMessage() : finalMessage,
+    });
+  }
+
+  if (responseCacheKey) {
+    const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+    if (stale) {
+      await logProxy(
+        {
+          channel: { routeId: null, id: null },
+          account: { id: null, username: 'cache' },
+          actualModel: requestedModel,
         },
-      });
-
-      const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
-        site: selected.site,
-        account: selected.account,
-        modelName,
-        parsedUsage,
-        resolvedUsage,
-      });
-
-      await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
-      recordProxyDebugTrace({
-        clientContext,
-        kind: 'proxy_success',
-        requestedModel,
-        actualModel: modelName,
-        downstreamPath,
-        selected,
-        endpointPath: successfulUpstreamPath,
-        status: 200,
-        retryCount,
-      });
-      recordDownstreamCostUsage(request, estimatedCost);
-      logProxy(
-        selected,
         requestedModel,
         'success',
         200,
-        latency,
-        null,
+        0,
+        finalStatus === 504 ? requestBudget.buildTimeoutMessage() : 'served stale cache after upstream failure',
         retryCount,
         downstreamPath,
-        resolvedUsage.promptTokens,
-        resolvedUsage.completionTokens,
-        resolvedUsage.totalTokens,
-        estimatedCost,
-        billingDetails,
-        successfulUpstreamPath,
-        clientContext,
-        downstreamApiKeyId,
-        !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: estimatedCost } : null,
-      );
-
-      // 异步写入精确缓存（不阻塞响应）
-      if (responseCacheKey && !isStream) {
-        writeResponseCache(responseCacheKey, requestedModel, {
-          body: JSON.stringify(downstreamResponse),
-          isStream: false,
-          promptTokens: resolvedUsage.promptTokens,
-          completionTokens: resolvedUsage.completionTokens,
-          estimatedCost,
-        }).catch(() => {});
-      }
-
-      return reply.header('X-Cache', 'MISS').send(downstreamResponse);
-    } catch (err: any) {
-      await tokenRouter.recordFailure(selected.channel.id, {
-        errorText: err?.message,
-        modelName,
-      });
-      recordProxyDebugTrace({
-        clientContext,
-        kind: 'proxy_exception',
-        requestedModel,
-        actualModel: modelName,
-        downstreamPath,
-        selected,
-        retryCount,
-        reason: err?.message || 'network failure',
-      });
-      logProxy(
-        selected,
-        requestedModel,
-        'failed',
-        0,
-        Date.now() - startTime,
-        err?.message || 'network error',
-        retryCount,
-        downstreamPath,
-        0,
-        0,
-        0,
+        stale.promptTokens,
+        stale.completionTokens,
+        stale.promptTokens + stale.completionTokens,
         0,
         null,
         null,
         clientContext,
         downstreamApiKeyId,
+        { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
       );
-
-      if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-        retryCount += 1;
-        continue;
-      }
-
-      await reportProxyAllFailed({
-        model: requestedModel,
-        reason: err?.message || 'network failure',
-      });
-
-      if (responseCacheKey) {
-        const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-        if (stale) {
-          return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-        }
-      }
-
-      return reply.code(502).send({
-        error: {
-          message: `Upstream error: ${err?.message || 'network failure'}`,
-          type: 'upstream_error',
-        },
-      });
+      return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
     }
   }
+
+  const errorType = execution.reason === 'no_channel' ? 'server_error' : 'upstream_error';
+  return reply.code(finalStatus).send({
+    error: {
+      message: finalStatus === 502 ? `Upstream error: ${finalMessage}` : finalMessage,
+      type: errorType,
+    },
+  });
 }
 
 function deriveCodexSessionCacheKey(input: {
@@ -1056,9 +1091,21 @@ export async function handleClaudeCountTokensSurfaceRequest(
     body: rawBody,
   });
   const downstreamPolicy = getDownstreamRoutingPolicy(request);
+  const conductor = new DefaultProxyConductor({
+    selectChannel: (model, policy) => tokenRouter.selectChannel(model, policy as any),
+    previewSelectedChannel: typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
+      ? (model, policy) => tokenRouter.previewSelectedChannel(model, policy as any)
+      : undefined,
+    selectNextChannel: (model, excludeChannelIds, policy, excludeSiteIds) => tokenRouter.selectNextChannel(
+      model,
+      excludeChannelIds,
+      policy as any,
+      excludeSiteIds,
+    ),
+  });
   const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
   const previewSelected = typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
-    ? await tokenRouter.previewSelectedChannel(requestedModel, downstreamPolicy)
+    ? await conductor.previewSelectedChannel(requestedModel, downstreamPolicy)
     : null;
   const routeScope = buildRouteScope({
     routeId: previewSelected?.channel.routeId,
@@ -1066,11 +1113,13 @@ export async function handleClaudeCountTokensSurfaceRequest(
     actualModel: previewSelected?.actualModel || requestedModel,
   });
   const responseCacheKey = buildCacheKey({
+    surface: 'chat:count_tokens',
     model: requestedModel,
     messages: rawBody.messages,
     temperature: 0,
     max_tokens: null,
     routeScope,
+    requestFingerprint: rawBody,
   });
   if (responseCacheKey) {
     const cached = await lookupResponseCache(responseCacheKey);
@@ -1100,154 +1149,191 @@ export async function handleClaudeCountTokensSurfaceRequest(
       );
       return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
     }
+    recordResponseCacheMiss();
   }
-  const excludeChannelIds: number[] = [];
-  const excludeSiteIds = new Set<number>();
-  let retryCount = 0;
 
-  while (retryCount <= MAX_RETRIES) {
-    let selected = retryCount === 0
-      ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-      : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
-
-    if (!selected && retryCount === 0) {
+  let reportedNoChannel = false;
+  const execution = await conductor.execute({
+    requestedModel,
+    downstreamPolicy,
+    maxAttempts: MAX_RETRIES + 1,
+    refreshSelection: async () => {
       await refreshModelsAndRebuildRoutes();
-      selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
-    }
-
-    if (!selected) {
+      return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
+    },
+    onNoChannel: async ({ attempts }) => {
+      reportedNoChannel = true;
       await reportProxyAllFailed({
         model: requestedModel,
         reason: 'No available channels after retries',
       });
-      if (retryCount === 0) {
+      if (attempts === 0) {
         await logProxyNoChannelFailure({
           modelRequested: requestedModel,
           httpStatus: 503,
           errorMessage: 'No available channels for this model',
-          retryCount,
+          retryCount: 0,
           downstreamPath,
           clientContext,
           downstreamApiKeyId,
         });
       }
-      if (responseCacheKey) {
-        const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-        if (stale) {
-          return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-        }
-      }
-      return reply.code(503).send({
-        error: { message: 'No available channels for this model', type: 'server_error' },
-      });
-    }
-
-    excludeChannelIds.push(selected.channel.id);
-    const modelName = selected.actualModel || requestedModel;
-    const endpointCandidates = await resolveUpstreamEndpointCandidates(
-      {
-        site: selected.site,
-        account: selected.account,
-      },
-      modelName,
-      'claude',
-      requestedModel,
-    );
-    if (!endpointCandidates.includes('messages')) {
-      if (retryCount < MAX_RETRIES) {
-        retryCount += 1;
-        continue;
-      }
-      return reply.code(501).send({
-        error: {
-          message: 'Claude count_tokens compatibility is not implemented for this upstream',
-          type: 'invalid_request_error',
+    },
+    getFailoverSiteId: (selected, failure) => {
+      if (!shouldAvoidSiteForRequest(
+        typeof failure.status === 'number' ? failure.status : 0,
+        typeof failure.rawErrorText === 'string' ? failure.rawErrorText : undefined,
+      )) return null;
+      const siteId = Number((selected.site as { id?: unknown }).id);
+      return Number.isFinite(siteId) ? Math.trunc(siteId) : null;
+    },
+    attempt: async ({ selected, attemptIndex }) => {
+      const retryCount = attemptIndex;
+      const modelName = selected.actualModel || requestedModel;
+      const endpointCandidates = await resolveUpstreamEndpointCandidates(
+        {
+          site: selected.site,
+          account: selected.account,
         },
-      });
-    }
-    const oauth = getOauthInfoFromExtraConfig(selected.account.extraConfig);
-    const startTime = Date.now();
-
-    const buildRequest = () => {
-      const upstreamRequest = buildClaudeCountTokensUpstreamRequest({
         modelName,
-        tokenValue: selected.tokenValue,
-        oauthProvider: oauth?.provider,
-        sitePlatform: selected.site.platform,
-        claudeBody: rawBody,
-        downstreamHeaders: request.headers as Record<string, unknown>,
-      });
-      return {
-        endpoint: 'messages' as const,
-        path: upstreamRequest.path,
-        headers: upstreamRequest.headers,
-        body: upstreamRequest.body,
-        runtime: upstreamRequest.runtime,
-      };
-    };
-
-    try {
-      let upstreamRequest = buildRequest();
-      let upstream = await dispatchRuntimeRequest({
-        siteUrl: selected.site.url,
-        request: upstreamRequest,
-        buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
-          method: 'POST',
-          headers: requestForFetch.headers,
-          body: JSON.stringify(requestForFetch.body),
-        }, resolveChannelProxyUrl(selected.site, selected.account.extraConfig)),
-      });
-
-      if ((upstream.status === 401 || upstream.status === 403) && oauth) {
-        try {
-          const refreshed = await refreshOauthAccessTokenSingleflight(selected.account.id);
-          selected.tokenValue = refreshed.accessToken;
-          selected.account = {
-            ...selected.account,
-            accessToken: refreshed.accessToken,
-            extraConfig: refreshed.extraConfig ?? selected.account.extraConfig,
-          };
-          upstreamRequest = buildRequest();
-          upstream = await dispatchRuntimeRequest({
-            siteUrl: selected.site.url,
-            request: upstreamRequest,
-            buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
-              method: 'POST',
-              headers: requestForFetch.headers,
-              body: JSON.stringify(requestForFetch.body),
-            }, resolveChannelProxyUrl(selected.site, selected.account.extraConfig)),
-          });
-        } catch {
-          // Fall through to the regular upstream error handling below.
-        }
+        'claude',
+        requestedModel,
+      );
+      if (!endpointCandidates.includes('messages')) {
+        return {
+          ok: false,
+          action: 'stop',
+          status: 501,
+          rawErrorText: 'Claude count_tokens compatibility is not implemented for this upstream',
+        };
       }
 
-      const latency = Date.now() - startTime;
-      const contentType = upstream.headers.get('content-type') || 'application/json';
-      const text = await upstream.text();
-      let payload: unknown = text;
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = text;
-      }
-
-      if (!upstream.ok) {
-        await tokenRouter.recordFailure(selected.channel.id, {
-          status: upstream.status,
-          errorText: typeof payload === 'string' ? payload : text,
+      const oauth = getOauthInfoFromExtraConfig(selected.account.extraConfig);
+      const tokenValue = selected.tokenValue || '';
+      const startTime = Date.now();
+      const buildRequest = () => {
+        const upstreamRequest = buildClaudeCountTokensUpstreamRequest({
           modelName,
+          tokenValue: selected.tokenValue || '',
+          oauthProvider: oauth?.provider,
+          sitePlatform: selected.site.platform,
+          claudeBody: rawBody,
+          downstreamHeaders: request.headers as Record<string, unknown>,
         });
-        if (shouldAvoidSiteForRequest(upstream.status, typeof payload === 'string' ? payload : text)) {
-          excludeSiteIds.add(selected.site.id);
+        return {
+          endpoint: 'messages' as const,
+          path: upstreamRequest.path,
+          headers: upstreamRequest.headers,
+          body: upstreamRequest.body,
+          runtime: upstreamRequest.runtime,
+        };
+      };
+
+      try {
+        let upstreamRequest = buildRequest();
+        let upstream = await dispatchRuntimeRequest({
+          siteUrl: selected.site.url,
+          request: upstreamRequest,
+          buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
+            method: 'POST',
+            headers: requestForFetch.headers,
+            body: JSON.stringify(requestForFetch.body),
+          }, resolveChannelProxyUrl(selected.site, selected.account.extraConfig)),
+        });
+
+        if ((upstream.status === 401 || upstream.status === 403) && oauth) {
+          try {
+            const refreshed = await refreshOauthAccessTokenSingleflight(selected.account.id);
+            selected.tokenValue = refreshed.accessToken;
+            selected.account = {
+              ...selected.account,
+              accessToken: refreshed.accessToken,
+              extraConfig: refreshed.extraConfig ?? selected.account.extraConfig,
+            };
+            upstreamRequest = buildRequest();
+            upstream = await dispatchRuntimeRequest({
+              siteUrl: selected.site.url,
+              request: upstreamRequest,
+              buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
+                method: 'POST',
+                headers: requestForFetch.headers,
+                body: JSON.stringify(requestForFetch.body),
+              }, resolveChannelProxyUrl(selected.site, selected.account.extraConfig)),
+            });
+          } catch {
+            // Fall through to the regular upstream error handling below.
+          }
         }
+
+        const latency = Date.now() - startTime;
+        const contentType = upstream.headers.get('content-type') || 'application/json';
+        const text = await upstream.text();
+        let payload: unknown = text;
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          payload = text;
+        }
+
+        if (!upstream.ok) {
+          const errorText = typeof payload === 'string' ? payload : text;
+          await tokenRouter.recordFailure(selected.channel.id, {
+            status: upstream.status,
+            errorText,
+            modelName,
+          });
+          logProxy(
+            selected,
+            requestedModel,
+            'failed',
+            upstream.status,
+            latency,
+            typeof payload === 'string' ? payload : JSON.stringify(payload),
+            retryCount,
+            downstreamPath,
+            0,
+            0,
+            0,
+            0,
+            null,
+            upstreamRequest.path,
+            clientContext,
+            downstreamApiKeyId,
+          );
+          if (isTokenExpiredError({ status: upstream.status, message: errorText })) {
+            await reportTokenExpired({
+              accountId: selected.account.id,
+              username: selected.account.username,
+              siteName: selected.site.name,
+              detail: `HTTP ${upstream.status}`,
+            });
+          }
+          if (shouldRetryProxyRequest(upstream.status, errorText) && retryCount < MAX_RETRIES) {
+            return {
+              ok: false,
+              action: 'failover',
+              status: upstream.status,
+              rawErrorText: errorText,
+            };
+          }
+          return {
+            ok: false,
+            action: 'stop',
+            status: upstream.status,
+            rawErrorText: errorText,
+            error: { payload, contentType },
+          };
+        }
+
+        await tokenRouter.recordSuccess(selected.channel.id, latency, 0, modelName);
+        recordDownstreamCostUsage(request, 0);
         logProxy(
           selected,
           requestedModel,
-          'failed',
+          'success',
           upstream.status,
           latency,
-          typeof payload === 'string' ? payload : JSON.stringify(payload),
+          null,
           retryCount,
           downstreamPath,
           0,
@@ -1258,97 +1344,99 @@ export async function handleClaudeCountTokensSurfaceRequest(
           upstreamRequest.path,
           clientContext,
           downstreamApiKeyId,
+          { cacheStatus: 'miss', cacheSavedCost: 0 },
         );
-        if (isTokenExpiredError({ status: upstream.status, message: typeof payload === 'string' ? payload : text })) {
-          await reportTokenExpired({
-            accountId: selected.account.id,
-            username: selected.account.username,
-            siteName: selected.site.name,
-            detail: `HTTP ${upstream.status}`,
-          });
-        }
-        if (shouldRetryProxyRequest(upstream.status, typeof payload === 'string' ? payload : text) && retryCount < MAX_RETRIES) {
-          retryCount += 1;
-          continue;
-        }
         if (responseCacheKey) {
-          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-          if (stale) {
-            await logProxy(
-              {
-                channel: { routeId: null, id: null },
-                account: { id: null, username: 'cache' },
-                actualModel: requestedModel,
-              },
-              requestedModel,
-              'success',
-              200,
-              latency,
-              'count_tokens stale cache fallback',
-              retryCount,
-              downstreamPath,
-              0,
-              0,
-              0,
-              0,
-              null,
-              null,
-              clientContext,
-              downstreamApiKeyId,
-              { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
-            );
-            return reply.header('X-Cache', 'STALE').type('application/json').send(JSON.parse(stale.body));
-          }
+          writeResponseCache(responseCacheKey, requestedModel, {
+            body: JSON.stringify(payload),
+            isStream: false,
+            promptTokens: 0,
+            completionTokens: 0,
+            estimatedCost: 0,
+          }).catch(() => {});
         }
-        return reply.code(upstream.status).type(contentType).send(payload);
+        reply.header('X-Cache', 'MISS').code(upstream.status).type(contentType).send(payload);
+        return {
+          ok: true,
+          response: upstream,
+          latencyMs: latency,
+          cost: 0,
+        };
+      } catch (error: any) {
+        const errorMessage = error?.message || 'network failure';
+        await tokenRouter.recordFailure(selected.channel.id, {
+          errorText: errorMessage,
+          modelName,
+        });
+        logProxy(
+          selected,
+          requestedModel,
+          'failed',
+          0,
+          Date.now() - startTime,
+          errorMessage,
+          retryCount,
+          downstreamPath,
+          0,
+          0,
+          0,
+          0,
+          null,
+          null,
+          clientContext,
+          downstreamApiKeyId,
+        );
+        if (retryCount < MAX_RETRIES) {
+          return {
+            ok: false,
+            action: 'failover',
+            status: 502,
+            rawErrorText: errorMessage,
+          };
+        }
+        return {
+          ok: false,
+          action: 'stop',
+          status: 502,
+          rawErrorText: errorMessage,
+        };
       }
+    },
+  });
 
-      await tokenRouter.recordSuccess(selected.channel.id, latency, 0, modelName);
-      recordDownstreamCostUsage(request, 0);
-      logProxy(
-        selected,
+  if (execution.ok) {
+    return;
+  }
+
+  const finalStatus = execution.reason === 'no_channel'
+    ? 503
+    : (execution.status ?? 502);
+  const finalMessage = execution.reason === 'no_channel'
+    ? 'No available channels for this model'
+    : (execution.rawErrorText || 'upstream request failed');
+  const retryCount = Math.max(0, execution.attempts - 1);
+
+  if (!reportedNoChannel) {
+    await reportProxyAllFailed({
+      model: requestedModel,
+      reason: finalMessage,
+    });
+  }
+
+  if (responseCacheKey) {
+    const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+    if (stale) {
+      await logProxy(
+        {
+          channel: { routeId: null, id: null },
+          account: { id: null, username: 'cache' },
+          actualModel: requestedModel,
+        },
         requestedModel,
         'success',
-        upstream.status,
-        latency,
-        null,
-        retryCount,
-        downstreamPath,
+        200,
         0,
-        0,
-        0,
-        0,
-        null,
-        upstreamRequest.path,
-        clientContext,
-        downstreamApiKeyId,
-        { cacheStatus: 'miss', cacheSavedCost: 0 },
-      );
-      if (responseCacheKey) {
-        writeResponseCache(responseCacheKey, requestedModel, {
-          body: JSON.stringify(payload),
-          isStream: false,
-          promptTokens: 0,
-          completionTokens: 0,
-          estimatedCost: 0,
-        }).catch(() => {});
-      }
-      return reply.header('X-Cache', 'MISS').code(upstream.status).type(contentType).send(payload);
-    } catch (error: any) {
-      await tokenRouter.recordFailure(selected.channel.id, {
-        errorText: error?.message,
-        modelName,
-      });
-      if (shouldAvoidSiteForRequest(0, error?.message)) {
-        excludeSiteIds.add(selected.site.id);
-      }
-      logProxy(
-        selected,
-        requestedModel,
-        'failed',
-        0,
-        Date.now() - startTime,
-        error?.message || 'network error',
+        'count_tokens stale cache fallback',
         retryCount,
         downstreamPath,
         0,
@@ -1359,25 +1447,28 @@ export async function handleClaudeCountTokensSurfaceRequest(
         null,
         clientContext,
         downstreamApiKeyId,
+        { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
       );
-      if (retryCount < MAX_RETRIES) {
-        retryCount += 1;
-        continue;
-      }
-      if (responseCacheKey) {
-        const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-        if (stale) {
-          return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-        }
-      }
-      return reply.code(502).send({
-        error: {
-          message: `Upstream error: ${error?.message || 'network failure'}`,
-          type: 'upstream_error',
-        },
-      });
+      return reply.header('X-Cache', 'STALE').type('application/json').send(JSON.parse(stale.body));
     }
   }
+
+  if (finalStatus === 501) {
+    return reply.code(501).send({
+      error: {
+        message: 'Claude count_tokens compatibility is not implemented for this upstream',
+        type: 'invalid_request_error',
+      },
+    });
+  }
+
+  const errorType = execution.reason === 'no_channel' ? 'server_error' : 'upstream_error';
+  return reply.code(finalStatus).send({
+    error: {
+      message: finalStatus === 502 ? `Upstream error: ${finalMessage}` : finalMessage,
+      type: errorType,
+    },
+  });
 }
 
 async function logProxy(

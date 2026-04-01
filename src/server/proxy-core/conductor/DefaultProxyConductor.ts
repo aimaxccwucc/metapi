@@ -15,26 +15,36 @@ export class DefaultProxyConductor {
     if (this.deps.previewSelectedChannel) {
       return this.deps.previewSelectedChannel(requestedModel, downstreamPolicy);
     }
-    return this.deps.selectChannel(requestedModel, downstreamPolicy);
+    return null;
   }
 
   async execute(input: ExecuteInput): Promise<ExecuteResult> {
     const excludeChannelIds: number[] = [];
+    const excludeSiteIds = new Set<number>();
+    const maxAttempts = Math.max(1, Math.trunc(input.maxAttempts ?? 1));
     let attempts = 0;
+
+    await input.onBeforeInitialSelect?.();
     let selected = await this.deps.selectChannel(input.requestedModel, input.downstreamPolicy);
+    if (!selected && input.refreshSelection) {
+      selected = await input.refreshSelection();
+    }
     if (!selected) {
+      await input.onNoChannel?.({ attempts });
       return {
         ok: false,
         reason: 'no_channel',
-        attempts: 0,
+        attempts,
       };
     }
 
-    while (selected) {
+    while (selected && attempts < maxAttempts) {
       const result = await input.attempt({
         selected,
         attemptIndex: attempts,
         excludeChannelIds: [...excludeChannelIds],
+        excludeSiteIds: [...excludeSiteIds],
+        maxAttempts,
       });
       attempts += 1;
 
@@ -72,7 +82,7 @@ export class DefaultProxyConductor {
         };
       }
 
-      if (shouldRetrySameChannel(action)) {
+      if (shouldRetrySameChannel(action) && attempts < maxAttempts) {
         continue;
       }
 
@@ -81,7 +91,7 @@ export class DefaultProxyConductor {
           status: result.status,
           rawErrorText: result.rawErrorText,
         });
-        if (refreshed) {
+        if (refreshed && attempts < maxAttempts) {
           selected = refreshed;
           continue;
         }
@@ -89,12 +99,24 @@ export class DefaultProxyConductor {
 
       if (shouldFailover(action)) {
         excludeChannelIds.push(selected.channel.id);
+        const failoverSiteId = input.getFailoverSiteId?.(selected, {
+          status: result.status,
+          rawErrorText: result.rawErrorText,
+        });
+        if (typeof failoverSiteId === 'number' && Number.isFinite(failoverSiteId)) {
+          excludeSiteIds.add(Math.trunc(failoverSiteId));
+        }
+        if (attempts >= maxAttempts) {
+          break;
+        }
         const next = await this.deps.selectNextChannel(
           input.requestedModel,
           excludeChannelIds,
           input.downstreamPolicy,
+          excludeSiteIds,
         );
         if (!next) {
+          await input.onNoChannel?.({ attempts });
           return {
             ok: false,
             reason: 'failed',
@@ -121,6 +143,7 @@ export class DefaultProxyConductor {
     return {
       ok: false,
       reason: 'failed',
+      selected,
       attempts,
     };
   }

@@ -1,7 +1,7 @@
 export type SelectedChannelLike = {
-  channel: { id: number; routeId?: number };
-  site: Record<string, unknown>;
-  account: Record<string, unknown>;
+  channel: { id: number; routeId?: number; [key: string]: any };
+  site: any;
+  account: any;
   tokenName?: string;
   tokenValue?: string;
   actualModel?: string;
@@ -9,7 +9,7 @@ export type SelectedChannelLike = {
 
 export type AttemptSuccess = {
   ok: true;
-  response: Response;
+  response: unknown;
   latencyMs?: number | null;
   cost?: number | null;
 };
@@ -35,6 +35,8 @@ export type ExecuteAttemptContext = {
   selected: SelectedChannelLike;
   attemptIndex: number;
   excludeChannelIds: number[];
+  excludeSiteIds: number[];
+  maxAttempts: number;
 };
 
 export type ProxyConductorDependencies = {
@@ -44,6 +46,7 @@ export type ProxyConductorDependencies = {
     requestedModel: string,
     excludeChannelIds: number[],
     downstreamPolicy?: unknown,
+    excludeSiteIds?: ReadonlySet<number>,
   ) => Promise<SelectedChannelLike | null>;
   recordSuccess?: (channelId: number, metrics: { latencyMs: number | null; cost: number | null }) => Promise<void> | void;
   recordFailure?: (channelId: number, failure: { status?: number; rawErrorText?: string }) => Promise<void> | void;
@@ -56,6 +59,11 @@ export type ProxyConductorDependencies = {
 export type ExecuteInput = {
   requestedModel: string;
   downstreamPolicy?: unknown;
+  maxAttempts?: number;
+  onBeforeInitialSelect?: () => Promise<void> | void;
+  refreshSelection?: () => Promise<SelectedChannelLike | null>;
+  onNoChannel?: (context: { attempts: number }) => Promise<void> | void;
+  getFailoverSiteId?: (selected: SelectedChannelLike, failure: { status?: number; rawErrorText?: string }) => number | null;
   attempt: (context: ExecuteAttemptContext) => Promise<AttemptResult>;
   onTerminalFailure?: (
     selected: SelectedChannelLike,
@@ -67,7 +75,7 @@ export type ExecuteResult =
   | {
     ok: true;
     selected: SelectedChannelLike;
-    response: Response;
+    response: unknown;
     attempts: number;
   }
   | {

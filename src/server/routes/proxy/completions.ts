@@ -22,7 +22,8 @@ import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { createRequestBudget, shouldRetryWithinBudget } from './requestBudget.js';
 import { wrapReaderWithIdleTimeout } from './streamTimeout.js';
-import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
+import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, recordResponseCacheMiss, writeResponseCache } from '../../services/responseCacheService.js';
+import { DefaultProxyConductor } from '../../proxy-core/conductor/DefaultProxyConductor.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
 
@@ -34,6 +35,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       return reply.code(400).send({ error: { message: 'model is required', type: 'invalid_request_error' } });
     }
     if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+
     const downstreamPolicy = getDownstreamRoutingPolicy(request);
     const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
     const downstreamPath = '/v1/completions';
@@ -42,10 +44,23 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       headers: request.headers as Record<string, unknown>,
       body,
     });
-
     const isStream = body.stream === true;
-    const previewSelected = !isStream && typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
-      ? await tokenRouter.previewSelectedChannel(requestedModel, downstreamPolicy)
+
+    const conductor = new DefaultProxyConductor({
+      selectChannel: (model, policy) => tokenRouter.selectChannel(model, policy as any),
+      previewSelectedChannel: typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
+        ? (model, policy) => tokenRouter.previewSelectedChannel(model, policy as any)
+        : undefined,
+      selectNextChannel: (model, excludeChannelIds, policy, excludeSiteIds) => tokenRouter.selectNextChannel(
+        model,
+        excludeChannelIds,
+        policy as any,
+        excludeSiteIds,
+      ),
+    });
+
+    const previewSelected = !isStream
+      ? await conductor.previewSelectedChannel(requestedModel, downstreamPolicy)
       : null;
     const routeScope = previewSelected
       ? buildRouteScope({
@@ -56,14 +71,19 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       : null;
     const responseCacheKey = !isStream
       ? buildCacheKey({
+          surface: 'completions',
           model: requestedModel,
           messages: body?.prompt,
           temperature: body?.temperature as number | null | undefined,
           top_p: body?.top_p as number | null | undefined,
           max_tokens: body?.max_tokens as number | null | undefined,
+          stop: body?.stop,
+          seed: body?.seed,
           routeScope,
+          requestFingerprint: body,
         })
       : null;
+
     if (responseCacheKey) {
       const cached = await lookupResponseCache(responseCacheKey);
       if (cached) {
@@ -76,185 +96,278 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         }, requestedModel, 'success', 200, 0, null, 0, downstreamApiKeyId, cached.promptTokens, cached.completionTokens, cached.promptTokens + cached.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: 'hit', cacheSavedCost: cached.estimatedCost });
         return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
       }
+      recordResponseCacheMiss();
     }
-    const excludeChannelIds: number[] = [];
-    const excludeSiteIds = new Set<number>();
-    let retryCount = 0;
+
     const requestBudget = createRequestBudget();
+    let reportedNoChannel = false;
 
-    while (retryCount <= MAX_RETRIES) {
-      if (requestBudget.isExpired()) {
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: requestBudget.buildTimeoutMessage(),
-        });
-        if (responseCacheKey && !isStream) {
-          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-          if (stale) {
-            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-          }
-        }
-        return reply.code(504).send({
-          error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
-        });
-      }
-
-      let selected = retryCount === 0
-        ? await tokenRouter.selectChannel(requestedModel, downstreamPolicy)
-        : await tokenRouter.selectNextChannel(requestedModel, excludeChannelIds, downstreamPolicy, excludeSiteIds);
-
-      if (!selected && retryCount === 0) {
+    const execution = await conductor.execute({
+      requestedModel,
+      downstreamPolicy,
+      maxAttempts: MAX_RETRIES + 1,
+      refreshSelection: async () => {
         await refreshModelsAndRebuildRoutes();
-        selected = await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
-      }
-
-      if (!selected) {
+        return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
+      },
+      onNoChannel: async ({ attempts }) => {
+        reportedNoChannel = true;
         await reportProxyAllFailed({
           model: requestedModel,
           reason: 'No available channels after retries',
         });
-        if (retryCount === 0) {
+        if (attempts === 0) {
           await logProxyNoChannelFailure({
             modelRequested: requestedModel,
             httpStatus: 503,
             errorMessage: 'No available channels for this model',
-            retryCount,
+            retryCount: 0,
             downstreamPath,
             clientContext,
             downstreamApiKeyId,
           });
         }
-        if (responseCacheKey && !isStream) {
-          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-          if (stale) {
-            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-          }
-        }
-        return reply.code(503).send({
-          error: { message: 'No available channels for this model', type: 'server_error' },
-        });
-      }
-
-      excludeChannelIds.push(selected.channel.id);
-
-      const targetUrl = buildUpstreamUrl(selected.site.url, '/v1/completions');
-      const forwardBody = { ...body, model: selected.actualModel };
-      const startTime = Date.now();
-
-      try {
-        const upstream = await fetch(targetUrl, withSiteRecordProxyRequestInit(selected.site, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${selected.tokenValue}`,
-          },
-          body: JSON.stringify(forwardBody),
-        }, getProxyUrlFromExtraConfig(selected.account.extraConfig)));
-
-        if (!upstream.ok) {
-          const errText = await upstream.text().catch(() => 'unknown error');
-          await tokenRouter.recordFailure(selected.channel.id, {
-            status: upstream.status,
-            errorText: errText,
-            modelName: selected.actualModel,
-          });
-          if (shouldAvoidSiteForRequest(upstream.status, errText)) {
-            excludeSiteIds.add(selected.site.id);
-          }
-          logProxy(
-            selected,
-            requestedModel,
-            'failed',
-            upstream.status,
-            Date.now() - startTime,
-            errText,
-            retryCount,
-            downstreamApiKeyId,
-            0,
-            0,
-            0,
-            0,
-            null,
-            clientContext,
-            downstreamPath,
-          );
-
-          if (isTokenExpiredError({ status: upstream.status, message: errText })) {
-            await reportTokenExpired({
-              accountId: selected.account.id,
-              username: selected.account.username,
-              siteName: selected.site.name,
-              detail: `HTTP ${upstream.status}`,
-            });
-          }
-
-          if (shouldRetryProxyRequest(upstream.status, errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-            retryCount++;
-            continue;
-          }
-
-          await reportProxyAllFailed({
-            model: requestedModel,
-            reason: `upstream returned HTTP ${upstream.status}`,
-          });
-          return reply.code(upstream.status).send({ error: { message: errText, type: 'upstream_error' } });
-        }
-
-        if (isStream) {
-          reply.raw.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-          });
-
-          const reader = upstream.body?.getReader();
-          if (!reader) {
-            reply.raw.end();
-            return;
-          }
-          const guardedReader = wrapReaderWithIdleTimeout(reader);
-
-          const decoder = new TextDecoder();
-          let parsedUsage: ReturnType<typeof parseProxyUsage> = {
-            promptTokens: 0,
-            completionTokens: 0,
-            totalTokens: 0,
-            cacheReadTokens: 0,
-            cacheCreationTokens: 0,
-            promptTokensIncludeCache: null,
+      },
+      getFailoverSiteId: (selected, failure) => {
+        if (!shouldAvoidSiteForRequest(
+          typeof failure.status === 'number' ? failure.status : 0,
+          typeof failure.rawErrorText === 'string' ? failure.rawErrorText : undefined,
+        )) return null;
+        const siteId = Number((selected.site as { id?: unknown }).id);
+        return Number.isFinite(siteId) ? Math.trunc(siteId) : null;
+      },
+      attempt: async ({ selected, attemptIndex }) => {
+        const retryCount = attemptIndex;
+        if (requestBudget.isExpired()) {
+          return {
+            ok: false,
+            action: 'stop',
+            status: 504,
+            rawErrorText: requestBudget.buildTimeoutMessage(),
           };
-          let sseBuffer = '';
-          try {
-            while (true) {
-              const { done, value } = await guardedReader.read();
-              if (done) break;
-              if (!value) continue;
-              const chunk = decoder.decode(value as Uint8Array, { stream: true });
-              reply.raw.write(chunk);
+        }
 
-              sseBuffer += chunk;
-              const pulled = pullSseDataEvents(sseBuffer);
-              sseBuffer = pulled.rest;
-              for (const eventPayload of pulled.events) {
-                try {
-                  parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(JSON.parse(eventPayload)));
-                } catch {}
-              }
+        const targetUrl = buildUpstreamUrl(selected.site.url, '/v1/completions');
+        const forwardBody = { ...body, model: selected.actualModel };
+        const startTime = Date.now();
+
+        try {
+          const upstream = await fetch(targetUrl, withSiteRecordProxyRequestInit(selected.site, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${selected.tokenValue}`,
+            },
+            body: JSON.stringify(forwardBody),
+          }, getProxyUrlFromExtraConfig((selected.account as { extraConfig?: string | null | undefined }).extraConfig)));
+
+          if (!upstream.ok) {
+            const errText = await upstream.text().catch(() => 'unknown error');
+            await tokenRouter.recordFailure(selected.channel.id, {
+              status: upstream.status,
+              errorText: errText,
+              modelName: selected.actualModel,
+            });
+            logProxy(
+              selected,
+              requestedModel,
+              'failed',
+              upstream.status,
+              Date.now() - startTime,
+              errText,
+              retryCount,
+              downstreamApiKeyId,
+              0,
+              0,
+              0,
+              0,
+              null,
+              clientContext,
+              downstreamPath,
+            );
+
+            if (isTokenExpiredError({ status: upstream.status, message: errText })) {
+              await reportTokenExpired({
+                accountId: (selected.account as { id: number }).id,
+                username: (selected.account as { username: string }).username,
+                siteName: (selected.site as { name: string }).name,
+                detail: `HTTP ${upstream.status}`,
+              });
             }
-            if (sseBuffer.trim().length > 0) {
-              const pulled = pullSseDataEvents(`${sseBuffer}\n\n`);
-              for (const eventPayload of pulled.events) {
-                try {
-                  parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(JSON.parse(eventPayload)));
-                } catch {}
-              }
+
+            if (shouldRetryProxyRequest(upstream.status, errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+              return {
+                ok: false,
+                action: 'failover',
+                status: upstream.status,
+                rawErrorText: errText,
+              };
             }
-          } finally {
-            guardedReader.releaseLock?.();
-            reply.raw.end();
+
+            return {
+              ok: false,
+              action: 'stop',
+              status: upstream.status,
+              rawErrorText: errText,
+            };
           }
 
+          if (isStream) {
+            reply.raw.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+            });
+
+            const reader = upstream.body?.getReader();
+            if (!reader) {
+              reply.raw.end();
+              return { ok: true, response: upstream };
+            }
+            const guardedReader = wrapReaderWithIdleTimeout(reader);
+
+            const decoder = new TextDecoder();
+            let parsedUsage: ReturnType<typeof parseProxyUsage> = {
+              promptTokens: 0,
+              completionTokens: 0,
+              totalTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+              promptTokensIncludeCache: null,
+            };
+            let sseBuffer = '';
+            try {
+              while (true) {
+                const { done, value } = await guardedReader.read();
+                if (done) break;
+                if (!value) continue;
+                const chunk = decoder.decode(value as Uint8Array, { stream: true });
+                reply.raw.write(chunk);
+
+                sseBuffer += chunk;
+                const pulled = pullSseDataEvents(sseBuffer);
+                sseBuffer = pulled.rest;
+                for (const eventPayload of pulled.events) {
+                  try {
+                    parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(JSON.parse(eventPayload)));
+                  } catch {}
+                }
+              }
+              if (sseBuffer.trim().length > 0) {
+                const pulled = pullSseDataEvents(`${sseBuffer}\n\n`);
+                for (const eventPayload of pulled.events) {
+                  try {
+                    parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(JSON.parse(eventPayload)));
+                  } catch {}
+                }
+              }
+            } finally {
+              guardedReader.releaseLock?.();
+              reply.raw.end();
+            }
+
+            const latency = Date.now() - startTime;
+            const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+              site: selected.site,
+              account: selected.account,
+              tokenValue: selected.tokenValue,
+              tokenName: selected.tokenName,
+              modelName: selected.actualModel || requestedModel,
+              requestStartedAtMs: startTime,
+              requestEndedAtMs: startTime + latency,
+              localLatencyMs: latency,
+              usage: {
+                promptTokens: parsedUsage.promptTokens,
+                completionTokens: parsedUsage.completionTokens,
+                totalTokens: parsedUsage.totalTokens,
+              },
+            });
+            const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
+              site: selected.site,
+              account: selected.account,
+              modelName: selected.actualModel || requestedModel,
+              parsedUsage,
+              resolvedUsage,
+            });
+            await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
+            recordDownstreamCostUsage(request, estimatedCost);
+            logProxy(
+              selected,
+              requestedModel,
+              'success',
+              200,
+              latency,
+              null,
+              retryCount,
+              downstreamApiKeyId,
+              resolvedUsage.promptTokens,
+              resolvedUsage.completionTokens,
+              resolvedUsage.totalTokens,
+              estimatedCost,
+              billingDetails,
+              clientContext,
+              downstreamPath,
+            );
+            return {
+              ok: true,
+              response: upstream,
+              latencyMs: latency,
+              cost: estimatedCost,
+            };
+          }
+
+          const rawText = await upstream.text();
+          let data: any = rawText;
+          try {
+            data = JSON.parse(rawText);
+          } catch {
+            data = rawText;
+          }
           const latency = Date.now() - startTime;
+          const parsedUsage = parseProxyUsage(data);
+          const failure = detectProxyFailure({ rawText, usage: parsedUsage });
+          if (failure) {
+            const errText = failure.reason;
+            await tokenRouter.recordFailure(selected.channel.id, {
+              status: failure.status,
+              errorText: errText,
+              modelName: selected.actualModel,
+            });
+            logProxy(
+              selected,
+              requestedModel,
+              'failed',
+              failure.status,
+              latency,
+              errText,
+              retryCount,
+              downstreamApiKeyId,
+              0,
+              0,
+              0,
+              0,
+              null,
+              clientContext,
+              downstreamPath,
+            );
+
+            if (shouldRetryProxyRequest(failure.status, errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+              return {
+                ok: false,
+                action: 'failover',
+                status: failure.status,
+                rawErrorText: errText,
+              };
+            }
+
+            return {
+              ok: false,
+              action: 'stop',
+              status: failure.status,
+              rawErrorText: errText,
+            };
+          }
+
           const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
             site: selected.site,
             account: selected.account,
@@ -277,6 +390,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             parsedUsage,
             resolvedUsage,
           });
+
           await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
           recordDownstreamCostUsage(request, estimatedCost);
           logProxy(
@@ -295,37 +409,38 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             billingDetails,
             clientContext,
             downstreamPath,
+            !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: estimatedCost } : null,
           );
-          return;
-        }
-
-        const rawText = await upstream.text();
-        let data: any = rawText;
-        try {
-          data = JSON.parse(rawText);
-        } catch {
-          data = rawText;
-        }
-        const latency = Date.now() - startTime;
-        const parsedUsage = parseProxyUsage(data);
-        const failure = detectProxyFailure({ rawText, usage: parsedUsage });
-        if (failure) {
-          const errText = failure.reason;
+          if (responseCacheKey) {
+            writeResponseCache(responseCacheKey, requestedModel, {
+              body: JSON.stringify(data),
+              isStream: false,
+              promptTokens: resolvedUsage.promptTokens,
+              completionTokens: resolvedUsage.completionTokens,
+              estimatedCost,
+            }).catch(() => {});
+          }
+          reply.header('X-Cache', 'MISS').send(data);
+          return {
+            ok: true,
+            response: upstream,
+            latencyMs: latency,
+            cost: estimatedCost,
+          };
+        } catch (err: any) {
+          const errorMessage = err?.message || 'network failure';
           await tokenRouter.recordFailure(selected.channel.id, {
-            status: failure.status,
-            errorText: errText,
+            status: 0,
+            errorText: errorMessage,
             modelName: selected.actualModel,
           });
-          if (shouldAvoidSiteForRequest(failure.status, errText)) {
-            excludeSiteIds.add(selected.site.id);
-          }
           logProxy(
             selected,
             requestedModel,
             'failed',
-            failure.status,
-            latency,
-            errText,
+            0,
+            Date.now() - startTime,
+            errorMessage,
             retryCount,
             downstreamApiKeyId,
             0,
@@ -337,133 +452,64 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             downstreamPath,
           );
 
-          if (shouldRetryProxyRequest(failure.status, errText) && shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-            retryCount += 1;
-            continue;
+          if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
+            return {
+              ok: false,
+              action: 'failover',
+              status: 502,
+              rawErrorText: errorMessage,
+            };
           }
 
-          await reportProxyAllFailed({
-            model: requestedModel,
-            reason: failure.reason,
-          });
+          return {
+            ok: false,
+            action: 'stop',
+            status: 502,
+            rawErrorText: errorMessage,
+          };
+        }
+      },
+    });
 
-          if (responseCacheKey && !isStream) {
-            const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-            if (stale) {
-              await logProxy({
-                channel: { routeId: null, id: null } as any,
-                account: { id: null } as any,
-                actualModel: requestedModel,
-                site: { name: 'cache', url: '', platform: 'cache' } as any,
-                tokenName: 'response_cache',
-              }, requestedModel, 'success', 200, latency, 'served stale cache after upstream failure', retryCount, downstreamApiKeyId, stale.promptTokens, stale.completionTokens, stale.promptTokens + stale.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost });
-              return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-            }
-          }
+    if (execution.ok) {
+      return;
+    }
 
-          return reply.code(failure.status).send({
-            error: { message: errText, type: 'upstream_error' },
-          });
-        }
+    const finalStatus = execution.reason === 'no_channel'
+      ? 503
+      : (execution.status ?? 502);
+    const finalMessage = execution.reason === 'no_channel'
+      ? 'No available channels for this model'
+      : (execution.rawErrorText || 'upstream request failed');
+    const retryCount = Math.max(0, execution.attempts - 1);
 
-        const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
-          site: selected.site,
-          account: selected.account,
-          tokenValue: selected.tokenValue,
-          tokenName: selected.tokenName,
-          modelName: selected.actualModel || requestedModel,
-          requestStartedAtMs: startTime,
-          requestEndedAtMs: startTime + latency,
-          localLatencyMs: latency,
-          usage: {
-            promptTokens: parsedUsage.promptTokens,
-            completionTokens: parsedUsage.completionTokens,
-            totalTokens: parsedUsage.totalTokens,
-          },
-        });
-        const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
-          site: selected.site,
-          account: selected.account,
-          modelName: selected.actualModel || requestedModel,
-          parsedUsage,
-          resolvedUsage,
-        });
+    if (!reportedNoChannel) {
+      await reportProxyAllFailed({
+        model: requestedModel,
+        reason: finalStatus === 504 ? requestBudget.buildTimeoutMessage() : finalMessage,
+      });
+    }
 
-        await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
-        recordDownstreamCostUsage(request, estimatedCost);
-        logProxy(
-          selected,
-          requestedModel,
-          'success',
-          200,
-          latency,
-          null,
-          retryCount,
-          downstreamApiKeyId,
-          resolvedUsage.promptTokens,
-          resolvedUsage.completionTokens,
-          resolvedUsage.totalTokens,
-          estimatedCost,
-          billingDetails,
-          clientContext,
-          downstreamPath,
-          !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: estimatedCost } : null,
-        );
-        if (responseCacheKey && !isStream) {
-          writeResponseCache(responseCacheKey, requestedModel, {
-            body: JSON.stringify(data),
-            isStream: false,
-            promptTokens: resolvedUsage.promptTokens,
-            completionTokens: resolvedUsage.completionTokens,
-            estimatedCost,
-          }).catch(() => {});
-        }
-        return reply.header('X-Cache', 'MISS').send(data);
-      } catch (err: any) {
-        await tokenRouter.recordFailure(selected.channel.id, {
-          status: 0,
-          errorText: err.message,
-          modelName: selected.actualModel,
-        });
-        if (shouldAvoidSiteForRequest(0, err?.message)) {
-          excludeSiteIds.add(selected.site.id);
-        }
-        logProxy(
-          selected,
-          requestedModel,
-          'failed',
-          0,
-          Date.now() - startTime,
-          err.message,
-          retryCount,
-          downstreamApiKeyId,
-          0,
-          0,
-          0,
-          0,
-          null,
-          clientContext,
-          downstreamPath,
-        );
-        if (shouldRetryWithinBudget(retryCount, MAX_RETRIES, requestBudget)) {
-          retryCount++;
-          continue;
-        }
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: err.message || 'network failure',
-        });
-        if (responseCacheKey && !isStream) {
-          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-          if (stale) {
-            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-          }
-        }
-        return reply.code(502).send({
-          error: { message: `Upstream error: ${err.message}`, type: 'upstream_error' },
-        });
+    if (responseCacheKey) {
+      const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+      if (stale) {
+        await logProxy({
+          channel: { routeId: null, id: null } as any,
+          account: { id: null } as any,
+          actualModel: requestedModel,
+          site: { name: 'cache', url: '', platform: 'cache' } as any,
+          tokenName: 'response_cache',
+        }, requestedModel, 'success', 200, 0, 'served stale cache after upstream failure', retryCount, downstreamApiKeyId, stale.promptTokens, stale.completionTokens, stale.promptTokens + stale.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost });
+        return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
       }
     }
+
+    return reply.code(finalStatus).send({
+      error: {
+        message: finalStatus === 502 ? `Upstream error: ${finalMessage}` : finalMessage,
+        type: 'upstream_error',
+      },
+    });
   });
 }
 

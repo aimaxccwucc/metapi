@@ -16,6 +16,7 @@ const CREATE_RESPONSE_CACHE_SQL: Record<ResponseCacheSchemaDialect, string[]> = 
       is_stream integer NOT NULL DEFAULT 0,
       prompt_tokens integer DEFAULT 0,
       completion_tokens integer DEFAULT 0,
+      estimated_cost real DEFAULT 0,
       hit_count integer NOT NULL DEFAULT 0,
       created_at text NOT NULL,
       expires_at text NOT NULL
@@ -33,13 +34,14 @@ const CREATE_RESPONSE_CACHE_SQL: Record<ResponseCacheSchemaDialect, string[]> = 
       \`is_stream\` tinyint(1) NOT NULL DEFAULT 0,
       \`prompt_tokens\` int DEFAULT 0,
       \`completion_tokens\` int DEFAULT 0,
+      \`estimated_cost\` double DEFAULT 0,
       \`hit_count\` int NOT NULL DEFAULT 0,
-      \`created_at\` TEXT NOT NULL,
-      \`expires_at\` TEXT NOT NULL
+      \`created_at\` VARCHAR(191) NOT NULL,
+      \`expires_at\` VARCHAR(191) NOT NULL
     )`,
     'CREATE UNIQUE INDEX `response_cache_key_idx` ON `response_cache`(`cache_key`)',
     'CREATE INDEX `response_cache_expires_at_idx` ON `response_cache`(`expires_at`)',
-    'CREATE INDEX `response_cache_model_idx` ON `response_cache`(`model`)',
+    'CREATE INDEX `response_cache_model_idx` ON `response_cache`(`model`(191))',
   ],
   postgres: [
     `CREATE TABLE IF NOT EXISTS "response_cache" (
@@ -48,9 +50,7 @@ const CREATE_RESPONSE_CACHE_SQL: Record<ResponseCacheSchemaDialect, string[]> = 
       "model" TEXT NOT NULL,
       "response_body" TEXT NOT NULL,
       "is_stream" INTEGER NOT NULL DEFAULT 0,
-      "prompt_tokens" INTEGER DEFAULT 0,
-      "completion_tokens" INTEGER DEFAULT 0,
-      "hit_count" INTEGER NOT NULL DEFAULT 0,
+      \"prompt_tokens\" INTEGER DEFAULT 0,\n      \"completion_tokens\" INTEGER DEFAULT 0,\n      \"estimated_cost\" DOUBLE PRECISION DEFAULT 0,\n      \"hit_count\" INTEGER NOT NULL DEFAULT 0,
       "created_at" TEXT NOT NULL,
       "expires_at" TEXT NOT NULL
     )`,

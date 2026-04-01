@@ -796,6 +796,9 @@ export async function statsRoutes(app: FastifyInstance) {
         cacheSavedCost: includeCacheFields
           ? sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.cacheSavedCost}, 0)), 0)`
           : sql<number>`0`,
+        cacheSavedTokens: includeCacheFields
+          ? sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) in ('hit', 'stale') then coalesce(${schema.proxyLogs.totalTokens}, 0) else 0 end), 0)`
+          : sql<number>`0`,
       }).from(schema.proxyLogs)
         .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
         .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
@@ -814,6 +817,7 @@ export async function statsRoutes(app: FastifyInstance) {
       cacheMissCount?: number;
       cacheStaleCount?: number;
       cacheSavedCost?: number;
+      cacheSavedTokens?: number;
     } | undefined;
 
     return {
@@ -832,6 +836,7 @@ export async function statsRoutes(app: FastifyInstance) {
         cacheMissCount: Number(summaryRow?.cacheMissCount || 0),
         cacheStaleCount: Number(summaryRow?.cacheStaleCount || 0),
         cacheSavedCost: toRoundedMicroNumber(summaryRow?.cacheSavedCost),
+        cacheSavedTokens: Number(summaryRow?.cacheSavedTokens || 0),
       },
     };
   });

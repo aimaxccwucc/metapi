@@ -34,6 +34,7 @@ describe('DefaultProxyConductor', () => {
     const result = await conductor.execute({
       requestedModel: 'gpt-5.4',
       attempt,
+      maxAttempts: 3,
     });
 
     expect(result).toMatchObject({
@@ -76,6 +77,7 @@ describe('DefaultProxyConductor', () => {
     const result = await conductor.execute({
       requestedModel: 'gpt-5.4',
       attempt,
+      maxAttempts: 3,
     });
 
     expect(result).toMatchObject({
@@ -121,6 +123,8 @@ describe('DefaultProxyConductor', () => {
     const result = await conductor.execute({
       requestedModel: 'gpt-5.4',
       attempt,
+      maxAttempts: 3,
+      getFailoverSiteId: (selected) => Number(selected.site.id),
     });
 
     expect(result).toMatchObject({
@@ -128,7 +132,7 @@ describe('DefaultProxyConductor', () => {
       selected: nextSelectedChannel,
       attempts: 2,
     });
-    expect(selectNextChannel).toHaveBeenCalledWith('gpt-5.4', [11], undefined);
+    expect(selectNextChannel).toHaveBeenCalledWith('gpt-5.4', [11], undefined, new Set([44]));
     expect(recordFailure).toHaveBeenCalledWith(11, {
       status: 503,
       rawErrorText: 'upstream unavailable',
@@ -167,6 +171,7 @@ describe('DefaultProxyConductor', () => {
     const result = await conductor.execute({
       requestedModel: 'gpt-5.4',
       attempt,
+      maxAttempts: 3,
     });
 
     expect(result).toMatchObject({
@@ -180,9 +185,12 @@ describe('DefaultProxyConductor', () => {
     });
   });
 
-  it('returns a no_channel result when no channel is available', async () => {
+  it('calls refreshSelection once when the first select returns no channel', async () => {
+    const selectChannel = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(baseSelectedChannel);
     const conductor = new DefaultProxyConductor({
-      selectChannel: vi.fn().mockResolvedValue(null),
+      selectChannel,
       selectNextChannel: vi.fn(),
       recordSuccess: vi.fn(),
       recordFailure: vi.fn(),
@@ -193,7 +201,32 @@ describe('DefaultProxyConductor', () => {
 
     const result = await conductor.execute({
       requestedModel: 'gpt-5.4',
+      attempt: vi.fn().mockResolvedValue({
+        ok: true,
+        response: new Response('ok', { status: 200 }),
+      }),
+      refreshSelection: async () => selectChannel('gpt-5.4', undefined),
+      maxAttempts: 2,
+    });
+
+    expect(result).toMatchObject({ ok: true, attempts: 1 });
+    expect(selectChannel).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns a no_channel result when no channel is available', async () => {
+    const onNoChannel = vi.fn().mockResolvedValue(undefined);
+    const conductor = new DefaultProxyConductor({
+      selectChannel: vi.fn().mockResolvedValue(null),
+      selectNextChannel: vi.fn(),
+      recordSuccess: vi.fn(),
+      recordFailure: vi.fn(),
+      previewSelectedChannel: vi.fn().mockResolvedValue(null),
+    });
+
+    const result = await conductor.execute({
+      requestedModel: 'gpt-5.4',
       attempt: vi.fn(),
+      onNoChannel,
     });
 
     expect(result).toEqual({
@@ -201,6 +234,7 @@ describe('DefaultProxyConductor', () => {
       reason: 'no_channel',
       attempts: 0,
     });
+    expect(onNoChannel).toHaveBeenCalledWith({ attempts: 0 });
   });
 
   it('propagates terminal stream failures and calls the terminal failure hook', async () => {
@@ -223,6 +257,7 @@ describe('DefaultProxyConductor', () => {
       requestedModel: 'gpt-5.4',
       attempt,
       onTerminalFailure,
+      maxAttempts: 2,
     });
 
     expect(result).toEqual({

@@ -180,6 +180,14 @@ describe('responseCacheService', () => {
     })).toBeNull();
   });
 
+  it('returns null cache key for non-deterministic top_p requests', () => {
+    expect(buildCacheKey({
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'hi' }],
+      top_p: 0.9,
+    })).toBeNull();
+  });
+
   it('formats route scope from selected route metadata', () => {
     expect(__responseCacheServiceTestUtils.buildRouteScope({
       routeId: 7,
@@ -272,5 +280,30 @@ describe('responseCacheService', () => {
 
     await expect(isResponseCacheAvailable()).resolves.toBe(false);
     expect(hasResponseCacheTableMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-probes cache availability after cooldown following transient failures', async () => {
+    vi.useFakeTimers();
+    try {
+      dbInsertConflictRunMock.mockRejectedValueOnce(new Error('write failed'));
+
+      await expect(writeResponseCache('cache-key', 'gpt-5', {
+        body: JSON.stringify({ ok: true }),
+        isStream: false,
+        promptTokens: 1,
+        completionTokens: 2,
+        estimatedCost: 3.456789,
+      })).resolves.toBeUndefined();
+
+      await expect(isResponseCacheAvailable()).resolves.toBe(false);
+      expect(hasResponseCacheTableMock).toHaveBeenCalledTimes(1);
+
+      hasResponseCacheTableMock.mockResolvedValueOnce(true);
+      await vi.advanceTimersByTimeAsync(30_001);
+      await expect(isResponseCacheAvailable()).resolves.toBe(true);
+      expect(hasResponseCacheTableMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
