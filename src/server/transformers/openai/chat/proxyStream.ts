@@ -4,6 +4,7 @@ import { type DownstreamFormat, type ParsedSseEvent } from '../../shared/normali
 import { createOpenAiChatAggregateState, applyOpenAiChatStreamEvent, finalizeOpenAiChatAggregate } from './aggregator.js';
 import { openAiChatOutbound } from './outbound.js';
 import { openAiChatStream } from './stream.js';
+import { config } from '../../../config.js';
 
 type StreamReader = {
   read(): Promise<{ done: boolean; value?: Uint8Array }>;
@@ -44,10 +45,35 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
   const chatAggregateState = input.downstreamFormat === 'openai'
     ? createOpenAiChatAggregateState()
     : null;
+  let hasMeaningfulOutput = false;
   let finalized = false;
   let terminalResult: ChatProxyStreamResult = {
     status: 'completed',
     errorMessage: null,
+  };
+
+  const markMeaningfulOutput = (event?: {
+    contentDelta?: string;
+    reasoningDelta?: string;
+    redactedReasoningContent?: string;
+    toolCallDeltas?: Array<unknown>;
+  } | null) => {
+    if (hasMeaningfulOutput) return;
+    if (typeof event?.contentDelta === 'string' && event.contentDelta.trim().length > 0) {
+      hasMeaningfulOutput = true;
+      return;
+    }
+    if (typeof event?.reasoningDelta === 'string' && event.reasoningDelta.trim().length > 0) {
+      hasMeaningfulOutput = true;
+      return;
+    }
+    if (typeof event?.redactedReasoningContent === 'string' && event.redactedReasoningContent.trim().length > 0) {
+      hasMeaningfulOutput = true;
+      return;
+    }
+    if (Array.isArray(event?.toolCallDeltas) && event.toolCallDeltas.length > 0) {
+      hasMeaningfulOutput = true;
+    }
   };
 
   const extractFailureMessage = (payload: unknown, fallback = 'upstream stream failed'): string => {
@@ -76,9 +102,55 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     };
   };
 
+  const finalizeAsEmptyContentFailure = () => {
+    if (
+      input.downstreamFormat !== 'openai'
+      || terminalResult.status === 'failed'
+      || hasMeaningfulOutput
+      || !config.proxyEmptyContentFailEnabled
+    ) {
+      return false;
+    }
+
+    const normalizedFailure = openAiChatOutbound.normalizeFinal({
+      id: streamContext.id,
+      object: 'chat.completion',
+      created: streamContext.created,
+      model: streamContext.model || input.modelName,
+      choices: [{
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: '',
+        },
+        finish_reason: 'error',
+      }],
+    }, input.modelName, '');
+    streamContext.id = normalizedFailure.id;
+    streamContext.model = normalizedFailure.model;
+    streamContext.created = normalizedFailure.created;
+    input.writeLines(
+      openAiChatOutbound
+        .buildSyntheticChunks(normalizedFailure)
+        .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`),
+    );
+
+    markFailed({
+      error: {
+        message: 'Upstream returned empty content',
+      },
+    }, 'Upstream returned empty content');
+    return true;
+  };
+
   const finalize = () => {
     if (finalized) return;
     finalized = true;
+
+    if (finalizeAsEmptyContentFailure()) {
+      input.writeLines(downstreamTransformer.serializeDone(streamContext, claudeContext));
+      return;
+    }
 
     // For native Anthropic streams, EOF without message_stop is not a clean
     // completion. Forward the partial stream as-is instead of fabricating an
@@ -157,6 +229,7 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         markFailed(parsedPayload);
       }
       const normalizedEvent = downstreamTransformer.transformStreamEvent(parsedPayload, streamContext, input.modelName);
+      markMeaningfulOutput(normalizedEvent);
       if (input.downstreamFormat === 'openai' && chatAggregateState) {
         applyOpenAiChatStreamEvent(chatAggregateState, normalizedEvent);
       }
@@ -190,6 +263,11 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
       }
       if (input.downstreamFormat === 'openai') {
         const normalizedFinal = openAiChatOutbound.normalizeFinal(payload, input.modelName, fallbackText);
+        markMeaningfulOutput({
+          contentDelta: normalizedFinal.content,
+          reasoningDelta: normalizedFinal.reasoningContent,
+          toolCallDeltas: normalizedFinal.toolCalls,
+        });
         streamContext.id = normalizedFinal.id;
         streamContext.model = normalizedFinal.model;
         streamContext.created = normalizedFinal.created;
