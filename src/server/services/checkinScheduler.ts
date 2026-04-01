@@ -11,7 +11,10 @@ import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dai
 import { cleanupConfiguredLogs, normalizeLogCleanupRetentionDays } from './logCleanupService.js';
 import { executeRefreshSiteReachability } from './siteHealthService.js';
 import { pruneResponseCache } from './responseCacheService.js';
-import { runRoutingGovernanceRecoveryPass } from './routingGovernanceService.js';
+import {
+  executeRoutingGovernanceAutoRecoveryPass,
+  recordRoutingGovernanceAutoRecoveryEvent,
+} from './routingGovernanceAutoRecoveryService.js';
 
 export type CheckinScheduleMode = 'cron' | 'interval';
 
@@ -306,7 +309,10 @@ function createRoutingGovernanceRecoveryTask(cronExpr: string) {
     }
     routingGovernanceRecoveryRunning = true;
     try {
-      const result = await runRoutingGovernanceRecoveryPass();
+      const result = await executeRoutingGovernanceAutoRecoveryPass();
+      if (result.scanned > 0 || result.promotedToProbing > 0 || result.restored > 0) {
+        await recordRoutingGovernanceAutoRecoveryEvent(result);
+      }
       console.log(
         `[Scheduler] Routing governance recovery pass done: scanned=${result.scanned}, promoted=${result.promotedToProbing}, keptSuppressed=${result.keptSuppressed}, restored=${result.restored}`,
       );

@@ -794,7 +794,7 @@ export async function statsRoutes(app: FastifyInstance) {
           ? sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) = 'stale' then 1 else 0 end), 0)`
           : sql<number>`0`,
         cacheSavedCost: includeCacheFields
-          ? sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.cacheSavedCost}, 0)), 0)`
+          ? sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) in ('hit', 'stale') then coalesce(${schema.proxyLogs.cacheSavedCost}, 0) else 0 end), 0)`
           : sql<number>`0`,
         cacheSavedTokens: includeCacheFields
           ? sql<number>`coalesce(sum(case when lower(coalesce(${schema.proxyLogs.cacheStatus}, '')) in ('hit', 'stale') then coalesce(${schema.proxyLogs.totalTokens}, 0) else 0 end), 0)`

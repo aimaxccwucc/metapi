@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { arrayMove } from '@dnd-kit/sortable';
 import type { DragEndEvent } from '@dnd-kit/core';
 import { api } from '../api.js';
-import type { RouteDiagnosticsResponse, RouteOverviewResponse, RoutingGovernanceSubject } from '../api.js';
+import type { RouteDiagnosticsResponse, RouteOverviewResponse, RoutingGovernanceSubject, RouteProbeResponse } from '../api.js';
 import { BrandGlyph, getBrand, InlineBrandIcon, type BrandInfo } from '../components/BrandIcon.js';
 import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
@@ -32,12 +32,14 @@ import type {
   RouteSummaryRow,
   RouteRoutingStrategy,
   RouteMode,
+  RouteProbePolicy,
   RouteDecision,
   RouteIconOption,
   MissingTokenRouteSiteActionItem,
   MissingTokenGroupRouteSiteActionItem,
   GroupRouteItem,
   ExplicitGroupSourceHealthSummary,
+  RouteProbeSummary,
 } from './token-routes/types.js';
 import {
   AUTO_ROUTE_DECISION_LIMIT,
@@ -74,6 +76,7 @@ const ROUTE_ICON_OPTIONS: RouteIconOption[] = [
 
 type RouteEditorForm = {
   routeMode: RouteMode;
+  probePolicy: RouteProbePolicy;
   displayName: string;
   displayIcon: string;
   modelPattern: string;
@@ -83,6 +86,7 @@ type RouteEditorForm = {
 
 const EMPTY_ROUTE_FORM: RouteEditorForm = {
   routeMode: 'explicit_group',
+  probePolicy: 'manual',
   displayName: '',
   displayIcon: '',
   modelPattern: '',
@@ -272,6 +276,12 @@ function formatIsoDateTime(input?: string | null): string {
   return date.toLocaleString();
 }
 
+function isManualGovernedRoute(route: Pick<RouteSummaryRow, 'probePolicy' | 'routeMode'>): boolean {
+  if (route.probePolicy === 'manual') return true;
+  if (route.probePolicy === 'system') return false;
+  return normalizeRouteMode(route.routeMode) === 'explicit_group';
+}
+
 export default function TokenRoutes() {
   const navigate = useNavigate();
   const governanceApi = api as unknown as RouteGovernanceApi;
@@ -300,7 +310,6 @@ export default function TokenRoutes() {
   const [form, setForm] = useState<RouteEditorForm>(EMPTY_ROUTE_FORM);
   const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
-  const [rebuilding, setRebuilding] = useState(false);
   const [resettingRoutingRuntime, setResettingRoutingRuntime] = useState(false);
 
   const [channelTokenDraft, setChannelTokenDraft] = useState<Record<number, number>>({});
@@ -316,8 +325,11 @@ export default function TokenRoutes() {
   const [governanceSubjects, setGovernanceSubjects] = useState<RoutingGovernanceSubject[]>([]);
   const [loadingGovernanceSubjects, setLoadingGovernanceSubjects] = useState(false);
   const [governanceSubjectsLoaded, setGovernanceSubjectsLoaded] = useState(false);
+  const [governanceSubjectsDirty, setGovernanceSubjectsDirty] = useState(false);
   const [routeDiagnostics, setRouteDiagnostics] = useState<RouteDiagnosticsResponse | null>(null);
   const [loadingRouteDiagnostics, setLoadingRouteDiagnostics] = useState(false);
+  const [routeProbeSummaryByRouteId, setRouteProbeSummaryByRouteId] = useState<Record<number, RouteProbeSummary>>({});
+  const [probingRouteId, setProbingRouteId] = useState<number | null>(null);
   const [diagnosticsExpanded, setDiagnosticsExpanded] = useState(false);
   const [governanceExpanded, setGovernanceExpanded] = useState(false);
   const [runningGovernanceRecovery, setRunningGovernanceRecovery] = useState(false);
@@ -442,12 +454,21 @@ export default function TokenRoutes() {
       startTransition(() => {
         setGovernanceSubjects(Array.isArray(res?.items) ? res.items : []);
         setGovernanceSubjectsLoaded(true);
+        setGovernanceSubjectsDirty(false);
       });
       return res;
     } finally {
       setLoadingGovernanceSubjects(false);
     }
   }, [governanceApi]);
+
+  const refreshGovernanceSubjects = useCallback(async () => {
+    if (!governanceExpanded) {
+      setGovernanceSubjectsDirty(true);
+      return null;
+    }
+    return loadGovernanceSubjects();
+  }, [governanceExpanded, loadGovernanceSubjects]);
 
   const applyRouteCandidateRows = useCallback((candidateRows: any) => {
     startTransition(() => {
@@ -510,19 +531,27 @@ export default function TokenRoutes() {
   useEffect(() => {
     (async () => {
       try {
-        await Promise.all([load(), loadRouteOverview(), loadGovernanceSubjects()]);
+        await Promise.all([load(), loadRouteOverview()]);
       } catch {
         toast.error('加载路由配置失败');
       }
     })();
-  }, [loadGovernanceSubjects, loadRouteOverview, toast]);
+  }, [loadRouteOverview, toast]);
 
   useEffect(() => {
-    if (!governanceExpanded || governanceSubjectsLoaded || loadingGovernanceSubjects) return;
+    if (!governanceExpanded || loadingGovernanceSubjects) return;
+    if (governanceSubjectsLoaded && !governanceSubjectsDirty) return;
     void loadGovernanceSubjects().catch(() => {
       toast.error('加载系统隔离列表失败');
     });
-  }, [governanceExpanded, governanceSubjectsLoaded, loadingGovernanceSubjects, loadGovernanceSubjects, toast]);
+  }, [
+    governanceExpanded,
+    governanceSubjectsDirty,
+    governanceSubjectsLoaded,
+    loadingGovernanceSubjects,
+    loadGovernanceSubjects,
+    toast,
+  ]);
 
   useEffect(() => {
     if (!diagnosticsExpanded || routeDiagnostics || loadingRouteDiagnostics) return;
@@ -536,36 +565,6 @@ export default function TokenRoutes() {
       ensureRouteCandidatesLoaded();
     }
   }, [ensureRouteCandidatesLoaded, filterCollapsed, showFilters, showManual, showZeroChannelRoutes]);
-
-  const handleRebuild = async () => {
-    try {
-      setRebuilding(true);
-      const res = await api.rebuildRoutes(true);
-      if (res?.queued) {
-        toast.info(res.message || '已开始重建路由，请稍后查看日志');
-        await Promise.all([
-          load({ includeCandidates: routeCandidatesLoaded }),
-          loadRouteOverview(),
-          loadGovernanceSubjects(),
-          diagnosticsExpanded ? loadRouteDiagnostics() : Promise.resolve(null),
-        ]);
-        return;
-      }
-      const createdRoutes = res?.rebuild?.createdRoutes ?? 0;
-      const createdChannels = res?.rebuild?.createdChannels ?? 0;
-      toast.success(`自动重建完成（新增 ${createdRoutes} 条路由 / ${createdChannels} 个通道）`);
-      await Promise.all([
-        load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded }),
-        loadRouteOverview(),
-        loadGovernanceSubjects(),
-        diagnosticsExpanded ? loadRouteDiagnostics() : Promise.resolve(null),
-      ]);
-    } catch (e: any) {
-      toast.error(e.message || '重建路由失败');
-    } finally {
-      setRebuilding(false);
-    }
-  };
 
   const handleRefreshRouteDecisions = async () => {
     try {
@@ -590,7 +589,7 @@ export default function TokenRoutes() {
       await Promise.all([
         loadRouteDecisions(refreshed.summaries, { force: true, refreshPricingCatalog: true, persistSnapshots: true }),
         loadRouteOverview(),
-        loadGovernanceSubjects(),
+        refreshGovernanceSubjects(),
         diagnosticsExpanded ? loadRouteDiagnostics() : Promise.resolve(null),
       ]);
     } catch (e: any) {
@@ -680,6 +679,7 @@ export default function TokenRoutes() {
         const modelPatternChanged = routeMode === 'pattern' && !!currentRoute && currentRoute.modelPattern !== trimmedModelPattern;
         await api.updateRoute(editingRouteId, {
           routeMode,
+          probePolicy: form.probePolicy,
           ...(routeMode === 'pattern' ? { modelPattern: trimmedModelPattern } : {}),
           displayName: trimmedDisplayName,
           displayIcon: trimmedDisplayIcon,
@@ -689,6 +689,7 @@ export default function TokenRoutes() {
       } else {
         await api.addRoute({
           routeMode,
+          probePolicy: form.probePolicy,
           ...(routeMode === 'pattern' ? { modelPattern: trimmedModelPattern } : {}),
           displayName: trimmedDisplayName,
           displayIcon: trimmedDisplayIcon,
@@ -699,7 +700,7 @@ export default function TokenRoutes() {
       const refreshed = await load({ includeCandidates: routeMode === 'explicit_group' || routeCandidatesLoaded, forceCandidates: routeMode === 'explicit_group' || routeCandidatesLoaded });
       await Promise.all([
         loadRouteOverview(),
-        loadGovernanceSubjects(),
+        refreshGovernanceSubjects(),
       ]);
       if (routeMode === 'explicit_group') {
         const feedback = buildExplicitGroupSaveFeedback(selectedSourceRouteIds, refreshed.summaries, refreshed.candidateRows);
@@ -727,6 +728,7 @@ export default function TokenRoutes() {
     const routeMode = normalizeRouteMode(route.routeMode);
     setForm({
       routeMode,
+      probePolicy: isManualGovernedRoute(route) ? 'manual' : 'system',
       modelPattern: route.modelPattern || '',
       displayName: route.displayName || '',
       displayIcon: normalizeRouteDisplayIconValue(route.displayIcon),
@@ -749,7 +751,7 @@ export default function TokenRoutes() {
       await Promise.all([
         load({ includeCandidates: routeCandidatesLoaded }),
         loadRouteOverview(),
-        loadGovernanceSubjects(),
+        refreshGovernanceSubjects(),
       ]);
     } catch (e: any) {
       toast.error(e.message || '删除路由失败');
@@ -799,7 +801,7 @@ export default function TokenRoutes() {
     }
 
     try {
-      await Promise.all([load(), loadRouteOverview(), loadGovernanceSubjects()]);
+      await Promise.all([load(), loadRouteOverview(), refreshGovernanceSubjects()]);
     } catch (e: any) {
       toast.error(e?.message || '路由策略已保存，但刷新列表失败');
     }
@@ -991,7 +993,7 @@ export default function TokenRoutes() {
     let list = sortedRoutes;
 
     if (showOnlyManualRoutes) {
-      list = list.filter((route) => isExplicitGroupRoute(route));
+      list = list.filter((route) => isManualGovernedRoute(route));
     }
 
     if (activeGroupFilter === '__all__') {
@@ -1220,11 +1222,11 @@ export default function TokenRoutes() {
       setRunningGovernanceRecovery(true);
       const res = await governanceApi.runRouteGovernanceRecoveryPass({ limit: 50, includeProbing: true });
       toast.success(
-        `恢复轮转已执行（扫描 ${res.scanned} 条，转入复测 ${res.promotedToProbing} 条，恢复 ${res.restored} 条）`,
+        `到期治理已处理（扫描 ${res.scanned} 条，转入主动复测 ${res.promotedToProbing} 条，被动恢复 ${res.restored} 条）`,
       );
       await Promise.all([
         loadRouteOverview(),
-        loadGovernanceSubjects(),
+        refreshGovernanceSubjects(),
       ]);
     } catch (error: any) {
       toast.error(error?.message || '执行恢复轮转失败');
@@ -1334,6 +1336,41 @@ export default function TokenRoutes() {
       toast.error(e.message || '保存通道优先级失败，已回滚');
     } finally {
       setSavingPriorityByRoute((prev) => ({ ...prev, [routeId]: false }));
+    }
+  };
+
+  const handleProbeRouteChannels = async (route: RouteSummaryRow) => {
+    if (!isRouteExactModel(route) || route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true) {
+      toast.error('当前路由不支持批量探测通道');
+      return;
+    }
+    setProbingRouteId(route.id);
+    try {
+      const result = await api.probeRouteChannels(route.id, {
+        limit: 80,
+        autoGovernance: true,
+      }) as RouteProbeResponse;
+      setRouteProbeSummaryByRouteId((prev) => ({ ...prev, [route.id]: result }));
+      await Promise.all([
+        loadRouteOverview(),
+        refreshGovernanceSubjects(),
+      ]);
+      const unavailablePreview = result.items
+        .filter((item) => !item.available)
+        .slice(0, 2)
+        .map((item) => `${item.siteName}${item.tokenName ? `/${item.tokenName}` : ''}`)
+        .join('、');
+      if (result.unavailableCount > 0) {
+        toast.error(
+          `探测完成：可用 ${result.availableCount}/${result.total}，已隔离 ${result.items.filter((item) => item.governanceAction === 'suppressed').length} 个${unavailablePreview ? `，异常通道 ${unavailablePreview}` : ''}`,
+        );
+      } else {
+        toast.success(`探测完成：${route.modelPattern} 的 ${result.total} 个通道均可用`);
+      }
+    } catch (error: any) {
+      toast.error(error?.message || '批量探测通道失败');
+    } finally {
+      setProbingRouteId(null);
     }
   };
 
@@ -1460,6 +1497,9 @@ export default function TokenRoutes() {
     [],
   );
   const stableAddChannel = useCallback((routeId: number) => setAddChannelModalRouteId(routeId), []);
+  const handleProbeRouteChannelsRef = useRef(handleProbeRouteChannels);
+  handleProbeRouteChannelsRef.current = handleProbeRouteChannels;
+  const stableProbeRouteChannels = useCallback((route: RouteSummaryRow) => handleProbeRouteChannelsRef.current(route), []);
   const stableToggleSourceGroup = useCallback(
     (groupKey: string) => setExpandedSourceGroupMap((prev) => ({ ...prev, [groupKey]: !prev[groupKey] })),
     [],
@@ -1501,7 +1541,7 @@ export default function TokenRoutes() {
     await Promise.all([
       load({ includeCandidates: routeCandidatesLoaded }),
       loadRouteOverview(),
-      loadGovernanceSubjects(),
+      refreshGovernanceSubjects(),
     ]);
   };
 
@@ -1568,19 +1608,6 @@ export default function TokenRoutes() {
           </button>
 
           <button
-            onClick={handleRebuild}
-            disabled={rebuilding}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-          >
-            {rebuilding ? (
-              <><span className="spinner spinner-sm" /> {tr('重建中...')}</>
-            ) : (
-              tr('自动重建')
-            )}
-          </button>
-
-          <button
             onClick={handleResetRoutingRuntime}
             disabled={resettingRoutingRuntime}
             className="btn btn-ghost"
@@ -1623,7 +1650,7 @@ export default function TokenRoutes() {
 
       {showOnlyManualRoutes ? (
         <div className="info-tip" style={{ marginBottom: 12 }}>
-          {tr('当前仅显示你手工创建的群组路由；如需排查系统自动生成的精确路由，请到筛选面板切换为“显示全部路由”。')}
+          {tr('当前仅显示手工治理路由；如需排查系统自动生成或系统治理路由，请到筛选面板切换为“显示全部路由”。')}
         </div>
       ) : null}
 
@@ -1665,7 +1692,7 @@ export default function TokenRoutes() {
             onClick={handleRunGovernanceRecoveryPass}
             disabled={runningGovernanceRecovery}
           >
-            {runningGovernanceRecovery ? '恢复中…' : '执行恢复轮转'}
+            {runningGovernanceRecovery ? '处理中…' : '处理到期治理'}
           </button>
           <button
             className="btn btn-ghost"
@@ -1677,7 +1704,7 @@ export default function TokenRoutes() {
         </div>
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
           {routeOverview
-            ? `汇总：路由 ${routeOverview.routeSummary.enabledRouteCount}/${routeOverview.routeSummary.routeCount} 启用，通道 ${routeOverview.routeSummary.enabledChannelCount}/${routeOverview.routeSummary.channelCount} 启用；系统隔离 ${governanceOverview.total} 条，其中复测中 ${governanceOverview.probing} 条。`
+            ? `汇总：路由 ${routeOverview.routeSummary.enabledRouteCount}/${routeOverview.routeSummary.routeCount} 启用，通道 ${routeOverview.routeSummary.enabledChannelCount}/${routeOverview.routeSummary.channelCount} 启用；系统隔离 ${governanceOverview.total} 条，其中主动复测中 ${governanceOverview.probing} 条。到期治理处理不会全量扫站点或模型。`
             : '正在加载轻量治理概览。'}
         </div>
 
@@ -2089,6 +2116,9 @@ export default function TokenRoutes() {
                     explicitGroupSourceHealth={explicitGroupSourceHealthByRouteId[route.id] || null}
                     onCreateTokenForMissing={stableCreateTokenForMissing}
                     onAddChannel={stableAddChannel}
+                    onProbeChannels={stableProbeRouteChannels}
+                    probingChannels={probingRouteId === route.id}
+                    routeProbeSummary={routeProbeSummaryByRouteId[route.id] || null}
                     expandedSourceGroupMap={expandedSourceGroupMap}
                     onToggleSourceGroup={stableToggleSourceGroup}
                   />
@@ -2126,6 +2156,9 @@ export default function TokenRoutes() {
               explicitGroupSourceHealth={explicitGroupSourceHealthByRouteId[route.id] || null}
               onCreateTokenForMissing={stableCreateTokenForMissing}
               onAddChannel={stableAddChannel}
+              onProbeChannels={stableProbeRouteChannels}
+              probingChannels={probingRouteId === route.id}
+              routeProbeSummary={routeProbeSummaryByRouteId[route.id] || null}
               expandedSourceGroupMap={expandedSourceGroupMap}
               onToggleSourceGroup={stableToggleSourceGroup}
             />
@@ -2156,13 +2189,13 @@ export default function TokenRoutes() {
             <div className="empty-state-title">
               {routeSummaries.length === 0
                 ? '暂无路由'
-                : (showOnlyManualRoutes ? '当前没有手工群组' : '没有匹配的路由')}
+                : (showOnlyManualRoutes ? '当前没有手工治理路由' : '没有匹配的路由')}
             </div>
             <div className="empty-state-desc">
               {routeSummaries.length === 0
-                ? '点击"自动重建"可按当前模型可用性生成路由。'
+                ? '请先同步模型或补齐连接配置；系统精确路由会按当前模型可用性自动生成。'
                 : (showOnlyManualRoutes
-                  ? '当前视图仅显示你手工创建的群组路由；切换到“显示全部路由”可查看系统自动生成的精确路由。'
+                  ? '当前视图仅显示手工治理路由；切换到“显示全部路由”可查看系统自动生成或系统治理路由。'
                   : '请调整品牌筛选、搜索词或排序条件。')}
             </div>
           </div>

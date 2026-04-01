@@ -132,6 +132,7 @@ export const tokenRoutes = sqliteTable('token_routes', {
   displayName: text('display_name'),
   displayIcon: text('display_icon'),
   routeMode: text('route_mode').default('pattern'),
+  probePolicy: text('probe_policy').notNull().default('system'),
   modelMapping: text('model_mapping'), // JSON
   decisionSnapshot: text('decision_snapshot'), // JSON
   decisionRefreshedAt: text('decision_refreshed_at'),

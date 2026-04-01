@@ -8,7 +8,7 @@ import { tr } from '../../i18n.js';
 import { getInitialVisibleCount, getNextVisibleCount } from '../helpers/progressiveRender.js';
 import type { MissingTokenModelsByName } from '../helpers/routeMissingTokenHints.js';
 import type { RouteModelCandidatesByModelName } from '../helpers/routeModelCandidatesIndex.js';
-import type { RouteIconOption, RouteMode, RouteSummaryRow } from './types.js';
+import type { RouteIconOption, RouteMode, RouteProbePolicy, RouteSummaryRow } from './types.js';
 import {
   ROUTE_ICON_NONE_VALUE,
   getModelPatternError,
@@ -24,6 +24,7 @@ import {
 
 type RouteEditorForm = {
   routeMode: RouteMode;
+  probePolicy: RouteProbePolicy;
   displayName: string;
   displayIcon: string;
   modelPattern: string;
@@ -570,6 +571,40 @@ export default function ManualRoutePanel({
 
           {routeMode === 'explicit_group' ? (
             <>
+              <div
+                style={{
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '12px 14px',
+                  background: 'var(--color-bg-card)',
+                  display: 'grid',
+                  gap: 10,
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)' }}>
+                  {tr('治理方式')}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  {tr('手工治理路由会参与手动探测后的自动复测；系统治理路由不会进入这条自动探测链。')}
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className={`filter-chip ${form.probePolicy === 'manual' ? 'active' : ''}`}
+                    onClick={() => setForm((current) => ({ ...current, probePolicy: 'manual' }))}
+                  >
+                    <span className="filter-chip-label">{tr('手工治理')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`filter-chip ${form.probePolicy === 'system' ? 'active' : ''}`}
+                    onClick={() => setForm((current) => ({ ...current, probePolicy: 'system' }))}
+                  >
+                    <span className="filter-chip-label">{tr('系统治理')}</span>
+                  </button>
+                </div>
+              </div>
+
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12 }}>
                 <label style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{tr('对外模型名')}</span>
@@ -716,6 +751,40 @@ export default function ManualRoutePanel({
             </>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div
+                style={{
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '12px 14px',
+                  background: 'var(--color-bg-card)',
+                  display: 'grid',
+                  gap: 10,
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)' }}>
+                  {tr('治理方式')}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  {tr('只有手工治理路由会参与手动探测后的自动复测；系统治理路由保持系统自动生成与被动恢复模式。')}
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className={`filter-chip ${form.probePolicy === 'manual' ? 'active' : ''}`}
+                    onClick={() => setForm((current) => ({ ...current, probePolicy: 'manual' }))}
+                  >
+                    <span className="filter-chip-label">{tr('手工治理')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`filter-chip ${form.probePolicy === 'system' ? 'active' : ''}`}
+                    onClick={() => setForm((current) => ({ ...current, probePolicy: 'system' }))}
+                  >
+                    <span className="filter-chip-label">{tr('系统治理')}</span>
+                  </button>
+                </div>
+              </div>
+
               {!editingLegacyPatternGroup && (
                 <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
                   <button

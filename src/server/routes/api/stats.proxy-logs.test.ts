@@ -656,6 +656,81 @@ describe('stats proxy logs routes', () => {
     expect(detailBody.clientAppName).toBe(null);
   });
 
+  it('only counts hit and stale cacheSavedCost in summary even if miss rows carry legacy values', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'cache-summary-site',
+      url: 'https://cache-summary.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'cache-summary-user',
+      accessToken: 'cache-summary-token',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.proxyLogs).values([
+      {
+        accountId: account.id,
+        modelRequested: 'gpt-4.1',
+        modelActual: 'gpt-4.1',
+        status: 'success',
+        cacheStatus: 'miss',
+        cacheSavedCost: 9.99,
+        totalTokens: 100,
+        estimatedCost: 0.1,
+        createdAt: formatUtcSqlDateTime(new Date('2026-03-09T13:00:00.000Z')),
+      },
+      {
+        accountId: account.id,
+        modelRequested: 'gpt-4.1',
+        modelActual: 'gpt-4.1',
+        status: 'success',
+        cacheStatus: 'hit',
+        cacheSavedCost: 0.22,
+        totalTokens: 50,
+        estimatedCost: 0,
+        createdAt: formatUtcSqlDateTime(new Date('2026-03-09T13:01:00.000Z')),
+      },
+      {
+        accountId: account.id,
+        modelRequested: 'gpt-4.1',
+        modelActual: 'gpt-4.1',
+        status: 'success',
+        cacheStatus: 'stale',
+        cacheSavedCost: 0.33,
+        totalTokens: 60,
+        estimatedCost: 0,
+        createdAt: formatUtcSqlDateTime(new Date('2026-03-09T13:02:00.000Z')),
+      },
+    ]).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/stats/proxy-logs?limit=50&offset=0&status=all',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      summary: {
+        cacheHitCount: number;
+        cacheMissCount: number;
+        cacheStaleCount: number;
+        cacheSavedCost: number;
+        cacheSavedTokens: number;
+      };
+    };
+
+    expect(body.summary).toMatchObject({
+      cacheHitCount: 1,
+      cacheMissCount: 1,
+      cacheStaleCount: 1,
+      cacheSavedCost: 0.55,
+      cacheSavedTokens: 110,
+    });
+  });
+
   it('returns proxy log summary even when legacy databases do not have cache columns', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'legacy-cache-site',
@@ -740,4 +815,5 @@ describe('stats proxy logs routes', () => {
       await legacyApp.close();
     }
   });
+
 });

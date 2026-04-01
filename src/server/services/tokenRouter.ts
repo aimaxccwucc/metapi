@@ -636,7 +636,7 @@ function formatGovernanceReason(block: CandidateGovernanceBlock): string {
     model_unsupported: '模型不可用',
     manual_recheck_needed: '待复测',
   };
-  const detail = block.reasonDetail?.trim();
+  const detail = block.reasonDetail?.replace('[manual_route_probe]', '').trim();
   const stateLabel = block.state === 'probing' ? '系统复测中' : '系统隔离';
   const base = `${stateLabel}：${subjectLabelMap[block.subjectType] || block.subjectType} / ${reasonLabelMap[block.reasonCode] || block.reasonCode}`;
   return detail ? `${base}（${detail}）` : base;

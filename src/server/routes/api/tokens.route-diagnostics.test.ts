@@ -1,8 +1,30 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+const getModelsMock = vi.fn();
+const withSiteProxyRequestInitMock = vi.fn();
+const fetchMock = vi.fn();
+
+vi.mock('../../services/platforms/index.js', () => ({
+  getAdapter: () => ({
+    getModels: (...args: unknown[]) => getModelsMock(...args),
+  }),
+}));
+
+vi.mock('../../services/siteProxy.js', () => ({
+  withSiteProxyRequestInit: (...args: unknown[]) => withSiteProxyRequestInitMock(...args),
+}));
+
+vi.mock('undici', async () => {
+  const actual = await vi.importActual<typeof import('undici')>('undici');
+  return {
+    ...actual,
+    fetch: (...args: unknown[]) => fetchMock(...args),
+  };
+});
 
 type DbModule = typeof import('../../db/index.js');
 type TokenRouterModule = typeof import('../../services/tokenRouter.js');
@@ -68,7 +90,13 @@ describe('GET /api/routes/diagnostics', () => {
   });
 
   beforeEach(async () => {
+    getModelsMock.mockReset();
+    withSiteProxyRequestInitMock.mockReset();
+    fetchMock.mockReset();
+    withSiteProxyRequestInitMock.mockImplementation(async (_url: string, init: Record<string, unknown>) => init);
+
     await db.delete(schema.routeChannels).run();
+    await db.delete(schema.routingGovernanceStates).run();
     await db.delete(schema.routeGroupSources).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.tokenModelAvailability).run();
@@ -404,7 +432,8 @@ describe('GET /api/routes/diagnostics', () => {
     expect(recoveryResponse.json()).toMatchObject({
       success: true,
       scanned: 1,
-      promotedToProbing: 1,
+      promotedToProbing: 0,
+      restored: 1,
     });
 
     const subjectsResponse = await app.inject({
@@ -414,15 +443,8 @@ describe('GET /api/routes/diagnostics', () => {
     expect(subjectsResponse.statusCode).toBe(200);
     expect(subjectsResponse.json()).toMatchObject({
       success: true,
-      total: 1,
-      items: [
-        expect.objectContaining({
-          subjectType: 'token',
-          subjectId: token.id,
-          state: 'probing',
-          reasonCode: 'auth',
-        }),
-      ],
+      total: 0,
+      items: [],
     });
   });
 
@@ -479,5 +501,184 @@ describe('GET /api/routes/diagnostics', () => {
     expect(body.checkinTodo.sites[0]?.siteId).toBe(site.id);
     expect(body.checkinTodo.sites[0]?.siteBackoffBlocked).toBe(false);
     expect(body.checkinTodo.sites[0]?.sampleAccounts[0]?.checkinSnapshot?.status).toBe('manual_required');
+  });
+
+  it('probes route channels and writes governance suppression for unavailable tokens', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'probe-site',
+      url: 'https://probe-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'probe-user',
+      accessToken: 'probe-access',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-probe-token',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4.1',
+      probePolicy: 'manual',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gpt-4.1',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+      checkedAt: new Date().toISOString(),
+    }).run();
+
+    getModelsMock.mockResolvedValue(['gpt-4o']);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'model gpt-4.1 not found' },
+    }), {
+      status: 404,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/probe`,
+      payload: { limit: 20, autoGovernance: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      total: number;
+      availableCount: number;
+      unavailableCount: number;
+      failedCount: number;
+      items: Array<{
+        available: boolean;
+        governanceAction: string;
+        governanceReasonCode: string | null;
+      }>;
+    };
+    expect(body.total).toBe(1);
+    expect(body.availableCount).toBe(0);
+    expect(body.unavailableCount).toBe(1);
+    expect(body.failedCount).toBe(0);
+    expect(body.items[0]).toMatchObject({
+      available: false,
+      governanceAction: 'suppressed',
+      governanceReasonCode: 'model_unsupported',
+    });
+
+    const governance = await db.select().from(schema.routingGovernanceStates).all();
+    expect(governance).toHaveLength(1);
+    expect(governance[0]).toMatchObject({
+      subjectType: 'token',
+      subjectId: token.id,
+      modelName: 'gpt-4.1',
+      reasonCode: 'model_unsupported',
+      state: 'suppressed',
+    });
+    expect(governance[0]?.reasonDetail || '').toContain('[manual_route_probe]');
+  });
+
+  it('clears matching governance entries when a probed route channel becomes available again', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'restore-site',
+      url: 'https://restore-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'restore-user',
+      accessToken: 'restore-access',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'restore-token',
+      token: 'sk-restore-token',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4.1',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gpt-4.1',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+      checkedAt: new Date().toISOString(),
+    }).run();
+
+    await upsertRoutingGovernanceState({
+      subjectType: 'token',
+      subjectId: token.id,
+      modelName: 'gpt-4.1',
+      state: 'suppressed',
+      reasonCode: 'model_unsupported',
+      reasonDetail: 'old failure',
+      suppressUntil: new Date(Date.now() + 60_000).toISOString(),
+      probeAfter: new Date(Date.now() + 60_000).toISOString(),
+      lastFailureAt: new Date().toISOString(),
+    });
+
+    getModelsMock.mockResolvedValue(['gpt-4.1']);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/probe`,
+      payload: { limit: 20, autoGovernance: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      availableCount: number;
+      items: Array<{
+        available: boolean;
+        governanceAction: string;
+      }>;
+    };
+    expect(body.availableCount).toBe(1);
+    expect(body.items[0]).toMatchObject({
+      available: true,
+      governanceAction: 'cleared',
+    });
+
+    const governance = await db.select().from(schema.routingGovernanceStates).all();
+    expect(governance).toHaveLength(0);
   });
 });

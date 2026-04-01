@@ -321,4 +321,97 @@ describe('/api/models/marketplace', () => {
       probeClassification: 'supported',
     });
   });
+
+  it('uses route channel token credential when probing a route and applies governance', async () => {
+    const tokensRoutesModule = await import('./tokens.js');
+    const governanceModule = await import('../../services/routingGovernanceService.js');
+    const routeApp = Fastify();
+    await routeApp.register(tokensRoutesModule.tokensRoutes);
+
+    try {
+      const site = await db.insert(schema.sites).values({
+        name: 'route-probe-site',
+        url: 'https://route-probe.example.com',
+        platform: 'new-api',
+        status: 'active',
+      }).returning().get();
+
+      const account = await db.insert(schema.accounts).values({
+        siteId: site.id,
+        username: 'route-user',
+        accessToken: 'session-token',
+        status: 'active',
+      }).returning().get();
+
+      const token = await db.insert(schema.accountTokens).values({
+        accountId: account.id,
+        name: 'scoped-token',
+        token: 'sk-route-probe',
+        enabled: true,
+        isDefault: false,
+        valueStatus: 'ready',
+      }).returning().get();
+
+      const route = await db.insert(schema.tokenRoutes).values({
+        modelPattern: 'gpt-4.1',
+        enabled: true,
+      }).returning().get();
+
+      await db.insert(schema.routeChannels).values({
+        routeId: route.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: 'gpt-4.1',
+        enabled: true,
+      }).run();
+
+      await db.insert(schema.modelAvailability).values({
+        accountId: account.id,
+        modelName: 'gpt-4.1',
+        available: true,
+      }).run();
+
+      getModelsMock.mockResolvedValue([]);
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({
+        error: { message: 'This token has no access to model gpt-4.1' },
+      }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      const response = await routeApp.inject({
+        method: 'POST',
+        url: `/api/routes/${route.id}/probe`,
+        payload: { autoGovernance: true },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json() as {
+        success: true;
+        unavailableCount: number;
+        items: Array<{
+          tokenId: number | null;
+          probeClassification: string | null;
+          governanceAction: string;
+          governanceReasonCode: string | null;
+        }>;
+      };
+      expect(body.success).toBe(true);
+      expect(body.unavailableCount).toBe(1);
+      expect(body.items[0]).toMatchObject({
+        tokenId: token.id,
+        probeClassification: 'credential',
+        governanceAction: 'suppressed',
+        governanceReasonCode: 'auth',
+      });
+      const authGovernance = await governanceModule.listActiveRoutingGovernanceStates({
+        subjectTypes: ['token'],
+        reasonCodes: ['auth'],
+        limit: 20,
+      });
+      expect(authGovernance.some((item) => item.subjectId === token.id)).toBe(true);
+    } finally {
+      await routeApp.close();
+    }
+  });
 });

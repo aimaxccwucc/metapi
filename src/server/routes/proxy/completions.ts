@@ -426,7 +426,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             billingDetails,
             clientContext,
             downstreamPath,
-            !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: estimatedCost } : null,
+            !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
           );
           if (responseCacheKey) {
             writeResponseCache(responseCacheKey, requestedModel, {

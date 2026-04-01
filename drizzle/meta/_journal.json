@@ -127,6 +127,20 @@
       "when": 1775044800000,
       "tag": "0018_routing_governance_states",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1775049046179,
+      "tag": "0019_proxy_logs_cache_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1775055609897,
+      "tag": "0020_clammy_supernaut",
+      "breakpoints": true
     }
   ]
 }

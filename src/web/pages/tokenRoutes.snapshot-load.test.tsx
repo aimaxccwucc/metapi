@@ -44,6 +44,14 @@ function collectText(node: ReactTestInstance): string {
   }).join('');
 }
 
+function findButtonByText(root: ReactTestInstance, text: string): ReactTestInstance {
+  return root.find((node) => (
+    node.type === 'button'
+    && typeof node.props.onClick === 'function'
+    && collectText(node).includes(text)
+  ));
+}
+
 async function flushMicrotasks() {
   await act(async () => {
     await Promise.resolve();
@@ -223,8 +231,16 @@ describe('TokenRoutes cached snapshot load', () => {
       await flushMicrotasks();
 
       expect(apiMock.getRouteOverview).toHaveBeenCalledTimes(1);
-      expect(apiMock.getRouteGovernanceSubjects).toHaveBeenCalledWith(200);
+      expect(apiMock.getRouteGovernanceSubjects).not.toHaveBeenCalled();
       expect(apiMock.getRouteDiagnostics).not.toHaveBeenCalled();
+
+      const expandGovernanceButton = findButtonByText(root.root, '展开隔离列表');
+      await act(async () => {
+        expandGovernanceButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.getRouteGovernanceSubjects).toHaveBeenCalledWith(200);
 
       // Expand the route card to see channel details with probability
       const expandBtn = root.root.find((node) =>

@@ -1177,6 +1177,7 @@ export async function rebuildTokenRoutesFromAvailability() {
     if (!route) {
       const inserted = await db.insert(schema.tokenRoutes).values({
         modelPattern: modelName,
+        probePolicy: 'system',
         routingStrategy: 'stable_first',
         enabled: true,
       }).run();

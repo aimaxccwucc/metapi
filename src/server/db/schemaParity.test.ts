@@ -110,6 +110,7 @@ describe('database schema parity', () => {
     expect(contract.tables.response_cache?.columns.estimated_cost?.logicalType).toBe('real');
     expect(contract.tables.response_cache?.columns.hit_count?.logicalType).toBe('integer');
     expect(contract.tables.routing_governance_states?.columns.reason_code?.logicalType).toBe('text');
+    expect(contract.tables.token_routes?.columns.probe_policy?.logicalType).toBe('text');
     expect(contract.indexes.some((index) => index.name === 'response_cache_expires_at_idx')).toBe(true);
     expect(contract.indexes.some((index) => index.name === 'response_cache_model_idx')).toBe(true);
     expect(contract.uniques.some((unique) => unique.name === 'response_cache_key_idx')).toBe(true);
@@ -120,6 +121,8 @@ describe('database schema parity', () => {
     expect(mysqlBootstrap).toContain('CREATE TABLE IF NOT EXISTS `routing_governance_states`');
     expect(
       mysqlUpgrade.includes('CREATE TABLE IF NOT EXISTS `routing_governance_states`')
+      || mysqlUpgrade.includes('ALTER TABLE `proxy_logs` ADD COLUMN `cache_status`')
+      || mysqlUpgrade.includes('ALTER TABLE `token_routes` ADD COLUMN `probe_policy`')
       || mysqlUpgrade.includes('-- no schema changes detected for mysql'),
     ).toBe(true);
     expect(postgresBootstrap).toContain('CREATE TABLE IF NOT EXISTS "response_cache"');
@@ -128,6 +131,8 @@ describe('database schema parity', () => {
     expect(postgresBootstrap).toContain('CREATE TABLE IF NOT EXISTS "routing_governance_states"');
     expect(
       postgresUpgrade.includes('CREATE TABLE IF NOT EXISTS "routing_governance_states"')
+      || postgresUpgrade.includes('ALTER TABLE "proxy_logs" ADD COLUMN "cache_status"')
+      || postgresUpgrade.includes('ALTER TABLE "token_routes" ADD COLUMN "probe_policy"')
       || postgresUpgrade.includes('-- no schema changes detected for postgres'),
     ).toBe(true);
   });

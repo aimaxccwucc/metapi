@@ -987,7 +987,7 @@ export async function handleChatSurfaceRequest(
           successfulUpstreamPath,
           clientContext,
           downstreamApiKeyId,
-          !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: estimatedCost } : null,
+          !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
         );
 
         if (responseCacheKey && !isStream) {

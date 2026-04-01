@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import type { BrandInfo } from '../../components/BrandIcon.js';
+import type { RouteProbeResponse } from '../../api.js';
 
 export type RouteSortBy = 'modelPattern' | 'channelCount';
 export type RouteSortDir = 'asc' | 'desc';
@@ -7,6 +8,7 @@ export type GroupFilter = null | '__all__' | number;
 export type RouteRoutingStrategy = 'weighted' | 'round_robin' | 'stable_first';
 export type RouteRowKind = 'persisted' | 'zero_channel';
 export type RouteMode = 'pattern' | 'explicit_group';
+export type RouteProbePolicy = 'system' | 'manual';
 
 export type RouteChannelDraft = {
   accountId: number;
@@ -52,6 +54,7 @@ export type RouteRow = {
   displayName?: string | null;
   displayIcon?: string | null;
   routeMode?: RouteMode | null;
+  probePolicy?: RouteProbePolicy | null;
   sourceRouteIds?: number[];
   modelMapping?: string | null;
   routingStrategy?: RouteRoutingStrategy | null;
@@ -67,6 +70,7 @@ export type RouteSummaryRow = {
   displayName: string | null;
   displayIcon: string | null;
   routeMode?: RouteMode | null;
+  probePolicy?: RouteProbePolicy | null;
   sourceRouteIds?: number[];
   modelMapping: string | null;
   routingStrategy?: RouteRoutingStrategy | null;
@@ -204,3 +208,5 @@ export type ExplicitGroupSourceHealthSummary = {
   missingTokenRoutes: string[];
   missingGroupRoutes: string[];
 };
+
+export type RouteProbeSummary = RouteProbeResponse | null;

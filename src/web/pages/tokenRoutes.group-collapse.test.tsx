@@ -9,6 +9,7 @@ const { apiMock, getBrandMock } = vi.hoisted(() => ({
   apiMock: {
     getRoutesSummary: vi.fn(),
     getRouteChannels: vi.fn(),
+    probeRouteChannels: vi.fn(),
     getModelTokenCandidates: vi.fn(),
     testMarketplaceModelAvailability: vi.fn(),
     getRouteDecisionsBatch: vi.fn(),
@@ -117,6 +118,18 @@ describe('TokenRoutes grouped source models', () => {
     getBrandMock.mockReturnValue(null);
     apiMock.getModelTokenCandidates.mockResolvedValue({ models: {} });
     apiMock.getRouteChannels.mockResolvedValue([]);
+    apiMock.probeRouteChannels.mockResolvedValue({
+      success: true,
+      routeId: 0,
+      routeModelPattern: '',
+      probedModel: '',
+      autoGovernance: true,
+      total: 0,
+      availableCount: 0,
+      unavailableCount: 0,
+      failedCount: 0,
+      items: [],
+    });
     apiMock.getRouteDecisionsBatch.mockResolvedValue({ decisions: {} });
     apiMock.getRouteWideDecisionsBatch.mockResolvedValue({ decisions: {} });
     apiMock.getRouteDiagnostics.mockResolvedValue({
@@ -1015,8 +1028,8 @@ describe('TokenRoutes grouped source models', () => {
       await flushMicrotasks();
 
       let normalizedText = collectText(root.root).replace(/\s+/g, '');
-      expect(normalizedText).toContain('当前仅显示你手工创建的群组路由');
-      expect(normalizedText).toContain('当前没有手工群组');
+      expect(normalizedText).toContain('当前仅显示手工治理路由');
+      expect(normalizedText).toContain('当前没有手工治理路由');
       expect(normalizedText).not.toContain('gpt-4o-mini');
 
       await switchToAllRoutes(root.root);
@@ -1024,7 +1037,7 @@ describe('TokenRoutes grouped source models', () => {
       normalizedText = collectText(root.root).replace(/\s+/g, '');
       expect(normalizedText).toContain('共1条路由');
       expect(normalizedText).toContain('gpt-4o-mini');
-      expect(normalizedText).not.toContain('当前没有手工群组');
+      expect(normalizedText).not.toContain('当前没有手工治理路由');
     } finally {
       root?.unmount();
     }
@@ -1606,6 +1619,111 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 
+  it('can probe exact-route channels from route card and show governance summary', async () => {
+    apiMock.getRoutesSummary.mockResolvedValue([
+      {
+        id: 11,
+        modelPattern: 'gpt-4.1',
+        displayName: null,
+        displayIcon: null,
+        modelMapping: null,
+        enabled: true,
+        routeMode: 'pattern',
+        sourceRouteIds: [],
+        channelCount: 2,
+        enabledChannelCount: 2,
+        siteNames: ['site-a'],
+        decisionSnapshot: null,
+        decisionRefreshedAt: null,
+      },
+    ]);
+    apiMock.getRouteChannels.mockResolvedValue([
+      {
+        id: 101,
+        accountId: 201,
+        tokenId: 301,
+        sourceModel: 'gpt-4.1',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+        manualOverride: false,
+        successCount: 0,
+        failCount: 0,
+        account: { username: 'tester' },
+        site: { id: 1, name: 'site-a', platform: 'new-api' },
+        token: { id: 301, name: 'token-a', accountId: 201, enabled: true, isDefault: true },
+      },
+    ]);
+    apiMock.probeRouteChannels.mockResolvedValue({
+      success: true,
+      routeId: 11,
+      routeModelPattern: 'gpt-4.1',
+      probedModel: 'gpt-4.1',
+      autoGovernance: true,
+      total: 1,
+      availableCount: 0,
+      unavailableCount: 1,
+      failedCount: 0,
+      items: [
+        {
+          channelId: 101,
+          accountId: 201,
+          accountName: 'tester',
+          siteId: 1,
+          siteName: 'site-a',
+          tokenId: 301,
+          tokenName: 'token-a',
+          sourceModel: 'gpt-4.1',
+          available: false,
+          reason: '当前凭证无权访问该模型',
+          probeClassification: 'credential',
+          probeEndpoint: 'chat',
+          latencyMs: 120,
+          detectionMethod: 'realtime_probe',
+          governanceAction: 'suppressed',
+          governanceReasonCode: 'auth',
+        },
+      ],
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+      await switchToAllRoutes(root.root);
+
+      const card = root.root.find((node) => (
+        node.type === 'div'
+        && String(node.props.className || '').includes('route-card-collapsed')
+        && collectText(node).includes('gpt-4.1')
+      ));
+      await act(async () => {
+        card.props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '探测通道').props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.probeRouteChannels).toHaveBeenCalledWith(11, { limit: 80, autoGovernance: true });
+      expect(collectText(root.root)).toContain('已自动写入治理');
+      expect(collectText(root.root)).toContain('已隔离');
+      expect(collectText(root.root)).toContain('当前凭证无权访问该模型');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('saves explicit groups with auto brand icon disabled as a no-icon sentinel', async () => {
     apiMock.getRoutesSummary.mockResolvedValue([
       {
@@ -1691,7 +1809,7 @@ describe('TokenRoutes grouped source models', () => {
         {
           id: 71, modelPattern: 'claude-opus-4-6', displayName: 'claude-opus-4-6',
           displayIcon: null, modelMapping: null, enabled: true,
-          routeMode: 'explicit_group', sourceRouteIds: [11],
+          routeMode: 'explicit_group', probePolicy: 'manual', sourceRouteIds: [11],
           channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
           decisionSnapshot: null, decisionRefreshedAt: null,
         },
@@ -1715,7 +1833,7 @@ describe('TokenRoutes grouped source models', () => {
         searchInput.props.onChange({ target: { value: 'not-match' } });
       });
       await flushMicrotasks();
-      expect(collectText(root.root)).toContain('当前没有手工群组');
+      expect(collectText(root.root)).toContain('当前没有手工治理路由');
 
       await act(async () => {
         findButtonByText(root.root, '新建群组').props.onClick();
@@ -1824,7 +1942,7 @@ describe('TokenRoutes grouped source models', () => {
         {
           id: 21, modelPattern: 'claude-opus-4-6', displayName: 'claude-opus-4-6',
           displayIcon: '', modelMapping: null, enabled: true,
-          routeMode: 'explicit_group', sourceRouteIds: [11],
+          routeMode: 'explicit_group', probePolicy: 'manual', sourceRouteIds: [11],
           channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a'],
           decisionSnapshot: null, decisionRefreshedAt: null,
         },
@@ -1847,7 +1965,7 @@ describe('TokenRoutes grouped source models', () => {
         {
           id: 21, modelPattern: 'claude-opus-4-6', displayName: 'claude-opus-4-6',
           displayIcon: '', modelMapping: null, enabled: true,
-          routeMode: 'explicit_group', sourceRouteIds: [11, 12],
+          routeMode: 'explicit_group', probePolicy: 'manual', sourceRouteIds: [11, 12],
           channelCount: 2, enabledChannelCount: 2, siteNames: ['site-a', 'site-b'],
           decisionSnapshot: null, decisionRefreshedAt: null,
         },
@@ -1931,13 +2049,13 @@ describe('TokenRoutes grouped source models', () => {
         channelCount: 0, enabledChannelCount: 0, siteNames: ['site-b'],
         decisionSnapshot: null, decisionRefreshedAt: null,
       },
-      {
-        id: 21, modelPattern: 'claude-opus-4-6', displayName: 'claude-opus-4-6',
-        displayIcon: '', modelMapping: null, enabled: true,
-        routeMode: 'explicit_group', sourceRouteIds: [11, 12],
-        channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a', 'site-b'],
-        decisionSnapshot: null, decisionRefreshedAt: null,
-      },
+        {
+          id: 21, modelPattern: 'claude-opus-4-6', displayName: 'claude-opus-4-6',
+          displayIcon: '', modelMapping: null, enabled: true,
+          routeMode: 'explicit_group', probePolicy: 'manual', sourceRouteIds: [11, 12],
+          channelCount: 1, enabledChannelCount: 1, siteNames: ['site-a', 'site-b'],
+          decisionSnapshot: null, decisionRefreshedAt: null,
+        },
     ]);
     apiMock.getModelTokenCandidates.mockResolvedValue({
       models: {
@@ -1994,13 +2112,13 @@ describe('TokenRoutes grouped source models', () => {
         channelCount: 6, enabledChannelCount: 6, siteNames: ['Wong'],
         decisionSnapshot: null, decisionRefreshedAt: null,
       },
-      {
-        id: 21, modelPattern: 'claude-haiku-proxy', displayName: 'claude-haiku-proxy',
-        displayIcon: '', modelMapping: null, enabled: true,
-        routeMode: 'explicit_group', sourceRouteIds: [11],
-        channelCount: 6, enabledChannelCount: 6, siteNames: ['Wong'],
-        decisionSnapshot: null, decisionRefreshedAt: null,
-      },
+        {
+          id: 21, modelPattern: 'claude-haiku-proxy', displayName: 'claude-haiku-proxy',
+          displayIcon: '', modelMapping: null, enabled: true,
+          routeMode: 'explicit_group', probePolicy: 'manual', sourceRouteIds: [11],
+          channelCount: 6, enabledChannelCount: 6, siteNames: ['Wong'],
+          decisionSnapshot: null, decisionRefreshedAt: null,
+        },
     ]);
     apiMock.getRouteChannels.mockResolvedValue([
       {

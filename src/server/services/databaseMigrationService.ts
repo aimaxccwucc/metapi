@@ -453,7 +453,7 @@ function buildStatements(snapshot: BackupSnapshot): InsertStatement[] {
   for (const row of snapshot.accounts.tokenRoutes) {
     statements.push({
       table: 'token_routes',
-      columns: ['id', 'model_pattern', 'display_name', 'display_icon', 'model_mapping', 'route_mode', 'decision_snapshot', 'decision_refreshed_at', 'routing_strategy', 'enabled', 'created_at', 'updated_at'],
+      columns: ['id', 'model_pattern', 'display_name', 'display_icon', 'model_mapping', 'route_mode', 'probe_policy', 'decision_snapshot', 'decision_refreshed_at', 'routing_strategy', 'enabled', 'created_at', 'updated_at'],
       values: [
         asNumber(row.id, 0),
         asNullableString(row.modelPattern),
@@ -461,6 +461,7 @@ function buildStatements(snapshot: BackupSnapshot): InsertStatement[] {
         asNullableString(row.displayIcon),
         asNullableString(row.modelMapping),
         asNullableString(row.routeMode) ?? 'pattern',
+        asNullableString((row as { probePolicy?: string | null }).probePolicy) ?? 'system',
         asNullableString(row.decisionSnapshot),
         asNullableString(row.decisionRefreshedAt),
         asNullableString(row.routingStrategy),

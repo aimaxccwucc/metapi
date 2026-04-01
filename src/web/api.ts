@@ -605,6 +605,7 @@ export type RouteSummaryRow = {
   displayName: string | null;
   displayIcon: string | null;
   routeMode: 'pattern' | 'explicit_group';
+  probePolicy: 'system' | 'manual';
   sourceRouteIds: number[];
   modelMapping: string | null;
   routingStrategy: string;
@@ -644,6 +645,38 @@ export type RouteGovernanceRecoveryPassResponse = {
     action: 'promoted_to_probing' | 'already_probing';
     state: 'suppressed' | 'probing';
   }>;
+};
+
+export type RouteProbeItem = {
+  channelId: number;
+  accountId: number;
+  accountName: string | null;
+  siteId: number;
+  siteName: string;
+  tokenId: number | null;
+  tokenName: string | null;
+  sourceModel: string | null;
+  available: boolean;
+  reason: string;
+  probeClassification: 'supported' | 'model_unavailable' | 'credential' | 'protocol_mismatch' | 'inconclusive' | null;
+  probeEndpoint: string | null;
+  latencyMs: number | null;
+  detectionMethod: 'model_list' | 'realtime_probe' | 'unknown' | 'probe_failed';
+  governanceAction: 'suppressed' | 'cleared' | 'none';
+  governanceReasonCode: string | null;
+};
+
+export type RouteProbeResponse = {
+  success: true;
+  routeId: number;
+  routeModelPattern: string;
+  probedModel: string;
+  autoGovernance: boolean;
+  total: number;
+  availableCount: number;
+  unavailableCount: number;
+  failedCount: number;
+  items: RouteProbeItem[];
 };
 
 export type RuntimeOverview = {
@@ -1036,6 +1069,12 @@ export const api = {
   runRouteGovernanceRecoveryPass: (data?: { limit?: number }) =>
     request('/api/routes/governance/recovery-pass', { method: 'POST', body: JSON.stringify(data || {}) }) as Promise<RouteGovernanceRecoveryPassResponse>,
   getRouteChannels: (routeId: number) => request(`/api/routes/${routeId}/channels`),
+  probeRouteChannels: (routeId: number, data?: { limit?: number; autoGovernance?: boolean }) =>
+    request(`/api/routes/${routeId}/probe`, {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+      timeoutMs: 60_000,
+    }) as Promise<RouteProbeResponse>,
   batchAddChannels: (routeId: number, channels: Array<{ accountId: number; tokenId?: number; sourceModel?: string }>) =>
     request(`/api/routes/${routeId}/channels/batch`, { method: 'POST', body: JSON.stringify({ channels }) }),
   addRoute: (data: any) => request('/api/routes', { method: 'POST', body: JSON.stringify(data) }),

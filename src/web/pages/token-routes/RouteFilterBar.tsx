@@ -68,7 +68,7 @@ function ActiveFilterSummary({
   activeEndpointType,
 }: Pick<RouteFilterBarProps, 'showOnlyManualRoutes' | 'activeBrand' | 'activeSite' | 'activeGroupFilter' | 'activeEndpointType'>) {
   const tags: string[] = [];
-  if (showOnlyManualRoutes) tags.push('视图=只看我创建的');
+  if (showOnlyManualRoutes) tags.push('视图=只看手工治理');
   if (activeBrand) tags.push(`品牌=${activeBrand === '__other__' ? '其他' : activeBrand}`);
   if (activeSite) tags.push(`站点=${activeSite}`);
   if (activeGroupFilter === '__all__') tags.push('群组=全部');
@@ -134,7 +134,7 @@ export default function RouteFilterBar(props: RouteFilterBarProps) {
           <FilterRow label={tr('视图')}>
             <FilterChip
               active={showOnlyManualRoutes}
-              label={tr('只看我创建的')}
+              label={tr('只看手工治理')}
               icon={<span style={{ fontSize: 10 }}>★</span>}
               onClick={() => setShowOnlyManualRoutes(true)}
             />

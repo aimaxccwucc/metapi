@@ -677,6 +677,18 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "cache_status": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "cache_saved_cost": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": "0",
+          "primaryKey": false
         }
       }
     },
@@ -1482,6 +1494,12 @@
           "logicalType": "text",
           "notNull": false,
           "defaultValue": "'pattern'",
+          "primaryKey": false
+        },
+        "probe_policy": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'system'",
           "primaryKey": false
         }
       }

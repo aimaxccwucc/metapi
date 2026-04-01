@@ -331,6 +331,8 @@ export async function completeRoutingGovernanceProbe(
     lastProbeMessage?: string | null;
     suppressUntil?: string | null;
     probeAfter?: string | null;
+    lastSuccessAt?: string | null;
+    lastFailureAt?: string | null;
     successCountDelta?: number;
     failureCountDelta?: number;
   },
@@ -357,6 +359,8 @@ export async function completeRoutingGovernanceProbe(
       lastProbeMessage: input.lastProbeMessage ?? null,
       suppressUntil: input.suppressUntil ?? existing.suppressUntil,
       probeAfter: input.probeAfter ?? existing.probeAfter,
+      lastSuccessAt: input.lastSuccessAt ?? existing.lastSuccessAt,
+      lastFailureAt: input.lastFailureAt ?? existing.lastFailureAt,
       failureCount: Math.max(0, (existing.failureCount ?? 0) + (input.failureCountDelta ?? 0)),
       successCount: Math.max(0, (existing.successCount ?? 0) + (input.successCountDelta ?? 0)),
       updatedAt: nowIso(),

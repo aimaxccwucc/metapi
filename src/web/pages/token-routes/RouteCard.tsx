@@ -26,6 +26,7 @@ import type {
   MissingTokenGroupRouteSiteActionItem,
   RouteRoutingStrategy,
   ExplicitGroupSourceHealthSummary,
+  RouteProbeSummary,
 } from './types.js';
 import type { RouteCandidateView, RouteTokenOption } from '../helpers/routeModelCandidatesIndex.js';
 import { SortableChannelRow } from './SortableChannelRow.js';
@@ -70,6 +71,9 @@ type RouteCardProps = {
   onCreateTokenForMissing: (accountId: number, modelName: string) => void;
   // Add channel
   onAddChannel: (routeId: number) => void;
+  onProbeChannels: (route: RouteSummaryRow) => void;
+  probingChannels: boolean;
+  routeProbeSummary?: RouteProbeSummary;
   // Source group expansion
   expandedSourceGroupMap: Record<string, boolean>;
   onToggleSourceGroup: (groupKey: string) => void;
@@ -218,6 +222,9 @@ function RouteCardInner({
   explicitGroupSourceHealth,
   onCreateTokenForMissing,
   onAddChannel,
+  onProbeChannels,
+  probingChannels,
+  routeProbeSummary,
   expandedSourceGroupMap,
   onToggleSourceGroup,
 }: RouteCardProps) {
@@ -273,7 +280,7 @@ function RouteCardInner({
       ? {
         tone: 'badge-warning' as const,
         badges: [tr('当前无通道')],
-        detail: tr('该路由暂未生成可用通道，通常需要补充 Key、模型支持或执行自动重建'),
+        detail: tr('该路由暂未生成可用通道，通常需要补充 Key、修正模型支持或手动维护通道'),
       }
       : null);
 
@@ -624,6 +631,83 @@ function RouteCardInner({
         </div>
       )}
 
+      {!readOnlyRoute && exactRoute ? (
+        <div
+          style={{
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-sm)',
+            padding: '10px 12px',
+            background: 'var(--color-bg-card)',
+            display: 'grid',
+            gap: 8,
+            marginBottom: 12,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span className="badge badge-info" style={{ fontSize: 10 }}>{tr('通道探测')}</span>
+              {routeProbeSummary ? (
+                <>
+                  <span className="badge badge-success" style={{ fontSize: 10 }}>
+                    {`可用 ${routeProbeSummary.availableCount}/${routeProbeSummary.total}`}
+                  </span>
+                  {routeProbeSummary.unavailableCount > 0 ? (
+                    <span className="badge badge-warning" style={{ fontSize: 10 }}>
+                      {`不可用 ${routeProbeSummary.unavailableCount}`}
+                    </span>
+                  ) : null}
+                  {routeProbeSummary.autoGovernance ? (
+                    <span className="badge badge-muted" style={{ fontSize: 10 }}>{tr('已自动写入治理')}</span>
+                  ) : null}
+                </>
+              ) : (
+                <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                  {tr('对当前精确模型路由的已启用通道发起最小请求探测，帮助快速识别不可用通道。')}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => onProbeChannels(route)}
+              className="btn btn-ghost"
+              disabled={probingChannels}
+              style={{ fontSize: 12, padding: '6px 10px', border: '1px solid var(--color-border)' }}
+            >
+              {probingChannels ? tr('探测中...') : tr('探测通道')}
+            </button>
+          </div>
+          {routeProbeSummary?.items?.length ? (
+            <div style={{ display: 'grid', gap: 6 }}>
+              <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                {tr('探测摘要仅保留在当前页面；隔离/恢复治理状态会持久化到数据库。')}
+              </div>
+              {routeProbeSummary.items.slice(0, 4).map((item) => (
+                <div key={item.channelId} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                  <span className={`badge ${item.available ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: 10 }}>
+                    {item.available ? tr('可用') : tr('不可用')}
+                  </span>
+                  <code style={{ fontSize: 11 }}>{item.siteName}</code>
+                  {item.tokenName ? (
+                    <span className="badge badge-muted" style={{ fontSize: 10 }}>{item.tokenName}</span>
+                  ) : null}
+                  {item.governanceAction === 'suppressed' ? (
+                    <span className="badge badge-error" style={{ fontSize: 10 }}>{tr('已隔离')}</span>
+                  ) : item.governanceAction === 'cleared' ? (
+                    <span className="badge badge-success" style={{ fontSize: 10 }}>{tr('已解除隔离')}</span>
+                  ) : null}
+                  <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{item.reason}</span>
+                </div>
+              ))}
+              {routeProbeSummary.items.length > 4 ? (
+                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                  {`其余 ${routeProbeSummary.items.length - 4} 个通道结果已写入当前页状态，可再次点击探测刷新。`}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* Missing token hints + Add channel button */}
       <div style={{ display: 'flex', alignItems: compact ? 'stretch' : 'flex-start', flexDirection: compact ? 'column' : 'row', justifyContent: 'space-between', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
         {!channelManagementDisabled && (missingTokenSiteItems.length > 0 || missingTokenGroupItems.length > 0) ? (
@@ -664,15 +748,17 @@ function RouteCardInner({
             )}
           </div>
         ) : <div />}
-        {!readOnlyRoute && !channelManagementDisabled && (
-          <button
-            onClick={() => onAddChannel(route.id)}
-            className="btn btn-ghost"
-            style={{ fontSize: 12, padding: '6px 10px', color: 'var(--color-primary)', border: '1px solid var(--color-border)', whiteSpace: compact ? 'normal' : 'nowrap', width: compact ? '100%' : 'auto' }}
-          >
-            + {tr('添加通道')}
-          </button>
-        )}
+        {!readOnlyRoute && !channelManagementDisabled ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', width: compact ? '100%' : 'auto' }}>
+            <button
+              onClick={() => onAddChannel(route.id)}
+              className="btn btn-ghost"
+              style={{ fontSize: 12, padding: '6px 10px', color: 'var(--color-primary)', border: '1px solid var(--color-border)', whiteSpace: compact ? 'normal' : 'nowrap', width: compact ? '100%' : 'auto' }}
+            >
+              + {tr('添加通道')}
+            </button>
+          </div>
+        ) : null}
       </div>
 
       {/* Channel list */}
