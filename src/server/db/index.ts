@@ -138,6 +138,25 @@ function execSqliteLegacyCompat(sqlText: string): void {
   executeLegacyCompatSync(execSqliteStatement, sqlText);
 }
 
+function normalizeInformationSchemaColumnNames(rows: unknown): Set<string> {
+  if (!Array.isArray(rows)) {
+    return new Set();
+  }
+
+  return new Set(
+    rows
+      .map((row) => {
+        if (!row || typeof row !== 'object') {
+          return '';
+        }
+        const record = row as Record<string, unknown>;
+        const raw = record.column_name ?? record.COLUMN_NAME;
+        return typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+      })
+      .filter(Boolean),
+  );
+}
+
 function ensureTokenManagementSchema() {
   if (!tableExists('accounts') || !tableExists('route_channels')) {
     return;
@@ -870,11 +889,7 @@ export async function hasProxyLogClientColumns(): Promise<boolean> {
       'SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name IN (?, ?, ?, ?)',
       ['proxy_logs', ...requiredColumns],
     ) as [Array<{ column_name?: string }>, unknown];
-    const available = new Set(
-      Array.isArray(rows)
-        ? rows.map((row) => String(row?.column_name || '').trim().toLowerCase()).filter(Boolean)
-        : [],
-    );
+    const available = normalizeInformationSchemaColumnNames(rows);
     proxyLogClientColumnsAvailable = requiredColumns.every((columnName) => available.has(columnName));
     return proxyLogClientColumnsAvailable;
   }
@@ -909,11 +924,7 @@ export async function hasProxyLogCacheColumns(): Promise<boolean> {
       'SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name IN (?, ?)',
       ['proxy_logs', ...requiredColumns],
     ) as [Array<{ column_name?: string }>, unknown];
-    const available = new Set(
-      Array.isArray(rows)
-        ? rows.map((row) => String(row?.column_name || '').trim().toLowerCase()).filter(Boolean)
-        : [],
-    );
+    const available = normalizeInformationSchemaColumnNames(rows);
     proxyLogCacheColumnsAvailable = requiredColumns.every((columnName) => available.has(columnName));
     return proxyLogCacheColumnsAvailable;
   }
@@ -960,11 +971,7 @@ export async function hasResponseCacheTable(): Promise<boolean> {
       'SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       ['response_cache', ...requiredColumns],
     ) as [Array<{ column_name?: string }>, unknown];
-    const available = new Set(
-      Array.isArray(rows)
-        ? rows.map((row) => String(row?.column_name || '').trim().toLowerCase()).filter(Boolean)
-        : [],
-    );
+    const available = normalizeInformationSchemaColumnNames(rows);
     responseCacheTableAvailable = requiredColumns.every((columnName) => available.has(columnName));
     return responseCacheTableAvailable;
   }
