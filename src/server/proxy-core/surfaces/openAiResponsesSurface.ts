@@ -1037,6 +1037,59 @@ export async function handleOpenAiResponsesSurfaceRequest(
           usage: parsedUsage,
           serializationMode: isCompactRequest ? 'compact' : 'response',
         });
+        const downstreamFailure = detectProxyFailure({
+          rawText: JSON.stringify(downstreamData),
+          usage: parsedUsage,
+        });
+        if (downstreamFailure) {
+          await tokenRouter.recordFailure(selected.channel.id, {
+            status: downstreamFailure.status,
+            errorText: downstreamFailure.reason,
+            modelName,
+          });
+          logProxy(
+            selected,
+            requestedModel,
+            'failed',
+            downstreamFailure.status,
+            latency,
+            downstreamFailure.reason,
+            retryCount,
+            downstreamPath,
+            parsedUsage.promptTokens,
+            parsedUsage.completionTokens,
+            parsedUsage.totalTokens,
+            0,
+            null,
+            successfulUpstreamPath,
+            clientContext,
+            downstreamApiKeyId,
+          );
+
+          if (
+            shouldRetryProxyRequest(downstreamFailure.status, downstreamFailure.reason)
+            && await waitForRetryWithinBudget({
+              retryCount,
+              maxRetries: MAX_RETRIES,
+              budget: requestBudget,
+              status: downstreamFailure.status,
+            })
+          ) {
+            return {
+              ok: false,
+              action: 'failover',
+              status: downstreamFailure.status,
+              rawErrorText: downstreamFailure.reason,
+            };
+          }
+
+          return {
+            ok: false,
+            action: 'stop',
+            status: downstreamFailure.status,
+            rawErrorText: downstreamFailure.reason,
+          };
+        }
         const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
           site: selected.site,
           account: selected.account,

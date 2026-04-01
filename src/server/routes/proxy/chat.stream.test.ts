@@ -262,6 +262,54 @@ describe('chat proxy stream behavior', () => {
     expect(recordFailureMock).toHaveBeenCalledTimes(1);
   });
 
+  it('returns upstream_error when anthropic upstream normalizes into an empty OpenAI chat response', async () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: {
+        name: 'claude-site',
+        url: 'https://upstream.example.com',
+        platform: 'anthropic',
+        supportedEndpoints: 'messages',
+      },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'claude-sonnet-4.6',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'msg-empty-shell',
+      type: 'message',
+      model: 'claude-sonnet-4.6',
+      role: 'assistant',
+      content: [
+        { type: 'text', text: '' },
+      ],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 100, output_tokens: 0, total_tokens: 100 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'claude-sonnet-4.6',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()?.error?.type).toBe('upstream_error');
+    expect(response.json()?.error?.message).toContain('empty content');
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(recordFailureMock).toHaveBeenCalledTimes(1);
+  });
+
   it('returns HTTP upstream_error instead of hijacking when streamed chat requests receive empty non-SSE payloads', async () => {
     config.proxyEmptyContentFailEnabled = true;
 
@@ -1098,6 +1146,42 @@ describe('chat proxy stream behavior', () => {
     expect(response.body).toContain('"name":"Glob"');
     expect(response.body).toContain('"partial_json":"{\\"pattern\\":\\"README*\\"}"');
     expect(response.body).toContain('event: message_stop');
+  });
+
+  it('allows thinking-only anthropic messages on /v1/messages', async () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'msg-thinking-only',
+      type: 'message',
+      model: 'claude-opus-4-6',
+      role: 'assistant',
+      content: [
+        {
+          type: 'thinking',
+          thinking: 'internal plan',
+        },
+      ],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/messages',
+      payload: {
+        model: 'claude-opus-4-6',
+        max_tokens: 256,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()?.content?.[0]?.type).toBe('thinking');
+    expect(response.json()?.content?.[0]?.thinking).toBe('internal plan');
   });
 
   it('serves /v1/responses via protocol translation when upstream is OpenAI-compatible', async () => {

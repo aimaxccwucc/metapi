@@ -880,6 +880,60 @@ export async function handleChatSurfaceRequest(
 
         const normalizedFinal = downstreamTransformer.transformFinalResponse(upstreamData, modelName, rawText);
         const downstreamResponse = downstreamTransformer.serializeFinalResponse(normalizedFinal, parsedUsage);
+        const downstreamFailure = detectProxyFailure({
+          rawText: JSON.stringify(downstreamResponse),
+          usage: parsedUsage,
+        });
+        if (downstreamFailure) {
+          await tokenRouter.recordFailure(selected.channel.id, {
+            status: downstreamFailure.status,
+            errorText: downstreamFailure.reason,
+            modelName,
+          });
+          logProxy(
+            selected,
+            requestedModel,
+            'failed',
+            downstreamFailure.status,
+            latency,
+            downstreamFailure.reason,
+            retryCount,
+            downstreamPath,
+            parsedUsage.promptTokens,
+            parsedUsage.completionTokens,
+            parsedUsage.totalTokens,
+            0,
+            null,
+            successfulUpstreamPath,
+            clientContext,
+            downstreamApiKeyId,
+          );
+
+          const failureMessage = `[upstream:${successfulUpstreamPath}] ${downstreamFailure.reason}`;
+          if (
+            shouldRetryProxyRequest(downstreamFailure.status, downstreamFailure.reason)
+            && await waitForRetryWithinBudget({
+              retryCount,
+              maxRetries: MAX_RETRIES,
+              budget: requestBudget,
+              status: downstreamFailure.status,
+            })
+          ) {
+            return {
+              ok: false,
+              action: 'failover',
+              status: downstreamFailure.status,
+              rawErrorText: failureMessage,
+            };
+          }
+
+          return {
+            ok: false,
+            action: 'stop',
+            status: downstreamFailure.status,
+            rawErrorText: failureMessage,
+          };
+        }
         const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
           site: selected.site,
           account: selected.account,
