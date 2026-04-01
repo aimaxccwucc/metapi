@@ -988,7 +988,7 @@ async function loadCredentialScopedChannelIds(
       .from(schema.routeChannels)
       .where(eq(schema.routeChannels.tokenId, channel.tokenId))
       .all();
-    return tokenRows.map((row) => row.id);
+    return tokenRows.map((row: { id: number }) => row.id);
   }
 
   const credentialScope = buildCredentialScopedCooldownFingerprint(account, channel);
@@ -1003,12 +1003,17 @@ async function loadCredentialScopedChannelIds(
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
       .all();
     return rows
-      .filter((row) => {
+      .filter((row: {
+        channelId: number;
+        accountId: number;
+        extraConfig: string | null;
+        tokenId: number | null;
+      }) => {
         const currentChannel = { tokenId: row.tokenId } as typeof schema.routeChannels.$inferSelect;
         const currentAccount = { id: row.accountId, extraConfig: row.extraConfig } as typeof schema.accounts.$inferSelect;
         return buildCredentialScopedCooldownFingerprint(currentAccount, currentChannel) === credentialScope;
       })
-      .map((row) => row.channelId);
+      .map((row: { channelId: number }) => row.channelId);
   }
 
   const accountRows = await db.select({ id: schema.routeChannels.id })
@@ -1018,7 +1023,7 @@ async function loadCredentialScopedChannelIds(
       isNull(schema.routeChannels.tokenId),
     ))
     .all();
-  return accountRows.map((row) => row.id);
+  return accountRows.map((row: { id: number }) => row.id);
 }
 
 function getDecayedSiteRuntimePenalty(state: SiteRuntimeHealthState, nowMs: number): number {
@@ -2022,6 +2027,19 @@ type RouteRow = typeof schema.tokenRoutes.$inferSelect & {
   sourceRouteIds: number[];
 };
 type ChannelRow = typeof schema.routeChannels.$inferSelect;
+type RouteChannelIdRow = { id: number };
+type CredentialScopedChannelRow = {
+  channelId: number;
+  accountId: number;
+  extraConfig: string | null;
+  tokenId: number | null;
+};
+type JoinedRouteMatchRow = {
+  route_channels: typeof schema.routeChannels.$inferSelect;
+  accounts: typeof schema.accounts.$inferSelect;
+  sites: typeof schema.sites.$inferSelect;
+  account_tokens: typeof schema.accountTokens.$inferSelect | null;
+};
 
 type RouteCacheSnapshot = {
   loadedAt: number;
@@ -2571,8 +2589,8 @@ async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
     .where(eq(schema.tokenRoutes.enabled, true))
     .all();
   const explicitGroupRouteIds = rawRoutes
-    .filter((route) => normalizeRouteMode(route.routeMode) === 'explicit_group')
-    .map((route) => route.id);
+    .filter((route: typeof schema.tokenRoutes.$inferSelect) => normalizeRouteMode(route.routeMode) === 'explicit_group')
+    .map((route: typeof schema.tokenRoutes.$inferSelect) => route.id);
   const sourceRows = explicitGroupRouteIds.length > 0
     ? await db.select().from(schema.routeGroupSources)
       .where(inArray(schema.routeGroupSources.groupRouteId, explicitGroupRouteIds))
@@ -2585,7 +2603,7 @@ async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
     }
     sourceIdsByRouteId.get(row.groupRouteId)!.push(row.sourceRouteId);
   }
-  const routes = rawRoutes.map((route) => ({
+  const routes = rawRoutes.map((route: typeof schema.tokenRoutes.$inferSelect) => ({
     ...route,
     routeMode: normalizeRouteMode(route.routeMode),
     sourceRouteIds: Array.from(new Set(sourceIdsByRouteId.get(route.id) ?? [])),
@@ -2637,7 +2655,12 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
       .all()
     : [];
 
-  const mapped = channels.map((row) => ({
+  const mapped = channels.map((row: {
+    route_channels: typeof schema.routeChannels.$inferSelect;
+    accounts: typeof schema.accounts.$inferSelect;
+    sites: typeof schema.sites.$inferSelect;
+    account_tokens: typeof schema.accountTokens.$inferSelect | null;
+  }) => ({
     channel: {
       ...row.route_channels,
       sourceModel: normalizeChannelSourceModel(row.route_channels.sourceModel)

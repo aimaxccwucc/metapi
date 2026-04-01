@@ -274,7 +274,7 @@ export async function listActiveRoutingGovernanceStates(query: ActiveGovernanceQ
 
   if (Array.isArray(query.subjectTypes) && query.subjectTypes.length > 0) {
     const allowed = new Set(query.subjectTypes);
-    rows = rows.filter((item) => allowed.has(item.subjectType as RoutingGovernanceSubjectType));
+    rows = rows.filter((item: RoutingGovernanceEntry) => allowed.has(item.subjectType as RoutingGovernanceSubjectType));
   }
 
   return rows;

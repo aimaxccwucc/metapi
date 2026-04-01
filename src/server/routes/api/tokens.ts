@@ -41,6 +41,9 @@ import {
   listActiveRoutingGovernanceStates,
   runRoutingGovernanceRecoveryPass,
   type RoutingGovernanceEntry,
+  type RoutingGovernanceReasonCode,
+  type RoutingGovernanceState,
+  type RoutingGovernanceSubjectType,
 } from '../../services/routingGovernanceService.js';
 
 const ROUTE_AUTOCREATE_SOFT_TIMEOUT_MS = 4_000;
@@ -103,13 +106,46 @@ function isExactModelPattern(modelPattern: string): boolean {
 }
 
 type RouteMode = 'pattern' | 'explicit_group';
-type RouteRow = typeof schema.tokenRoutes.$inferSelect & {
+type TokenRouteTableRow = typeof schema.tokenRoutes.$inferSelect;
+type RouteChannelTableRow = typeof schema.routeChannels.$inferSelect;
+type AccountTableRow = typeof schema.accounts.$inferSelect;
+type SiteTableRow = typeof schema.sites.$inferSelect;
+type AccountTokenTableRow = typeof schema.accountTokens.$inferSelect;
+type RouteRow = TokenRouteTableRow & {
   routeMode: RouteMode;
   sourceRouteIds: number[];
 };
+type RouteChannelView = RouteChannelTableRow & {
+  account: AccountTableRow;
+  site: SiteTableRow;
+  token: Pick<AccountTokenTableRow, 'id' | 'name' | 'accountId' | 'enabled' | 'isDefault'> | null;
+};
+
+const ROUTING_GOVERNANCE_SUBJECT_TYPES = new Set<RoutingGovernanceSubjectType>(['site', 'account', 'token', 'channel']);
+const ROUTING_GOVERNANCE_STATES = new Set<RoutingGovernanceState>(['suppressed', 'probing']);
+const ROUTING_GOVERNANCE_REASON_CODES = new Set<RoutingGovernanceReasonCode>([
+  'auth',
+  'rate_limit',
+  'balance_exhausted',
+  'quota_exhausted',
+  'model_unsupported',
+  'manual_recheck_needed',
+]);
 
 function normalizeRouteMode(routeMode: unknown): RouteMode {
   return routeMode === 'explicit_group' ? 'explicit_group' : 'pattern';
+}
+
+function isRoutingGovernanceSubjectType(value: string): value is RoutingGovernanceSubjectType {
+  return ROUTING_GOVERNANCE_SUBJECT_TYPES.has(value as RoutingGovernanceSubjectType);
+}
+
+function isRoutingGovernanceState(value: string): value is RoutingGovernanceState {
+  return ROUTING_GOVERNANCE_STATES.has(value as RoutingGovernanceState);
+}
+
+function isRoutingGovernanceReasonCode(value: string): value is RoutingGovernanceReasonCode {
+  return ROUTING_GOVERNANCE_REASON_CODES.has(value as RoutingGovernanceReasonCode);
 }
 
 function isExplicitGroupRoute(route: Pick<RouteRow, 'routeMode'> | Pick<typeof schema.tokenRoutes.$inferSelect, 'routeMode'>): boolean {
@@ -151,7 +187,7 @@ async function loadRouteSourceIdsMap(routeIds: number[]): Promise<Map<number, nu
 }
 
 function decorateRoutesWithSources(
-  routes: Array<typeof schema.tokenRoutes.$inferSelect>,
+  routes: TokenRouteTableRow[],
   sourceRouteIdsByRouteId: Map<number, number[]>,
 ): RouteRow[] {
   return routes.map((route) => ({
@@ -162,7 +198,7 @@ function decorateRoutesWithSources(
 }
 
 async function listRoutesWithSources(): Promise<RouteRow[]> {
-  const routes = await db.select().from(schema.tokenRoutes).all();
+  const routes: TokenRouteTableRow[] = await db.select().from(schema.tokenRoutes).all();
   const sourceRouteIdsByRouteId = await loadRouteSourceIdsMap(routes.map((route) => route.id));
   return decorateRoutesWithSources(routes, sourceRouteIdsByRouteId);
 }
@@ -406,7 +442,11 @@ async function ensurePreferredTokenCoverageForPattern(modelPattern: string): Pro
       totalTokens: 0,
     }).catch(() => null);
 
-    const coverageRows = await db.select({
+    const coverageRows: Array<{
+      tokenGroup: string | null;
+      tokenName: string | null;
+      availableModelName: string | null;
+    }> = await db.select({
       tokenGroup: schema.accountTokens.tokenGroup,
       tokenName: schema.accountTokens.name,
       availableModelName: schema.tokenModelAvailability.modelName,
@@ -422,7 +462,10 @@ async function ensurePreferredTokenCoverageForPattern(modelPattern: string): Pro
         ),
       )
       .all();
-    const existingAccountTokens = await db.select({
+    const existingAccountTokens: Array<{
+      tokenGroup: string | null;
+      tokenName: string | null;
+    }> = await db.select({
       tokenGroup: schema.accountTokens.tokenGroup,
       tokenName: schema.accountTokens.name,
     })
@@ -451,13 +494,20 @@ async function ensurePreferredTokenCoverageForPattern(modelPattern: string): Pro
       );
       const preferredGroupKey = preferredGroup.trim().toLowerCase() || 'default';
 
-      const hasReusableTokenInGroup = existingAccountTokens.some((item) => {
+      const hasReusableTokenInGroup = existingAccountTokens.some((item: {
+        tokenGroup: string | null;
+        tokenName: string | null;
+      }) => {
         const groupLabel = resolveTokenGroupLabel(item.tokenGroup, item.tokenName);
         return (groupLabel || 'default').trim().toLowerCase() === preferredGroupKey;
       }) || createdGroups.some((group) => (group || '').trim().toLowerCase() === preferredGroupKey);
       if (hasReusableTokenInGroup) continue;
 
-      const hasPreferredCoverage = coverageRows.some((item) => {
+      const hasPreferredCoverage = coverageRows.some((item: {
+        availableModelName: string | null;
+        tokenGroup: string | null;
+        tokenName: string | null;
+      }) => {
         const availableModelName = (item.availableModelName || '').trim();
         if (!availableModelName) return false;
         if (availableModelName !== normalizedModelName && !isModelAliasEquivalent(availableModelName, normalizedModelName)) {
@@ -511,7 +561,7 @@ async function runWithSoftTimeout(task: Promise<void>, timeoutMs: number): Promi
 }
 
 async function tokenSupportsModel(tokenId: number, modelName: string): Promise<boolean> {
-  const rows = await db.select().from(schema.tokenModelAvailability)
+  const rows: Array<{ modelName: string | null }> = await db.select().from(schema.tokenModelAvailability)
     .where(
       and(
         eq(schema.tokenModelAvailability.tokenId, tokenId),
@@ -519,7 +569,7 @@ async function tokenSupportsModel(tokenId: number, modelName: string): Promise<b
       ),
     )
     .all();
-  return rows.some((row) => {
+  return rows.some((row: { modelName: string | null }) => {
     const availableModelName = row.modelName?.trim();
     if (!availableModelName) return false;
     return availableModelName === modelName || isModelAliasEquivalent(availableModelName, modelName);
@@ -574,20 +624,28 @@ async function getMatchedExactRouteChannelCandidates(modelPattern: string): Prom
   enabled: boolean;
   manualOverride: boolean;
 }>> {
-  const matchedRoutes = (await db.select().from(schema.tokenRoutes)
+  const matchedRoutes: TokenRouteTableRow[] = (await db.select().from(schema.tokenRoutes)
     .where(eq(schema.tokenRoutes.enabled, true))
     .all())
-    .filter((route) => isExactModelPattern(route.modelPattern) && matchesModelPattern(route.modelPattern, modelPattern));
+    .filter((route: TokenRouteTableRow) => isExactModelPattern(route.modelPattern) && matchesModelPattern(route.modelPattern, modelPattern));
 
   if (matchedRoutes.length === 0) return [];
   const routeMap = new Map<number, typeof matchedRoutes[number]>();
   for (const route of matchedRoutes) routeMap.set(route.id, route);
 
-  const channels = await db.select().from(schema.routeChannels)
+  const channels: RouteChannelTableRow[] = await db.select().from(schema.routeChannels)
     .where(inArray(schema.routeChannels.routeId, matchedRoutes.map((route) => route.id)))
     .all();
 
-  return channels.map((channel) => ({
+  const mappedCandidates: Array<{
+    tokenId: number | null;
+    accountId: number;
+    sourceModel: string;
+    priority: number;
+    weight: number;
+    enabled: boolean;
+    manualOverride: boolean;
+  }> = channels.map((channel: RouteChannelTableRow) => ({
     tokenId: channel.tokenId ?? null,
     accountId: channel.accountId,
     sourceModel: (channel.sourceModel || routeMap.get(channel.routeId)?.modelPattern || '').trim(),
@@ -595,7 +653,9 @@ async function getMatchedExactRouteChannelCandidates(modelPattern: string): Prom
     weight: channel.weight ?? 10,
     enabled: !!channel.enabled,
     manualOverride: !!channel.manualOverride,
-  })).filter((candidate) => candidate.sourceModel.length > 0);
+  }));
+
+  return mappedCandidates.filter((candidate) => candidate.sourceModel.length > 0);
 }
 
 async function populateRouteChannelsByModelPattern(routeId: number, modelPattern: string): Promise<number> {
@@ -616,12 +676,12 @@ async function populateRouteChannelsByModelPattern(routeId: number, modelPattern
   const candidates = [...routeCandidates, ...availabilityCandidates];
   if (candidates.length === 0) return 0;
 
-  const existingChannels = await db.select().from(schema.routeChannels)
+  const existingChannels: RouteChannelTableRow[] = await db.select().from(schema.routeChannels)
     .where(eq(schema.routeChannels.routeId, routeId))
     .all();
   const existingPairs = new Set<string>(
     existingChannels
-      .map((channel) => {
+      .map((channel: RouteChannelTableRow) => {
         const tokenId = typeof channel.tokenId === 'number' && Number.isFinite(channel.tokenId) ? channel.tokenId : 0;
         const sourceModel = (channel.sourceModel || '').trim().toLowerCase();
         return `${channel.accountId}::${tokenId}::${sourceModel}`;
@@ -629,7 +689,15 @@ async function populateRouteChannelsByModelPattern(routeId: number, modelPattern
   );
 
   let created = 0;
-  for (const candidate of candidates) {
+  for (const candidate of candidates as Array<{
+    tokenId: number | null;
+    accountId: number;
+    sourceModel: string;
+    priority: number;
+    weight: number;
+    enabled: boolean;
+    manualOverride: boolean;
+  }>) {
     const tokenId = typeof candidate.tokenId === 'number' && Number.isFinite(candidate.tokenId) ? candidate.tokenId : 0;
     const pairKey = `${candidate.accountId}::${tokenId}::${candidate.sourceModel.trim().toLowerCase()}`;
     if (existingPairs.has(pairKey)) continue;
@@ -859,13 +927,13 @@ type RouteChannelSummary = {
   siteNames: Set<string>;
 };
 
-async function fetchChannelsForRouteRows(routes: RouteRow[]): Promise<Map<number, any[]>> {
+async function fetchChannelsForRouteRows(routes: RouteRow[]): Promise<Map<number, RouteChannelView[]>> {
   if (routes.length === 0) return new Map();
 
   const explicitSourceRouteIds = Array.from(new Set(routes
     .filter((route) => isExplicitGroupRoute(route))
     .flatMap((route) => route.sourceRouteIds)));
-  const explicitSourceRoutes = explicitSourceRouteIds.length > 0
+  const explicitSourceRoutes: Array<Pick<TokenRouteTableRow, 'id' | 'modelPattern' | 'routeMode' | 'enabled'>> = explicitSourceRouteIds.length > 0
     ? (await db.select({
       id: schema.tokenRoutes.id,
       modelPattern: schema.tokenRoutes.modelPattern,
@@ -883,7 +951,7 @@ async function fetchChannelsForRouteRows(routes: RouteRow[]): Promise<Map<number
     ...enabledExplicitSourceRouteIds,
   ]));
   if (actualRouteIds.length === 0) {
-    return new Map(routes.map((route) => [route.id, []]));
+    return new Map(routes.map((route: RouteRow) => [route.id, [] as RouteChannelView[]]));
   }
 
   const actualRouteById = new Map<number, { modelPattern: string; routeMode: string | null }>();
@@ -894,14 +962,19 @@ async function fetchChannelsForRouteRows(routes: RouteRow[]): Promise<Map<number
     actualRouteById.set(route.id, { modelPattern: route.modelPattern, routeMode: route.routeMode ?? null });
   }
 
-  const channelRows = await db.select().from(schema.routeChannels)
+  const channelRows: Array<{
+    route_channels: RouteChannelTableRow;
+    accounts: AccountTableRow;
+    sites: SiteTableRow;
+    account_tokens: AccountTokenTableRow | null;
+  }> = await db.select().from(schema.routeChannels)
     .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .leftJoin(schema.accountTokens, eq(schema.routeChannels.tokenId, schema.accountTokens.id))
     .where(inArray(schema.routeChannels.routeId, actualRouteIds))
     .all();
 
-  const channelsByActualRouteId = new Map<number, any[]>();
+  const channelsByActualRouteId = new Map<number, RouteChannelView[]>();
 
   for (const row of channelRows) {
     const routeId = row.route_channels.routeId;
@@ -928,7 +1001,7 @@ async function fetchChannelsForRouteRows(routes: RouteRow[]): Promise<Map<number
     });
   }
 
-  const channelsByRoute = new Map<number, any[]>();
+  const channelsByRoute = new Map<number, RouteChannelView[]>();
   for (const route of routes) {
     if (isExplicitGroupRoute(route)) {
       channelsByRoute.set(route.id, route.sourceRouteIds.flatMap((sourceRouteId) => channelsByActualRouteId.get(sourceRouteId) || []));
@@ -940,10 +1013,10 @@ async function fetchChannelsForRouteRows(routes: RouteRow[]): Promise<Map<number
   return channelsByRoute;
 }
 
-async function fetchChannelsForRoutes(routeIds: number[]): Promise<Map<number, any[]>> {
+async function fetchChannelsForRoutes(routeIds: number[]): Promise<Map<number, RouteChannelView[]>> {
   if (routeIds.length === 0) return new Map();
   return await fetchChannelsForRouteRows(await listRoutesWithSources()).then((channelsByRoute) => {
-    const filtered = new Map<number, any[]>();
+    const filtered = new Map<number, RouteChannelView[]>();
     for (const routeId of routeIds) {
       filtered.set(routeId, channelsByRoute.get(routeId) || []);
     }
@@ -951,34 +1024,14 @@ async function fetchChannelsForRoutes(routeIds: number[]): Promise<Map<number, a
   });
 }
 
-async function buildRouteChannelSummaryMap(routes: RouteRow[]): Promise<Map<number, RouteChannelSummary>> {
-  const channelsByRoute = await fetchChannelsForRouteRows(routes);
-  const summaryByRoute = new Map<number, RouteChannelSummary>();
-  for (const route of routes) {
-    const channels = channelsByRoute.get(route.id) || [];
-    const siteNames = new Set<string>();
-    let enabledChannelCount = 0;
-    for (const channel of channels) {
-      if (channel.enabled) enabledChannelCount += 1;
-      if (channel.site?.name) siteNames.add(channel.site.name);
-    }
-    summaryByRoute.set(route.id, {
-      channelCount: channels.length,
-      enabledChannelCount,
-      siteNames,
-    });
-  }
-  return summaryByRoute;
-}
-
-async function buildLightweightRouteChannelSummaryMap(routes: RouteRow[]): Promise<Map<number, RouteChannelSummary>> {
+async function buildRouteChannelSummaryMapLight(routes: RouteRow[]): Promise<Map<number, RouteChannelSummary>> {
   const summaryByRoute = new Map<number, RouteChannelSummary>();
   if (routes.length === 0) return summaryByRoute;
 
   const explicitSourceRouteIds = Array.from(new Set(routes
     .filter((route) => isExplicitGroupRoute(route))
     .flatMap((route) => route.sourceRouteIds)));
-  const explicitSourceRoutes = explicitSourceRouteIds.length > 0
+  const explicitSourceRoutes: Array<Pick<TokenRouteTableRow, 'id' | 'enabled' | 'modelPattern' | 'routeMode'>> = explicitSourceRouteIds.length > 0
     ? (await db.select({
       id: schema.tokenRoutes.id,
       enabled: schema.tokenRoutes.enabled,
@@ -1121,69 +1174,6 @@ function serializeGovernanceEntry(entry: RoutingGovernanceEntry) {
   };
 }
 
-async function buildRouteChannelSummaryMapLight(routes: RouteRow[]): Promise<Map<number, RouteChannelSummary>> {
-  const summaryByRoute = new Map<number, RouteChannelSummary>();
-  if (routes.length === 0) return summaryByRoute;
-
-  const explicitGroupRoutes = routes.filter((route) => isExplicitGroupRoute(route));
-  const nonExplicitRoutes = routes.filter((route) => !isExplicitGroupRoute(route));
-
-  const directRows = nonExplicitRoutes.length > 0
-    ? await db.select({
-      routeId: schema.routeChannels.routeId,
-      enabled: schema.routeChannels.enabled,
-      siteName: schema.sites.name,
-    }).from(schema.routeChannels)
-      .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
-      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-      .where(inArray(schema.routeChannels.routeId, nonExplicitRoutes.map((route) => route.id)))
-      .all()
-    : [];
-
-  const directAgg = new Map<number, RouteChannelSummary>();
-  for (const row of directRows) {
-    if (!directAgg.has(row.routeId)) {
-      directAgg.set(row.routeId, {
-        channelCount: 0,
-        enabledChannelCount: 0,
-        siteNames: new Set<string>(),
-      });
-    }
-    const bucket = directAgg.get(row.routeId)!;
-    bucket.channelCount += 1;
-    if (row.enabled === true) bucket.enabledChannelCount += 1;
-    if ((row.siteName || '').trim()) bucket.siteNames.add(row.siteName!.trim());
-  }
-
-  for (const route of nonExplicitRoutes) {
-    summaryByRoute.set(route.id, directAgg.get(route.id) || {
-      channelCount: 0,
-      enabledChannelCount: 0,
-      siteNames: new Set<string>(),
-    });
-  }
-
-  for (const route of explicitGroupRoutes) {
-    const aggregate: RouteChannelSummary = {
-      channelCount: 0,
-      enabledChannelCount: 0,
-      siteNames: new Set<string>(),
-    };
-    for (const sourceRouteId of route.sourceRouteIds) {
-      const sourceSummary = directAgg.get(sourceRouteId);
-      if (!sourceSummary) continue;
-      aggregate.channelCount += sourceSummary.channelCount;
-      aggregate.enabledChannelCount += sourceSummary.enabledChannelCount;
-      for (const siteName of sourceSummary.siteNames) {
-        aggregate.siteNames.add(siteName);
-      }
-    }
-    summaryByRoute.set(route.id, aggregate);
-  }
-
-  return summaryByRoute;
-}
-
 function parseDateTimeMs(value?: string | null): number | null {
   if (!value) return null;
   const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
@@ -1222,26 +1212,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     if (routes.length === 0) return [];
     const aggByRoute = await buildRouteChannelSummaryMapLight(routes);
 
-    return routes.map((route) => {
-      const agg = aggByRoute.get(route.id);
-      return {
-        id: route.id,
-        modelPattern: route.modelPattern,
-        displayName: route.displayName ?? null,
-        displayIcon: route.displayIcon ?? null,
-        routeMode: route.routeMode,
-        sourceRouteIds: route.sourceRouteIds,
-        modelMapping: route.modelMapping ?? null,
-        routingStrategy: route.routingStrategy ?? 'weighted',
-        enabled: route.enabled,
-        channelCount: agg?.channelCount ?? 0,
-        enabledChannelCount: agg?.enabledChannelCount ?? 0,
-        siteNames: agg ? Array.from(agg.siteNames) : [],
-        decisionSnapshot: parseRouteDecisionSnapshot(route.decisionSnapshot) as any,
-        decisionSnapshotAvailable: typeof route.decisionSnapshot === 'string' && route.decisionSnapshot.trim().length > 0,
-        decisionRefreshedAt: route.decisionRefreshedAt ?? null,
-      };
-    });
+    return routes.map((route) => mapRouteSummaryRow(route, aggByRoute.get(route.id)));
   });
 
   app.get('/api/routes/overview', async () => {
@@ -1357,9 +1328,9 @@ export async function tokensRoutes(app: FastifyInstance) {
     const limit = request.query.limit ? Number.parseInt(request.query.limit, 10) : 200;
 
     const items = await listActiveRoutingGovernanceStates({
-      subjectTypes: subjectType ? [subjectType as any] : undefined,
-      states: state ? [state as any] : ['suppressed', 'probing'],
-      reasonCodes: reasonCode ? [reasonCode as any] : undefined,
+      subjectTypes: subjectType && isRoutingGovernanceSubjectType(subjectType) ? [subjectType] : undefined,
+      states: state && isRoutingGovernanceState(state) ? [state] : ['suppressed', 'probing'],
+      reasonCodes: reasonCode && isRoutingGovernanceReasonCode(reasonCode) ? [reasonCode] : undefined,
       limit: Number.isFinite(limit) ? limit : 200,
     });
 
@@ -1534,9 +1505,9 @@ export async function tokensRoutes(app: FastifyInstance) {
 
     const routeSummary: RouteDiagnosticsRouteSummary = {
       routeCount: routeRows.length,
-      enabledRouteCount: routeRows.filter((row) => row.enabled === true).length,
+      enabledRouteCount: routeRows.filter((row: { enabled: boolean | null }) => row.enabled === true).length,
       channelCount: channelRows.length,
-      enabledChannelCount: channelRows.filter((row) => row.enabled === true).length,
+      enabledChannelCount: channelRows.filter((row: { enabled: boolean | null }) => row.enabled === true).length,
     };
 
     const channelById = new Map<number, {
@@ -1641,7 +1612,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     const unavailableModelItems = unavailableModelRows.map((row) => {
       if (row.scope === 'token') {
         const channel = row.ownerId > 0
-          ? channelRows.find((item) => item.tokenId === row.ownerId)
+          ? channelRows.find((item: { tokenId: number | null }) => item.tokenId === row.ownerId)
           : null;
         return {
           ...row,
@@ -1719,10 +1690,24 @@ export async function tokensRoutes(app: FastifyInstance) {
       };
     });
 
-    const siteProfiles = siteRows.map((site) => {
+    const siteProfiles = siteRows.map((site: {
+      id: number;
+      name: string | null;
+      url: string | null;
+      platform: string | null;
+      status: string | null;
+    }) => {
       const protocolConfig = siteProtocolConfigs[site.id];
-      const siteAccounts = accountRows.filter((account) => account.siteId === site.id);
-      const schedulableAccounts = siteAccounts.filter((account) => (
+      const siteAccounts = accountRows.filter((account: {
+        siteId: number;
+        status: string | null;
+        checkinEnabled: boolean | null;
+        extraConfig: string | null;
+      }) => account.siteId === site.id);
+      const schedulableAccounts = siteAccounts.filter((account: {
+        status: string | null;
+        checkinEnabled: boolean | null;
+      }) => (
         account.checkinEnabled === true
         && isSchedulableCheckinAccountStatus(account.status)
         && site.status !== 'disabled'
@@ -1738,14 +1723,14 @@ export async function tokensRoutes(app: FastifyInstance) {
         preferredEndpoint: protocolConfig?.preferredEndpoint || null,
         protocolUpdatedAt: protocolConfig?.updatedAtMs ? new Date(protocolConfig.updatedAtMs).toISOString() : null,
         schedulableCheckinAccounts: schedulableAccounts.length,
-        activeAccounts: siteAccounts.filter((account) => account.status === 'active').length,
-        expiredAccounts: siteAccounts.filter((account) => account.status === 'expired').length,
-        degradedAccounts: siteAccounts.filter((account) => (
+        activeAccounts: siteAccounts.filter((account: { status: string | null }) => account.status === 'active').length,
+        expiredAccounts: siteAccounts.filter((account: { status: string | null }) => account.status === 'expired').length,
+        degradedAccounts: siteAccounts.filter((account: { extraConfig: string | null }) => (
           extractRuntimeHealth(account.extraConfig)?.state === 'degraded'
         )).length,
       };
     });
-    const manualSiteProfileCount = siteProfiles.filter((item) => item.protocolMode === 'manual').length;
+    const manualSiteProfileCount = siteProfiles.filter((item: { protocolMode: 'manual' | 'auto' }) => item.protocolMode === 'manual').length;
 
     const checkinIntervalMs = Math.max(1, config.checkinIntervalHours) * 60 * 60 * 1000;
     const checkinCronFallbackMs = 24 * 60 * 60 * 1000;
@@ -1983,11 +1968,11 @@ export async function tokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: 'channels 必须是非空数组' });
     }
 
-    const existingChannels = await db.select().from(schema.routeChannels)
+    const existingChannels: RouteChannelTableRow[] = await db.select().from(schema.routeChannels)
       .where(eq(schema.routeChannels.routeId, routeId))
       .all();
     const existingPairs = new Set<string>(
-      existingChannels.map((channel) => {
+      existingChannels.map((channel: RouteChannelTableRow) => {
         const tokenId = typeof channel.tokenId === 'number' && Number.isFinite(channel.tokenId) ? channel.tokenId : 0;
         const sourceModel = (channel.sourceModel || '').trim().toLowerCase();
         return `${channel.accountId}::${tokenId}::${sourceModel}`;
@@ -2325,7 +2310,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     const duplicate = (await db.select().from(schema.routeChannels)
       .where(eq(schema.routeChannels.routeId, routeId))
       .all())
-      .some((channel) =>
+      .some((channel: RouteChannelTableRow) =>
         channel.accountId === body.accountId
         && (channel.tokenId ?? null) === (body.tokenId ?? null)
         && (channel.sourceModel || '').trim().toLowerCase() === sourceModel.toLowerCase(),
@@ -2368,7 +2353,7 @@ export async function tokensRoutes(app: FastifyInstance) {
       .where(inArray(schema.routeChannels.id, channelIds))
       .all();
     if (existingChannels.length !== channelIds.length) {
-      const existingIds = new Set(existingChannels.map((channel) => channel.id));
+      const existingIds = new Set(existingChannels.map((channel: RouteChannelTableRow) => channel.id));
       const missingId = channelIds.find((id) => !existingIds.has(id));
       return reply.code(404).send({ success: false, message: `通道不存在: ${missingId}` });
     }
@@ -2383,8 +2368,8 @@ export async function tokensRoutes(app: FastifyInstance) {
     const updatedChannels = await db.select().from(schema.routeChannels)
       .where(inArray(schema.routeChannels.id, channelIds))
       .all();
-    await clearRouteDecisionSnapshots(existingChannels.map((channel) => channel.routeId));
-    await clearDependentExplicitGroupSnapshotsBySourceRouteIds(existingChannels.map((channel) => channel.routeId));
+    await clearRouteDecisionSnapshots(existingChannels.map((channel: RouteChannelTableRow) => channel.routeId));
+    await clearDependentExplicitGroupSnapshotsBySourceRouteIds(existingChannels.map((channel: RouteChannelTableRow) => channel.routeId));
     invalidateTokenRouterCache();
     return { success: true, channels: updatedChannels };
   });

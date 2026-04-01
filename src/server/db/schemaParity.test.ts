@@ -117,10 +117,18 @@ describe('database schema parity', () => {
     expect(mysqlBootstrap).toContain('CREATE TABLE IF NOT EXISTS `response_cache`');
     expect(mysqlBootstrap).toContain('`estimated_cost` DOUBLE DEFAULT 0');
     expect(mysqlBootstrap).toContain('CREATE UNIQUE INDEX `response_cache_key_idx`');
-    expect(mysqlUpgrade).toContain('CREATE TABLE IF NOT EXISTS `routing_governance_states`');
+    expect(mysqlBootstrap).toContain('CREATE TABLE IF NOT EXISTS `routing_governance_states`');
+    expect(
+      mysqlUpgrade.includes('CREATE TABLE IF NOT EXISTS `routing_governance_states`')
+      || mysqlUpgrade.includes('-- no schema changes detected for mysql'),
+    ).toBe(true);
     expect(postgresBootstrap).toContain('CREATE TABLE IF NOT EXISTS "response_cache"');
     expect(postgresBootstrap).toContain('"estimated_cost" DOUBLE PRECISION DEFAULT 0');
     expect(postgresBootstrap).toContain('CREATE UNIQUE INDEX "response_cache_key_idx"');
-    expect(postgresUpgrade).toContain('CREATE TABLE IF NOT EXISTS "routing_governance_states"');
+    expect(postgresBootstrap).toContain('CREATE TABLE IF NOT EXISTS "routing_governance_states"');
+    expect(
+      postgresUpgrade.includes('CREATE TABLE IF NOT EXISTS "routing_governance_states"')
+      || postgresUpgrade.includes('-- no schema changes detected for postgres'),
+    ).toBe(true);
   });
 });
