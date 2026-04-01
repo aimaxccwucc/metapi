@@ -79,6 +79,58 @@ describe('detectProxyFailure (empty content)', () => {
     expect(failure).toBeNull();
   });
 
+  it('does not treat anthropic tool_use responses as empty content', () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    const rawText = JSON.stringify({
+      id: 'msg_tool_use',
+      type: 'message',
+      model: 'claude-sonnet-4.6',
+      stop_reason: 'tool_use',
+      content: [
+        {
+          type: 'tool_use',
+          id: 'toolu_1',
+          name: 'lookup_weather',
+          input: { city: 'Shanghai' },
+        },
+      ],
+      usage: { input_tokens: 12, output_tokens: 0 },
+    });
+
+    const failure = detectProxyFailure({
+      rawText,
+      usage: { promptTokens: 12, completionTokens: 0, totalTokens: 12 },
+    });
+
+    expect(failure).toBeNull();
+  });
+
+  it('does not treat anthropic thinking-only responses as empty content', () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    const rawText = JSON.stringify({
+      id: 'msg_thinking',
+      type: 'message',
+      model: 'claude-sonnet-4.6',
+      stop_reason: 'end_turn',
+      content: [
+        {
+          type: 'thinking',
+          thinking: 'I should reason about this privately first.',
+        },
+      ],
+      usage: { input_tokens: 20, output_tokens: 8, total_tokens: 28 },
+    });
+
+    const failure = detectProxyFailure({
+      rawText,
+      usage: { promptTokens: 20, completionTokens: 8, totalTokens: 28 },
+    });
+
+    expect(failure).toBeNull();
+  });
+
   it('flags empty SSE streams that contain no content deltas', () => {
     config.proxyEmptyContentFailEnabled = true;
 

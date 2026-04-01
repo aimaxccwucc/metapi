@@ -64,7 +64,7 @@ describe('Settings proxy failure rules', () => {
       proxyDebugTraceEnabled: false,
       proxyDebugTraceMaxEntries: 300,
       proxyErrorKeywords: ['rate limit'],
-      proxyEmptyContentFailEnabled: false,
+      proxyEmptyContentFailEnabled: true,
     });
     apiMock.getDownstreamApiKeys.mockResolvedValue({ items: [] });
     apiMock.getRoutesLite.mockResolvedValue([]);

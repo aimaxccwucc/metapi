@@ -66,6 +66,7 @@ describe('buildConfig', () => {
     expect(config.responseCacheStaleIfErrorMs).toBe(600_000);
     expect(config.slowSuccessLatencyThresholdMs).toBe(15_000);
     expect(config.slowSuccessPenaltyScore).toBe(0.25);
+    expect(config.proxyEmptyContentFailEnabled).toBe(true);
   });
 
   it('allows overriding the codex websocket beta gate from environment', () => {
@@ -110,12 +111,14 @@ describe('buildConfig', () => {
       GLOBAL_ALLOWED_MODELS: 'gpt-*, claude-sonnet-*',
       PROXY_DEBUG_TRACE_ENABLED: 'true',
       PROXY_DEBUG_TRACE_MAX_ENTRIES: '777',
+      PROXY_EMPTY_CONTENT_FAIL: 'false',
     });
 
     expect(config.disableCrossProtocolFallback).toBe(true);
     expect(config.globalAllowedModels).toEqual(['gpt-*', 'claude-sonnet-*']);
     expect(config.proxyDebugTraceEnabled).toBe(true);
     expect(config.proxyDebugTraceMaxEntries).toBe(777);
+    expect(config.proxyEmptyContentFailEnabled).toBe(false);
   });
 
   it('clamps proxy debug trace max entries to the supported upper bound', () => {

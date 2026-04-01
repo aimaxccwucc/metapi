@@ -40,6 +40,19 @@ function hasToolCallLike(value: unknown): boolean {
   return false;
 }
 
+function isMeaningfulContentPartType(value: unknown): boolean {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized) return false;
+  return normalized === 'tool_use'
+    || normalized === 'tool_result'
+    || normalized === 'thinking'
+    || normalized === 'redacted_thinking'
+    || normalized === 'reasoning'
+    || normalized === 'refusal'
+    || normalized.includes('function_call')
+    || normalized.includes('tool_call');
+}
+
 function hasCompletionContentFromChoice(choice: any): boolean {
   if (hasNonEmptyString(choice?.text)) return true;
   if (hasNonEmptyString(choice?.completion)) return true;
@@ -50,6 +63,9 @@ function hasCompletionContentFromChoice(choice: any): boolean {
   if (Array.isArray(message?.content)) {
     for (const part of message.content) {
       if (hasNonEmptyString(part?.text) || hasNonEmptyString(part?.output_text) || hasNonEmptyString(part?.content)) {
+        return true;
+      }
+      if (isMeaningfulContentPartType(part?.type)) {
         return true;
       }
     }
@@ -120,7 +136,7 @@ function hasCompletionContentFromPayload(payload: unknown): boolean {
         return true;
       }
       const partType = String((part as any)?.type || '').toLowerCase();
-      if (partType.includes('function_call') || partType.includes('tool_call')) return true;
+      if (isMeaningfulContentPartType(partType)) return true;
     }
   }
 
