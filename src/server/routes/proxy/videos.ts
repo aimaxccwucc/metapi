@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { fetch } from 'undici';
+import { config } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutes } from '../../services/modelService.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
@@ -25,7 +26,7 @@ import {
 } from '../../services/proxyVideoTaskStore.js';
 import { createRequestBudget, shouldRetryWithinBudget } from './requestBudget.js';
 
-const MAX_RETRIES = 2;
+const MAX_RETRIES = config.proxyMaxRetries;
 
 function rewriteVideoResponsePublicId(payload: unknown, publicId: string): unknown {
   if (!payload || typeof payload !== 'object') return payload;

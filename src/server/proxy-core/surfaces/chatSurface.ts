@@ -59,9 +59,9 @@ import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/con
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
 import { recordProxyDebugTrace } from '../../routes/proxy/proxyDebugTrace.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
-import { buildCacheKey, lookupResponseCache, lookupStaleResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
+import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
 
-const MAX_RETRIES = 2;
+const MAX_RETRIES = config.proxyMaxRetries;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -122,6 +122,16 @@ export async function handleChatSurfaceRequest(
   const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
 
   // 精确响应缓存：仅对非流式请求且 temperature=0 时生效
+  const previewSelected = !isStream && typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
+    ? await tokenRouter.previewSelectedChannel(requestedModel, downstreamPolicy)
+    : null;
+  const routeScope = previewSelected
+    ? buildRouteScope({
+        routeId: previewSelected.channel.routeId,
+        siteId: previewSelected.site.id,
+        actualModel: previewSelected.actualModel || requestedModel,
+      })
+    : null;
   const responseCacheKey = !isStream
     ? buildCacheKey({
         model: requestedModel,
@@ -129,6 +139,7 @@ export async function handleChatSurfaceRequest(
         temperature: (request.body as Record<string, unknown>)?.temperature as number | null | undefined,
         top_p: (request.body as Record<string, unknown>)?.top_p as number | null | undefined,
         max_tokens: (request.body as Record<string, unknown>)?.max_tokens as number | null | undefined,
+        routeScope,
       })
     : null;
   if (responseCacheKey) {
@@ -155,7 +166,7 @@ export async function handleChatSurfaceRequest(
         null,
         clientContext,
         downstreamApiKeyId,
-        { cacheStatus: 'hit', cacheSavedCost: 0 },
+        { cacheStatus: 'hit', cacheSavedCost: cached.estimatedCost },
       );
       return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
     }
@@ -172,6 +183,12 @@ export async function handleChatSurfaceRequest(
         model: requestedModel,
         reason: requestBudget.buildTimeoutMessage(),
       });
+      if (responseCacheKey) {
+        const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+        if (stale) {
+          return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
+        }
+      }
       return reply.code(504).send({
         error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
       });
@@ -201,6 +218,12 @@ export async function handleChatSurfaceRequest(
           clientContext,
           downstreamApiKeyId,
         });
+      }
+      if (responseCacheKey) {
+        const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+        if (stale) {
+          return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
+        }
       }
       return reply.code(503).send({
         error: { message: 'No available channels for this model', type: 'server_error' },
@@ -835,7 +858,7 @@ export async function handleChatSurfaceRequest(
               null,
               clientContext,
               downstreamApiKeyId,
-              { cacheStatus: 'stale', cacheSavedCost: 0 },
+              { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
             );
             return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
           }
@@ -902,7 +925,7 @@ export async function handleChatSurfaceRequest(
         successfulUpstreamPath,
         clientContext,
         downstreamApiKeyId,
-        !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
+        !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: estimatedCost } : null,
       );
 
       // 异步写入精确缓存（不阻塞响应）
@@ -912,6 +935,7 @@ export async function handleChatSurfaceRequest(
           isStream: false,
           promptTokens: resolvedUsage.promptTokens,
           completionTokens: resolvedUsage.completionTokens,
+          estimatedCost,
         }).catch(() => {});
       }
 
@@ -960,7 +984,7 @@ export async function handleChatSurfaceRequest(
         reason: err?.message || 'network failure',
       });
 
-      if (responseCacheKey && !isStream) {
+      if (responseCacheKey) {
         const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
         if (stale) {
           return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
@@ -1033,11 +1057,20 @@ export async function handleClaudeCountTokensSurfaceRequest(
   });
   const downstreamPolicy = getDownstreamRoutingPolicy(request);
   const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
+  const previewSelected = typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
+    ? await tokenRouter.previewSelectedChannel(requestedModel, downstreamPolicy)
+    : null;
+  const routeScope = buildRouteScope({
+    routeId: previewSelected?.channel.routeId,
+    siteId: previewSelected?.site.id,
+    actualModel: previewSelected?.actualModel || requestedModel,
+  });
   const responseCacheKey = buildCacheKey({
     model: requestedModel,
     messages: rawBody.messages,
     temperature: 0,
     max_tokens: null,
+    routeScope,
   });
   if (responseCacheKey) {
     const cached = await lookupResponseCache(responseCacheKey);
@@ -1063,7 +1096,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
         null,
         clientContext,
         downstreamApiKeyId,
-        { cacheStatus: 'hit', cacheSavedCost: 0 },
+        { cacheStatus: 'hit', cacheSavedCost: cached.estimatedCost },
       );
       return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
     }
@@ -1097,6 +1130,12 @@ export async function handleClaudeCountTokensSurfaceRequest(
           clientContext,
           downstreamApiKeyId,
         });
+      }
+      if (responseCacheKey) {
+        const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+        if (stale) {
+          return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
+        }
       }
       return reply.code(503).send({
         error: { message: 'No available channels for this model', type: 'server_error' },
@@ -1256,7 +1295,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
               null,
               clientContext,
               downstreamApiKeyId,
-              { cacheStatus: 'stale', cacheSavedCost: 0 },
+              { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
             );
             return reply.header('X-Cache', 'STALE').type('application/json').send(JSON.parse(stale.body));
           }
@@ -1291,6 +1330,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
           isStream: false,
           promptTokens: 0,
           completionTokens: 0,
+          estimatedCost: 0,
         }).catch(() => {});
       }
       return reply.header('X-Cache', 'MISS').code(upstream.status).type(contentType).send(payload);

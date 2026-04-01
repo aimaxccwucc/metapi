@@ -8,7 +8,6 @@ import * as schema from './schema.js';
 import { ensureSiteSchemaCompatibility, type SiteSchemaInspector } from './siteSchemaCompatibility.js';
 import { ensureRouteGroupingSchemaCompatibility } from './routeGroupingSchemaCompatibility.js';
 import { ensureProxyFileSchemaCompatibility } from './proxyFileSchemaCompatibility.js';
-import { ensureResponseCacheSchemaCompatibility } from './responseCacheSchemaCompatibility.js';
 import { executeLegacyCompat, executeLegacyCompatSync } from './legacySchemaCompat.js';
 import { config } from '../config.js';
 import { ensureRuntimeDatabaseReady } from '../runtimeDatabaseBootstrap.js';
@@ -47,6 +46,7 @@ let proxyLogBillingDetailsColumnAvailable: boolean | null = null;
 let proxyLogDownstreamApiKeyIdColumnAvailable: boolean | null = null;
 let proxyLogClientColumnsAvailable: boolean | null = null;
 let proxyLogCacheColumnsAvailable: boolean | null = null;
+let responseCacheTableAvailable: boolean | null = null;
 
 function resolveSqlitePath(): string {
   const raw = (config.dbUrl || '').trim();
@@ -487,10 +487,8 @@ export async function ensureProxyFileCompatibilityColumns(): Promise<void> {
   await ensureProxyFileSchemaCompatibility(inspector);
 }
 
-export async function ensureResponseCacheTable(): Promise<void> {
-  const inspector = createRuntimeSchemaInspector();
-  if (!inspector) return;
-  await ensureResponseCacheSchemaCompatibility(inspector);
+export async function ensureResponseCacheTable(): Promise<boolean> {
+  return await hasResponseCacheTable();
 }
 
 function ensureRouteGroupingSchema() {
@@ -932,6 +930,57 @@ export async function hasProxyLogCacheColumns(): Promise<boolean> {
   return proxyLogCacheColumnsAvailable;
 }
 
+export async function hasResponseCacheTable(): Promise<boolean> {
+  const requiredColumns = [
+    'cache_key',
+    'model',
+    'response_body',
+    'is_stream',
+    'prompt_tokens',
+    'completion_tokens',
+    'estimated_cost',
+    'hit_count',
+    'created_at',
+    'expires_at',
+  ];
+
+  if (responseCacheTableAvailable !== null) {
+    return responseCacheTableAvailable;
+  }
+
+  if (runtimeDbDialect === 'sqlite') {
+    responseCacheTableAvailable = tableExists('response_cache')
+      && requiredColumns.every((columnName) => tableColumnExists('response_cache', columnName));
+    return responseCacheTableAvailable;
+  }
+
+  if (runtimeDbDialect === 'mysql') {
+    if (!mysqlPool) return false;
+    const [rows] = await mysqlPool.query(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ['response_cache', ...requiredColumns],
+    ) as [Array<{ column_name?: string }>, unknown];
+    const available = new Set(
+      Array.isArray(rows)
+        ? rows.map((row) => String(row?.column_name || '').trim().toLowerCase()).filter(Boolean)
+        : [],
+    );
+    responseCacheTableAvailable = requiredColumns.every((columnName) => available.has(columnName));
+    return responseCacheTableAvailable;
+  }
+
+  if (!pgPool) return false;
+  const result = await pgPool.query(
+    'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = ANY($2::text[])',
+    ['response_cache', requiredColumns],
+  );
+  const available = new Set(
+    result.rows.map((row) => String((row as { column_name?: string }).column_name || '').trim().toLowerCase()).filter(Boolean),
+  );
+  responseCacheTableAvailable = requiredColumns.every((columnName) => available.has(columnName));
+  return responseCacheTableAvailable;
+}
+
 export async function ensureProxyLogCacheColumns(): Promise<boolean> {
   const requiredColumns = [
     { name: 'cache_status', sqliteType: 'text', mysqlType: 'TEXT NULL', postgresType: 'TEXT' },
@@ -1102,6 +1151,7 @@ function resetSchemaCapabilityCache() {
   proxyLogDownstreamApiKeyIdColumnAvailable = null;
   proxyLogClientColumnsAvailable = null;
   proxyLogCacheColumnsAvailable = null;
+  responseCacheTableAvailable = null;
 }
 
 async function sqliteProxyQuery(sqlText: string, params: unknown[], method: SqlMethod) {

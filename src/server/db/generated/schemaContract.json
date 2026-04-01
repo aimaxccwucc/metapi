@@ -774,6 +774,76 @@
         }
       }
     },
+    "response_cache": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "cache_key": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "response_body": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "is_stream": {
+          "logicalType": "boolean",
+          "notNull": true,
+          "defaultValue": "false",
+          "primaryKey": false
+        },
+        "prompt_tokens": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "completion_tokens": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "estimated_cost": {
+          "logicalType": "real",
+          "notNull": false,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "hit_count": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "expires_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        }
+      }
+    },
     "route_channels": {
       "columns": {
         "id": {
@@ -1576,6 +1646,30 @@
       "unique": false
     },
     {
+      "name": "response_cache_expires_at_idx",
+      "table": "response_cache",
+      "columns": [
+        "expires_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "response_cache_key_idx",
+      "table": "response_cache",
+      "columns": [
+        "cache_key"
+      ],
+      "unique": true
+    },
+    {
+      "name": "response_cache_model_idx",
+      "table": "response_cache",
+      "columns": [
+        "model"
+      ],
+      "unique": false
+    },
+    {
       "name": "route_channels_account_id_idx",
       "table": "route_channels",
       "columns": [
@@ -1781,6 +1875,13 @@
       "table": "proxy_video_tasks",
       "columns": [
         "public_id"
+      ]
+    },
+    {
+      "name": "response_cache_key_idx",
+      "table": "response_cache",
+      "columns": [
+        "cache_key"
       ]
     },
     {

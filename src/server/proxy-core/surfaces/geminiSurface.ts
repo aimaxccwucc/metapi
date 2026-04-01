@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { TextDecoder } from 'node:util';
 import { fetch } from 'undici';
 import { and, eq } from 'drizzle-orm';
+import { config } from '../../config.js';
 import { db, schema } from '../../db/index.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { parseProxyUsage } from '../../services/proxyUsageParser.js';
@@ -42,7 +43,7 @@ import { readRuntimeResponseText } from '../executors/types.js';
 import { createRequestBudget, shouldRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
 import { wrapReaderWithIdleTimeout } from '../../routes/proxy/streamTimeout.js';
 
-const MAX_RETRIES = 2;
+const MAX_RETRIES = config.proxyMaxRetries;
 const GEMINI_MODEL_PROBES = [
   'gemini-2.5-flash',
   'gemini-2.0-flash',

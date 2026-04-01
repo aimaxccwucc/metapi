@@ -22,9 +22,9 @@ import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { createRequestBudget, shouldRetryWithinBudget } from './requestBudget.js';
 import { wrapReaderWithIdleTimeout } from './streamTimeout.js';
-import { buildCacheKey, lookupResponseCache, lookupStaleResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
+import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
 
-const MAX_RETRIES = 2;
+const MAX_RETRIES = config.proxyMaxRetries;
 
 export async function completionsProxyRoute(app: FastifyInstance) {
   app.post('/v1/completions', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -44,6 +44,16 @@ export async function completionsProxyRoute(app: FastifyInstance) {
     });
 
     const isStream = body.stream === true;
+    const previewSelected = !isStream && typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
+      ? await tokenRouter.previewSelectedChannel(requestedModel, downstreamPolicy)
+      : null;
+    const routeScope = previewSelected
+      ? buildRouteScope({
+          routeId: previewSelected.channel.routeId,
+          siteId: previewSelected.site.id,
+          actualModel: previewSelected.actualModel || requestedModel,
+        })
+      : null;
     const responseCacheKey = !isStream
       ? buildCacheKey({
           model: requestedModel,
@@ -51,6 +61,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           temperature: body?.temperature as number | null | undefined,
           top_p: body?.top_p as number | null | undefined,
           max_tokens: body?.max_tokens as number | null | undefined,
+          routeScope,
         })
       : null;
     if (responseCacheKey) {
@@ -62,7 +73,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           actualModel: requestedModel,
           site: { name: 'cache', url: '', platform: 'cache' } as any,
           tokenName: 'response_cache',
-        }, requestedModel, 'success', 200, 0, null, 0, downstreamApiKeyId, cached.promptTokens, cached.completionTokens, cached.promptTokens + cached.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: 'hit', cacheSavedCost: 0 });
+        }, requestedModel, 'success', 200, 0, null, 0, downstreamApiKeyId, cached.promptTokens, cached.completionTokens, cached.promptTokens + cached.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: 'hit', cacheSavedCost: cached.estimatedCost });
         return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
       }
     }
@@ -77,6 +88,12 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           model: requestedModel,
           reason: requestBudget.buildTimeoutMessage(),
         });
+        if (responseCacheKey && !isStream) {
+          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+          if (stale) {
+            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
+          }
+        }
         return reply.code(504).send({
           error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
         });
@@ -106,6 +123,12 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             clientContext,
             downstreamApiKeyId,
           });
+        }
+        if (responseCacheKey && !isStream) {
+          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+          if (stale) {
+            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
+          }
         }
         return reply.code(503).send({
           error: { message: 'No available channels for this model', type: 'server_error' },
@@ -333,7 +356,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
                 actualModel: requestedModel,
                 site: { name: 'cache', url: '', platform: 'cache' } as any,
                 tokenName: 'response_cache',
-              }, requestedModel, 'success', 200, latency, 'served stale cache after upstream failure', retryCount, downstreamApiKeyId, stale.promptTokens, stale.completionTokens, stale.promptTokens + stale.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: 'stale', cacheSavedCost: 0 });
+              }, requestedModel, 'success', 200, latency, 'served stale cache after upstream failure', retryCount, downstreamApiKeyId, stale.promptTokens, stale.completionTokens, stale.promptTokens + stale.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost });
               return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
             }
           }
@@ -384,7 +407,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           billingDetails,
           clientContext,
           downstreamPath,
-          !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
+          !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: estimatedCost } : null,
         );
         if (responseCacheKey && !isStream) {
           writeResponseCache(responseCacheKey, requestedModel, {
@@ -392,6 +415,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             isStream: false,
             promptTokens: resolvedUsage.promptTokens,
             completionTokens: resolvedUsage.completionTokens,
+            estimatedCost,
           }).catch(() => {});
         }
         return reply.header('X-Cache', 'MISS').send(data);

@@ -57,9 +57,9 @@ import {
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
 import { recordProxyDebugTrace } from '../../routes/proxy/proxyDebugTrace.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
-import { buildCacheKey, lookupResponseCache, lookupStaleResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
+import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, writeResponseCache } from '../../services/responseCacheService.js';
 
-const MAX_RETRIES = 2;
+const MAX_RETRIES = config.proxyMaxRetries;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -188,6 +188,18 @@ export async function handleOpenAiResponsesSurfaceRequest(
         },
       });
     }
+    if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+    const downstreamPolicy = getDownstreamRoutingPolicy(request);
+    const previewSelected = !isStream && typeof (tokenRouter as { previewSelectedChannel?: unknown }).previewSelectedChannel === 'function'
+      ? await tokenRouter.previewSelectedChannel(requestedModel, downstreamPolicy)
+      : null;
+    const routeScope = previewSelected
+      ? buildRouteScope({
+          routeId: previewSelected.channel.routeId,
+          siteId: previewSelected.site.id,
+          actualModel: previewSelected.actualModel || requestedModel,
+        })
+      : null;
     const responseCacheKey = !isStream
       ? buildCacheKey({
           model: requestedModel,
@@ -195,10 +207,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
           temperature: (body.temperature as number | null | undefined),
           top_p: (body.top_p as number | null | undefined),
           max_tokens: ((body.max_output_tokens ?? body.max_tokens) as number | null | undefined),
+          routeScope,
         })
       : null;
-    if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
-    const downstreamPolicy = getDownstreamRoutingPolicy(request);
     const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
     if (responseCacheKey) {
       const cached = await lookupResponseCache(responseCacheKey);
@@ -225,7 +236,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           null,
           clientContext,
           downstreamApiKeyId,
-          { cacheStatus: 'hit', cacheSavedCost: 0 },
+          { cacheStatus: 'hit', cacheSavedCost: cached.estimatedCost },
         );
         return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
       }
@@ -241,6 +252,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
           model: requestedModel,
           reason: requestBudget.buildTimeoutMessage(),
         });
+        if (responseCacheKey && !isStream) {
+          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+          if (stale) {
+            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
+          }
+        }
         return reply.code(504).send({
           error: { message: requestBudget.buildTimeoutMessage(), type: 'upstream_error' },
         });
@@ -270,6 +287,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
             clientContext,
             downstreamApiKeyId,
           });
+        }
+        if (responseCacheKey && !isStream) {
+          const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+          if (stale) {
+            return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
+          }
         }
         return reply.code(503).send({
           error: { message: 'No available channels for this model', type: 'server_error' },
@@ -970,7 +993,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 null,
                 clientContext,
                 downstreamApiKeyId,
-                { cacheStatus: 'stale', cacheSavedCost: 0 },
+                { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
               );
               return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
             }
@@ -1030,7 +1053,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           successfulUpstreamPath,
           clientContext,
           downstreamApiKeyId,
-          !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
+          !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: estimatedCost } : null,
         );
         if (responseCacheKey && !isStream) {
           writeResponseCache(responseCacheKey, requestedModel, {
@@ -1038,6 +1061,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             isStream: false,
             promptTokens: resolvedUsage.promptTokens,
             completionTokens: resolvedUsage.completionTokens,
+            estimatedCost,
           }).catch(() => {});
         }
         return reply.header('X-Cache', 'MISS').send(downstreamData);

@@ -320,6 +320,7 @@ export const responseCache = sqliteTable('response_cache', {
   isStream: integer('is_stream', { mode: 'boolean' }).notNull().default(false),
   promptTokens: integer('prompt_tokens').default(0),
   completionTokens: integer('completion_tokens').default(0),
+  estimatedCost: real('estimated_cost').default(0),
   hitCount: integer('hit_count').notNull().default(0),
   createdAt: text('created_at').notNull(),
   expiresAt: text('expires_at').notNull(),

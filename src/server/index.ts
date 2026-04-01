@@ -353,9 +353,11 @@ try {
   await ensureProxyLogClientColumns();
   await ensureProxyLogDownstreamApiKeyIdColumn();
   try {
-    await ensureResponseCacheTable();
+    if (!await ensureResponseCacheTable()) {
+      console.warn('Response cache schema is unavailable; response cache disabled.');
+    }
   } catch (error) {
-    console.warn(`Failed to ensure response cache table: ${(error as Error)?.message || 'unknown error'}`);
+    console.warn(`Failed to verify response cache table: ${(error as Error)?.message || 'unknown error'}`);
   }
   const finalRows = await db.select().from(schema.settings).all();
   const finalMap = toSettingsMap(finalRows);

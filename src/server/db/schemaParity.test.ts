@@ -99,4 +99,26 @@ describe('database schema parity', () => {
     expect(postgresBootstrap).toContain('"client_app_id"');
     expect(postgresBootstrap).toContain('"proxy_logs_client_app_id_created_at_idx"');
   });
+
+  it('keeps response_cache schema and indexes in generated contract artifacts', () => {
+    const contract = JSON.parse(readFileSync(schemaContractPath, 'utf8')) as SchemaContract;
+    const mysqlBootstrap = readFileSync(resolve(generatedDir, 'mysql.bootstrap.sql'), 'utf8');
+    const mysqlUpgrade = readFileSync(resolve(generatedDir, 'mysql.upgrade.sql'), 'utf8');
+    const postgresBootstrap = readFileSync(resolve(generatedDir, 'postgres.bootstrap.sql'), 'utf8');
+    const postgresUpgrade = readFileSync(resolve(generatedDir, 'postgres.upgrade.sql'), 'utf8');
+
+    expect(contract.tables.response_cache?.columns.estimated_cost?.logicalType).toBe('real');
+    expect(contract.tables.response_cache?.columns.hit_count?.logicalType).toBe('integer');
+    expect(contract.indexes.some((index) => index.name === 'response_cache_expires_at_idx')).toBe(true);
+    expect(contract.indexes.some((index) => index.name === 'response_cache_model_idx')).toBe(true);
+    expect(contract.uniques.some((unique) => unique.name === 'response_cache_key_idx')).toBe(true);
+    expect(mysqlBootstrap).toContain('CREATE TABLE IF NOT EXISTS `response_cache`');
+    expect(mysqlBootstrap).toContain('`estimated_cost` DOUBLE DEFAULT 0');
+    expect(mysqlBootstrap).toContain('CREATE UNIQUE INDEX `response_cache_key_idx`');
+    expect(mysqlUpgrade).toContain('CREATE TABLE IF NOT EXISTS `response_cache`');
+    expect(postgresBootstrap).toContain('CREATE TABLE IF NOT EXISTS "response_cache"');
+    expect(postgresBootstrap).toContain('"estimated_cost" DOUBLE PRECISION DEFAULT 0');
+    expect(postgresBootstrap).toContain('CREATE UNIQUE INDEX "response_cache_key_idx"');
+    expect(postgresUpgrade).toContain('CREATE TABLE IF NOT EXISTS "response_cache"');
+  });
 });
