@@ -14,6 +14,9 @@ const { apiMock, getBrandMock } = vi.hoisted(() => ({
     getRouteDecisionsBatch: vi.fn(),
     getRouteWideDecisionsBatch: vi.fn(),
     getRouteDiagnostics: vi.fn(),
+    getRouteOverview: vi.fn(),
+    getRouteGovernanceSubjects: vi.fn(),
+    runRouteGovernanceRecoveryPass: vi.fn(),
     updateRoute: vi.fn(),
     addRoute: vi.fn(),
   },
@@ -154,6 +157,41 @@ describe('TokenRoutes grouped source models', () => {
         siteBackoffBlockedCount: 0,
         sites: [],
       },
+    });
+    apiMock.getRouteOverview.mockResolvedValue({
+      success: true,
+      generatedAt: '2026-04-01T00:00:00.000Z',
+      routeSummary: { routeCount: 0, enabledRouteCount: 0, channelCount: 0, enabledChannelCount: 0 },
+      governance: { total: 0, suppressed: 0, probing: 0, byReason: {} },
+      runtime: {
+        modelCircuitOpen: 0,
+        modelCircuitHalfOpen: 0,
+        siteRuntimeBreakerOpen: 0,
+        siteRuntimePenalized: 0,
+        unavailableModelBlocking: 0,
+        checkinAttention: 0,
+        checkinSiteBackoffBlocked: 0,
+      },
+    });
+    apiMock.getRouteGovernanceSubjects.mockResolvedValue({
+      success: true,
+      total: 0,
+      summary: {
+        total: 0,
+        suppressedCount: 0,
+        probingCount: 0,
+        countsByReason: {},
+        countsBySubjectType: {},
+      },
+      items: [],
+    });
+    apiMock.runRouteGovernanceRecoveryPass.mockResolvedValue({
+      success: true,
+      scanned: 0,
+      promotedToProbing: 0,
+      keptSuppressed: 0,
+      restored: 0,
+      items: [],
     });
     apiMock.updateRoute.mockResolvedValue({});
     apiMock.addRoute.mockResolvedValue({});
@@ -1396,7 +1434,7 @@ describe('TokenRoutes grouped source models', () => {
       expect(text).toContain('2来源模型');
       expect(text).toContain('来源健康1/2');
       expect(text).toContain('无通道1');
-      expect(text).toContain('缺少Key1');
+      expect(text).not.toContain('缺少Key1');
     } finally {
       root?.unmount();
     }

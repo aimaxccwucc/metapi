@@ -30,6 +30,7 @@ npm run docs:build
 | 新用户部署与首条请求 | [快速上手](./getting-started.md) | 新安装流程、默认端口、首次调用步骤变化时 |
 | 上游平台选择与接法 | [上游接入](./upstream-integration.md) | 平台支持范围、默认连接分段、自动识别规则变化时 |
 | 路由网关与签到改造基线 | [路由与签到稳定性改造](./gateway-checkin-hardening.md) | 需要统一沉淀稳定性问题、改造目标、实施分期和外部对照时 |
+| 路由治理与路由页性能治理 | [路由治理与路由页性能治理](./route-governance-ui-hardening.md) | 需要统一沉淀自动隔离、自动恢复、复测策略、路由页减载和治理 UI 时 |
 | 生产部署与回滚 | [部署指南](./deployment.md) | Docker Compose、反向代理、升级回滚策略变更时 |
 | 环境变量、参数和配置项 | [配置说明](./configuration.md) | 新增配置、默认值变化、兼容行为变化时 |
 | 客户端与工具接入 | [客户端接入](./client-integration.md) | Open WebUI、Cherry Studio、Cursor 等接入方式变化时 |
@@ -56,6 +57,7 @@ npm run docs:build
 
 - [FAQ/教程贡献规范](./community/faq-tutorial-guidelines.md)
 - [路由与签到稳定性改造](./gateway-checkin-hardening.md)
+- [路由治理与路由页性能治理](./route-governance-ui-hardening.md)
 - [返回文档首页](/)
 - [项目贡献流程](https://github.com/cita-777/metapi/blob/main/CONTRIBUTING.md)
 - [安全策略](https://github.com/cita-777/metapi/blob/main/SECURITY.md)

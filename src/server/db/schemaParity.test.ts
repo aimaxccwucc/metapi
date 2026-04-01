@@ -109,16 +109,18 @@ describe('database schema parity', () => {
 
     expect(contract.tables.response_cache?.columns.estimated_cost?.logicalType).toBe('real');
     expect(contract.tables.response_cache?.columns.hit_count?.logicalType).toBe('integer');
+    expect(contract.tables.routing_governance_states?.columns.reason_code?.logicalType).toBe('text');
     expect(contract.indexes.some((index) => index.name === 'response_cache_expires_at_idx')).toBe(true);
     expect(contract.indexes.some((index) => index.name === 'response_cache_model_idx')).toBe(true);
     expect(contract.uniques.some((unique) => unique.name === 'response_cache_key_idx')).toBe(true);
+    expect(contract.uniques.some((unique) => unique.name === 'routing_governance_states_subject_scope_unique')).toBe(true);
     expect(mysqlBootstrap).toContain('CREATE TABLE IF NOT EXISTS `response_cache`');
     expect(mysqlBootstrap).toContain('`estimated_cost` DOUBLE DEFAULT 0');
     expect(mysqlBootstrap).toContain('CREATE UNIQUE INDEX `response_cache_key_idx`');
-    expect(mysqlUpgrade).toContain('CREATE TABLE IF NOT EXISTS `response_cache`');
+    expect(mysqlUpgrade).toContain('CREATE TABLE IF NOT EXISTS `routing_governance_states`');
     expect(postgresBootstrap).toContain('CREATE TABLE IF NOT EXISTS "response_cache"');
     expect(postgresBootstrap).toContain('"estimated_cost" DOUBLE PRECISION DEFAULT 0');
     expect(postgresBootstrap).toContain('CREATE UNIQUE INDEX "response_cache_key_idx"');
-    expect(postgresUpgrade).toContain('CREATE TABLE IF NOT EXISTS "response_cache"');
+    expect(postgresUpgrade).toContain('CREATE TABLE IF NOT EXISTS "routing_governance_states"');
   });
 });

@@ -1,6 +1,7 @@
 ﻿import { and, eq, ne } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { getCredentialModeFromExtraConfig } from './accountExtraConfig.js';
+import { clearRoutingGovernanceState, clearRoutingGovernanceStates } from './routingGovernanceService.js';
 
 type UpstreamApiToken = {
   name?: string | null;
@@ -164,6 +165,17 @@ async function updateAccountApiToken(accountId: number, tokenValue: string | nul
     .run();
 }
 
+async function clearRecoveredCredentialGovernance(accountId: number, tokenId?: number | null) {
+  await clearRoutingGovernanceStates({
+    subjectType: 'account',
+    subjectId: accountId,
+    reasonCodes: ['auth', 'manual_recheck_needed'],
+  });
+  if (typeof tokenId === 'number' && Number.isFinite(tokenId) && tokenId > 0) {
+    await clearRoutingGovernanceState('token', tokenId, null);
+  }
+}
+
 function isApiKeyConnection(account: typeof schema.accounts.$inferSelect): boolean {
   const explicit = getCredentialModeFromExtraConfig(account.extraConfig);
   if (explicit && explicit !== 'auto') return explicit === 'apikey';
@@ -241,6 +253,7 @@ export async function ensureDefaultTokenForAccount(
     .run();
 
   await updateAccountApiToken(accountId, normalizedToken);
+  await clearRecoveredCredentialGovernance(accountId, target.id);
   return target.id;
 }
 
@@ -260,6 +273,7 @@ export async function setDefaultToken(tokenId: number): Promise<boolean> {
     .run();
 
   await updateAccountApiToken(target.accountId, target.token);
+  await clearRecoveredCredentialGovernance(target.accountId, target.id);
   return true;
 }
 
@@ -289,6 +303,7 @@ export async function repairDefaultToken(accountId: number) {
     .run();
 
   await updateAccountApiToken(accountId, currentDefault.token);
+  await clearRecoveredCredentialGovernance(accountId, currentDefault.id);
   return currentDefault;
 }
 
@@ -463,6 +478,7 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
   }
 
   const repaired = await repairDefaultToken(accountId);
+  await clearRecoveredCredentialGovernance(accountId, repaired?.id ?? null);
 
   return {
     created,
@@ -506,4 +522,3 @@ export async function listTokensWithRelations(accountId?: number) {
     };
     });
 }
-

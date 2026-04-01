@@ -550,6 +550,55 @@ export type RouteDiagnosticsResponse = {
   };
 };
 
+export type RouteOverviewResponse = {
+  success: true;
+  generatedAt: string;
+  routeSummary: {
+    routeCount: number;
+    enabledRouteCount: number;
+    channelCount: number;
+    enabledChannelCount: number;
+  };
+  governance: {
+    total: number;
+    suppressed: number;
+    probing: number;
+    byReason: Record<string, number>;
+  };
+  runtime: {
+    modelCircuitOpen: number;
+    modelCircuitHalfOpen: number;
+    siteRuntimeBreakerOpen: number;
+    siteRuntimePenalized: number;
+    unavailableModelBlocking: number;
+    checkinAttention: number;
+    checkinSiteBackoffBlocked: number;
+  };
+};
+
+export type RoutingGovernanceSubject = {
+  id: number;
+  subjectType: 'site' | 'account' | 'token' | 'channel';
+  subjectId: number;
+  modelName: string;
+  state: 'suppressed' | 'probing';
+  reasonCode: string;
+  reasonDetail: string | null;
+  probeModelName: string | null;
+  lastHttpStatus: number | null;
+  failureCount: number;
+  successCount: number;
+  suppressUntil: string | null;
+  probeAfter: string | null;
+  lastFailureAt: string | null;
+  lastSuccessAt: string | null;
+  lastProbeAt: string | null;
+  lastProbeStatus: string | null;
+  lastProbeMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type RuntimeOverview = {
   service: {
     name: string;
@@ -933,7 +982,19 @@ export const api = {
   // Routes
   getRoutes: () => request('/api/routes'),
   getRoutesLite: () => request('/api/routes/lite'),
-  getRoutesSummary: () => request('/api/routes/summary'),
+  getRoutesSummary: () => request('/api/routes/summary') as Promise<any[]>,
+  getRouteOverview: () => request('/api/routes/overview') as Promise<RouteOverviewResponse>,
+  getRouteGovernanceSubjects: (params?: { subjectType?: string; state?: string; reasonCode?: string; limit?: number }) =>
+    request(`/api/routes/governance/subjects${buildQueryString(params)}`) as Promise<{ success: true; items: RoutingGovernanceSubject[]; total: number }>,
+  runRouteGovernanceRecoveryPass: (data?: { limit?: number }) =>
+    request('/api/routes/governance/recovery-pass', { method: 'POST', body: JSON.stringify(data || {}) }) as Promise<{
+      success: true;
+      now: string;
+      scanned: number;
+      promotedToProbing: number;
+      skipped: number;
+      ids: number[];
+    }>,
   getRouteChannels: (routeId: number) => request(`/api/routes/${routeId}/channels`),
   batchAddChannels: (routeId: number, channels: Array<{ accountId: number; tokenId?: number; sourceModel?: string }>) =>
     request(`/api/routes/${routeId}/channels/batch`, { method: 'POST', body: JSON.stringify({ channels }) }),

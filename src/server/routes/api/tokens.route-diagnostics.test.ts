@@ -11,6 +11,7 @@ type UpstreamEndpointModule = typeof import('../proxy/upstreamEndpoint.js');
 type SiteProtocolConfigModule = typeof import('../../services/siteProtocolConfigService.js');
 type UpstreamProtocolProfileModule = typeof import('../../services/upstreamProtocolProfile.js');
 type CheckinSiteRuntimeModule = typeof import('../../services/checkinSiteRuntime.js');
+type RoutingGovernanceModule = typeof import('../../services/routingGovernanceService.js');
 
 describe('GET /api/routes/diagnostics', () => {
   let app: FastifyInstance;
@@ -28,6 +29,7 @@ describe('GET /api/routes/diagnostics', () => {
   let resetUpstreamProtocolProfileState: UpstreamProtocolProfileModule['resetUpstreamProtocolProfileState'];
   let recordCheckinSiteResolution: CheckinSiteRuntimeModule['recordCheckinSiteResolution'];
   let resetCheckinSiteRuntimeState: CheckinSiteRuntimeModule['resetCheckinSiteRuntimeState'];
+  let upsertRoutingGovernanceState: RoutingGovernanceModule['upsertRoutingGovernanceState'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -43,6 +45,7 @@ describe('GET /api/routes/diagnostics', () => {
     const siteProtocolConfigModule = await import('../../services/siteProtocolConfigService.js');
     const upstreamProtocolProfileModule = await import('../../services/upstreamProtocolProfile.js');
     const checkinSiteRuntimeModule = await import('../../services/checkinSiteRuntime.js');
+    const routingGovernanceModule = await import('../../services/routingGovernanceService.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
@@ -58,6 +61,7 @@ describe('GET /api/routes/diagnostics', () => {
     resetUpstreamProtocolProfileState = upstreamProtocolProfileModule.resetUpstreamProtocolProfileState;
     recordCheckinSiteResolution = checkinSiteRuntimeModule.recordCheckinSiteResolution;
     resetCheckinSiteRuntimeState = checkinSiteRuntimeModule.resetCheckinSiteRuntimeState;
+    upsertRoutingGovernanceState = routingGovernanceModule.upsertRoutingGovernanceState;
 
     app = Fastify();
     await app.register(routesModule.tokensRoutes);
@@ -299,6 +303,127 @@ describe('GET /api/routes/diagnostics', () => {
     expect(body.checkinTodo.sites[0]?.siteBackoffReasonCode).toBe('upstream_error');
     expect(body.checkinTodo.sites[0]?.sampleAccounts[0]?.checkinSnapshot?.status).toBe('manual_required');
     expect(body.checkinTodo.sites[0]?.sampleAccounts[0]?.checkinSnapshot?.reasonCode).toBe('manual_turnstile_required');
+  });
+
+  it('returns lightweight overview and can trigger a governance recovery pass', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'overview-site',
+      url: 'https://overview-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'overview-user',
+      accessToken: 'overview-access',
+      apiToken: 'sk-overview',
+      status: 'active',
+      checkinEnabled: true,
+      extraConfig: JSON.stringify({
+        checkinSnapshot: {
+          version: 1,
+          status: 'manual_required',
+          reasonCode: 'manual_turnstile_required',
+          retryable: false,
+          requiresManual: true,
+          unsupported: false,
+          lastAttemptAt: '2026-03-25T00:00:00.000Z',
+          message: 'manual required',
+          source: 'checkin',
+        },
+      }),
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-overview',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-overview',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gpt-overview',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    await upsertRoutingGovernanceState({
+      subjectType: 'token',
+      subjectId: token.id,
+      state: 'suppressed',
+      reasonCode: 'auth',
+      reasonDetail: 'token expired',
+      suppressUntil: '2000-01-01T00:00:00.000Z',
+      probeAfter: '2000-01-01T00:00:00.000Z',
+      lastFailureAt: '2026-03-25T00:00:00.000Z',
+    });
+
+    const overviewResponse = await app.inject({
+      method: 'GET',
+      url: '/api/routes/overview',
+    });
+
+    expect(overviewResponse.statusCode).toBe(200);
+    expect(overviewResponse.json()).toMatchObject({
+      success: true,
+      routeSummary: {
+        routeCount: 1,
+        enabledRouteCount: 1,
+        channelCount: 1,
+        enabledChannelCount: 1,
+      },
+      governance: {
+        total: 1,
+        suppressed: 1,
+        probing: 0,
+      },
+      runtime: {
+        checkinAttention: 1,
+      },
+    });
+
+    const recoveryResponse = await app.inject({
+      method: 'POST',
+      url: '/api/routes/governance/recovery-pass',
+      payload: {},
+    });
+
+    expect(recoveryResponse.statusCode).toBe(200);
+    expect(recoveryResponse.json()).toMatchObject({
+      success: true,
+      scanned: 1,
+      promotedToProbing: 1,
+    });
+
+    const subjectsResponse = await app.inject({
+      method: 'GET',
+      url: '/api/routes/governance/subjects',
+    });
+    expect(subjectsResponse.statusCode).toBe(200);
+    expect(subjectsResponse.json()).toMatchObject({
+      success: true,
+      total: 1,
+      items: [
+        expect.objectContaining({
+          subjectType: 'token',
+          subjectId: token.id,
+          state: 'probing',
+          reasonCode: 'auth',
+        }),
+      ],
+    });
   });
 
   it('keeps manual-required attention without marking site runtime backoff', async () => {

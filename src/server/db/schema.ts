@@ -330,6 +330,38 @@ export const responseCache = sqliteTable('response_cache', {
   modelIdx: index('response_cache_model_idx').on(table.model),
 }));
 
+export const routingGovernanceStates = sqliteTable('routing_governance_states', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  subjectType: text('subject_type').notNull(),
+  subjectId: integer('subject_id').notNull(),
+  modelName: text('model_name').notNull().default(''),
+  state: text('state').notNull().default('suppressed'),
+  reasonCode: text('reason_code').notNull(),
+  reasonDetail: text('reason_detail'),
+  probeModelName: text('probe_model_name'),
+  lastHttpStatus: integer('last_http_status'),
+  failureCount: integer('failure_count').notNull().default(0),
+  successCount: integer('success_count').notNull().default(0),
+  suppressUntil: text('suppress_until'),
+  probeAfter: text('probe_after'),
+  lastFailureAt: text('last_failure_at'),
+  lastSuccessAt: text('last_success_at'),
+  lastProbeAt: text('last_probe_at'),
+  lastProbeStatus: text('last_probe_status'),
+  lastProbeMessage: text('last_probe_message'),
+  createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+}, (table) => ({
+  subjectScopeUnique: uniqueIndex('routing_governance_states_subject_scope_unique').on(
+    table.subjectType,
+    table.subjectId,
+    table.modelName,
+  ),
+  stateSuppressIdx: index('routing_governance_states_state_suppress_idx').on(table.state, table.suppressUntil, table.probeAfter),
+  subjectIdx: index('routing_governance_states_subject_idx').on(table.subjectType, table.subjectId),
+  reasonStateIdx: index('routing_governance_states_reason_state_idx').on(table.reasonCode, table.state),
+}));
+
 export const events = sqliteTable('events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   type: text('type').notNull(), // 'checkin' | 'balance' | 'token' | 'proxy' | 'status'

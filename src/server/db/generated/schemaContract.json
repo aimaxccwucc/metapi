@@ -984,6 +984,130 @@
         }
       }
     },
+    "routing_governance_states": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "subject_type": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "subject_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model_name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "''",
+          "primaryKey": false
+        },
+        "state": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'suppressed'",
+          "primaryKey": false
+        },
+        "reason_code": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "reason_detail": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "probe_model_name": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_http_status": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "failure_count": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "success_count": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "suppress_until": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "probe_after": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_failure_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_success_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_probe_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_probe_status": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_probe_message": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "settings": {
       "columns": {
         "key": {
@@ -1729,6 +1853,44 @@
       "unique": false
     },
     {
+      "name": "routing_governance_states_reason_state_idx",
+      "table": "routing_governance_states",
+      "columns": [
+        "reason_code",
+        "state"
+      ],
+      "unique": false
+    },
+    {
+      "name": "routing_governance_states_state_suppress_idx",
+      "table": "routing_governance_states",
+      "columns": [
+        "state",
+        "suppress_until",
+        "probe_after"
+      ],
+      "unique": false
+    },
+    {
+      "name": "routing_governance_states_subject_idx",
+      "table": "routing_governance_states",
+      "columns": [
+        "subject_type",
+        "subject_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "routing_governance_states_subject_scope_unique",
+      "table": "routing_governance_states",
+      "columns": [
+        "subject_type",
+        "subject_id",
+        "model_name"
+      ],
+      "unique": true
+    },
+    {
       "name": "site_announcements_read_at_idx",
       "table": "site_announcements",
       "columns": [
@@ -1890,6 +2052,15 @@
       "columns": [
         "group_route_id",
         "source_route_id"
+      ]
+    },
+    {
+      "name": "routing_governance_states_subject_scope_unique",
+      "table": "routing_governance_states",
+      "columns": [
+        "subject_type",
+        "subject_id",
+        "model_name"
       ]
     },
     {

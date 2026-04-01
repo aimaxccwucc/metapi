@@ -35,6 +35,7 @@ const TABLES_WITH_NUMERIC_ID = new Set([
   'downstream_api_keys',
   'site_announcements',
   'events',
+  'routing_governance_states',
 ]);
 
 export let runtimeDbDialect: RuntimeDbDialect = config.dbType;

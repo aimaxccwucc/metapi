@@ -32,6 +32,14 @@ import {
 } from './modelCircuitBreaker.js';
 import { classifyProxyFailureCategory } from './proxyRetryPolicy.js';
 import { parseCodexQuotaResetHint } from './oauth/quota.js';
+import {
+  clearRoutingGovernanceState,
+  listActiveRoutingGovernanceStates,
+  upsertRoutingGovernanceState,
+  type CandidateGovernanceBlock,
+  type RoutingGovernanceReasonCode,
+  type RoutingGovernanceSubjectType,
+} from './routingGovernanceService.js';
 
 interface RouteMatch {
   route: RouteRow;
@@ -65,6 +73,10 @@ type FailureAwareChannel = {
 type PersistedUnavailableModelSnapshot = {
   tokenModels: Map<number, Map<string, number>>;
   accountModels: Map<number, Map<string, number>>;
+};
+
+type GovernanceSnapshot = {
+  byScopeKey: Map<string, CandidateGovernanceBlock>;
 };
 
 export type PersistedUnavailableModelDiagnosticEntry = {
@@ -338,6 +350,20 @@ function createEmptyPersistedUnavailableModelSnapshot(): PersistedUnavailableMod
   };
 }
 
+function createEmptyGovernanceSnapshot(): GovernanceSnapshot {
+  return {
+    byScopeKey: new Map<string, CandidateGovernanceBlock>(),
+  };
+}
+
+function buildGovernanceScopeKey(
+  subjectType: RoutingGovernanceSubjectType,
+  subjectId: number,
+  modelName?: string | null,
+): string {
+  return `${subjectType}:${subjectId}:${normalizeModelAlias(modelName || '')}`;
+}
+
 function appendUnavailableModel(
   target: Map<number, Map<string, number>>,
   ownerId: number,
@@ -504,6 +530,184 @@ async function loadPersistedUnavailableModelsForCandidates(
   }
 
   return snapshot;
+}
+
+async function loadGovernanceSnapshotForCandidates(
+  candidates: RouteChannelCandidate[],
+): Promise<GovernanceSnapshot> {
+  const snapshot = createEmptyGovernanceSnapshot();
+  if (candidates.length <= 0) return snapshot;
+
+  const subjectTypeSet = new Set<RoutingGovernanceSubjectType>();
+  const subjectIdByType = new Map<RoutingGovernanceSubjectType, Set<number>>();
+  const modelNames = new Set<string>();
+
+  for (const candidate of candidates) {
+    if (typeof candidate.channel.id === 'number' && candidate.channel.id > 0) {
+      subjectTypeSet.add('channel');
+      if (!subjectIdByType.has('channel')) subjectIdByType.set('channel', new Set<number>());
+      subjectIdByType.get('channel')!.add(candidate.channel.id);
+    }
+    if (typeof candidate.channel.tokenId === 'number' && candidate.channel.tokenId > 0) {
+      subjectTypeSet.add('token');
+      if (!subjectIdByType.has('token')) subjectIdByType.set('token', new Set<number>());
+      subjectIdByType.get('token')!.add(candidate.channel.tokenId);
+    }
+    if (typeof candidate.account.id === 'number' && candidate.account.id > 0) {
+      subjectTypeSet.add('account');
+      if (!subjectIdByType.has('account')) subjectIdByType.set('account', new Set<number>());
+      subjectIdByType.get('account')!.add(candidate.account.id);
+    }
+    if (typeof candidate.site.id === 'number' && candidate.site.id > 0) {
+      subjectTypeSet.add('site');
+      if (!subjectIdByType.has('site')) subjectIdByType.set('site', new Set<number>());
+      subjectIdByType.get('site')!.add(candidate.site.id);
+    }
+    const normalizedSourceModel = normalizeModelAlias(candidate.channel.sourceModel || '');
+    if (normalizedSourceModel) modelNames.add(normalizedSourceModel);
+  }
+
+  const states = await listActiveRoutingGovernanceStates({
+    subjectTypes: Array.from(subjectTypeSet),
+    states: ['suppressed', 'probing'],
+    limit: 500,
+  });
+
+  for (const state of states) {
+    const subjectType = state.subjectType as RoutingGovernanceSubjectType;
+    const subjectIds = subjectIdByType.get(subjectType);
+    if (!subjectIds || !subjectIds.has(state.subjectId)) continue;
+    const normalizedModelName = normalizeModelAlias(state.modelName || '');
+    if (normalizedModelName && !modelNames.has(normalizedModelName)) {
+      continue;
+    }
+    const key = buildGovernanceScopeKey(subjectType, state.subjectId, normalizedModelName);
+    if (!snapshot.byScopeKey.has(key)) {
+      snapshot.byScopeKey.set(key, {
+        subjectType,
+        subjectId: state.subjectId,
+        modelName: normalizedModelName,
+        reasonCode: state.reasonCode as RoutingGovernanceReasonCode,
+        reasonDetail: state.reasonDetail ?? null,
+        suppressUntil: state.suppressUntil ?? null,
+        state: state.state as 'suppressed' | 'probing',
+      });
+    }
+  }
+
+  return snapshot;
+}
+
+function findGovernanceBlockFromSnapshot(
+  snapshot: GovernanceSnapshot | undefined,
+  candidate: RouteChannelCandidate,
+  runtimeModelName?: string | null,
+): CandidateGovernanceBlock | null {
+  if (!snapshot) return null;
+  const normalizedModelName = normalizeModelAlias(runtimeModelName || '');
+  const lookups: Array<[RoutingGovernanceSubjectType, number | null]> = [
+    ['channel', candidate.channel.id ?? null],
+    ['token', (typeof candidate.channel.tokenId === 'number' && candidate.channel.tokenId > 0) ? candidate.channel.tokenId : null],
+    ['account', candidate.account.id ?? null],
+    ['site', candidate.site.id ?? null],
+  ];
+  for (const [subjectType, subjectId] of lookups) {
+    if (!(typeof subjectId === 'number' && subjectId > 0)) continue;
+    const exactKey = buildGovernanceScopeKey(subjectType, subjectId, normalizedModelName);
+    const globalKey = buildGovernanceScopeKey(subjectType, subjectId, '');
+    const hit = snapshot.byScopeKey.get(exactKey) || snapshot.byScopeKey.get(globalKey) || null;
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function formatGovernanceReason(block: CandidateGovernanceBlock): string {
+  const subjectLabelMap: Record<RoutingGovernanceSubjectType, string> = {
+    channel: '通道',
+    token: '令牌',
+    account: '账号',
+    site: '站点',
+  };
+  const reasonLabelMap: Record<RoutingGovernanceReasonCode, string> = {
+    auth: '鉴权失效',
+    rate_limit: '限流中',
+    balance_exhausted: '余额不足',
+    quota_exhausted: '额度不足',
+    model_unsupported: '模型不可用',
+    manual_recheck_needed: '待复测',
+  };
+  const detail = block.reasonDetail?.trim();
+  const stateLabel = block.state === 'probing' ? '系统复测中' : '系统隔离';
+  const base = `${stateLabel}：${subjectLabelMap[block.subjectType] || block.subjectType} / ${reasonLabelMap[block.reasonCode] || block.reasonCode}`;
+  return detail ? `${base}（${detail}）` : base;
+}
+
+function resolveGovernanceSuppression(
+  input: {
+    failureCategory: ReturnType<typeof classifyProxyFailureCategory>;
+    channel: typeof schema.routeChannels.$inferSelect;
+    account: typeof schema.accounts.$inferSelect;
+    status?: number | null;
+    modelName?: string | null;
+    errorText?: string | null;
+    cooldownUntil?: string | null;
+  },
+): { subjectType: RoutingGovernanceSubjectType; subjectId: number; modelName?: string | null; reasonCode: RoutingGovernanceReasonCode } | null {
+  const normalizedModelName = normalizeModelAlias(input.modelName || '');
+  const normalizedStatus = typeof input.status === 'number' && Number.isFinite(input.status)
+    ? Math.trunc(input.status)
+    : 0;
+  const errorText = (input.errorText || '').trim();
+  const protocolMismatchText = /does\s+not\s+allow\s+\/v1\/|unsupported\s+endpoint|unsupported\s+path|please\s+use\s+\/v1\//i
+    .test(errorText);
+  if ((normalizedStatus === 400 || normalizedStatus === 403 || normalizedStatus === 404) && protocolMismatchText) {
+    return null;
+  }
+  if (input.failureCategory === 'auth') {
+    if (typeof input.channel.tokenId === 'number' && input.channel.tokenId > 0) {
+      return {
+        subjectType: 'token',
+        subjectId: input.channel.tokenId,
+        reasonCode: 'auth',
+      };
+    }
+    return {
+      subjectType: 'account',
+      subjectId: input.account.id,
+      reasonCode: 'auth',
+    };
+  }
+  if (input.failureCategory === 'rate_limit') {
+    if (typeof input.channel.tokenId === 'number' && input.channel.tokenId > 0) {
+      return {
+        subjectType: 'token',
+        subjectId: input.channel.tokenId,
+        reasonCode: 'rate_limit',
+      };
+    }
+    return {
+      subjectType: 'account',
+      subjectId: input.account.id,
+      reasonCode: 'rate_limit',
+    };
+  }
+  if (input.failureCategory === 'model_unsupported' && normalizedModelName) {
+    if (typeof input.channel.tokenId === 'number' && input.channel.tokenId > 0) {
+      return {
+        subjectType: 'token',
+        subjectId: input.channel.tokenId,
+        modelName: normalizedModelName,
+        reasonCode: 'model_unsupported',
+      };
+    }
+    return {
+      subjectType: 'account',
+      subjectId: input.account.id,
+      modelName: normalizedModelName,
+      reasonCode: 'model_unsupported',
+    };
+  }
+  return null;
 }
 
 function isCandidatePersistentlyUnavailableForModel(
@@ -3368,6 +3572,7 @@ type CandidateEligibilityOptions = {
   nowMs?: number;
   runtimeModelName?: string | null;
   persistedUnavailableModels?: PersistedUnavailableModelSnapshot;
+  governanceSnapshot?: GovernanceSnapshot;
 };
 
 type CostSignal = {
@@ -4029,6 +4234,7 @@ export class TokenRouter {
       ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
       : mappedModel;
     const persistedUnavailableModels = await loadPersistedUnavailableModelsForCandidates(match.channels);
+    const governanceSnapshot = await loadGovernanceSnapshotForCandidates(match.channels);
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
@@ -4064,6 +4270,11 @@ export class TokenRouter {
       const runtimeModelName = typeof runtimeModelResolver === 'function'
         ? runtimeModelResolver(row)
         : runtimeModelResolver;
+      const governanceBlock = findGovernanceBlockFromSnapshot(
+        governanceSnapshot,
+        row,
+        runtimeModelName,
+      );
       const reasonParts = this.getCandidateEligibilityReasons(row, {
         requestedModel,
         bypassSourceModelCheck,
@@ -4073,6 +4284,7 @@ export class TokenRouter {
         nowMs,
         runtimeModelName,
         persistedUnavailableModels,
+        governanceSnapshot,
       });
       const modelCircuitStatus = getCandidateModelCircuitStatus(row.channel.id, runtimeModelName, nowMs);
       const runtimeHealthDetails = getSiteRuntimeHealthDetails(row.site.id, runtimeModelName, nowMs);
@@ -4083,6 +4295,9 @@ export class TokenRouter {
         : false;
       const eligible = reasonParts.length === 0;
       let reason = eligible ? '可用' : reasonParts.join('、');
+      if (eligible && governanceBlock?.state === 'probing') {
+        reason = formatGovernanceReason(governanceBlock);
+      }
       if (
         !eligible
         && runtimeCircuit.isOpen
@@ -4612,6 +4827,18 @@ export class TokenRouter {
     releaseAccountSelectionLease(account.id, nowMs);
 
     await restorePersistedModelAvailabilityForChannel(ch, account.id, modelName);
+    if (typeof ch.tokenId === 'number' && ch.tokenId > 0) {
+      await clearRoutingGovernanceState('token', ch.tokenId, null);
+      if (normalizeModelAlias(modelName || '')) {
+        await clearRoutingGovernanceState('token', ch.tokenId, modelName);
+      }
+    }
+    await clearRoutingGovernanceState('account', account.id, null);
+    if (normalizeModelAlias(modelName || '')) {
+      await clearRoutingGovernanceState('account', account.id, modelName);
+    }
+    await clearRoutingGovernanceState('channel', ch.id, null);
+    await clearRoutingGovernanceState('site', account.siteId, null);
 
     if (normalizeModelAlias(modelName || '')) {
       recordModelCircuitSuccess(channelId, modelName || '', nowMs);
@@ -4800,6 +5027,32 @@ export class TokenRouter {
     }
     budgetState.updatedAtMs = nowMs;
     scheduleAccountRuntimePersistence();
+
+    const governanceSuppression = resolveGovernanceSuppression({
+      failureCategory,
+      channel: ch,
+      account,
+      status: normalizedContext.status,
+      modelName: normalizedContext.modelName,
+      errorText: normalizedContext.errorText,
+      cooldownUntil,
+    });
+    if (governanceSuppression) {
+      await upsertRoutingGovernanceState({
+        subjectType: governanceSuppression.subjectType,
+        subjectId: governanceSuppression.subjectId,
+        modelName: governanceSuppression.modelName,
+        state: 'suppressed',
+        reasonCode: governanceSuppression.reasonCode,
+        reasonDetail: (normalizedContext.errorText || '').trim() || null,
+        probeModelName: normalizeModelAlias(normalizedContext.modelName || '') || null,
+        lastHttpStatus: typeof normalizedContext.status === 'number' ? normalizedContext.status : null,
+        suppressUntil: cooldownUntil,
+        probeAfter: cooldownUntil,
+        lastFailureAt: nowIso,
+        failureCountDelta: 1,
+      });
+    }
   }
 
   /**
@@ -4850,6 +5103,7 @@ export class TokenRouter {
       ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
       : mappedModel;
     const persistedUnavailableModels = await loadPersistedUnavailableModelsForCandidates(match.channels);
+    const governanceSnapshot = await loadGovernanceSnapshotForCandidates(match.channels);
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
@@ -4858,6 +5112,11 @@ export class TokenRouter {
       const runtimeModelName = typeof runtimeModelResolver === 'function'
         ? runtimeModelResolver(candidate)
         : runtimeModelResolver;
+      const governanceBlock = findGovernanceBlockFromSnapshot(
+        governanceSnapshot,
+        candidate,
+        runtimeModelName,
+      );
       const reasons = this.getCandidateEligibilityReasons(candidate, {
         requestedModel,
         bypassSourceModelCheck,
@@ -4867,10 +5126,12 @@ export class TokenRouter {
         nowMs,
         runtimeModelName,
         persistedUnavailableModels,
+        governanceSnapshot,
       });
       return {
         candidate,
         reasons,
+        governanceBlock,
       };
     });
     const available = evaluatedCandidates
@@ -5151,6 +5412,15 @@ export class TokenRouter {
       nowMs,
     )) {
       reasonParts.push('模型能力已标记不可用');
+    }
+
+    const governanceBlock = findGovernanceBlockFromSnapshot(
+      options.governanceSnapshot,
+      candidate,
+      options.runtimeModelName,
+    );
+    if (governanceBlock && governanceBlock.state === 'suppressed') {
+      reasonParts.push(formatGovernanceReason(governanceBlock));
     }
 
     if (!candidate.channel.enabled) reasonParts.push('通道禁用');

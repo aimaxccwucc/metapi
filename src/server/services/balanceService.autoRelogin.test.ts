@@ -14,6 +14,8 @@ const decryptPasswordMock = vi.fn();
 const setAccountRuntimeHealthMock = vi.fn();
 const extractRuntimeHealthMock = vi.fn();
 const undiciFetchMock = vi.fn();
+const clearRoutingGovernanceStatesMock = vi.fn();
+const upsertRoutingGovernanceStateMock = vi.fn();
 
 vi.mock('../db/index.js', () => {
   const selectChain = {
@@ -79,6 +81,11 @@ vi.mock('./accountHealthService.js', () => ({
   extractRuntimeHealth: (...args: unknown[]) => extractRuntimeHealthMock(...args),
 }));
 
+vi.mock('./routingGovernanceService.js', () => ({
+  clearRoutingGovernanceStates: (...args: unknown[]) => clearRoutingGovernanceStatesMock(...args),
+  upsertRoutingGovernanceState: (...args: unknown[]) => upsertRoutingGovernanceStateMock(...args),
+}));
+
 vi.mock('undici', () => ({
   fetch: (...args: unknown[]) => undiciFetchMock(...args),
 }));
@@ -96,6 +103,8 @@ describe('balanceService auto relogin', () => {
     setAccountRuntimeHealthMock.mockReset();
     extractRuntimeHealthMock.mockReset();
     undiciFetchMock.mockReset();
+    clearRoutingGovernanceStatesMock.mockReset();
+    upsertRoutingGovernanceStateMock.mockReset();
 
     extractRuntimeHealthMock.mockReturnValue(null);
     undiciFetchMock.mockResolvedValue({

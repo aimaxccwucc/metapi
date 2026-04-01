@@ -37,6 +37,11 @@ import { listSiteProtocolConfigs } from '../../services/siteProtocolConfigServic
 import { extractRuntimeHealth } from '../../services/accountHealthService.js';
 import { isSchedulableCheckinAccountStatus } from '../../services/checkinService.js';
 import { listCheckinSiteRuntimeSnapshots } from '../../services/checkinSiteRuntime.js';
+import {
+  listActiveRoutingGovernanceStates,
+  runRoutingGovernanceRecoveryPass,
+  type RoutingGovernanceEntry,
+} from '../../services/routingGovernanceService.js';
 
 const ROUTE_AUTOCREATE_SOFT_TIMEOUT_MS = 4_000;
 
@@ -54,6 +59,40 @@ type RouteDiagnosticsRouteSummary = {
   enabledRouteCount: number;
   channelCount: number;
   enabledChannelCount: number;
+};
+
+type RouteOverviewResponse = {
+  success: true;
+  generatedAt: string;
+  routeSummary: RouteDiagnosticsRouteSummary;
+  governance: {
+    total: number;
+    suppressed: number;
+    probing: number;
+    byReason: Record<string, number>;
+  };
+  runtime: {
+    modelCircuitOpen: number;
+    modelCircuitHalfOpen: number;
+    siteRuntimeBreakerOpen: number;
+    siteRuntimePenalized: number;
+    unavailableModelBlocking: number;
+    checkinAttention: number;
+    checkinSiteBackoffBlocked: number;
+  };
+};
+
+type RouteGovernanceSubjectsResponse = {
+  success: true;
+  total: number;
+  summary: {
+    total: number;
+    suppressedCount: number;
+    probingCount: number;
+    countsByReason: Record<string, number>;
+    countsBySubjectType: Record<string, number>;
+  };
+  items: Array<ReturnType<typeof serializeGovernanceEntry>>;
 };
 
 function isExactModelPattern(modelPattern: string): boolean {
@@ -932,6 +971,219 @@ async function buildRouteChannelSummaryMap(routes: RouteRow[]): Promise<Map<numb
   return summaryByRoute;
 }
 
+async function buildLightweightRouteChannelSummaryMap(routes: RouteRow[]): Promise<Map<number, RouteChannelSummary>> {
+  const summaryByRoute = new Map<number, RouteChannelSummary>();
+  if (routes.length === 0) return summaryByRoute;
+
+  const explicitSourceRouteIds = Array.from(new Set(routes
+    .filter((route) => isExplicitGroupRoute(route))
+    .flatMap((route) => route.sourceRouteIds)));
+  const explicitSourceRoutes = explicitSourceRouteIds.length > 0
+    ? (await db.select({
+      id: schema.tokenRoutes.id,
+      enabled: schema.tokenRoutes.enabled,
+      modelPattern: schema.tokenRoutes.modelPattern,
+      routeMode: schema.tokenRoutes.routeMode,
+    }).from(schema.tokenRoutes)
+      .where(inArray(schema.tokenRoutes.id, explicitSourceRouteIds))
+      .all())
+    : [];
+  const enabledExplicitSourceRouteIds = explicitSourceRoutes
+    .filter((route) => route.enabled && !isExplicitGroupRoute(route) && isExactModelPattern(route.modelPattern))
+    .map((route) => route.id);
+  const actualRouteIds = Array.from(new Set([
+    ...routes.filter((route) => !isExplicitGroupRoute(route)).map((route) => route.id),
+    ...enabledExplicitSourceRouteIds,
+  ]));
+
+  const actualSummaries = new Map<number, RouteChannelSummary>();
+  if (actualRouteIds.length > 0) {
+    const channelRows = await db.select({
+      routeId: schema.routeChannels.routeId,
+      enabled: schema.routeChannels.enabled,
+      siteName: schema.sites.name,
+    }).from(schema.routeChannels)
+      .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
+      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .where(inArray(schema.routeChannels.routeId, actualRouteIds))
+      .all();
+
+    for (const row of channelRows) {
+      if (!actualSummaries.has(row.routeId)) {
+        actualSummaries.set(row.routeId, {
+          channelCount: 0,
+          enabledChannelCount: 0,
+          siteNames: new Set<string>(),
+        });
+      }
+      const target = actualSummaries.get(row.routeId)!;
+      target.channelCount += 1;
+      if (row.enabled) target.enabledChannelCount += 1;
+      if (row.siteName) target.siteNames.add(row.siteName);
+    }
+  }
+
+  for (const route of routes) {
+    if (!isExplicitGroupRoute(route)) {
+      summaryByRoute.set(route.id, actualSummaries.get(route.id) || {
+        channelCount: 0,
+        enabledChannelCount: 0,
+        siteNames: new Set<string>(),
+      });
+      continue;
+    }
+
+    const siteNames = new Set<string>();
+    let channelCount = 0;
+    let enabledChannelCount = 0;
+    for (const sourceRouteId of route.sourceRouteIds) {
+      const sourceSummary = actualSummaries.get(sourceRouteId);
+      if (!sourceSummary) continue;
+      channelCount += sourceSummary.channelCount;
+      enabledChannelCount += sourceSummary.enabledChannelCount;
+      for (const siteName of sourceSummary.siteNames) {
+        siteNames.add(siteName);
+      }
+    }
+    summaryByRoute.set(route.id, {
+      channelCount,
+      enabledChannelCount,
+      siteNames,
+    });
+  }
+
+  return summaryByRoute;
+}
+
+function mapRouteSummaryRow(route: RouteRow, summary: RouteChannelSummary | undefined) {
+  const parsedSnapshot = parseRouteDecisionSnapshot(route.decisionSnapshot);
+  return {
+    id: route.id,
+    modelPattern: route.modelPattern,
+    displayName: route.displayName ?? null,
+    displayIcon: route.displayIcon ?? null,
+    routeMode: route.routeMode,
+    sourceRouteIds: route.sourceRouteIds,
+    modelMapping: route.modelMapping ?? null,
+    routingStrategy: route.routingStrategy ?? 'weighted',
+    enabled: route.enabled,
+    channelCount: summary?.channelCount ?? 0,
+    enabledChannelCount: summary?.enabledChannelCount ?? 0,
+    siteNames: summary ? Array.from(summary.siteNames) : [],
+    decisionSnapshot: parsedSnapshot,
+    decisionSnapshotAvailable: !!parsedSnapshot,
+    decisionRefreshedAt: route.decisionRefreshedAt ?? null,
+  };
+}
+
+function summarizeGovernanceEntries(entries: RoutingGovernanceEntry[]) {
+  const countsByReason: Record<string, number> = {};
+  const countsBySubjectType: Record<string, number> = {};
+  let suppressedCount = 0;
+  let probingCount = 0;
+  for (const entry of entries) {
+    if (entry.state === 'probing') probingCount += 1;
+    else suppressedCount += 1;
+    countsByReason[entry.reasonCode] = (countsByReason[entry.reasonCode] || 0) + 1;
+    countsBySubjectType[entry.subjectType] = (countsBySubjectType[entry.subjectType] || 0) + 1;
+  }
+  return {
+    total: entries.length,
+    suppressedCount,
+    probingCount,
+    countsByReason,
+    countsBySubjectType,
+  };
+}
+
+function serializeGovernanceEntry(entry: RoutingGovernanceEntry) {
+  return {
+    id: entry.id,
+    subjectType: entry.subjectType,
+    subjectId: entry.subjectId,
+    modelName: entry.modelName || '',
+    state: entry.state,
+    reasonCode: entry.reasonCode,
+    reasonDetail: entry.reasonDetail ?? null,
+    probeModelName: entry.probeModelName ?? null,
+    lastHttpStatus: entry.lastHttpStatus ?? null,
+    failureCount: entry.failureCount ?? 0,
+    successCount: entry.successCount ?? 0,
+    suppressUntil: entry.suppressUntil ?? null,
+    probeAfter: entry.probeAfter ?? null,
+    lastFailureAt: entry.lastFailureAt ?? null,
+    lastSuccessAt: entry.lastSuccessAt ?? null,
+    lastProbeAt: entry.lastProbeAt ?? null,
+    lastProbeStatus: entry.lastProbeStatus ?? null,
+    lastProbeMessage: entry.lastProbeMessage ?? null,
+    updatedAt: entry.updatedAt ?? null,
+    createdAt: entry.createdAt ?? null,
+  };
+}
+
+async function buildRouteChannelSummaryMapLight(routes: RouteRow[]): Promise<Map<number, RouteChannelSummary>> {
+  const summaryByRoute = new Map<number, RouteChannelSummary>();
+  if (routes.length === 0) return summaryByRoute;
+
+  const explicitGroupRoutes = routes.filter((route) => isExplicitGroupRoute(route));
+  const nonExplicitRoutes = routes.filter((route) => !isExplicitGroupRoute(route));
+
+  const directRows = nonExplicitRoutes.length > 0
+    ? await db.select({
+      routeId: schema.routeChannels.routeId,
+      enabled: schema.routeChannels.enabled,
+      siteName: schema.sites.name,
+    }).from(schema.routeChannels)
+      .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
+      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .where(inArray(schema.routeChannels.routeId, nonExplicitRoutes.map((route) => route.id)))
+      .all()
+    : [];
+
+  const directAgg = new Map<number, RouteChannelSummary>();
+  for (const row of directRows) {
+    if (!directAgg.has(row.routeId)) {
+      directAgg.set(row.routeId, {
+        channelCount: 0,
+        enabledChannelCount: 0,
+        siteNames: new Set<string>(),
+      });
+    }
+    const bucket = directAgg.get(row.routeId)!;
+    bucket.channelCount += 1;
+    if (row.enabled === true) bucket.enabledChannelCount += 1;
+    if ((row.siteName || '').trim()) bucket.siteNames.add(row.siteName!.trim());
+  }
+
+  for (const route of nonExplicitRoutes) {
+    summaryByRoute.set(route.id, directAgg.get(route.id) || {
+      channelCount: 0,
+      enabledChannelCount: 0,
+      siteNames: new Set<string>(),
+    });
+  }
+
+  for (const route of explicitGroupRoutes) {
+    const aggregate: RouteChannelSummary = {
+      channelCount: 0,
+      enabledChannelCount: 0,
+      siteNames: new Set<string>(),
+    };
+    for (const sourceRouteId of route.sourceRouteIds) {
+      const sourceSummary = directAgg.get(sourceRouteId);
+      if (!sourceSummary) continue;
+      aggregate.channelCount += sourceSummary.channelCount;
+      aggregate.enabledChannelCount += sourceSummary.enabledChannelCount;
+      for (const siteName of sourceSummary.siteNames) {
+        aggregate.siteNames.add(siteName);
+      }
+    }
+    summaryByRoute.set(route.id, aggregate);
+  }
+
+  return summaryByRoute;
+}
+
 function parseDateTimeMs(value?: string | null): number | null {
   if (!value) return null;
   const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
@@ -968,7 +1220,7 @@ export async function tokensRoutes(app: FastifyInstance) {
   app.get('/api/routes/summary', async () => {
     const routes = await listRoutesWithSources();
     if (routes.length === 0) return [];
-    const aggByRoute = await buildRouteChannelSummaryMap(routes);
+    const aggByRoute = await buildRouteChannelSummaryMapLight(routes);
 
     return routes.map((route) => {
       const agg = aggByRoute.get(route.id);
@@ -985,11 +1237,162 @@ export async function tokensRoutes(app: FastifyInstance) {
         channelCount: agg?.channelCount ?? 0,
         enabledChannelCount: agg?.enabledChannelCount ?? 0,
         siteNames: agg ? Array.from(agg.siteNames) : [],
-        decisionSnapshot: null,
+        decisionSnapshot: parseRouteDecisionSnapshot(route.decisionSnapshot) as any,
         decisionSnapshotAvailable: typeof route.decisionSnapshot === 'string' && route.decisionSnapshot.trim().length > 0,
         decisionRefreshedAt: route.decisionRefreshedAt ?? null,
       };
     });
+  });
+
+  app.get('/api/routes/overview', async () => {
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const [
+      routes,
+      governanceStates,
+      modelCircuitRows,
+      siteRuntimeRows,
+      unavailableModelRows,
+      checkinSiteRuntimeRows,
+      accountRows,
+      siteRows,
+    ] = await Promise.all([
+      listRoutesWithSources(),
+      listActiveRoutingGovernanceStates({
+        states: ['suppressed', 'probing'],
+        limit: 500,
+      }),
+      getModelCircuitSnapshots(nowMs),
+      listSiteRuntimeHealthSnapshots(nowMs),
+      listPersistedUnavailableModelEntries(),
+      listCheckinSiteRuntimeSnapshots(nowMs),
+      db.select({
+        id: schema.accounts.id,
+        siteId: schema.accounts.siteId,
+        status: schema.accounts.status,
+        checkinEnabled: schema.accounts.checkinEnabled,
+        extraConfig: schema.accounts.extraConfig,
+      }).from(schema.accounts).all(),
+      db.select({
+        id: schema.sites.id,
+        status: schema.sites.status,
+      }).from(schema.sites).all(),
+    ]);
+    const aggByRoute = await buildRouteChannelSummaryMapLight(routes);
+    const routeSummary: RouteDiagnosticsRouteSummary = {
+      routeCount: routes.length,
+      enabledRouteCount: routes.filter((row) => row.enabled === true).length,
+      channelCount: Array.from(aggByRoute.values()).reduce((sum, item) => sum + item.channelCount, 0),
+      enabledChannelCount: Array.from(aggByRoute.values()).reduce((sum, item) => sum + item.enabledChannelCount, 0),
+    };
+
+    const governanceCountsByReason: Record<string, number> = {};
+    let suppressed = 0;
+    let probing = 0;
+    for (const item of governanceStates) {
+      if (item.state === 'probing') probing += 1;
+      else suppressed += 1;
+      governanceCountsByReason[item.reasonCode] = (governanceCountsByReason[item.reasonCode] || 0) + 1;
+    }
+
+    const siteStatusById = new Map<number, string>();
+    for (const site of siteRows) {
+      siteStatusById.set(site.id, site.status || 'active');
+    }
+
+    let checkinAttention = 0;
+    for (const account of accountRows) {
+      if (account.checkinEnabled !== true) continue;
+      if (!isSchedulableCheckinAccountStatus(account.status)) continue;
+      if (siteStatusById.get(account.siteId) === 'disabled') continue;
+      const snapshot = extractCheckinSnapshot(account.extraConfig);
+      const runtimeHealth = extractRuntimeHealth(account.extraConfig);
+      if (
+        snapshot?.requiresManual === true
+        || snapshot?.status === 'manual_required'
+        || snapshot?.status === 'retryable_failed'
+        || snapshot?.status === 'terminal_failed'
+        || runtimeHealth?.state === 'unhealthy'
+        || account.status === 'expired'
+      ) {
+        checkinAttention += 1;
+      }
+    }
+
+    const response: RouteOverviewResponse = {
+      success: true,
+      generatedAt: nowIso,
+      routeSummary,
+      governance: {
+        total: governanceStates.length,
+        suppressed,
+        probing,
+        byReason: governanceCountsByReason,
+      },
+      runtime: {
+        modelCircuitOpen: modelCircuitRows.filter((item) => item.status.isOpen).length,
+        modelCircuitHalfOpen: modelCircuitRows.filter((item) => item.status.isHalfOpen).length,
+        siteRuntimeBreakerOpen: siteRuntimeRows.filter((item) => item.breakerOpen).length,
+        siteRuntimePenalized: siteRuntimeRows.filter((item) => item.multiplier < 0.999).length,
+        unavailableModelBlocking: unavailableModelRows.filter((item) => item.stillBlocking).length,
+        checkinAttention,
+        checkinSiteBackoffBlocked: checkinSiteRuntimeRows.filter((item) => item.blocked).length,
+      },
+    };
+
+    return response;
+  });
+
+  app.get<{
+    Querystring: {
+      subjectType?: string;
+      state?: string;
+      reasonCode?: string;
+      limit?: string;
+    };
+  }>('/api/routes/governance/subjects', async (request) => {
+    const subjectType = typeof request.query.subjectType === 'string' ? request.query.subjectType.trim() : '';
+    const state = typeof request.query.state === 'string' ? request.query.state.trim() : '';
+    const reasonCode = typeof request.query.reasonCode === 'string' ? request.query.reasonCode.trim() : '';
+    const limit = request.query.limit ? Number.parseInt(request.query.limit, 10) : 200;
+
+    const items = await listActiveRoutingGovernanceStates({
+      subjectTypes: subjectType ? [subjectType as any] : undefined,
+      states: state ? [state as any] : ['suppressed', 'probing'],
+      reasonCodes: reasonCode ? [reasonCode as any] : undefined,
+      limit: Number.isFinite(limit) ? limit : 200,
+    });
+
+    const response: RouteGovernanceSubjectsResponse = {
+      success: true,
+      total: items.length,
+      summary: summarizeGovernanceEntries(items),
+      items: items.map((item) => serializeGovernanceEntry(item)),
+    };
+
+    return response;
+  });
+
+  app.post<{ Body?: { limit?: number; includeProbing?: boolean } }>('/api/routes/governance/recovery-pass', async (request) => {
+    const result = await runRoutingGovernanceRecoveryPass({
+      limit: typeof request.body?.limit === 'number' ? request.body.limit : undefined,
+      includeProbing: request.body?.includeProbing === true,
+    });
+    return {
+      success: true,
+      scanned: result.scanned,
+      promotedToProbing: result.promotedToProbing,
+      keptSuppressed: result.keptSuppressed,
+      restored: result.restored,
+      items: result.items.map((item) => ({
+        id: item.id,
+        subjectType: item.subjectType,
+        subjectId: item.subjectId,
+        modelName: item.modelName,
+        action: item.action,
+        state: item.state,
+      })),
+    };
   });
 
   app.get<{ Querystring: { limit?: string } }>('/api/routes/diagnostics', async (request) => {

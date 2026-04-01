@@ -79,6 +79,7 @@ export default withMermaid(
             { text: '配置说明', link: '/configuration' },
             { text: '客户端接入', link: '/client-integration' },
             { text: '路由与签到稳定性改造', link: '/gateway-checkin-hardening' },
+            { text: '路由治理与路由页性能治理', link: '/route-governance-ui-hardening' },
             { text: '运维手册', link: '/operations' },
             { text: '常见问题 FAQ', link: '/faq' },
           ],

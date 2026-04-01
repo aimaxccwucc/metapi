@@ -11,6 +11,7 @@ import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dai
 import { cleanupConfiguredLogs, normalizeLogCleanupRetentionDays } from './logCleanupService.js';
 import { executeRefreshSiteReachability } from './siteHealthService.js';
 import { pruneResponseCache } from './responseCacheService.js';
+import { runRoutingGovernanceRecoveryPass } from './routingGovernanceService.js';
 
 export type CheckinScheduleMode = 'cron' | 'interval';
 
@@ -21,13 +22,16 @@ let dailySummaryTask: cron.ScheduledTask | null = null;
 let logCleanupTask: cron.ScheduledTask | null = null;
 let siteHealthTask: cron.ScheduledTask | null = null;
 let responseCacheCleanupTask: cron.ScheduledTask | null = null;
+let routingGovernanceRecoveryTask: cron.ScheduledTask | null = null;
 let siteHealthRefreshRunning = false;
+let routingGovernanceRecoveryRunning = false;
 const intervalAttemptByAccount = new Map<number, number>();
 let intervalCheckinPassRunning = false;
 
 const DAILY_SUMMARY_DEFAULT_CRON = '58 23 * * *';
 const LOG_CLEANUP_DEFAULT_CRON = '0 6 * * *';
 const CHECKIN_INTERVAL_POLL_MS = 60_000;
+const ROUTING_GOVERNANCE_RECOVERY_DEFAULT_CRON = '*/10 * * * *';
 
 async function resolveJsonSetting<T>(
   settingKey: string,
@@ -294,6 +298,26 @@ function createSiteHealthTask(cronExpr: string) {
   });
 }
 
+function createRoutingGovernanceRecoveryTask(cronExpr: string) {
+  return cron.schedule(cronExpr, async () => {
+    if (routingGovernanceRecoveryRunning) {
+      console.log('[Scheduler] Routing governance recovery skipped: existing run is in progress');
+      return;
+    }
+    routingGovernanceRecoveryRunning = true;
+    try {
+      const result = await runRoutingGovernanceRecoveryPass();
+      console.log(
+        `[Scheduler] Routing governance recovery pass done: scanned=${result.scanned}, promoted=${result.promotedToProbing}, keptSuppressed=${result.keptSuppressed}, restored=${result.restored}`,
+      );
+    } catch (err) {
+      console.error('[Scheduler] Routing governance recovery error:', err);
+    } finally {
+      routingGovernanceRecoveryRunning = false;
+    }
+  });
+}
+
 export async function startScheduler() {
   const activeCheckinCron = await resolveCronSetting('checkin_cron', config.checkinCron);
   const activeCheckinScheduleMode = await resolveJsonSetting<CheckinScheduleMode>(
@@ -337,17 +361,20 @@ export async function startScheduler() {
   logCleanupTask?.stop();
   siteHealthTask?.stop();
   responseCacheCleanupTask?.stop();
+  routingGovernanceRecoveryTask?.stop();
   startCheckinSchedule();
   balanceTask = createBalanceTask(activeBalanceCron);
   siteHealthTask = createSiteHealthTask(activeSiteHealthCron);
   dailySummaryTask = createDailySummaryTask(activeDailySummaryCron);
   logCleanupTask = createLogCleanupTask(activeLogCleanupCron);
   responseCacheCleanupTask = createResponseCacheCleanupTask('0 * * * *');
+  routingGovernanceRecoveryTask = createRoutingGovernanceRecoveryTask(ROUTING_GOVERNANCE_RECOVERY_DEFAULT_CRON);
 
   console.log(`[Scheduler] Check-in schedule: ${config.checkinScheduleMode} (${config.checkinScheduleMode === 'cron' ? activeCheckinCron : `${config.checkinIntervalHours}h`})`);
   console.log(`[Scheduler] Balance refresh cron: ${activeBalanceCron}`);
   console.log(`[Scheduler] Site health refresh cron: ${activeSiteHealthCron}`);
   console.log(`[Scheduler] Daily summary cron: ${activeDailySummaryCron}`);
+  console.log(`[Scheduler] Routing governance recovery cron: ${ROUTING_GOVERNANCE_RECOVERY_DEFAULT_CRON}`);
   console.log(
     `[Scheduler] Log cleanup cron: ${activeLogCleanupCron} (configured=${config.logCleanupConfigured}, usage=${activeLogCleanupUsageLogsEnabled}, program=${activeLogCleanupProgramLogsEnabled}, retentionDays=${activeLogCleanupRetentionDays})`,
   );
@@ -425,11 +452,16 @@ export function __resetCheckinSchedulerForTests() {
   dailySummaryTask?.stop();
   logCleanupTask?.stop();
   siteHealthTask?.stop();
+  responseCacheCleanupTask?.stop();
+  routingGovernanceRecoveryTask?.stop();
   balanceTask = null;
   dailySummaryTask = null;
   logCleanupTask = null;
   siteHealthTask = null;
+  responseCacheCleanupTask = null;
+  routingGovernanceRecoveryTask = null;
   siteHealthRefreshRunning = false;
+  routingGovernanceRecoveryRunning = false;
   intervalCheckinPassRunning = false;
   intervalAttemptByAccount.clear();
 }

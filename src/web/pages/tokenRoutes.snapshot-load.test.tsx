@@ -12,6 +12,9 @@ const { apiMock, getBrandMock } = vi.hoisted(() => ({
     getRouteDecisionsBatch: vi.fn(),
     getRouteWideDecisionsBatch: vi.fn(),
     getRouteDiagnostics: vi.fn(),
+    getRouteOverview: vi.fn(),
+    getRouteGovernanceSubjects: vi.fn(),
+    runRouteGovernanceRecoveryPass: vi.fn(),
   },
   getBrandMock: vi.fn(),
 }));
@@ -106,6 +109,41 @@ describe('TokenRoutes cached snapshot load', () => {
         sites: [],
       },
     });
+    apiMock.getRouteOverview.mockResolvedValue({
+      success: true,
+      generatedAt: '2026-04-01T00:00:00.000Z',
+      routeSummary: { routeCount: 0, enabledRouteCount: 0, channelCount: 0, enabledChannelCount: 0 },
+      governance: { total: 0, suppressed: 0, probing: 0, byReason: {} },
+      runtime: {
+        modelCircuitOpen: 0,
+        modelCircuitHalfOpen: 0,
+        siteRuntimeBreakerOpen: 0,
+        siteRuntimePenalized: 0,
+        unavailableModelBlocking: 0,
+        checkinAttention: 0,
+        checkinSiteBackoffBlocked: 0,
+      },
+    });
+    apiMock.getRouteGovernanceSubjects.mockResolvedValue({
+      success: true,
+      total: 0,
+      summary: {
+        total: 0,
+        suppressedCount: 0,
+        probingCount: 0,
+        countsByReason: {},
+        countsBySubjectType: {},
+      },
+      items: [],
+    });
+    apiMock.runRouteGovernanceRecoveryPass.mockResolvedValue({
+      success: true,
+      scanned: 0,
+      promotedToProbing: 0,
+      keptSuppressed: 0,
+      restored: 0,
+      items: [],
+    });
     apiMock.getRoutesSummary.mockResolvedValue([
       {
         id: 1,
@@ -183,6 +221,10 @@ describe('TokenRoutes cached snapshot load', () => {
         );
       });
       await flushMicrotasks();
+
+      expect(apiMock.getRouteOverview).toHaveBeenCalledTimes(1);
+      expect(apiMock.getRouteGovernanceSubjects).toHaveBeenCalledWith(200);
+      expect(apiMock.getRouteDiagnostics).not.toHaveBeenCalled();
 
       // Expand the route card to see channel details with probability
       const expandBtn = root.root.find((node) =>

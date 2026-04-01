@@ -17,6 +17,10 @@ import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthSe
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
 import { withAccountProxyOverride, withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import {
+  clearRoutingGovernanceStates,
+  upsertRoutingGovernanceState,
+} from './routingGovernanceService.js';
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
@@ -510,6 +514,51 @@ export async function refreshBalance(accountId: number) {
     .where(eq(schema.accounts.id, accountId))
     .run();
 
+  const normalizedBalance = typeof balanceInfo.balance === 'number' && Number.isFinite(balanceInfo.balance)
+    ? balanceInfo.balance
+    : null;
+  const normalizedQuota = typeof balanceInfo.quota === 'number' && Number.isFinite(balanceInfo.quota)
+    ? balanceInfo.quota
+    : null;
+
+  if (normalizedBalance != null && normalizedBalance <= 0) {
+    await upsertRoutingGovernanceState({
+      subjectType: 'account',
+      subjectId: account.id,
+      state: 'suppressed',
+      reasonCode: 'balance_exhausted',
+      reasonDetail: '余额刷新结果为 0，等待下一次恢复检测',
+      suppressUntil: nowPlusMs(30 * 60 * 1000),
+      probeAfter: nowPlusMs(30 * 60 * 1000),
+      lastSuccessAt: new Date().toISOString(),
+    });
+  } else {
+    await clearRoutingGovernanceStates({
+      subjectType: 'account',
+      subjectId: account.id,
+      reasonCodes: ['balance_exhausted', 'quota_exhausted', 'auth', 'manual_recheck_needed'],
+    });
+  }
+
+  if (normalizedQuota != null && normalizedQuota <= 0) {
+    await upsertRoutingGovernanceState({
+      subjectType: 'account',
+      subjectId: account.id,
+      state: 'suppressed',
+      reasonCode: 'quota_exhausted',
+      reasonDetail: '额度刷新结果为 0，等待下一次恢复检测',
+      suppressUntil: nowPlusMs(30 * 60 * 1000),
+      probeAfter: nowPlusMs(30 * 60 * 1000),
+      lastSuccessAt: new Date().toISOString(),
+    });
+  } else {
+    await clearRoutingGovernanceStates({
+      subjectType: 'account',
+      subjectId: account.id,
+      reasonCodes: ['quota_exhausted'],
+    });
+  }
+
   setAccountRuntimeHealth(account.id, {
     state: keepUnsupportedCheckinDegraded ? 'degraded' : 'healthy',
     reason: keepUnsupportedCheckinDegraded
@@ -521,6 +570,10 @@ export async function refreshBalance(accountId: number) {
   });
 
   return balanceInfo;
+}
+
+function nowPlusMs(ms: number): string {
+  return new Date(Date.now() + Math.max(1_000, Math.trunc(ms))).toISOString();
 }
 
 export async function refreshAllBalances() {

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { arrayMove } from '@dnd-kit/sortable';
 import type { DragEndEvent } from '@dnd-kit/core';
 import { api } from '../api.js';
-import type { RouteDiagnosticsResponse } from '../api.js';
+import type { RouteDiagnosticsResponse, RouteOverviewResponse, RoutingGovernanceSubject } from '../api.js';
 import { BrandGlyph, getBrand, InlineBrandIcon, type BrandInfo } from '../components/BrandIcon.js';
 import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
@@ -95,6 +95,44 @@ type ModelTokenCandidatesPayload = {
   modelsWithoutToken?: MissingTokenModelsByName;
   modelsMissingTokenGroups?: MissingTokenModelsByName;
   endpointTypesByModel?: Record<string, string[]>;
+};
+
+type RouteGovernanceSubjectsResponse = {
+  success: true;
+  total: number;
+  summary: {
+    total: number;
+    suppressedCount: number;
+    probingCount: number;
+    countsByReason: Record<string, number>;
+    countsBySubjectType: Record<string, number>;
+  };
+  items: RoutingGovernanceSubject[];
+};
+
+type RouteGovernanceRecoveryPassResponse = {
+  success: true;
+  scanned: number;
+  promotedToProbing: number;
+  keptSuppressed: number;
+  restored: number;
+  items: Array<{
+    id: number;
+    subjectType: string;
+    subjectId: number;
+    modelName: string;
+    action: string;
+    state: string;
+  }>;
+};
+
+type RouteGovernanceApi = {
+  getRouteOverview(): Promise<RouteOverviewResponse>;
+  getRouteGovernanceSubjects(limit?: number): Promise<RouteGovernanceSubjectsResponse>;
+  runRouteGovernanceRecoveryPass(body?: {
+    limit?: number;
+    includeProbing?: boolean;
+  }): Promise<RouteGovernanceRecoveryPassResponse>;
 };
 
 function pickFeedbackExamples(names: string[]): string {
@@ -236,6 +274,7 @@ function formatIsoDateTime(input?: string | null): string {
 
 export default function TokenRoutes() {
   const navigate = useNavigate();
+  const governanceApi = api as unknown as RouteGovernanceApi;
   const [routeSummaries, setRouteSummaries] = useState<RouteSummaryRow[]>([]);
   const [modelCandidates, setModelCandidates] = useState<RouteModelCandidatesByModelName>({});
   const [missingTokenModelsByName, setMissingTokenModelsByName] = useState<MissingTokenModelsByName>({});
@@ -272,8 +311,16 @@ export default function TokenRoutes() {
   const [decisionByRoute, setDecisionByRoute] = useState<Record<number, RouteDecision | null>>({});
   const [loadingDecision, setLoadingDecision] = useState(false);
   const [decisionAutoSkipped, setDecisionAutoSkipped] = useState(false);
+  const [routeOverview, setRouteOverview] = useState<RouteOverviewResponse | null>(null);
+  const [loadingRouteOverview, setLoadingRouteOverview] = useState(false);
+  const [governanceSubjects, setGovernanceSubjects] = useState<RoutingGovernanceSubject[]>([]);
+  const [loadingGovernanceSubjects, setLoadingGovernanceSubjects] = useState(false);
+  const [governanceSubjectsLoaded, setGovernanceSubjectsLoaded] = useState(false);
   const [routeDiagnostics, setRouteDiagnostics] = useState<RouteDiagnosticsResponse | null>(null);
   const [loadingRouteDiagnostics, setLoadingRouteDiagnostics] = useState(false);
+  const [diagnosticsExpanded, setDiagnosticsExpanded] = useState(false);
+  const [governanceExpanded, setGovernanceExpanded] = useState(false);
+  const [runningGovernanceRecovery, setRunningGovernanceRecovery] = useState(false);
   const [visibleRouteCount, setVisibleRouteCount] = useState(ROUTE_RENDER_CHUNK);
   const [expandedSourceGroupMap, setExpandedSourceGroupMap] = useState<Record<string, boolean>>({});
   const [expandedRouteIds, setExpandedRouteIds] = useState<number[]>([]);
@@ -375,6 +422,33 @@ export default function TokenRoutes() {
     }
   }, []);
 
+  const loadRouteOverview = useCallback(async () => {
+    setLoadingRouteOverview(true);
+    try {
+      const res = await governanceApi.getRouteOverview();
+      startTransition(() => {
+        setRouteOverview(res);
+      });
+      return res;
+    } finally {
+      setLoadingRouteOverview(false);
+    }
+  }, [governanceApi]);
+
+  const loadGovernanceSubjects = useCallback(async () => {
+    setLoadingGovernanceSubjects(true);
+    try {
+      const res = await governanceApi.getRouteGovernanceSubjects(200);
+      startTransition(() => {
+        setGovernanceSubjects(Array.isArray(res?.items) ? res.items : []);
+        setGovernanceSubjectsLoaded(true);
+      });
+      return res;
+    } finally {
+      setLoadingGovernanceSubjects(false);
+    }
+  }, [governanceApi]);
+
   const applyRouteCandidateRows = useCallback((candidateRows: any) => {
     startTransition(() => {
       setModelCandidates((candidateRows?.models || {}) as RouteModelCandidatesByModelName);
@@ -414,7 +488,7 @@ export default function TokenRoutes() {
     startTransition(() => {
       setRouteSummaries(summaries);
     });
-    const shouldIncludeCandidates = !!options?.includeCandidates || summaries.some((route) => isExplicitGroupRoute(route));
+    const shouldIncludeCandidates = !!options?.includeCandidates;
     let candidateRows: ModelTokenCandidatesPayload | undefined;
     if (shouldIncludeCandidates) {
       candidateRows = await api.getModelTokenCandidates() as ModelTokenCandidatesPayload;
@@ -436,15 +510,26 @@ export default function TokenRoutes() {
   useEffect(() => {
     (async () => {
       try {
-        await Promise.all([
-          load(),
-          loadRouteDiagnostics(),
-        ]);
+        await Promise.all([load(), loadRouteOverview(), loadGovernanceSubjects()]);
       } catch {
         toast.error('加载路由配置失败');
       }
     })();
-  }, [loadRouteDiagnostics]);
+  }, [loadGovernanceSubjects, loadRouteOverview, toast]);
+
+  useEffect(() => {
+    if (!governanceExpanded || governanceSubjectsLoaded || loadingGovernanceSubjects) return;
+    void loadGovernanceSubjects().catch(() => {
+      toast.error('加载系统隔离列表失败');
+    });
+  }, [governanceExpanded, governanceSubjectsLoaded, loadingGovernanceSubjects, loadGovernanceSubjects, toast]);
+
+  useEffect(() => {
+    if (!diagnosticsExpanded || routeDiagnostics || loadingRouteDiagnostics) return;
+    void loadRouteDiagnostics().catch(() => {
+      toast.error('加载路由诊断失败');
+    });
+  }, [diagnosticsExpanded, loadRouteDiagnostics, loadingRouteDiagnostics, routeDiagnostics, toast]);
 
   useEffect(() => {
     if (showZeroChannelRoutes || showFilters || showManual || !filterCollapsed) {
@@ -460,7 +545,9 @@ export default function TokenRoutes() {
         toast.info(res.message || '已开始重建路由，请稍后查看日志');
         await Promise.all([
           load({ includeCandidates: routeCandidatesLoaded }),
-          loadRouteDiagnostics(),
+          loadRouteOverview(),
+          loadGovernanceSubjects(),
+          diagnosticsExpanded ? loadRouteDiagnostics() : Promise.resolve(null),
         ]);
         return;
       }
@@ -469,7 +556,9 @@ export default function TokenRoutes() {
       toast.success(`自动重建完成（新增 ${createdRoutes} 条路由 / ${createdChannels} 个通道）`);
       await Promise.all([
         load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded }),
-        loadRouteDiagnostics(),
+        loadRouteOverview(),
+        loadGovernanceSubjects(),
+        diagnosticsExpanded ? loadRouteDiagnostics() : Promise.resolve(null),
       ]);
     } catch (e: any) {
       toast.error(e.message || '重建路由失败');
@@ -482,7 +571,8 @@ export default function TokenRoutes() {
     try {
       await Promise.all([
         loadRouteDecisions(routeSummaries, { force: true, refreshPricingCatalog: true, persistSnapshots: true }),
-        loadRouteDiagnostics(),
+        loadRouteOverview(),
+        diagnosticsExpanded ? loadRouteDiagnostics() : Promise.resolve(null),
       ]);
       toast.success(tr('路由决策已刷新'));
     } catch {
@@ -499,7 +589,9 @@ export default function TokenRoutes() {
       const refreshed = await load({ includeCandidates: routeCandidatesLoaded, forceCandidates: routeCandidatesLoaded });
       await Promise.all([
         loadRouteDecisions(refreshed.summaries, { force: true, refreshPricingCatalog: true, persistSnapshots: true }),
-        loadRouteDiagnostics(),
+        loadRouteOverview(),
+        loadGovernanceSubjects(),
+        diagnosticsExpanded ? loadRouteDiagnostics() : Promise.resolve(null),
       ]);
     } catch (e: any) {
       toast.error(e.message || '清理路由运行时状态失败');
@@ -605,6 +697,10 @@ export default function TokenRoutes() {
         toast.success(tr('群组已创建'));
       }
       const refreshed = await load({ includeCandidates: routeMode === 'explicit_group' || routeCandidatesLoaded, forceCandidates: routeMode === 'explicit_group' || routeCandidatesLoaded });
+      await Promise.all([
+        loadRouteOverview(),
+        loadGovernanceSubjects(),
+      ]);
       if (routeMode === 'explicit_group') {
         const feedback = buildExplicitGroupSaveFeedback(selectedSourceRouteIds, refreshed.summaries, refreshed.candidateRows);
         if (feedback) {
@@ -650,7 +746,11 @@ export default function TokenRoutes() {
     try {
       await api.deleteRoute(routeId);
       toast.success('路由已删除');
-      await load({ includeCandidates: routeCandidatesLoaded });
+      await Promise.all([
+        load({ includeCandidates: routeCandidatesLoaded }),
+        loadRouteOverview(),
+        loadGovernanceSubjects(),
+      ]);
     } catch (e: any) {
       toast.error(e.message || '删除路由失败');
     }
@@ -663,6 +763,7 @@ export default function TokenRoutes() {
     );
     try {
       await api.updateRoute(route.id, { enabled: newEnabled });
+      await loadRouteOverview();
       toast.success(newEnabled ? '路由已启用' : '路由已禁用');
     } catch (e: any) {
       setRouteSummaries((prev) =>
@@ -698,7 +799,7 @@ export default function TokenRoutes() {
     }
 
     try {
-      await load();
+      await Promise.all([load(), loadRouteOverview(), loadGovernanceSubjects()]);
     } catch (e: any) {
       toast.error(e?.message || '路由策略已保存，但刷新列表失败');
     }
@@ -1080,6 +1181,58 @@ export default function TokenRoutes() {
     };
   }, [routeDiagnostics]);
 
+  const governanceReasonLabels = useMemo<Record<string, string>>(() => ({
+    auth: '鉴权失效',
+    rate_limit: '限流中',
+    balance_exhausted: '余额不足',
+    quota_exhausted: '额度不足',
+    model_unsupported: '模型不可用',
+    manual_recheck_needed: '待复测',
+  }), []);
+
+  const governanceOverview = useMemo(() => {
+    const overview = routeOverview?.governance;
+    if (!overview) {
+      return {
+        total: 0,
+        suppressed: 0,
+        probing: 0,
+        byReasonEntries: [] as Array<{ code: string; label: string; count: number }>,
+      };
+    }
+    const byReasonEntries = Object.entries(overview.byReason || {})
+      .map(([code, count]) => ({
+        code,
+        label: governanceReasonLabels[code] || code,
+        count: Number(count || 0),
+      }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+    return {
+      total: overview.total || 0,
+      suppressed: overview.suppressed || 0,
+      probing: overview.probing || 0,
+      byReasonEntries,
+    };
+  }, [governanceReasonLabels, routeOverview]);
+
+  const handleRunGovernanceRecoveryPass = async () => {
+    try {
+      setRunningGovernanceRecovery(true);
+      const res = await governanceApi.runRouteGovernanceRecoveryPass({ limit: 50, includeProbing: true });
+      toast.success(
+        `恢复轮转已执行（扫描 ${res.scanned} 条，转入复测 ${res.promotedToProbing} 条，恢复 ${res.restored} 条）`,
+      );
+      await Promise.all([
+        loadRouteOverview(),
+        loadGovernanceSubjects(),
+      ]);
+    } catch (error: any) {
+      toast.error(error?.message || '执行恢复轮转失败');
+    } finally {
+      setRunningGovernanceRecovery(false);
+    }
+  };
+
   const getRouteCandidateView = (routeId: number): RouteCandidateView => {
     return routeModelCandidateIndex[routeId] || EMPTY_ROUTE_CANDIDATE_VIEW;
   };
@@ -1345,7 +1498,11 @@ export default function TokenRoutes() {
     // Reload channels for this route
     await loadChannels(addChannelModalRouteId, true);
     // Refresh summary to update channel count
-    await load({ includeCandidates: routeCandidatesLoaded });
+    await Promise.all([
+      load({ includeCandidates: routeCandidatesLoaded }),
+      loadRouteOverview(),
+      loadGovernanceSubjects(),
+    ]);
   };
 
   return (
@@ -1489,166 +1646,265 @@ export default function TokenRoutes() {
 
       <div className="info-tip" style={{ marginBottom: 12, display: 'grid', gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span className="badge badge-info" style={{ fontSize: 11 }}>路由稳定性诊断</span>
-          {loadingRouteDiagnostics ? (
+          <span className="badge badge-info" style={{ fontSize: 11 }}>系统隔离治理</span>
+          {loadingRouteOverview ? (
             <span className="badge badge-muted" style={{ fontSize: 11 }}>加载中…</span>
           ) : (
-            <span className="badge badge-muted" style={{ fontSize: 11 }}>快照时间 {routeDiagnosticsHighlights.generatedAtLabel}</span>
+            <span className="badge badge-muted" style={{ fontSize: 11 }}>治理总数 {governanceOverview.total}</span>
+          )}
+          <span className={`badge ${governanceOverview.suppressed > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>隔离中 {governanceOverview.suppressed}</span>
+          <span className={`badge ${governanceOverview.probing > 0 ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>复测中 {governanceOverview.probing}</span>
+          <span className={`badge ${(routeOverview?.runtime.modelCircuitOpen || 0) > 0 ? 'badge-error' : 'badge-muted'}`} style={{ fontSize: 11 }}>模型熔断中 {routeOverview?.runtime.modelCircuitOpen || 0}</span>
+          <span className={`badge ${(routeOverview?.runtime.siteRuntimeBreakerOpen || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>站点熔断中 {routeOverview?.runtime.siteRuntimeBreakerOpen || 0}</span>
+          <span className={`badge ${(routeOverview?.runtime.unavailableModelBlocking || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>持久不可用阻断 {routeOverview?.runtime.unavailableModelBlocking || 0}</span>
+          <span className={`badge ${(routeOverview?.runtime.checkinSiteBackoffBlocked || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到站点退避中 {routeOverview?.runtime.checkinSiteBackoffBlocked || 0}</span>
+          <span className={`badge ${(routeOverview?.runtime.checkinAttention || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到待处理 {routeOverview?.runtime.checkinAttention || 0}</span>
+          <button
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '6px 10px', fontSize: 12 }}
+            onClick={handleRunGovernanceRecoveryPass}
+            disabled={runningGovernanceRecovery}
+          >
+            {runningGovernanceRecovery ? '恢复中…' : '执行恢复轮转'}
+          </button>
+          <button
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '6px 10px', fontSize: 12 }}
+            onClick={() => setGovernanceExpanded((prev) => !prev)}
+          >
+            {governanceExpanded ? '收起隔离列表' : '展开隔离列表'}
+          </button>
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+          {routeOverview
+            ? `汇总：路由 ${routeOverview.routeSummary.enabledRouteCount}/${routeOverview.routeSummary.routeCount} 启用，通道 ${routeOverview.routeSummary.enabledChannelCount}/${routeOverview.routeSummary.channelCount} 启用；系统隔离 ${governanceOverview.total} 条，其中复测中 ${governanceOverview.probing} 条。`
+            : '正在加载轻量治理概览。'}
+        </div>
+
+        {governanceOverview.byReasonEntries.length > 0 ? (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {governanceOverview.byReasonEntries.map((entry) => (
+              <span key={`governance-reason-${entry.code}`} className="badge badge-muted" style={{ fontSize: 11 }}>
+                {entry.label} {entry.count}
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {governanceExpanded ? (
+          loadingGovernanceSubjects ? (
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>系统隔离列表加载中…</div>
+          ) : governanceSubjects.length > 0 ? (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>主体</th>
+                    <th>ID</th>
+                    <th>模型</th>
+                    <th>状态</th>
+                    <th>原因</th>
+                    <th>恢复时间</th>
+                    <th>最近失败</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {governanceSubjects.map((item) => (
+                    <tr key={`governance-subject-${item.id}`}>
+                      <td>{item.subjectType}</td>
+                      <td>#{item.subjectId}</td>
+                      <td>{item.modelName || '-'}</td>
+                      <td>{item.state === 'probing' ? '复测中' : '隔离中'}</td>
+                      <td>{governanceReasonLabels[item.reasonCode] || item.reasonCode}</td>
+                      <td>{formatIsoDateTime(item.probeAfter || item.suppressUntil)}</td>
+                      <td>{formatIsoDateTime(item.lastFailureAt)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>当前没有活跃的系统隔离记录。</div>
+          )
+        ) : null}
+      </div>
+
+      <div className="info-tip" style={{ marginBottom: 12, display: 'grid', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="badge badge-info" style={{ fontSize: 11 }}>路由稳定性诊断</span>
+          <button
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '6px 10px', fontSize: 12 }}
+            onClick={() => setDiagnosticsExpanded((prev) => !prev)}
+          >
+            {diagnosticsExpanded ? '收起诊断' : '展开诊断'}
+          </button>
+          {diagnosticsExpanded ? (
+            loadingRouteDiagnostics ? (
+              <span className="badge badge-muted" style={{ fontSize: 11 }}>加载中…</span>
+            ) : (
+              <span className="badge badge-muted" style={{ fontSize: 11 }}>快照时间 {routeDiagnosticsHighlights.generatedAtLabel}</span>
+            )
+          ) : (
+            <span className="badge badge-muted" style={{ fontSize: 11 }}>按需加载</span>
           )}
           <span className={`badge ${routeDiagnosticsHighlights.endpointRuntimeBlocked > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>端点记忆阻断 {routeDiagnosticsHighlights.endpointRuntimeBlocked}</span>
           <span className={`badge ${routeDiagnosticsHighlights.modelCircuitOpen > 0 ? 'badge-error' : 'badge-muted'}`} style={{ fontSize: 11 }}>模型熔断中 {routeDiagnosticsHighlights.modelCircuitOpen}</span>
           <span className={`badge ${routeDiagnosticsHighlights.runtimeBreakerOpen > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>站点熔断中 {routeDiagnosticsHighlights.runtimeBreakerOpen}</span>
-          <span className={`badge ${routeDiagnosticsHighlights.unavailableBlocking > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>持久不可用阻断 {routeDiagnosticsHighlights.unavailableBlocking}</span>
-          <span className={`badge ${routeDiagnosticsHighlights.checkinSiteBackoffBlocked > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到站点退避中 {routeDiagnosticsHighlights.checkinSiteBackoffBlocked}</span>
-          <span className={`badge ${routeDiagnosticsHighlights.checkinAttention > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到待处理 {routeDiagnosticsHighlights.checkinAttention}</span>
         </div>
 
-        {routeDiagnostics ? (
-          <>
+        {diagnosticsExpanded ? (
+          routeDiagnostics ? (
+            <>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                汇总：路由 {routeDiagnostics.routeSummary.enabledRouteCount}/{routeDiagnostics.routeSummary.routeCount} 启用，通道 {routeDiagnostics.routeSummary.enabledChannelCount}/{routeDiagnostics.routeSummary.channelCount} 启用，手动协议站点 {routeDiagnostics.siteProfiles.manualConfiguredCount}/{routeDiagnostics.siteProfiles.total}，签到站点退避 {routeDiagnostics.checkinSiteRuntime.blockedCount}/{routeDiagnostics.checkinSiteRuntime.total}。
+              </div>
+
+              <details>
+                <summary style={{ cursor: 'pointer', fontWeight: 500 }}>签到待办站点（前 {routeDiagnostics.checkinTodo.sites.length}）</summary>
+                <div style={{ marginTop: 8, overflowX: 'auto' }}>
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>站点</th>
+                        <th>待处理</th>
+                        <th>应执行</th>
+                        <th>人工验证</th>
+                        <th>失败</th>
+                        <th>站点退避</th>
+                        <th>快照</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {routeDiagnostics.checkinTodo.sites.map((site) => (
+                        <tr key={`checkin-todo-${site.siteId}`}>
+                          <td>{site.siteName}</td>
+                          <td>{site.attentionCount}</td>
+                          <td>{site.dueNowCount}</td>
+                          <td>{site.manualRequiredCount}</td>
+                          <td>{site.failedRecentCount}</td>
+                          <td style={{ fontSize: 12, color: site.siteBackoffBlocked ? 'var(--color-warning)' : 'var(--color-text-secondary)' }}>
+                            {site.siteBackoffBlocked
+                              ? `${site.siteBackoffFailureStreak} 次 / ${site.siteBackoffUntil ? new Date(site.siteBackoffUntil).toLocaleString() : '恢复中'}`
+                              : '-'}
+                          </td>
+                          <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                            {site.sampleAccounts[0]?.checkinSnapshot
+                              ? `${site.sampleAccounts[0].checkinSnapshot.status} / ${site.sampleAccounts[0].checkinSnapshot.reasonCode}`
+                              : '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+
+              <details>
+                <summary style={{ cursor: 'pointer', fontWeight: 500 }}>站点运行时健康（前 {routeDiagnostics.siteRuntimeHealth.items.length}）</summary>
+                <div style={{ marginTop: 8, overflowX: 'auto' }}>
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>站点</th>
+                        <th>范围</th>
+                        <th>模型</th>
+                        <th>倍率</th>
+                        <th>熔断</th>
+                        <th>最近失败</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {routeDiagnostics.siteRuntimeHealth.items.map((item) => (
+                        <tr key={`runtime-health-${item.siteId}-${item.scope}-${item.modelName || 'global'}`}>
+                          <td>{item.siteName}</td>
+                          <td>{item.scope === 'global' ? '全站' : '模型'}</td>
+                          <td>{item.modelName || '-'}</td>
+                          <td>{Math.round((item.multiplier || 0) * 100)}%</td>
+                          <td>{item.breakerOpen ? '开启' : '关闭'}</td>
+                          <td>{formatIsoDateTime(item.lastFailureAt)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+
+              <details>
+                <summary style={{ cursor: 'pointer', fontWeight: 500 }}>模型熔断明细（前 {routeDiagnostics.modelCircuits.items.length}）</summary>
+                <div style={{ marginTop: 8, overflowX: 'auto' }}>
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>站点</th>
+                        <th>账号</th>
+                        <th>模型</th>
+                        <th>状态</th>
+                        <th>失败数</th>
+                        <th>下次恢复</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {routeDiagnostics.modelCircuits.items.map((item) => (
+                        <tr key={`model-circuit-${item.channelId}-${item.modelName}`}>
+                          <td>{item.siteName || '-'}</td>
+                          <td>{item.accountUsername || (item.accountId != null ? `#${item.accountId}` : '-')}</td>
+                          <td>{item.modelName}</td>
+                          <td>{item.status.state}</td>
+                          <td>{item.failCount}</td>
+                          <td>{item.openUntilMs ? formatIsoDateTime(new Date(item.openUntilMs).toISOString()) : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+
+              <details>
+                <summary style={{ cursor: 'pointer', fontWeight: 500 }}>端点记忆与持久画像（前 {routeDiagnostics.endpointRuntimeMemory.items.length}/{routeDiagnostics.persistedEndpointProfiles.items.length}）</summary>
+                <div style={{ marginTop: 8, overflowX: 'auto' }}>
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>站点</th>
+                        <th>类型</th>
+                        <th>首选端点</th>
+                        <th>活跃阻断</th>
+                        <th>更新时间</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {routeDiagnostics.endpointRuntimeMemory.items.map((item) => (
+                        <tr key={`endpoint-runtime-${item.key}`}>
+                          <td>{item.siteName || '-'}</td>
+                          <td>运行时</td>
+                          <td>{item.preferredEndpoint || '-'}</td>
+                          <td>{item.activeBlocks.join(',') || '-'}</td>
+                          <td>{item.preferredUpdatedAtMs ? formatIsoDateTime(new Date(item.preferredUpdatedAtMs).toISOString()) : '-'}</td>
+                        </tr>
+                      ))}
+                      {routeDiagnostics.persistedEndpointProfiles.items.map((item) => (
+                        <tr key={`endpoint-profile-${item.key}`}>
+                          <td>{item.siteName || '-'}</td>
+                          <td>持久画像</td>
+                          <td>{item.preferredEndpoint || '-'}</td>
+                          <td>{item.activeBlocks.join(',') || '-'}</td>
+                          <td>{item.preferredUpdatedAtMs ? formatIsoDateTime(new Date(item.preferredUpdatedAtMs).toISOString()) : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            </>
+          ) : (
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-              汇总：路由 {routeDiagnostics.routeSummary.enabledRouteCount}/{routeDiagnostics.routeSummary.routeCount} 启用，通道 {routeDiagnostics.routeSummary.enabledChannelCount}/{routeDiagnostics.routeSummary.channelCount} 启用，手动协议站点 {routeDiagnostics.siteProfiles.manualConfiguredCount}/{routeDiagnostics.siteProfiles.total}，签到站点退避 {routeDiagnostics.checkinSiteRuntime.blockedCount}/{routeDiagnostics.checkinSiteRuntime.total}。
+              诊断快照暂不可用，可展开后重试加载。
             </div>
-
-            <details>
-              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>签到待办站点（前 {routeDiagnostics.checkinTodo.sites.length}）</summary>
-              <div style={{ marginTop: 8, overflowX: 'auto' }}>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>站点</th>
-                      <th>待处理</th>
-                      <th>应执行</th>
-                      <th>人工验证</th>
-                      <th>失败</th>
-                      <th>站点退避</th>
-                      <th>快照</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {routeDiagnostics.checkinTodo.sites.map((site) => (
-                      <tr key={`checkin-todo-${site.siteId}`}>
-                        <td>{site.siteName}</td>
-                        <td>{site.attentionCount}</td>
-                        <td>{site.dueNowCount}</td>
-                        <td>{site.manualRequiredCount}</td>
-                        <td>{site.failedRecentCount}</td>
-                        <td style={{ fontSize: 12, color: site.siteBackoffBlocked ? 'var(--color-warning)' : 'var(--color-text-secondary)' }}>
-                          {site.siteBackoffBlocked
-                            ? `${site.siteBackoffFailureStreak} 次 / ${site.siteBackoffUntil ? new Date(site.siteBackoffUntil).toLocaleString() : '恢复中'}`
-                            : '-'}
-                        </td>
-                        <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                          {site.sampleAccounts[0]?.checkinSnapshot
-                            ? `${site.sampleAccounts[0].checkinSnapshot.status} / ${site.sampleAccounts[0].checkinSnapshot.reasonCode}`
-                            : '-'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-
-            <details>
-              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>站点运行时健康（前 {routeDiagnostics.siteRuntimeHealth.items.length}）</summary>
-              <div style={{ marginTop: 8, overflowX: 'auto' }}>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>站点</th>
-                      <th>范围</th>
-                      <th>模型</th>
-                      <th>倍率</th>
-                      <th>熔断</th>
-                      <th>最近失败</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {routeDiagnostics.siteRuntimeHealth.items.map((item) => (
-                      <tr key={`runtime-health-${item.siteId}-${item.scope}-${item.modelName || 'global'}`}>
-                        <td>{item.siteName}</td>
-                        <td>{item.scope === 'global' ? '全站' : '模型'}</td>
-                        <td>{item.modelName || '-'}</td>
-                        <td>{Math.round((item.multiplier || 0) * 100)}%</td>
-                        <td>{item.breakerOpen ? '开启' : '关闭'}</td>
-                        <td>{formatIsoDateTime(item.lastFailureAt)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-
-            <details>
-              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>模型熔断明细（前 {routeDiagnostics.modelCircuits.items.length}）</summary>
-              <div style={{ marginTop: 8, overflowX: 'auto' }}>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>站点</th>
-                      <th>账号</th>
-                      <th>模型</th>
-                      <th>状态</th>
-                      <th>失败数</th>
-                      <th>下次恢复</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {routeDiagnostics.modelCircuits.items.map((item) => (
-                      <tr key={`model-circuit-${item.channelId}-${item.modelName}`}>
-                        <td>{item.siteName || '-'}</td>
-                        <td>{item.accountUsername || (item.accountId != null ? `#${item.accountId}` : '-')}</td>
-                        <td>{item.modelName}</td>
-                        <td>{item.status.state}</td>
-                        <td>{item.failCount}</td>
-                        <td>{item.openUntilMs ? formatIsoDateTime(new Date(item.openUntilMs).toISOString()) : '-'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-
-            <details>
-              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>端点记忆与持久画像（前 {routeDiagnostics.endpointRuntimeMemory.items.length}/{routeDiagnostics.persistedEndpointProfiles.items.length}）</summary>
-              <div style={{ marginTop: 8, overflowX: 'auto' }}>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>站点</th>
-                      <th>类型</th>
-                      <th>首选端点</th>
-                      <th>活跃阻断</th>
-                      <th>更新时间</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {routeDiagnostics.endpointRuntimeMemory.items.map((item) => (
-                      <tr key={`endpoint-runtime-${item.key}`}>
-                        <td>{item.siteName || '-'}</td>
-                        <td>运行时</td>
-                        <td>{item.preferredEndpoint || '-'}</td>
-                        <td>{item.activeBlocks.join(',') || '-'}</td>
-                        <td>{item.preferredUpdatedAtMs ? formatIsoDateTime(new Date(item.preferredUpdatedAtMs).toISOString()) : '-'}</td>
-                      </tr>
-                    ))}
-                    {routeDiagnostics.persistedEndpointProfiles.items.map((item) => (
-                      <tr key={`endpoint-profile-${item.key}`}>
-                        <td>{item.siteName || '-'}</td>
-                        <td>持久画像</td>
-                        <td>{item.preferredEndpoint || '-'}</td>
-                        <td>{item.activeBlocks.join(',') || '-'}</td>
-                        <td>{item.preferredUpdatedAtMs ? formatIsoDateTime(new Date(item.preferredUpdatedAtMs).toISOString()) : '-'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          </>
+          )
         ) : (
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-            诊断快照暂不可用，点击“刷新路由决策”后会同步拉取最新稳定性快照。
+            完整诊断默认按需加载，避免首屏一次性拉取重型快照。
           </div>
         )}
       </div>
