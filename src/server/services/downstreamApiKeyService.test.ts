@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { eq } from 'drizzle-orm';
 
 type DbModule = typeof import('../db/index.js');
 type ServiceModule = typeof import('./downstreamApiKeyService.js');
@@ -34,6 +35,9 @@ describe('downstreamApiKeyService', () => {
     await db.delete(schema.tokenRoutes).run();
     config.proxyToken = 'sk-global-proxy-token';
     config.globalAllowedModels = [];
+    config.downstreamAuthCacheTtlMs = 15_000;
+    config.downstreamAuthNegativeCacheTtlMs = 5_000;
+    service.resetDownstreamAuthCacheForTests();
   });
 
   afterAll(() => {
@@ -49,6 +53,59 @@ describe('downstreamApiKeyService', () => {
       expect(result.policy.supportedModels).toEqual([]);
       expect(result.policy.globalAllowedModels).toEqual([]);
     }
+  });
+
+  it('reuses positive cache entries for repeated token authorization', async () => {
+    const row = await db.insert(schema.downstreamApiKeys).values({
+      name: 'cached-key',
+      key: 'sk-cached-key',
+      enabled: true,
+    }).returning().get();
+
+    const first = await service.authorizeDownstreamToken(row.key);
+    expect(first.ok).toBe(true);
+
+    await db.update(schema.downstreamApiKeys).set({
+      enabled: false,
+    }).where(eq(schema.downstreamApiKeys.id, row.id)).run();
+
+    const second = await service.authorizeDownstreamToken(row.key);
+    expect(second.ok).toBe(true);
+    expect(service.getDownstreamAuthCacheRuntimeStatus()).toMatchObject({
+      hits: 1,
+      misses: 1,
+    });
+  });
+
+  it('reuses negative cache entries for invalid tokens', async () => {
+    const first = await service.authorizeDownstreamToken('sk-invalid');
+    const second = await service.authorizeDownstreamToken('sk-invalid');
+
+    expect(first.ok).toBe(false);
+    expect(second.ok).toBe(false);
+    expect(service.getDownstreamAuthCacheRuntimeStatus()).toMatchObject({
+      misses: 1,
+      negativeHits: 1,
+    });
+  });
+
+  it('invalidates managed key auth cache explicitly', async () => {
+    const row = await db.insert(schema.downstreamApiKeys).values({
+      name: 'invalidate-me',
+      key: 'sk-invalidate-me',
+      enabled: true,
+    }).returning().get();
+
+    const first = await service.authorizeDownstreamToken(row.key);
+    expect(first.ok).toBe(true);
+
+    await db.update(schema.downstreamApiKeys).set({
+      enabled: false,
+    }).where(eq(schema.downstreamApiKeys.id, row.id)).run();
+    service.invalidateDownstreamAuthCache(row.key);
+
+    const second = await service.authorizeDownstreamToken(row.key);
+    expect(second.ok).toBe(false);
   });
 
   it('applies global allowed model patterns to managed and global policies', async () => {

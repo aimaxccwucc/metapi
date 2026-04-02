@@ -22,7 +22,16 @@ import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
 import { wrapReaderWithIdleTimeout } from './streamTimeout.js';
-import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, recordResponseCacheMiss, writeResponseCache } from '../../services/responseCacheService.js';
+import {
+  buildCacheKey,
+  buildRouteScope,
+  getInflightResponseCacheWrite,
+  lookupResponseCache,
+  lookupStaleResponseCache,
+  recordResponseCacheMiss,
+  reserveInflightResponseCacheWrite,
+  writeResponseCache,
+} from '../../services/responseCacheService.js';
 import { DefaultProxyConductor } from '../../proxy-core/conductor/DefaultProxyConductor.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
@@ -84,6 +93,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         })
       : null;
 
+    let inflightReservation: ReturnType<typeof reserveInflightResponseCacheWrite> | null = null;
     if (responseCacheKey) {
       const cached = await lookupResponseCache(responseCacheKey);
       if (cached) {
@@ -96,6 +106,20 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         }, requestedModel, 'success', 200, 0, null, 0, downstreamApiKeyId, cached.promptTokens, cached.completionTokens, cached.promptTokens + cached.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: 'hit', cacheSavedCost: cached.estimatedCost });
         return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
       }
+      const inflight = getInflightResponseCacheWrite(responseCacheKey);
+      if (inflight) {
+        const awaited = await inflight;
+      const awaitedResponse = awaited.response;
+        await logProxy({
+          channel: { routeId: null, id: null } as any,
+          account: { id: null } as any,
+          actualModel: requestedModel,
+          site: { name: 'cache', url: '', platform: 'cache' } as any,
+          tokenName: 'response_cache',
+        }, requestedModel, 'success', 200, 0, 'response cache inflight join', 0, downstreamApiKeyId, awaitedResponse.promptTokens, awaitedResponse.completionTokens, awaitedResponse.promptTokens + awaitedResponse.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: awaited.cacheStatus, cacheSavedCost: awaitedResponse.estimatedCost });
+        return reply.header('X-Cache', awaited.cacheStatus === 'stale' ? 'STALE' : 'HIT').send(JSON.parse(awaitedResponse.body));
+      }
+      inflightReservation = reserveInflightResponseCacheWrite(responseCacheKey);
       recordResponseCacheMiss();
     }
 
@@ -429,14 +453,17 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             downstreamPath,
             !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
           );
-          if (responseCacheKey) {
-            writeResponseCache(responseCacheKey, requestedModel, {
+          if (responseCacheKey && inflightReservation) {
+            const cachedResponse = {
               body: JSON.stringify(data),
               isStream: false,
               promptTokens: resolvedUsage.promptTokens,
               completionTokens: resolvedUsage.completionTokens,
               estimatedCost,
-            }).catch(() => {});
+            };
+            writeResponseCache(responseCacheKey, requestedModel, cachedResponse)
+              .then(() => inflightReservation?.resolve({ response: cachedResponse, cacheStatus: 'hit' }))
+              .catch((error) => inflightReservation?.reject(error));
           }
           reply.header('X-Cache', 'MISS').send(data);
           return {
@@ -513,26 +540,30 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       });
     }
 
+    let staleFallback: Awaited<ReturnType<typeof lookupStaleResponseCache>> = null;
     if (responseCacheKey) {
-      const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-      if (stale) {
-        await logProxy({
-          channel: { routeId: null, id: null } as any,
-          account: { id: null } as any,
-          actualModel: requestedModel,
-          site: { name: 'cache', url: '', platform: 'cache' } as any,
-          tokenName: 'response_cache',
-        }, requestedModel, 'success', 200, 0, 'served stale cache after upstream failure', retryCount, downstreamApiKeyId, stale.promptTokens, stale.completionTokens, stale.promptTokens + stale.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost });
-        return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-      }
+      staleFallback = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+    }
+    if (staleFallback) {
+      inflightReservation?.resolve({ response: staleFallback, cacheStatus: 'stale' });
+      await logProxy({
+        channel: { routeId: null, id: null } as any,
+        account: { id: null } as any,
+        actualModel: requestedModel,
+        site: { name: 'cache', url: '', platform: 'cache' } as any,
+        tokenName: 'response_cache',
+      }, requestedModel, 'success', 200, 0, 'served stale cache after upstream failure', retryCount, downstreamApiKeyId, staleFallback.promptTokens, staleFallback.completionTokens, staleFallback.promptTokens + staleFallback.completionTokens, 0, null, clientContext, downstreamPath, { cacheStatus: 'stale', cacheSavedCost: staleFallback.estimatedCost });
+      return reply.header('X-Cache', 'STALE').send(JSON.parse(staleFallback.body));
     }
 
-    return reply.code(finalStatus).send({
+    const failurePayload = {
       error: {
         message: finalStatus === 502 ? `Upstream error: ${finalMessage}` : finalMessage,
         type: 'upstream_error',
       },
-    });
+    };
+    inflightReservation?.reject({ statusCode: finalStatus, payload: failurePayload });
+    return reply.code(finalStatus).send(failurePayload);
   });
 }
 

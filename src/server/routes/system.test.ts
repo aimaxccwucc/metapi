@@ -113,6 +113,10 @@ describe('system routes', () => {
         ready: true,
         availabilityChecked: true,
       },
+      downstreamAuthCache: {
+        size: expect.any(Number),
+        inflight: expect.any(Number),
+      },
       oauthLoopback: {
         ready: 1,
         total: 1,
@@ -131,6 +135,9 @@ describe('system routes', () => {
     expect(metrics.body).toContain('metapi_ready 1');
     expect(metrics.body).toContain('metapi_response_cache_ready 1');
     expect(metrics.body).toContain('metapi_response_cache_failures_total{kind="write"} 0');
+    expect(metrics.body).toContain('metapi_response_cache_inflight_total{kind="registered"}');
+    expect(metrics.body).toContain('metapi_downstream_auth_cache_total{kind="hit"}');
+    expect(metrics.body).toContain('metapi_downstream_auth_cache_entries{kind="cached"}');
     expect(metrics.body).toContain('metapi_retry_backoff_ms_total 1200');
     expect(metrics.body).toContain('metapi_refresh_triggered_total 2');
     expect(metrics.body).toContain('metapi_on_demand_refresh_skipped_total 5');
@@ -167,6 +174,10 @@ describe('system routes', () => {
       responseCache: {
         ready: true,
         availabilityChecked: true,
+      },
+      downstreamAuthCache: {
+        size: expect.any(Number),
+        inflight: expect.any(Number),
       },
       gatewayRouting: {
         retryBackoffMs: 0,

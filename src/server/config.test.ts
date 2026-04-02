@@ -61,9 +61,12 @@ describe('buildConfig', () => {
     expect(config.upstreamStreamIdleTimeoutMs).toBe(20_000);
     expect(config.onDemandModelRefreshCooldownMs).toBe(15_000);
     expect(config.proxyMaxRetries).toBe(4);
+    expect(config.downstreamAuthCacheTtlMs).toBe(15_000);
+    expect(config.downstreamAuthNegativeCacheTtlMs).toBe(5_000);
     expect(config.responseCacheTtlMs).toBe(3_600_000);
     expect(config.responseCacheMaxRows).toBe(2_000);
     expect(config.responseCacheStaleIfErrorMs).toBe(600_000);
+    expect(config.responseCacheInflightTtlMs).toBe(30_000);
     expect(config.slowSuccessLatencyThresholdMs).toBe(15_000);
     expect(config.slowSuccessPenaltyScore).toBe(0.25);
     expect(config.proxyEmptyContentFailEnabled).toBe(true);
@@ -85,9 +88,12 @@ describe('buildConfig', () => {
       UPSTREAM_STREAM_IDLE_TIMEOUT_MS: '12000',
       ON_DEMAND_MODEL_REFRESH_COOLDOWN_MS: '22000',
       PROXY_MAX_RETRIES: '5',
+      DOWNSTREAM_AUTH_CACHE_TTL_MS: '30000',
+      DOWNSTREAM_AUTH_NEGATIVE_CACHE_TTL_MS: '7000',
       RESPONSE_CACHE_TTL_MS: '1800000',
       RESPONSE_CACHE_MAX_ROWS: '1200',
       RESPONSE_CACHE_STALE_IF_ERROR_MS: '300000',
+      RESPONSE_CACHE_INFLIGHT_TTL_MS: '45000',
       SLOW_SUCCESS_LATENCY_THRESHOLD_MS: '18000',
       SLOW_SUCCESS_PENALTY_SCORE: '0.4',
     });
@@ -98,9 +104,12 @@ describe('buildConfig', () => {
     expect(config.upstreamStreamIdleTimeoutMs).toBe(12_000);
     expect(config.onDemandModelRefreshCooldownMs).toBe(22_000);
     expect(config.proxyMaxRetries).toBe(5);
+    expect(config.downstreamAuthCacheTtlMs).toBe(30_000);
+    expect(config.downstreamAuthNegativeCacheTtlMs).toBe(7_000);
     expect(config.responseCacheTtlMs).toBe(1_800_000);
     expect(config.responseCacheMaxRows).toBe(1_200);
     expect(config.responseCacheStaleIfErrorMs).toBe(300_000);
+    expect(config.responseCacheInflightTtlMs).toBe(45_000);
     expect(config.slowSuccessLatencyThresholdMs).toBe(18_000);
     expect(config.slowSuccessPenaltyScore).toBe(0.4);
   });

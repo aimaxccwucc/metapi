@@ -53,6 +53,7 @@ vi.mock('../config.js', () => ({
     responseCacheStaleIfErrorMs: 600_000,
     responseCacheTtlMs: 3_600_000,
     responseCacheMaxRows: 2_000,
+    responseCacheInflightTtlMs: 30_000,
   },
 }));
 
@@ -73,9 +74,12 @@ vi.mock('../db/index.js', () => ({
 import {
   __responseCacheServiceTestUtils,
   buildCacheKey,
+  getInflightResponseCacheWrite,
   isResponseCacheAvailable,
   lookupResponseCache,
   lookupStaleResponseCache,
+  registerInflightResponseCacheWrite,
+  reserveInflightResponseCacheWrite,
   resetResponseCacheAvailabilityForTests,
   writeResponseCache,
 } from './responseCacheService.js';
@@ -263,6 +267,86 @@ describe('responseCacheService', () => {
       completionTokens: 3,
       estimatedCost: 0.765432,
     });
+  });
+
+  it('tracks inflight cache write registrations and joins', async () => {
+    let resolveWrite: ((value: { body: string; isStream: false; promptTokens: number; completionTokens: number; estimatedCost: number }) => void) | null = null;
+    const task = new Promise<{ body: string; isStream: false; promptTokens: number; completionTokens: number; estimatedCost: number }>((resolve) => {
+      resolveWrite = resolve;
+    });
+
+    const registered = registerInflightResponseCacheWrite('cache-key', task);
+    const joined = getInflightResponseCacheWrite('cache-key');
+
+    expect(joined).toBeTruthy();
+    resolveWrite?.({
+      body: JSON.stringify({ ok: true }),
+      isStream: false,
+      promptTokens: 2,
+      completionTokens: 1,
+      estimatedCost: 0.12,
+    });
+
+    await expect(registered).resolves.toEqual({
+      response: {
+        body: JSON.stringify({ ok: true }),
+        isStream: false,
+        promptTokens: 2,
+        completionTokens: 1,
+        estimatedCost: 0.12,
+      },
+      cacheStatus: 'hit',
+    });
+    await expect(joined).resolves.toEqual({
+      response: {
+        body: JSON.stringify({ ok: true }),
+        isStream: false,
+        promptTokens: 2,
+        completionTokens: 1,
+        estimatedCost: 0.12,
+      },
+      cacheStatus: 'hit',
+    });
+    expect(getInflightResponseCacheWrite('cache-key')).toBeNull();
+  });
+
+  it('can reserve inflight cache coordination before the cache write starts', async () => {
+    const reserved = reserveInflightResponseCacheWrite('pending-key');
+    const joined = getInflightResponseCacheWrite('pending-key');
+
+    expect(joined).toBeTruthy();
+    reserved.resolve({
+      response: {
+        body: JSON.stringify({ queued: true }),
+        isStream: false,
+        promptTokens: 4,
+        completionTokens: 2,
+        estimatedCost: 0.34,
+      },
+      cacheStatus: 'hit',
+    });
+
+    await expect(joined).resolves.toEqual({
+      response: {
+        body: JSON.stringify({ queued: true }),
+        isStream: false,
+        promptTokens: 4,
+        completionTokens: 2,
+        estimatedCost: 0.34,
+      },
+      cacheStatus: 'hit',
+    });
+    await expect(reserved.promise).resolves.toEqual({
+      response: {
+        body: JSON.stringify({ queued: true }),
+        isStream: false,
+        promptTokens: 4,
+        completionTokens: 2,
+        estimatedCost: 0.34,
+      },
+      cacheStatus: 'hit',
+    });
+    expect(getInflightResponseCacheWrite('pending-key')).toBeNull();
   });
 
   it('marks cache unavailable after write failures to avoid repeated silent errors', async () => {

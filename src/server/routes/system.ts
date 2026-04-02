@@ -4,6 +4,7 @@ import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { config } from '../config.js';
 import { getOAuthLoopbackCallbackServerStates } from '../services/oauth/localCallbackServer.js';
 import { listBackgroundTasks } from '../services/backgroundTaskService.js';
+import { getDownstreamAuthCacheRuntimeStatus } from '../services/downstreamApiKeyService.js';
 import { getResponseCacheRuntimeStatus, isResponseCacheAvailable } from '../services/responseCacheService.js';
 import { getRetryBackoffMetrics } from './proxy/requestBudget.js';
 import { getOnDemandRefreshMetrics } from '../services/modelService.js';
@@ -31,6 +32,7 @@ type RuntimeOverviewResponse = {
     dialect: string;
   };
   responseCache: ReturnType<typeof getResponseCacheRuntimeStatus>;
+  downstreamAuthCache: ReturnType<typeof getDownstreamAuthCacheRuntimeStatus>;
   gatewayRouting: {
     retryBackoffMs: number;
     retryBackoffCount: number;
@@ -132,6 +134,7 @@ async function buildRuntimeOverview(startedAt: Date): Promise<RuntimeOverviewRes
     buildRecentActivity(),
   ]);
   const responseCache = getResponseCacheRuntimeStatus();
+  const downstreamAuthCache = getDownstreamAuthCacheRuntimeStatus();
   const retryBackoffMetrics = getRetryBackoffMetrics();
   const onDemandRefreshMetrics = getOnDemandRefreshMetrics();
   const oauthStates = getOAuthLoopbackCallbackServerStates();
@@ -158,6 +161,7 @@ async function buildRuntimeOverview(startedAt: Date): Promise<RuntimeOverviewRes
       dialect: runtimeDbDialect,
     },
     responseCache,
+    downstreamAuthCache,
     gatewayRouting: {
       retryBackoffMs: retryBackoffMetrics.totalMs,
       retryBackoffCount: retryBackoffMetrics.count,
@@ -205,6 +209,7 @@ function buildMetricsPayload(overview: RuntimeOverviewResponse): string {
     `metapi_response_cache_hits_total{kind="hit"} ${overview.responseCache.hits}`,
     `metapi_response_cache_hits_total{kind="stale"} ${overview.responseCache.staleHits}`,
     `metapi_response_cache_hits_total{kind="miss"} ${overview.responseCache.misses}`,
+    `metapi_response_cache_hits_total{kind="inflight_join"} ${overview.responseCache.inflightJoins}`,
     '# HELP metapi_response_cache_saved_tokens_total Response cache saved tokens.',
     '# TYPE metapi_response_cache_saved_tokens_total gauge',
     `metapi_response_cache_saved_tokens_total ${overview.responseCache.savedTokens}`,
@@ -215,6 +220,22 @@ function buildMetricsPayload(overview: RuntimeOverviewResponse): string {
     '# TYPE metapi_response_cache_prune_deleted_total gauge',
     `metapi_response_cache_prune_deleted_total{reason="expired"} ${overview.responseCache.pruneDeletedExpiredRows}`,
     `metapi_response_cache_prune_deleted_total{reason="overflow"} ${overview.responseCache.pruneDeletedOverflowRows}`,
+    '# HELP metapi_response_cache_inflight_total Response cache inflight coordination metrics.',
+    '# TYPE metapi_response_cache_inflight_total gauge',
+    `metapi_response_cache_inflight_total{kind="registered"} ${overview.responseCache.inflightWrites}`,
+    `metapi_response_cache_inflight_total{kind="evicted"} ${overview.responseCache.inflightEvictions}`,
+    '# HELP metapi_downstream_auth_cache_total Downstream auth cache metrics.',
+    '# TYPE metapi_downstream_auth_cache_total gauge',
+    `metapi_downstream_auth_cache_total{kind="hit"} ${overview.downstreamAuthCache.hits}`,
+    `metapi_downstream_auth_cache_total{kind="negative_hit"} ${overview.downstreamAuthCache.negativeHits}`,
+    `metapi_downstream_auth_cache_total{kind="miss"} ${overview.downstreamAuthCache.misses}`,
+    `metapi_downstream_auth_cache_total{kind="singleflight_join"} ${overview.downstreamAuthCache.singleflightJoins}`,
+    `metapi_downstream_auth_cache_total{kind="invalidation"} ${overview.downstreamAuthCache.invalidations}`,
+    `metapi_downstream_auth_cache_total{kind="eviction"} ${overview.downstreamAuthCache.evictions}`,
+    '# HELP metapi_downstream_auth_cache_entries Current downstream auth cache entries.',
+    '# TYPE metapi_downstream_auth_cache_entries gauge',
+    `metapi_downstream_auth_cache_entries{kind="cached"} ${overview.downstreamAuthCache.size}`,
+    `metapi_downstream_auth_cache_entries{kind="inflight"} ${overview.downstreamAuthCache.inflight}`,
     '# HELP metapi_retry_backoff_ms_total Total retry backoff delay applied before retries.',
     '# TYPE metapi_retry_backoff_ms_total gauge',
     `metapi_retry_backoff_ms_total ${overview.gatewayRouting.retryBackoffMs}`,
@@ -274,6 +295,10 @@ export async function systemRoutes(app: FastifyInstance, options: RuntimeStatusR
         ready: overview.responseCache.ready,
         availabilityChecked: overview.responseCache.availabilityChecked,
         lastError: overview.responseCache.lastError,
+      },
+      downstreamAuthCache: {
+        size: overview.downstreamAuthCache.size,
+        inflight: overview.downstreamAuthCache.inflight,
       },
       oauthLoopback: {
         ready: overview.oauthLoopback.ready,

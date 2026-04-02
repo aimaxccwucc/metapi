@@ -27,6 +27,9 @@ export type ResponseCacheRuntimeStatus = {
   hits: number;
   staleHits: number;
   misses: number;
+  inflightJoins: number;
+  inflightWrites: number;
+  inflightEvictions: number;
 };
 
 function buildInitialRuntimeStatus(): ResponseCacheRuntimeStatus {
@@ -44,10 +47,14 @@ function buildInitialRuntimeStatus(): ResponseCacheRuntimeStatus {
     hits: 0,
     staleHits: 0,
     misses: 0,
+    inflightJoins: 0,
+    inflightWrites: 0,
+    inflightEvictions: 0,
   };
 }
 
 const responseCacheRuntimeStatus = buildInitialRuntimeStatus();
+const responseCacheInflight = new Map<string, { promise: Promise<InflightResponseCacheResult>; resolve: (result: InflightResponseCacheResult) => void; reject: (reason?: unknown) => void; createdAtMs: number }>();
 
 function getDb(): DbClient | null {
   return ((dbIndex as { db?: DbClient }).db) ?? null;
@@ -154,6 +161,29 @@ export interface CachedResponse {
   estimatedCost: number;
 }
 
+export type InflightResponseCacheResult = {
+  response: CachedResponse;
+  cacheStatus: 'hit' | 'stale';
+};
+
+export type InflightResponseCacheFailure = {
+  statusCode: number;
+  payload: unknown;
+};
+
+export type InflightResponseCacheWrite = {
+  promise: Promise<InflightResponseCacheResult>;
+  resolve: (result: InflightResponseCacheResult) => void;
+  reject: (reason?: InflightResponseCacheFailure | unknown) => void;
+};
+
+export function isInflightResponseCacheFailure(value: unknown): value is InflightResponseCacheFailure {
+  return !!value
+    && typeof value === 'object'
+    && Number.isInteger((value as { statusCode?: unknown }).statusCode)
+    && Object.prototype.hasOwnProperty.call(value, 'payload');
+}
+
 function normalizeFiniteNumber(value: unknown, fallback = 0): number {
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -218,7 +248,68 @@ export async function isResponseCacheAvailable(): Promise<boolean> {
 export function resetResponseCacheAvailabilityForTests(): void {
   responseCacheAvailable = null;
   responseCacheAvailabilityRetryAtMs = 0;
+  responseCacheInflight.clear();
   Object.assign(responseCacheRuntimeStatus, buildInitialRuntimeStatus());
+}
+
+function pruneInflightResponseCache(nowMs = Date.now()): void {
+  for (const [cacheKey, entry] of responseCacheInflight.entries()) {
+    if ((nowMs - entry.createdAtMs) < config.responseCacheInflightTtlMs) continue;
+    responseCacheInflight.delete(cacheKey);
+    responseCacheRuntimeStatus.inflightEvictions += 1;
+  }
+}
+
+export function getInflightResponseCacheWrite(cacheKey: string): Promise<InflightResponseCacheResult> | null {
+  pruneInflightResponseCache();
+  const entry = responseCacheInflight.get(cacheKey);
+  if (!entry) return null;
+  responseCacheRuntimeStatus.inflightJoins += 1;
+  return entry.promise;
+}
+
+export function reserveInflightResponseCacheWrite(cacheKey: string): InflightResponseCacheWrite {
+  pruneInflightResponseCache();
+  const existing = responseCacheInflight.get(cacheKey);
+  if (existing) {
+    return {
+      promise: existing.promise,
+      resolve: existing.resolve,
+      reject: existing.reject,
+    };
+  }
+
+  let resolvePromise!: (result: InflightResponseCacheResult) => void;
+  let rejectPromise!: (reason?: unknown) => void;
+  const promise = new Promise<InflightResponseCacheResult>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  const entry = {
+    promise,
+    resolve: resolvePromise,
+    reject: rejectPromise,
+    createdAtMs: Date.now(),
+  };
+  responseCacheRuntimeStatus.inflightWrites += 1;
+  responseCacheInflight.set(cacheKey, entry);
+  promise.finally(() => {
+    const current = responseCacheInflight.get(cacheKey);
+    if (current?.promise === promise) {
+      responseCacheInflight.delete(cacheKey);
+    }
+  }).catch(() => {});
+  return {
+    promise,
+    resolve: resolvePromise,
+    reject: rejectPromise,
+  };
+}
+
+export function registerInflightResponseCacheWrite(cacheKey: string, task: Promise<CachedResponse>): Promise<InflightResponseCacheResult> {
+  const reserved = reserveInflightResponseCacheWrite(cacheKey);
+  task.then((response) => reserved.resolve({ response, cacheStatus: 'hit' }), reserved.reject);
+  return reserved.promise;
 }
 
 export function buildRouteScope(input: {
@@ -434,6 +525,7 @@ export async function writeResponseCache(
 
 export const __responseCacheServiceTestUtils = {
   buildRouteScope,
+  pruneInflightResponseCache,
 };
 
 export async function pruneResponseCache(): Promise<void> {

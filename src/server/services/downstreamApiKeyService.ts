@@ -45,6 +45,31 @@ export type DownstreamTokenAuthFailure = {
 
 export type DownstreamTokenAuthResult = DownstreamTokenAuthSuccess | DownstreamTokenAuthFailure;
 
+type DownstreamAuthCacheEntry = {
+  value: DownstreamTokenAuthResult;
+  expiresAtMs: number;
+};
+
+type DownstreamAuthRuntimeStatus = {
+  hits: number;
+  misses: number;
+  negativeHits: number;
+  singleflightJoins: number;
+  invalidations: number;
+  evictions: number;
+};
+
+const downstreamAuthCache = new Map<string, DownstreamAuthCacheEntry>();
+const downstreamAuthInflight = new Map<string, Promise<DownstreamTokenAuthResult>>();
+const downstreamAuthRuntimeStatus: DownstreamAuthRuntimeStatus = {
+  hits: 0,
+  misses: 0,
+  negativeHits: 0,
+  singleflightJoins: 0,
+  invalidations: 0,
+  evictions: 0,
+};
+
 function isRegexModelPattern(pattern: string): boolean {
   return pattern.trim().toLowerCase().startsWith('re:');
 }
@@ -62,6 +87,117 @@ function parseRegexModelPattern(pattern: string): RegExp | null {
 
 function normalizeToken(raw: string): string {
   return (raw || '').trim();
+}
+
+function isAuthSuccess(result: DownstreamTokenAuthResult): result is DownstreamTokenAuthSuccess {
+  return result.ok;
+}
+
+function cloneAuthResult(result: DownstreamTokenAuthResult): DownstreamTokenAuthResult {
+  if (!isAuthSuccess(result)) {
+    return { ...result };
+  }
+  return {
+    ...result,
+    key: result.key
+      ? {
+        ...result.key,
+        supportedModels: [...result.key.supportedModels],
+        allowedRouteIds: [...result.key.allowedRouteIds],
+        tags: [...result.key.tags],
+        siteWeightMultipliers: { ...result.key.siteWeightMultipliers },
+      }
+      : null,
+    policy: {
+      ...result.policy,
+      supportedModels: [...result.policy.supportedModels],
+      allowedRouteIds: [...result.policy.allowedRouteIds],
+      globalAllowedModels: [...(result.policy.globalAllowedModels ?? [])],
+      siteWeightMultipliers: { ...result.policy.siteWeightMultipliers },
+    },
+  };
+}
+
+function pruneDownstreamAuthCache(nowMs = Date.now()): void {
+  for (const [token, entry] of downstreamAuthCache.entries()) {
+    if (entry.expiresAtMs > nowMs) continue;
+    downstreamAuthCache.delete(token);
+    downstreamAuthRuntimeStatus.evictions += 1;
+  }
+}
+
+function readDownstreamAuthCache(token: string, nowMs = Date.now()): DownstreamTokenAuthResult | null {
+  pruneDownstreamAuthCache(nowMs);
+  const cached = downstreamAuthCache.get(token);
+  if (!cached) return null;
+  if (cached.expiresAtMs <= nowMs) {
+    downstreamAuthCache.delete(token);
+    downstreamAuthRuntimeStatus.evictions += 1;
+    return null;
+  }
+  if (cached.value.ok) downstreamAuthRuntimeStatus.hits += 1;
+  else downstreamAuthRuntimeStatus.negativeHits += 1;
+  return cloneAuthResult(cached.value);
+}
+
+function writeDownstreamAuthCache(token: string, value: DownstreamTokenAuthResult, nowMs = Date.now()): void {
+  const ttlMs = value.ok ? config.downstreamAuthCacheTtlMs : config.downstreamAuthNegativeCacheTtlMs;
+  downstreamAuthCache.set(token, {
+    value: cloneAuthResult(value),
+    expiresAtMs: nowMs + ttlMs,
+  });
+}
+
+function patchCachedManagedKey(
+  token: string,
+  updater: (key: DownstreamApiKeyPolicyView) => DownstreamApiKeyPolicyView,
+): void {
+  const cached = downstreamAuthCache.get(token);
+  if (!cached || !cached.value.ok || !cached.value.key) return;
+  const nextKey = updater(cached.value.key);
+  cached.value = {
+    ...cached.value,
+    key: nextKey,
+    policy: toPolicyFromView(nextKey),
+  };
+}
+
+export function invalidateDownstreamAuthCache(token?: string | null): void {
+  if (typeof token === 'string' && token.trim()) {
+    if (downstreamAuthCache.delete(token.trim())) {
+      downstreamAuthRuntimeStatus.invalidations += 1;
+    }
+    downstreamAuthInflight.delete(token.trim());
+    return;
+  }
+  if (downstreamAuthCache.size > 0 || downstreamAuthInflight.size > 0) {
+    downstreamAuthRuntimeStatus.invalidations += downstreamAuthCache.size;
+  }
+  downstreamAuthCache.clear();
+  downstreamAuthInflight.clear();
+}
+
+export function getDownstreamAuthCacheRuntimeStatus(): DownstreamAuthRuntimeStatus & {
+  size: number;
+  inflight: number;
+} {
+  pruneDownstreamAuthCache();
+  return {
+    ...downstreamAuthRuntimeStatus,
+    size: downstreamAuthCache.size,
+    inflight: downstreamAuthInflight.size,
+  };
+}
+
+export function resetDownstreamAuthCacheForTests(): void {
+  downstreamAuthCache.clear();
+  downstreamAuthInflight.clear();
+  downstreamAuthRuntimeStatus.hits = 0;
+  downstreamAuthRuntimeStatus.misses = 0;
+  downstreamAuthRuntimeStatus.negativeHits = 0;
+  downstreamAuthRuntimeStatus.singleflightJoins = 0;
+  downstreamAuthRuntimeStatus.invalidations = 0;
+  downstreamAuthRuntimeStatus.evictions = 0;
 }
 
 function maskSecret(value: string): string {
@@ -348,94 +484,145 @@ export async function authorizeDownstreamToken(token: string): Promise<Downstrea
     };
   }
 
-  const managed = await getManagedDownstreamApiKeyByToken(normalizedToken);
-  if (managed) {
-    if (!managed.enabled) {
-      return {
-        ok: false,
-        statusCode: 403,
-        error: 'API key is disabled',
-        reason: 'disabled',
-      };
-    }
+  const cached = readDownstreamAuthCache(normalizedToken);
+  if (cached) return cached;
 
-    if (managed.expiresAt) {
-      const expiresAtTs = Date.parse(managed.expiresAt);
-      if (Number.isFinite(expiresAtTs) && expiresAtTs <= Date.now()) {
-        return {
+  downstreamAuthRuntimeStatus.misses += 1;
+  const inflight = downstreamAuthInflight.get(normalizedToken);
+  if (inflight) {
+    downstreamAuthRuntimeStatus.singleflightJoins += 1;
+    return cloneAuthResult(await inflight);
+  }
+
+  const run = (async (): Promise<DownstreamTokenAuthResult> => {
+    const managed = await getManagedDownstreamApiKeyByToken(normalizedToken);
+    if (managed) {
+      if (!managed.enabled) {
+        const result: DownstreamTokenAuthResult = {
           ok: false,
           statusCode: 403,
-          error: 'API key is expired',
-          reason: 'expired',
+          error: 'API key is disabled',
+          reason: 'disabled',
         };
+        writeDownstreamAuthCache(normalizedToken, result);
+        return result;
       }
-    }
 
-    if (managed.maxCost !== null && managed.usedCost >= managed.maxCost) {
-      return {
-        ok: false,
-        statusCode: 403,
-        error: 'API key has exceeded max cost',
-        reason: 'over_cost',
+      if (managed.expiresAt) {
+        const expiresAtTs = Date.parse(managed.expiresAt);
+        if (Number.isFinite(expiresAtTs) && expiresAtTs <= Date.now()) {
+          const result: DownstreamTokenAuthResult = {
+            ok: false,
+            statusCode: 403,
+            error: 'API key is expired',
+            reason: 'expired',
+          };
+          writeDownstreamAuthCache(normalizedToken, result);
+          return result;
+        }
+      }
+
+      if (managed.maxCost !== null && managed.usedCost >= managed.maxCost) {
+        const result: DownstreamTokenAuthResult = {
+          ok: false,
+          statusCode: 403,
+          error: 'API key has exceeded max cost',
+          reason: 'over_cost',
+        };
+        writeDownstreamAuthCache(normalizedToken, result);
+        return result;
+      }
+
+      if (managed.maxRequests !== null && managed.usedRequests >= managed.maxRequests) {
+        const result: DownstreamTokenAuthResult = {
+          ok: false,
+          statusCode: 403,
+          error: 'API key has exceeded max requests',
+          reason: 'over_requests',
+        };
+        writeDownstreamAuthCache(normalizedToken, result);
+        return result;
+      }
+
+      const result: DownstreamTokenAuthResult = {
+        ok: true,
+        source: 'managed',
+        token: normalizedToken,
+        key: managed,
+        policy: toPolicyFromView(managed),
       };
+      writeDownstreamAuthCache(normalizedToken, result);
+      return result;
     }
 
-    if (managed.maxRequests !== null && managed.usedRequests >= managed.maxRequests) {
-      return {
-        ok: false,
-        statusCode: 403,
-        error: 'API key has exceeded max requests',
-        reason: 'over_requests',
+    if (normalizedToken === config.proxyToken) {
+      const result: DownstreamTokenAuthResult = {
+        ok: true,
+        source: 'global',
+        token: normalizedToken,
+        key: null,
+        policy: getDefaultGlobalPolicy(),
       };
+      writeDownstreamAuthCache(normalizedToken, result);
+      return result;
     }
 
-    return {
-      ok: true,
-      source: 'managed',
-      token: normalizedToken,
-      key: managed,
-      policy: toPolicyFromView(managed),
+    const result: DownstreamTokenAuthResult = {
+      ok: false,
+      statusCode: 403,
+      error: 'Invalid API key',
+      reason: 'invalid',
     };
-  }
+    writeDownstreamAuthCache(normalizedToken, result);
+    return result;
+  })();
 
-  if (normalizedToken === config.proxyToken) {
-    return {
-      ok: true,
-      source: 'global',
-      token: normalizedToken,
-      key: null,
-      policy: getDefaultGlobalPolicy(),
-    };
+  downstreamAuthInflight.set(normalizedToken, run);
+  try {
+    return cloneAuthResult(await run);
+  } finally {
+    downstreamAuthInflight.delete(normalizedToken);
   }
-
-  return {
-    ok: false,
-    statusCode: 403,
-    error: 'Invalid API key',
-    reason: 'invalid',
-  };
 }
 
 export async function consumeManagedKeyRequest(keyId: number): Promise<void> {
   const nowIso = new Date().toISOString();
+  const currentView = await getDownstreamApiKeyById(keyId);
   await db.update(schema.downstreamApiKeys).set({
     // Atomic increment to avoid lost updates under multi-process concurrency.
     usedRequests: sql`coalesce(${schema.downstreamApiKeys.usedRequests}, 0) + 1`,
     lastUsedAt: nowIso,
     updatedAt: nowIso,
   }).where(eq(schema.downstreamApiKeys.id, keyId)).run();
+  if (currentView?.key) {
+    patchCachedManagedKey(currentView.key, (key) => ({
+      ...key,
+      usedRequests: key.usedRequests + 1,
+      lastUsedAt: nowIso,
+      updatedAt: nowIso,
+    }));
+  }
 }
 
 export async function recordManagedKeyCostUsage(keyId: number, estimatedCost: number): Promise<void> {
   const cost = Number(estimatedCost);
   if (!Number.isFinite(cost) || cost <= 0) return;
   const nowIso = new Date().toISOString();
+  const currentView = await getDownstreamApiKeyById(keyId);
   await db.update(schema.downstreamApiKeys).set({
     // Atomic increment to avoid lost updates under multi-process concurrency.
     usedCost: sql`coalesce(${schema.downstreamApiKeys.usedCost}, 0) + ${cost}`,
     lastUsedAt: nowIso,
     updatedAt: nowIso,
   }).where(eq(schema.downstreamApiKeys.id, keyId)).run();
+  if (currentView?.key) {
+    patchCachedManagedKey(currentView.key, (key) => ({
+      ...key,
+      usedCost: Number((key.usedCost + cost).toFixed(6)),
+      lastUsedAt: nowIso,
+      updatedAt: nowIso,
+    }));
+  }
 }
 
 export function normalizeDownstreamApiKeyPayload(input: {

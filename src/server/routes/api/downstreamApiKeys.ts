@@ -3,6 +3,7 @@ import { and, eq, inArray, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import { db, hasProxyLogDownstreamApiKeyIdColumn, runtimeDbDialect, schema } from '../../db/index.js';
 import {
   getDownstreamApiKeyById,
+  invalidateDownstreamAuthCache,
   listDownstreamApiKeys,
   normalizeDownstreamApiKeyPayload,
   toDownstreamApiKeyPolicyView,
@@ -510,6 +511,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       if (!inserted) {
         return reply.code(500).send({ success: false, message: '创建失败' });
       }
+      invalidateDownstreamAuthCache(inserted.key);
 
       return {
         success: true,
@@ -592,6 +594,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     }
 
     const nowIso = new Date().toISOString();
+    const previousToken = existing.key;
     try {
       await db.update(schema.downstreamApiKeys).set({
         name: normalized.name,
@@ -608,6 +611,9 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
         siteWeightMultipliers: toPersistenceJson(normalized.siteWeightMultipliers),
         updatedAt: nowIso,
       }).where(eq(schema.downstreamApiKeys.id, id)).run();
+
+      invalidateDownstreamAuthCache(previousToken);
+      invalidateDownstreamAuthCache(normalized.key);
 
       const updated = await getDownstreamApiKeyById(id);
       return {
@@ -638,6 +644,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       usedRequests: 0,
       updatedAt: new Date().toISOString(),
     }).where(eq(schema.downstreamApiKeys.id, id)).run();
+    invalidateDownstreamAuthCache(existing.key);
 
     return {
       success: true,
@@ -659,6 +666,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     await db.delete(schema.downstreamApiKeys)
       .where(eq(schema.downstreamApiKeys.id, id))
       .run();
+    invalidateDownstreamAuthCache(existing.key);
 
     return { success: true };
   });
@@ -715,12 +723,14 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
           await db.delete(schema.downstreamApiKeys)
             .where(eq(schema.downstreamApiKeys.id, id))
             .run();
+          invalidateDownstreamAuthCache(existing.key);
         } else if (action === 'resetUsage') {
           await db.update(schema.downstreamApiKeys).set({
             usedCost: 0,
             usedRequests: 0,
             updatedAt: new Date().toISOString(),
           }).where(eq(schema.downstreamApiKeys.id, id)).run();
+          invalidateDownstreamAuthCache(existing.key);
         } else if (action === 'updateMetadata') {
           const nextGroupName = groupOperation === 'keep'
             ? existing.groupName
@@ -733,11 +743,13 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
             tags: toPersistenceJson(nextTags),
             updatedAt: new Date().toISOString(),
           }).where(eq(schema.downstreamApiKeys.id, id)).run();
+          invalidateDownstreamAuthCache(existing.key);
         } else {
           await db.update(schema.downstreamApiKeys).set({
             enabled: action === 'enable',
             updatedAt: new Date().toISOString(),
           }).where(eq(schema.downstreamApiKeys.id, id)).run();
+          invalidateDownstreamAuthCache(existing.key);
         }
 
         successIds.push(id);

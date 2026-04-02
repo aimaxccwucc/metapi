@@ -59,7 +59,16 @@ import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/con
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
 import { recordProxyDebugTrace } from '../../routes/proxy/proxyDebugTrace.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
-import { buildCacheKey, buildRouteScope, lookupResponseCache, lookupStaleResponseCache, recordResponseCacheMiss, writeResponseCache } from '../../services/responseCacheService.js';
+import {
+  buildCacheKey,
+  buildRouteScope,
+  getInflightResponseCacheWrite,
+  lookupResponseCache,
+  lookupStaleResponseCache,
+  recordResponseCacheMiss,
+  reserveInflightResponseCacheWrite,
+  writeResponseCache,
+} from '../../services/responseCacheService.js';
 import { DefaultProxyConductor } from '../conductor/DefaultProxyConductor.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
@@ -165,6 +174,7 @@ export async function handleChatSurfaceRequest(
         requestFingerprint: request.body,
       })
     : null;
+  let inflightReservation: ReturnType<typeof reserveInflightResponseCacheWrite> | null = null;
   if (responseCacheKey) {
     const cached = await lookupResponseCache(responseCacheKey);
     if (cached) {
@@ -193,6 +203,36 @@ export async function handleChatSurfaceRequest(
       );
       return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
     }
+    const inflight = getInflightResponseCacheWrite(responseCacheKey);
+    if (inflight) {
+      const awaited = await inflight;
+      const awaitedResponse = awaited.response;
+      await logProxy(
+        {
+          channel: { routeId: null, id: null },
+          account: { id: null, username: 'cache' },
+          actualModel: requestedModel,
+        },
+        requestedModel,
+        'success',
+        200,
+        0,
+        'response cache inflight join',
+        0,
+        downstreamPath,
+        awaitedResponse.promptTokens,
+        awaitedResponse.completionTokens,
+        awaitedResponse.promptTokens + awaitedResponse.completionTokens,
+        0,
+        null,
+        null,
+        clientContext,
+        downstreamApiKeyId,
+        { cacheStatus: awaited.cacheStatus, cacheSavedCost: awaitedResponse.estimatedCost },
+      );
+      return reply.header('X-Cache', awaited.cacheStatus === 'stale' ? 'STALE' : 'HIT').send(JSON.parse(awaitedResponse.body));
+    }
+    inflightReservation = reserveInflightResponseCacheWrite(responseCacheKey);
     recordResponseCacheMiss();
   }
 
@@ -998,14 +1038,17 @@ export async function handleChatSurfaceRequest(
           !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
         );
 
-        if (responseCacheKey && !isStream) {
-          writeResponseCache(responseCacheKey, requestedModel, {
+        if (responseCacheKey && !isStream && inflightReservation) {
+          const cachedResponse = {
             body: JSON.stringify(downstreamResponse),
             isStream: false,
             promptTokens: resolvedUsage.promptTokens,
             completionTokens: resolvedUsage.completionTokens,
             estimatedCost,
-          }).catch(() => {});
+          };
+          writeResponseCache(responseCacheKey, requestedModel, cachedResponse)
+            .then(() => inflightReservation?.resolve({ response: cachedResponse, cacheStatus: 'hit' }))
+            .catch((error) => inflightReservation?.reject(error));
         }
 
         reply.header('X-Cache', 'MISS').send(downstreamResponse);
@@ -1093,43 +1136,47 @@ export async function handleChatSurfaceRequest(
     });
   }
 
+  let staleFallback: Awaited<ReturnType<typeof lookupStaleResponseCache>> = null;
   if (responseCacheKey) {
-    const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-    if (stale) {
-      await logProxy(
-        {
-          channel: { routeId: null, id: null },
-          account: { id: null, username: 'cache' },
-          actualModel: requestedModel,
-        },
-        requestedModel,
-        'success',
-        200,
-        0,
-        finalStatus === 504 ? requestBudget.buildTimeoutMessage() : 'served stale cache after upstream failure',
-        retryCount,
-        downstreamPath,
-        stale.promptTokens,
-        stale.completionTokens,
-        stale.promptTokens + stale.completionTokens,
-        0,
-        null,
-        null,
-        clientContext,
-        downstreamApiKeyId,
-        { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
-      );
-      return reply.header('X-Cache', 'STALE').send(JSON.parse(stale.body));
-    }
+    staleFallback = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+  }
+  if (staleFallback) {
+    inflightReservation?.resolve({ response: staleFallback, cacheStatus: 'stale' });
+    await logProxy(
+      {
+        channel: { routeId: null, id: null },
+        account: { id: null, username: 'cache' },
+        actualModel: requestedModel,
+      },
+      requestedModel,
+      'success',
+      200,
+      0,
+      finalStatus === 504 ? requestBudget.buildTimeoutMessage() : 'served stale cache after upstream failure',
+      retryCount,
+      downstreamPath,
+      staleFallback.promptTokens,
+      staleFallback.completionTokens,
+      staleFallback.promptTokens + staleFallback.completionTokens,
+      0,
+      null,
+      null,
+      clientContext,
+      downstreamApiKeyId,
+      { cacheStatus: 'stale', cacheSavedCost: staleFallback.estimatedCost },
+    );
+    return reply.header('X-Cache', 'STALE').send(JSON.parse(staleFallback.body));
   }
 
   const errorType = execution.reason === 'no_channel' ? 'server_error' : 'upstream_error';
-  return reply.code(finalStatus).send({
+  const failurePayload = {
     error: {
       message: finalStatus === 502 ? `Upstream error: ${finalMessage}` : finalMessage,
       type: errorType,
     },
-  });
+  };
+  inflightReservation?.reject({ statusCode: finalStatus, payload: failurePayload });
+  return reply.code(finalStatus).send(failurePayload);
 }
 
 function deriveCodexSessionCacheKey(input: {
@@ -1217,6 +1264,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
     routeScope,
     requestFingerprint: rawBody,
   });
+  let inflightReservation: ReturnType<typeof reserveInflightResponseCacheWrite> | null = null;
   if (responseCacheKey) {
     const cached = await lookupResponseCache(responseCacheKey);
     if (cached) {
@@ -1245,6 +1293,36 @@ export async function handleClaudeCountTokensSurfaceRequest(
       );
       return reply.header('X-Cache', 'HIT').send(JSON.parse(cached.body));
     }
+    const inflight = getInflightResponseCacheWrite(responseCacheKey);
+    if (inflight) {
+      const awaited = await inflight;
+      const awaitedResponse = awaited.response;
+      await logProxy(
+        {
+          channel: { routeId: null, id: null },
+          account: { id: null, username: 'cache' },
+          actualModel: requestedModel,
+        },
+        requestedModel,
+        'success',
+        200,
+        0,
+        'response cache inflight join',
+        0,
+        downstreamPath,
+        awaitedResponse.promptTokens,
+        awaitedResponse.completionTokens,
+        awaitedResponse.promptTokens + awaitedResponse.completionTokens,
+        0,
+        null,
+        null,
+        clientContext,
+        downstreamApiKeyId,
+        { cacheStatus: awaited.cacheStatus, cacheSavedCost: awaitedResponse.estimatedCost },
+      );
+      return reply.header('X-Cache', awaited.cacheStatus === 'stale' ? 'STALE' : 'HIT').send(JSON.parse(awaitedResponse.body));
+    }
+    inflightReservation = reserveInflightResponseCacheWrite(responseCacheKey);
     recordResponseCacheMiss();
   }
 
@@ -1452,14 +1530,17 @@ export async function handleClaudeCountTokensSurfaceRequest(
           downstreamApiKeyId,
           { cacheStatus: 'miss', cacheSavedCost: 0 },
         );
-        if (responseCacheKey) {
-          writeResponseCache(responseCacheKey, requestedModel, {
+        if (responseCacheKey && inflightReservation) {
+          const cachedResponse = {
             body: JSON.stringify(payload),
             isStream: false,
             promptTokens: 0,
             completionTokens: 0,
             estimatedCost: 0,
-          }).catch(() => {});
+          };
+          writeResponseCache(responseCacheKey, requestedModel, cachedResponse)
+            .then(() => inflightReservation?.resolve({ response: cachedResponse, cacheStatus: 'hit' }))
+            .catch((error) => inflightReservation?.reject(error));
         }
         reply.header('X-Cache', 'MISS').code(upstream.status).type(contentType).send(payload);
         return {
@@ -1534,34 +1615,36 @@ export async function handleClaudeCountTokensSurfaceRequest(
     });
   }
 
+  let staleFallback: Awaited<ReturnType<typeof lookupStaleResponseCache>> = null;
   if (responseCacheKey) {
-    const stale = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
-    if (stale) {
-      await logProxy(
-        {
-          channel: { routeId: null, id: null },
-          account: { id: null, username: 'cache' },
-          actualModel: requestedModel,
-        },
-        requestedModel,
-        'success',
-        200,
-        0,
-        'count_tokens stale cache fallback',
-        retryCount,
-        downstreamPath,
-        0,
-        0,
-        0,
-        0,
-        null,
-        null,
-        clientContext,
-        downstreamApiKeyId,
-        { cacheStatus: 'stale', cacheSavedCost: stale.estimatedCost },
-      );
-      return reply.header('X-Cache', 'STALE').type('application/json').send(JSON.parse(stale.body));
-    }
+    staleFallback = await lookupStaleResponseCache(responseCacheKey, config.responseCacheStaleIfErrorMs);
+  }
+  if (staleFallback) {
+    inflightReservation?.resolve({ response: staleFallback, cacheStatus: 'stale' });
+    await logProxy(
+      {
+        channel: { routeId: null, id: null },
+        account: { id: null, username: 'cache' },
+        actualModel: requestedModel,
+      },
+      requestedModel,
+      'success',
+      200,
+      0,
+      'count_tokens stale cache fallback',
+      retryCount,
+      downstreamPath,
+      0,
+      0,
+      0,
+      0,
+      null,
+      null,
+      clientContext,
+      downstreamApiKeyId,
+      { cacheStatus: 'stale', cacheSavedCost: staleFallback.estimatedCost },
+    );
+    return reply.header('X-Cache', 'STALE').type('application/json').send(JSON.parse(staleFallback.body));
   }
 
   if (finalStatus === 501) {
@@ -1574,12 +1657,14 @@ export async function handleClaudeCountTokensSurfaceRequest(
   }
 
   const errorType = execution.reason === 'no_channel' ? 'server_error' : 'upstream_error';
-  return reply.code(finalStatus).send({
+  const failurePayload = {
     error: {
       message: finalStatus === 502 ? `Upstream error: ${finalMessage}` : finalMessage,
       type: errorType,
     },
-  });
+  };
+  inflightReservation?.reject({ statusCode: finalStatus, payload: failurePayload });
+  return reply.code(finalStatus).send(failurePayload);
 }
 
 async function logProxy(
