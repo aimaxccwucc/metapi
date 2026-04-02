@@ -140,6 +140,7 @@ export async function searchProxyRoute(app: FastifyInstance) {
               Authorization: `Bearer ${selected.tokenValue}`,
             },
             body: JSON.stringify(forwardBody),
+            signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true })),
           }, getProxyUrlFromExtraConfig(selected.account.extraConfig)));
 
           const text = await upstream.text();

@@ -72,6 +72,18 @@ describe('proxyRetryPolicy', () => {
     expect(classifyProxyFailureCategory(400, 'too many requests')).toBe('rate_limit');
   });
 
+  it('classifies invalid channel wrappers and empty upstream groups separately', () => {
+    expect(
+      classifyProxyFailureCategory(404, '{"error":{"message":"openai_error","type":"bad_response_status_code"}}'),
+    ).toBe('invalid_channel');
+    expect(
+      classifyProxyFailureCategory(403, '{"error":{"message":"request_error"}}'),
+    ).toBe('invalid_channel');
+    expect(
+      classifyProxyFailureCategory(503, 'No available channel for model gpt-5.4 under group default (distributor)'),
+    ).toBe('upstream_group_empty');
+  });
+
   it('classifies explicit 403 model denial as model_unsupported before generic auth', () => {
     expect(
       classifyProxyFailureCategory(403, '{"error":{"message":"you do not have access to the model gpt-5.2"}}'),

@@ -9,6 +9,9 @@ export type RoutingGovernanceReasonCode =
   | 'balance_exhausted'
   | 'quota_exhausted'
   | 'model_unsupported'
+  | 'invalid_channel'
+  | 'upstream_group_empty'
+  | 'slow_site'
   | 'manual_recheck_needed';
 
 export type RoutingGovernanceEntry = typeof schema.routingGovernanceStates.$inferSelect;

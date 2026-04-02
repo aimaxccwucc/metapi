@@ -6,6 +6,7 @@ export type RequestBudget = {
   getRemainingMs: () => number;
   isExpired: () => boolean;
   buildTimeoutMessage: () => string;
+  getPerAttemptTimeoutMs: (options?: { preferFastFail?: boolean }) => number;
 };
 
 type RetryBackoffInput = {
@@ -45,6 +46,11 @@ export function createRequestBudget(totalBudgetMs = config.upstreamRequestBudget
     getRemainingMs: () => Math.max(0, normalizedBudgetMs - (Date.now() - startedAtMs)),
     isExpired: () => (Date.now() - startedAtMs) >= normalizedBudgetMs,
     buildTimeoutMessage: () => `upstream request budget exceeded after ${normalizedBudgetMs}ms`,
+    getPerAttemptTimeoutMs: (options) => {
+      const remainingMs = Math.max(0, normalizedBudgetMs - (Date.now() - startedAtMs));
+      const hardCap = options?.preferFastFail ? 10_000 : config.upstreamRequestTimeoutMs;
+      return Math.max(1_000, Math.min(remainingMs, hardCap));
+    },
   };
 }
 

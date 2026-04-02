@@ -4,9 +4,11 @@ export type RetryFailureCategory =
   | 'network'
   | 'server'
   | 'rate_limit'
+  | 'upstream_group_empty'
   | 'payload_too_large'
   | 'model_unsupported'
   | 'auth'
+  | 'invalid_channel'
   | 'bad_request'
   | 'other';
 
@@ -96,6 +98,25 @@ const RETRYABLE_CHANNEL_LOCAL_404_PATTERNS: RegExp[] = [
   /not[_\s-]?found[_\s-]?error/i,
 ];
 
+const INVALID_CHANNEL_PATTERNS: RegExp[] = [
+  /\bopenai_error\b/i,
+  /\bbad_response_status_code\b/i,
+  /\brequest_error\b/i,
+  /\bnot[_\s-]?found[_\s-]?error\b/i,
+  /upstream\s+returned\s+http\s+404/i,
+  /unsupported\s+endpoint/i,
+  /unsupported\s+path/i,
+  /unrecognized\s+request\s+url/i,
+  /does\s+not\s+allow\s+\/v1\//i,
+];
+
+const UPSTREAM_GROUP_EMPTY_PATTERNS: RegExp[] = [
+  /no\s+available\s+channel\s+for\s+model/i,
+  /under\s+group\s+.+\(distributor\)/i,
+  /billing\s+service\s+temporarily\s+unavailable/i,
+  /偷偷倒闭/i,
+];
+
 function isModelUnsupportedErrorMessage(rawMessage?: string | null): boolean {
   const text = (rawMessage || '').trim();
   if (!text) return false;
@@ -125,6 +146,12 @@ export function classifyProxyFailureCategory(status?: number | null, upstreamErr
 
   if (normalizedStatus === 0) return 'network';
   if (isModelUnsupportedErrorMessage(text)) return 'model_unsupported';
+  if (normalizedStatus === 503 && matchesAnyPattern(UPSTREAM_GROUP_EMPTY_PATTERNS, text)) return 'upstream_group_empty';
+  if ((normalizedStatus === 404 || normalizedStatus === 410) && isRetryableChannelLocal404(text)) return 'invalid_channel';
+  if ((normalizedStatus === 400 || normalizedStatus === 403 || normalizedStatus === 404 || normalizedStatus === 410 || normalizedStatus === 422)
+    && matchesAnyPattern(INVALID_CHANNEL_PATTERNS, text)) {
+    return 'invalid_channel';
+  }
   if (normalizedStatus === 401 || normalizedStatus === 403) return 'auth';
   if (matchesAnyPattern(AUTH_FAILURE_PATTERNS, text)) return 'auth';
   if (normalizedStatus === 429 || matchesAnyPattern(RATE_LIMIT_PATTERNS, text)) return 'rate_limit';
@@ -146,6 +173,8 @@ export function classifyProxyFailureCategory(status?: number | null, upstreamErr
 }
 
 export function shouldRetryProxyRequest(status: number, upstreamErrorText?: string | null): boolean {
+  const category = classifyProxyFailureCategory(status, upstreamErrorText);
+  if (category === 'upstream_group_empty' || category === 'invalid_channel') return true;
   if (status >= 500) return true;
   if (status === 408 || status === 409 || status === 425 || status === 429) return true;
   if (status === 401 || status === 403) return true;

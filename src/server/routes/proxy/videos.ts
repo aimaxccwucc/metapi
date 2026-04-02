@@ -145,7 +145,10 @@ async function executeVideoCreateRequest(params: {
       const startTime = Date.now();
 
       try {
-        const upstream = await fetch(targetUrl, requestInit);
+        const upstream = await fetch(targetUrl, {
+          ...requestInit,
+          signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true })),
+        });
         const text = await upstream.text();
         if (!upstream.ok) {
           const retryAfterHeader = upstream.headers.get('retry-after');

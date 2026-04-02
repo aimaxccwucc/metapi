@@ -23,6 +23,7 @@ export type ProxyRuntimeRequest = {
     stream?: boolean;
     oauthProjectId?: string | null;
     action?: 'generateContent' | 'streamGenerateContent' | 'countTokens';
+    timeoutMs?: number;
   };
 };
 
@@ -99,6 +100,10 @@ function mergeAbortSignals(
 }
 
 function resolveRuntimeRequestTimeoutMs(request: ProxyRuntimeRequest): number {
+  const runtimeTimeoutMs = Math.trunc(request.runtime?.timeoutMs || 0);
+  if (runtimeTimeoutMs > 0) {
+    return Math.max(1_000, runtimeTimeoutMs);
+  }
   if (request.runtime?.stream) {
     return config.upstreamStreamFirstByteTimeoutMs;
   }

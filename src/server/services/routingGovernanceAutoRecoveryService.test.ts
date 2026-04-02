@@ -76,6 +76,26 @@ describe('routingGovernanceAutoRecoveryService', () => {
     expect(remaining).toHaveLength(0);
   });
 
+  it('passively releases invalid-channel governance after expiry without active reprobe', async () => {
+    await upsertRoutingGovernanceState({
+      subjectType: 'channel',
+      subjectId: 9,
+      modelName: 'gpt-5.4',
+      state: 'suppressed',
+      reasonCode: 'invalid_channel',
+      reasonDetail: 'openai_error bad_response_status_code',
+      suppressUntil: '2000-01-01T00:00:00.000Z',
+      probeAfter: '2000-01-01T00:00:00.000Z',
+    });
+
+    const result = await executeRoutingGovernanceAutoRecoveryPass();
+    expect(result.promotedToProbing).toBe(0);
+    expect(result.restored).toBe(1);
+
+    const remaining = await db.select().from(schema.routingGovernanceStates).all();
+    expect(remaining).toHaveLength(0);
+  });
+
   it('keeps manual probe governance in recovery flow instead of passively releasing it', async () => {
     await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-4.1',

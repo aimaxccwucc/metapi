@@ -331,7 +331,10 @@ export async function geminiProxyRoute(app: FastifyInstance) {
 
         const upstream = await fetch(
           geminiGenerateContentTransformer.resolveModelsUrl(selected.site.url, apiVersion, selected.tokenValue),
-          { method: 'GET' },
+          {
+            method: 'GET',
+            signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true })),
+          },
         );
         const text = await readRuntimeResponseText(upstream);
         if (!upstream.ok) {
@@ -595,6 +598,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                     action: isCountTokensAction
                       ? 'countTokens'
                       : (isStreamAction ? 'streamGenerateContent' : 'generateContent'),
+                    timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
                   },
                 },
                 buildInit: async (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
@@ -607,6 +611,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 method: 'POST',
                 headers: requestHeaders,
                 body: JSON.stringify(requestBody),
+                signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true })),
               });
           };
 
@@ -942,7 +947,15 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           dispatchRuntimeRequest({
             siteUrl: selected.site.url,
             targetUrl,
-            request: compatibilityRequest,
+            request: {
+              ...compatibilityRequest,
+              runtime: compatibilityRequest.runtime
+                ? {
+                  ...compatibilityRequest.runtime,
+                  timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                }
+                : undefined,
+            },
             buildInit: async (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
               method: 'POST',
               headers: requestForFetch.headers,

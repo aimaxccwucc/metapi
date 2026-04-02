@@ -330,7 +330,15 @@ export async function handleChatSurfaceRequest(
         dispatchRuntimeRequest({
           siteUrl: selected.site.url,
           targetUrl,
-          request: compatibilityRequest,
+          request: {
+            ...compatibilityRequest,
+            runtime: compatibilityRequest.runtime
+              ? {
+                ...compatibilityRequest.runtime,
+                timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+              }
+              : undefined,
+          },
           buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
             method: 'POST',
             headers: requestForFetch.headers,

@@ -69,6 +69,8 @@ describe('TokenRouter selection scoring', () => {
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.settings).run();
+    await db.delete(schema.routingGovernanceStates).run();
+    await db.delete(schema.events).run();
     await db.delete(schema.tokenModelAvailability).run();
     await db.delete(schema.modelAvailability).run();
     await db.delete(schema.accountTokens).run();
@@ -648,7 +650,7 @@ describe('TokenRouter selection scoring', () => {
     const router = new TokenRouter();
     await router.recordFailure(channelA.id, {
       status: 502,
-      errorText: 'Gateway timeout',
+      errorText: 'bad gateway',
       modelName: 'gpt-4o-mini',
     });
     await db.update(schema.routeChannels).set({
@@ -1607,6 +1609,121 @@ describe('TokenRouter selection scoring', () => {
     expect(fallbackCandidate?.avoidedByRecentFailure).toBe(true);
     expect(fallbackCandidate?.reason || '').toContain('最近失败');
     expect(decision.summary.join(' ')).toContain('本次未选出通道');
+  });
+
+  it('soft-parks invalid channels for the failing model after repeated 404 wrappers', async () => {
+    const route = await createRoute('gpt-invalid-channel-soft-park');
+
+    const primarySite = await createSite('invalid-channel-primary');
+    const primaryAccount = await createAccount(primarySite.id, 'invalid-channel-user-primary');
+    const primaryToken = await createToken(primaryAccount.id, 'invalid-channel-token-primary');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: primaryAccount.id,
+      tokenId: primaryToken.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+
+    const backupSite = await createSite('invalid-channel-backup');
+    const backupAccount = await createAccount(backupSite.id, 'invalid-channel-user-backup');
+    const backupToken = await createToken(backupAccount.id, 'invalid-channel-token-backup');
+    const backupChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: backupAccount.id,
+      tokenId: backupToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(primaryChannel.id, {
+      status: 404,
+      errorText: 'openai_error bad_response_status_code',
+      modelName: 'gpt-invalid-channel-soft-park',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).where(eq(schema.routeChannels.id, primaryChannel.id)).run();
+    await router.recordFailure(primaryChannel.id, {
+      status: 404,
+      errorText: 'openai_error bad_response_status_code',
+      modelName: 'gpt-invalid-channel-soft-park',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+    }).where(eq(schema.routeChannels.id, primaryChannel.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-invalid-channel-soft-park');
+    const primaryCandidate = decision.candidates.find((candidate) => candidate.channelId === primaryChannel.id);
+    const backupCandidate = decision.candidates.find((candidate) => candidate.channelId === backupChannel.id);
+    const governanceRows = await db.select().from(schema.routingGovernanceStates).all();
+    const events = await db.select().from(schema.events).all();
+
+    expect(primaryCandidate?.eligible).toBe(false);
+    expect(primaryCandidate?.reason || '').toContain('系统隔离');
+    expect(primaryCandidate?.governanceSubjectType).toBe('channel');
+    expect(primaryCandidate?.sourceModelDerived).toBe(true);
+    expect(primaryCandidate?.modelCapabilityVerified).toBe(false);
+    expect(backupCandidate?.eligible).toBe(true);
+    expect(governanceRows.some((row) => row.reasonCode === 'invalid_channel')).toBe(true);
+    expect(events.some((event) => event.title === '路由治理抑制生效'
+      && String(event.message || '').includes('failureCategory=invalid_channel')
+      && String(event.message || '').includes('governanceAction=suppressed')
+      && String(event.message || '').includes('subjectType=channel')
+      && String(event.message || '').includes('lastProbeStatus=passive_wait'))).toBe(true);
+  });
+
+  it('excludes expired accounts before selection and prefers healthy fallback channels', async () => {
+    const route = await createRoute('gpt-expired-account-filter');
+
+    const expiredSite = await createSite('expired-account-site');
+    const expiredAccount = await createAccount(expiredSite.id, 'expired-account-user');
+    await db.update(schema.accounts).set({
+      status: 'expired',
+      extraConfig: JSON.stringify({ runtimeHealth: { state: 'unhealthy', reason: '访问令牌失效', source: 'auth', checkedAt: new Date().toISOString() } }),
+    }).where(eq(schema.accounts.id, expiredAccount.id)).run();
+    const expiredToken = await createToken(expiredAccount.id, 'expired-account-token');
+    const expiredChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: expiredAccount.id,
+      tokenId: expiredToken.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+
+    const healthySite = await createSite('healthy-account-site');
+    const healthyAccount = await createAccount(healthySite.id, 'healthy-account-user');
+    const healthyToken = await createToken(healthyAccount.id, 'healthy-account-token');
+    const healthyChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: healthyAccount.id,
+      tokenId: healthyToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    invalidateTokenRouterCache();
+    const router = new TokenRouter();
+    const preview = await router.previewSelectedChannel('gpt-expired-account-filter');
+    const decision = await router.explainSelection('gpt-expired-account-filter');
+    const expiredCandidate = decision.candidates.find((candidate) => candidate.channelId === expiredChannel.id);
+    const healthyCandidate = decision.candidates.find((candidate) => candidate.channelId === healthyChannel.id);
+
+    expect(preview?.channel.id).toBe(healthyChannel.id);
+    expect(expiredCandidate?.eligible).toBe(false);
+    expect(expiredCandidate?.reason || '').toContain('运行时健康=unhealthy');
+    expect(healthyCandidate?.eligible).toBe(true);
   });
 
   it('extends cooldown for auth-like failures to avoid hammering bad tokens', async () => {

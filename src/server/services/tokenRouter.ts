@@ -32,6 +32,8 @@ import {
 } from './modelCircuitBreaker.js';
 import { classifyProxyFailureCategory } from './proxyRetryPolicy.js';
 import { parseCodexQuotaResetHint } from './oauth/quota.js';
+import { extractRuntimeHealth } from './accountHealthService.js';
+import { formatUtcSqlDateTime } from './localTimeService.js';
 import {
   clearRoutingGovernanceState,
   listActiveRoutingGovernanceStates,
@@ -44,7 +46,10 @@ import {
 interface RouteMatch {
   route: RouteRow;
   channels: Array<{
-    channel: typeof schema.routeChannels.$inferSelect;
+    channel: typeof schema.routeChannels.$inferSelect & {
+      sourceModel: string | null;
+      sourceModelDerived: boolean;
+    };
     account: typeof schema.accounts.$inferSelect;
     site: typeof schema.sites.$inferSelect;
     token: typeof schema.accountTokens.$inferSelect | null;
@@ -634,6 +639,9 @@ function formatGovernanceReason(block: CandidateGovernanceBlock): string {
     balance_exhausted: '余额不足',
     quota_exhausted: '额度不足',
     model_unsupported: '模型不可用',
+    invalid_channel: '通道无效',
+    upstream_group_empty: '上游通道池空',
+    slow_site: '慢站点熔断',
     manual_recheck_needed: '待复测',
   };
   const detail = block.reasonDetail?.replace('[manual_route_probe]', '').trim();
@@ -706,6 +714,35 @@ function resolveGovernanceSuppression(
       modelName: normalizedModelName,
       reasonCode: 'model_unsupported',
     };
+  }
+  if (input.failureCategory === 'invalid_channel' && normalizedModelName) {
+    return {
+      subjectType: 'channel',
+      subjectId: input.channel.id,
+      modelName: normalizedModelName,
+      reasonCode: 'invalid_channel',
+    };
+  }
+  if (input.failureCategory === 'upstream_group_empty' && normalizedModelName) {
+    return {
+      subjectType: 'site',
+      subjectId: input.account.siteId,
+      modelName: normalizedModelName,
+      reasonCode: 'upstream_group_empty',
+    };
+  }
+  if ((input.failureCategory === 'network' || input.failureCategory === 'server') && normalizedModelName) {
+    const errorTextLower = errorText.toLowerCase();
+    const isSlowSiteFailure = normalizedStatus === 524
+      || /timeout|timed?\s*out|cloudflare\s+524|upstream\s+timeout/.test(errorTextLower);
+    if (isSlowSiteFailure) {
+      return {
+        subjectType: 'site',
+        subjectId: input.account.siteId,
+        modelName: normalizedModelName,
+        reasonCode: 'slow_site',
+      };
+    }
   }
   return null;
 }
@@ -897,12 +934,16 @@ function shouldApplyImmediateRoundRobinCooldown(category: ReturnType<typeof clas
   return category === 'auth'
     || category === 'model_unsupported'
     || category === 'payload_too_large'
-    || category === 'rate_limit';
+    || category === 'rate_limit'
+    || category === 'invalid_channel'
+    || category === 'upstream_group_empty';
 }
 
 function shouldApplySiteWideFailureTracking(context: SiteRuntimeFailureContext = {}): boolean {
   const category = classifyProxyFailureCategory(context.status, context.errorText);
-  return category === 'network' || category === 'server' || category === 'rate_limit';
+  return category === 'network'
+    || category === 'server'
+    || category === 'rate_limit';
 }
 
 function shouldApplySiteModelFailureTracking(context: SiteRuntimeFailureContext = {}): boolean {
@@ -2660,17 +2701,20 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
     accounts: typeof schema.accounts.$inferSelect;
     sites: typeof schema.sites.$inferSelect;
     account_tokens: typeof schema.accountTokens.$inferSelect | null;
-  }) => ({
-    channel: {
-      ...row.route_channels,
-      sourceModel: normalizeChannelSourceModel(row.route_channels.sourceModel)
-        || fallbackSourceModelByRouteId.get(row.route_channels.routeId)
-        || null,
-    },
-    account: row.accounts,
-    site: row.sites,
-    token: row.account_tokens,
-  }));
+  }) => {
+    const persistedSourceModel = normalizeChannelSourceModel(row.route_channels.sourceModel);
+    const fallbackSourceModel = fallbackSourceModelByRouteId.get(row.route_channels.routeId) || null;
+    return {
+      channel: {
+        ...row.route_channels,
+        sourceModel: persistedSourceModel || fallbackSourceModel,
+        sourceModelDerived: !persistedSourceModel && !!fallbackSourceModel,
+      },
+      account: row.accounts,
+      site: row.sites,
+      token: row.account_tokens,
+    };
+  });
 
   const match = { route, channels: mapped };
   routeMatchCache.set(route.id, {
@@ -3507,6 +3551,14 @@ export interface RouteDecisionCandidate {
   priority: number;
   weight: number;
   eligible: boolean;
+  failureCategory?: string | null;
+  governanceAction?: string | null;
+  governanceSubjectType?: string | null;
+  governanceSubjectId?: number | null;
+  governanceSuppressUntil?: string | null;
+  governanceLastProbeStatus?: string | null;
+  sourceModelDerived?: boolean;
+  modelCapabilityVerified?: boolean;
   recentlyFailed: boolean;
   avoidedByRecentFailure: boolean;
   avoidedByAttemptedSite?: boolean;
@@ -3596,6 +3648,7 @@ type CandidateEligibilityOptions = {
   runtimeModelName?: string | null;
   persistedUnavailableModels?: PersistedUnavailableModelSnapshot;
   governanceSnapshot?: GovernanceSnapshot;
+  governanceBlock?: CandidateGovernanceBlock | null;
 };
 
 type CostSignal = {
@@ -4111,6 +4164,32 @@ function isExplicitTokenChannel(candidate: RouteChannelCandidate): boolean {
   return typeof candidate.channel.tokenId === 'number' && candidate.channel.tokenId > 0;
 }
 
+function hasVerifiedModelCapability(candidate: RouteChannelCandidate, requestedModel: string, nowMs = Date.now()): boolean {
+  const normalizedRequestedModel = normalizeModelAlias(requestedModel || '');
+  if (!normalizedRequestedModel) return false;
+  if (!candidate.channel.sourceModelDerived) return true;
+  if ((candidate.channel.successCount ?? 0) <= 0) return false;
+  const lastSuccessAtMs = getChannelPersistedSuccessAtMs(candidate.channel);
+  const lastFailureAtMs = parseIsoTimeMs(candidate.channel.lastFailAt);
+  if (lastSuccessAtMs != null && lastSuccessAtMs > (lastFailureAtMs ?? 0)) return true;
+  const siteModelState = getSiteModelRuntimeHealthState(candidate.site.id, normalizedRequestedModel);
+  return !!siteModelState && (siteModelState.lastSuccessAtMs ?? 0) > (siteModelState.lastFailureAtMs ?? 0) && !isRuntimeHealthBreakerOpen(siteModelState, nowMs);
+}
+
+function shouldSoftParkUnknownCapabilityCandidate(
+  candidate: RouteChannelCandidate,
+  requestedModel: string,
+  governanceBlock?: CandidateGovernanceBlock | null,
+  nowMs = Date.now(),
+): boolean {
+  if (!candidate.channel.sourceModelDerived) return false;
+  if (governanceBlock?.reasonCode !== 'invalid_channel') return false;
+  if (hasVerifiedModelCapability(candidate, requestedModel, nowMs)) return false;
+  const failCount = Math.max(0, candidate.channel.failCount ?? 0);
+  const consecutiveFailCount = Math.max(0, candidate.channel.consecutiveFailCount ?? 0);
+  return failCount >= 2 || consecutiveFailCount >= 2;
+}
+
 export class TokenRouter {
   async getVisiblePublicModels(): Promise<string[]> {
     const routes = await loadEnabledRoutes();
@@ -4308,6 +4387,7 @@ export class TokenRouter {
         runtimeModelName,
         persistedUnavailableModels,
         governanceSnapshot,
+        governanceBlock,
       });
       const modelCircuitStatus = getCandidateModelCircuitStatus(row.channel.id, runtimeModelName, nowMs);
       const runtimeHealthDetails = getSiteRuntimeHealthDetails(row.site.id, runtimeModelName, nowMs);
@@ -4316,10 +4396,14 @@ export class TokenRouter {
       const recentlyFailed = routeStrategy !== 'round_robin'
         ? isChannelRecentlyFailed(row.channel, nowMs)
         : false;
+      const modelCapabilityVerified = hasVerifiedModelCapability(row, requestedModel, nowMs);
       const eligible = reasonParts.length === 0;
       let reason = eligible ? '可用' : reasonParts.join('、');
       if (eligible && governanceBlock?.state === 'probing') {
         reason = formatGovernanceReason(governanceBlock);
+      }
+      if (eligible && row.channel.sourceModelDerived && !modelCapabilityVerified) {
+        reason = `${reason}（模型能力未验证，当前按低权重试探）`;
       }
       if (
         !eligible
@@ -4339,6 +4423,14 @@ export class TokenRouter {
         priority: row.channel.priority ?? 0,
         weight: row.channel.weight ?? 10,
         eligible,
+        failureCategory: governanceBlock?.reasonCode ?? null,
+        governanceAction: governanceBlock?.state ?? null,
+        governanceSubjectType: governanceBlock?.subjectType ?? null,
+        governanceSubjectId: governanceBlock?.subjectId ?? null,
+        governanceSuppressUntil: governanceBlock?.suppressUntil ?? null,
+        governanceLastProbeStatus: governanceBlock?.state === 'probing' ? 'probing' : null,
+        sourceModelDerived: !!row.channel.sourceModelDerived,
+        modelCapabilityVerified,
         recentlyFailed,
         avoidedByRecentFailure: false,
         avoidedByAttemptedSite: effectiveExcludeSiteIds.has(row.site.id),
@@ -4850,6 +4942,16 @@ export class TokenRouter {
     releaseAccountSelectionLease(account.id, nowMs);
 
     await restorePersistedModelAvailabilityForChannel(ch, account.id, modelName);
+    const normalizedSuccessfulModel = normalizeModelAlias(modelName || '');
+    if (normalizedSuccessfulModel && (!normalizeChannelSourceModel(ch.sourceModel) || ch.sourceModelDerived)) {
+      await db.update(schema.routeChannels).set({
+        sourceModel: normalizedSuccessfulModel,
+      }).where(eq(schema.routeChannels.id, channelId)).run();
+      patchCachedChannel(channelId, (channel) => {
+        channel.sourceModel = normalizedSuccessfulModel;
+        (channel as typeof channel & { sourceModelDerived?: boolean }).sourceModelDerived = false;
+      });
+    }
     if (typeof ch.tokenId === 'number' && ch.tokenId > 0) {
       await clearRoutingGovernanceState('token', ch.tokenId, null);
       if (normalizeModelAlias(modelName || '')) {
@@ -5013,10 +5115,15 @@ export class TokenRouter {
             nowMs,
           );
         } else {
+          const modelCircuitFailureCategory: ModelCircuitFailureCategory = failureCategory === 'other'
+            ? 'unknown'
+            : (failureCategory === 'invalid_channel' || failureCategory === 'upstream_group_empty'
+              ? 'bad_request'
+              : failureCategory);
           recordModelCircuitFailure(
             channelId,
             normalizedRuntimeModelName,
-            failureCategory === 'other' ? 'unknown' : failureCategory,
+            modelCircuitFailureCategory,
             nowMs,
           );
         }
@@ -5075,6 +5182,27 @@ export class TokenRouter {
         lastFailureAt: nowIso,
         failureCountDelta: 1,
       });
+
+      const governanceModelName = normalizeModelAlias(normalizedContext.modelName || '') || normalizedContext.modelName || null;
+      const suppressUntil = cooldownUntil ?? retryAfterUntil ?? null;
+      await db.insert(schema.events).values({
+        type: 'proxy',
+        title: '路由治理抑制生效',
+        message: [
+          `failureCategory=${failureCategory}`,
+          'governanceAction=suppressed',
+          `subjectType=${governanceSuppression.subjectType}`,
+          `subjectId=${governanceSuppression.subjectId}`,
+          `modelName=${governanceModelName || '-'}`,
+          `reasonCode=${governanceSuppression.reasonCode}`,
+          `suppressUntil=${suppressUntil || '-'}`,
+          'lastProbeStatus=passive_wait',
+        ].join(', '),
+        level: 'warning',
+        relatedId: governanceSuppression.subjectId,
+        relatedType: governanceSuppression.subjectType,
+        createdAt: formatUtcSqlDateTime(new Date(nowMs)),
+      }).run();
     }
   }
 
@@ -5446,14 +5574,20 @@ export class TokenRouter {
       reasonParts.push(formatGovernanceReason(governanceBlock));
     }
 
-    if (!candidate.channel.enabled) reasonParts.push('通道禁用');
+    if (!candidate.channel.enabled) {
+      reasonParts.push('通道禁用');
+    }
 
-    if (isExplicitTokenChannel(candidate)) {
-      if (candidate.account.status === 'disabled') {
-        reasonParts.push(`账号状态=${candidate.account.status}`);
-      }
-    } else if (candidate.account.status !== 'active') {
+    const isExplicitToken = isExplicitTokenChannel(candidate);
+    const runtimeHealth = extractRuntimeHealth(candidate.account.extraConfig);
+    const ignoreExpiredStatusForExplicitToken = isExplicitToken && candidate.account.status === 'expired';
+
+    if (candidate.account.status !== 'active' && !ignoreExpiredStatusForExplicitToken) {
       reasonParts.push(`账号状态=${candidate.account.status}`);
+    }
+
+    if (runtimeHealth?.state === 'disabled' || runtimeHealth?.state === 'unhealthy') {
+      reasonParts.push(`运行时健康=${runtimeHealth.state}`);
     }
 
     if (isSiteDisabled(candidate.site.status)) {
@@ -5469,10 +5603,21 @@ export class TokenRouter {
     }
 
     const tokenValue = this.resolveChannelTokenValue(candidate);
-    if (!tokenValue) reasonParts.push('令牌不可用');
+    if (!tokenValue) {
+      reasonParts.push('令牌不可用');
+    }
 
     if (candidate.channel.cooldownUntil && candidate.channel.cooldownUntil > nowIso) {
       reasonParts.push('冷却中');
+    }
+
+    if (shouldSoftParkUnknownCapabilityCandidate(
+      candidate,
+      options.requestedModel,
+      options.governanceBlock,
+      nowMs,
+    )) {
+      reasonParts.push('模型能力未验证且近期失败，已软停放');
     }
 
     const modelCircuitStatus = getCandidateModelCircuitStatus(
@@ -5606,12 +5751,24 @@ export class TokenRouter {
     const resolveModelName = typeof modelName === 'function'
       ? modelName
       : (() => modelName);
-    const effectiveCosts = candidates.map((candidate) => resolveEffectiveUnitCost(candidate, resolveModelName(candidate)));
-    const runtimeHealthDetails = candidates.map((candidate) => (
-      getSiteRuntimeHealthDetails(candidate.site.id, resolveModelName(candidate), nowMs)
+    const resolvedModelNames = candidates.map((candidate) => resolveModelName(candidate));
+    const effectiveCosts = candidates.map((candidate, index) => resolveEffectiveUnitCost(candidate, resolvedModelNames[index]!));
+    const runtimeHealthDetails = candidates.map((candidate, index) => (
+      getSiteRuntimeHealthDetails(candidate.site.id, resolvedModelNames[index], nowMs)
     ));
-    const modelCircuitStatuses = candidates.map((candidate) => (
-      getCandidateModelCircuitStatus(candidate.channel.id, resolveModelName(candidate), nowMs)
+    const modelPreferredSiteIds = new Set<number>();
+    const hasModelPreference = new Set<string>();
+    for (const runtimeModelName of Array.from(new Set(resolvedModelNames.map((item) => normalizeModelAlias(item)))).filter(Boolean)) {
+      const partition = partitionModelPreferredSiteCandidates(candidates, runtimeModelName, nowMs);
+      if (partition.source !== 'none') {
+        hasModelPreference.add(runtimeModelName);
+        for (const siteId of partition.preferredSiteIds) {
+          modelPreferredSiteIds.add(siteId);
+        }
+      }
+    }
+    const modelCircuitStatuses = candidates.map((candidate, index) => (
+      getCandidateModelCircuitStatus(candidate.channel.id, resolvedModelNames[index], nowMs)
     ));
     const stickyPreference = preferStickySessionCandidates(
       candidates,
@@ -5680,6 +5837,14 @@ export class TokenRouter {
       contribution *= getAccountSuccessMultiplier(accountStates[i]?.successEma ?? 0.5);
       contribution *= getAccountLatencyMultiplier(accountStates[i]?.latencyEmaMs ?? null);
       contribution *= getAccountStickyMultiplier(candidate, stickyPreference.stickyBinding, stickyPreference.stickyReason);
+
+      const normalizedRuntimeModelName = normalizeModelAlias(resolvedModelNames[i]);
+      if (normalizedRuntimeModelName && hasModelPreference.has(normalizedRuntimeModelName)) {
+        contribution *= modelPreferredSiteIds.has(candidate.site.id) ? 1.3 : 0.72;
+      }
+      if (candidate.channel.sourceModelDerived) {
+        contribution *= hasVerifiedModelCapability(candidate, resolvedModelNames[i], nowMs) ? 1 : 0.08;
+      }
 
       // If upstream price is unknown and we are using fallback unit cost,
       // apply an explicit penalty so raising fallback cost meaningfully lowers probability.

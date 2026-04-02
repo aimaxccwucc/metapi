@@ -130,6 +130,9 @@ export function resolveWeightedFailureCooldownMs(
     case 'rate_limit':
       cooldownMs = Math.max(Math.round(base * 2), 90_000);
       break;
+    case 'upstream_group_empty':
+      cooldownMs = Math.max(Math.round(base * 3), 10 * 60 * 1000);
+      break;
     case 'payload_too_large':
       cooldownMs = Math.max(Math.round(base * 2.5), 2 * 60 * 1000);
       break;
@@ -138,6 +141,11 @@ export function resolveWeightedFailureCooldownMs(
       break;
     case 'auth':
       cooldownMs = Math.max(Math.round(base * 4), 30 * 60 * 1000);
+      break;
+    case 'invalid_channel':
+      cooldownMs = normalizedConsecutive >= 2
+        ? Math.max(Math.round(base * 12), 6 * 60 * 60 * 1000)
+        : Math.max(Math.round(base * 6), 45 * 60 * 1000);
       break;
     case 'bad_request':
       cooldownMs = Math.max(Math.round(base * 1.5), 60_000);
@@ -155,7 +163,9 @@ export function resolveWeightedFailureCooldownLevel(
   category: RetryFailureCategory,
 ): number {
   if (category === 'auth') return 3;
+  if (category === 'invalid_channel') return consecutiveFailCount >= 2 ? 3 : 2;
   if (category === 'model_unsupported') return 2;
+  if (category === 'upstream_group_empty') return 2;
   if (category === 'payload_too_large' || category === 'rate_limit') return 1;
   if (consecutiveFailCount >= 6) return 3;
   if (consecutiveFailCount >= 4) return 2;

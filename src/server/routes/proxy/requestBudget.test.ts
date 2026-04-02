@@ -25,12 +25,14 @@ describe('requestBudget', () => {
 
       vi.advanceTimersByTime(450);
       expect(budget.getRemainingMs()).toBe(550);
+      expect(budget.getPerAttemptTimeoutMs({ preferFastFail: true })).toBe(1000);
       expect(budget.isExpired()).toBe(false);
 
       vi.advanceTimersByTime(550);
       expect(budget.getRemainingMs()).toBe(0);
       expect(budget.isExpired()).toBe(true);
       expect(budget.buildTimeoutMessage()).toBe('upstream request budget exceeded after 1000ms');
+      expect(budget.getPerAttemptTimeoutMs()).toBe(1000);
     } finally {
       vi.useRealTimers();
     }

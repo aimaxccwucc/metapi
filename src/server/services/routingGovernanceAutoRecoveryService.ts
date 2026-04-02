@@ -24,6 +24,9 @@ import {
 
 const AUTO_RECOVERY_RECHECK_MS = 30 * 60 * 1000;
 const MODEL_UNSUPPORTED_RECHECK_MS = 12 * 60 * 60 * 1000;
+const INVALID_CHANNEL_RECHECK_MS = 6 * 60 * 60 * 1000;
+const UPSTREAM_GROUP_EMPTY_RECHECK_MS = 15 * 60 * 1000;
+const SLOW_SITE_RECHECK_MS = 20 * 60 * 1000;
 const MANUAL_ROUTE_PROBE_MARKER = '[manual_route_probe]';
 const DEFAULT_PROBING_LEASE_MS = 10 * 60 * 1000;
 
@@ -118,7 +121,7 @@ function mapProbeClassificationToReasonCode(
 ): RoutingGovernanceReasonCode {
   if (classification === 'credential') return 'auth';
   if (classification === 'model_unavailable') return 'model_unsupported';
-  if (fallback === 'auth' || fallback === 'model_unsupported') return fallback;
+  if (fallback === 'auth' || fallback === 'model_unsupported' || fallback === 'invalid_channel') return fallback;
   return 'manual_recheck_needed';
 }
 
@@ -410,6 +413,10 @@ async function processProbingEntry(entry: RoutingGovernanceEntry): Promise<boole
     return await handleBalanceRecovery(entry);
   }
 
+  if (reasonCode === 'invalid_channel' || reasonCode === 'upstream_group_empty' || reasonCode === 'slow_site') {
+    return await handlePassiveExpiryRelease(entry);
+  }
+
   if (!isManualRouteProbeGovernance(entry) || !await isRouteEligibleForManualGovernance(entry)) {
     return await handlePassiveExpiryRelease(entry);
   }
@@ -440,7 +447,9 @@ export async function executeRoutingGovernanceAutoRecoveryPass(options: {
       continue;
     }
     const reasonCode = state.reasonCode as RoutingGovernanceReasonCode;
-    const supportsZeroCostRecovery = reasonCode === 'rate_limit' || reasonCode === 'balance_exhausted' || reasonCode === 'quota_exhausted';
+    const supportsZeroCostRecovery = reasonCode === 'rate_limit'
+      || reasonCode === 'balance_exhausted'
+      || reasonCode === 'quota_exhausted';
     const allowActiveReprobe = isManualRouteProbeGovernance(state);
 
     if (supportsZeroCostRecovery || allowActiveReprobe) {
@@ -515,10 +524,14 @@ export async function executeRoutingGovernanceAutoRecoveryPass(options: {
 
 export async function recordRoutingGovernanceAutoRecoveryEvent(result: RoutingGovernanceRecoveryPassResult): Promise<void> {
   const createdAt = formatUtcSqlDateTime(new Date());
+  const itemSummary = result.items
+    .slice(0, 5)
+    .map((item) => `${item.subjectType}:${item.subjectId}/${item.modelName || '*'} -> ${item.action}`)
+    .join('；');
   await db.insert(schema.events).values({
     type: 'status',
     title: '路由治理自动复测已执行',
-    message: `扫描 ${result.scanned} 条，推进复测 ${result.promotedToProbing} 条，恢复 ${result.restored} 条，保留隔离 ${result.keptSuppressed} 条`,
+    message: `扫描 ${result.scanned} 条，推进复测 ${result.promotedToProbing} 条，恢复 ${result.restored} 条，保留隔离 ${result.keptSuppressed} 条${itemSummary ? `；样本=${itemSummary}` : ''}`,
     level: result.restored > 0 ? 'info' : 'warning',
     relatedType: 'route',
     createdAt,
