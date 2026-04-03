@@ -72,6 +72,7 @@ type RouteCardProps = {
   // Add channel
   onAddChannel: (routeId: number) => void;
   onProbeChannels: (route: RouteSummaryRow) => void;
+  onOpenDiagnostics: (targetType: 'site' | 'account' | 'token', targetId: number) => void;
   probingChannels: boolean;
   routeProbeSummary?: RouteProbeSummary;
   // Source group expansion
@@ -223,6 +224,7 @@ function RouteCardInner({
   onCreateTokenForMissing,
   onAddChannel,
   onProbeChannels,
+  onOpenDiagnostics,
   probingChannels,
   routeProbeSummary,
   expandedSourceGroupMap,
@@ -696,6 +698,23 @@ function RouteCardInner({
                     <span className="badge badge-success" style={{ fontSize: 10 }}>{tr('已解除隔离')}</span>
                   ) : null}
                   <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{item.reason}</span>
+                  {item.tokenId ? (
+                    <button
+                      type="button"
+                      className="btn btn-link"
+                      onClick={() => onOpenDiagnostics('token', item.tokenId!)}
+                    >
+                      {tr('诊断令牌')}
+                    </button>
+                  ) : item.accountId ? (
+                    <button
+                      type="button"
+                      className="btn btn-link"
+                      onClick={() => onOpenDiagnostics('account', item.accountId)}
+                    >
+                      {tr('诊断账号')}
+                    </button>
+                  ) : null}
                 </div>
               ))}
               {routeProbeSummary.items.length > 4 ? (

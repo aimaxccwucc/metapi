@@ -20,6 +20,7 @@ import { monitorRoutes } from './routes/api/monitor.js';
 import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { oauthRoutes } from './routes/api/oauth.js';
 import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
+import { diagnosticsRoutes } from './routes/api/diagnostics.js';
 import { systemRoutes } from './routes/system.js';
 import { proxyRoutes } from './routes/proxy/router.js';
 import { registerCustomRoutes } from './custom/register.js';
@@ -411,6 +412,7 @@ await app.register(testRoutes);
 await app.register(monitorRoutes);
 await app.register(downstreamApiKeysRoutes);
 await app.register(oauthRoutes);
+await app.register(diagnosticsRoutes);
 await app.register(registerCustomRoutes);
 
 // Register OpenAI-compatible proxy routes

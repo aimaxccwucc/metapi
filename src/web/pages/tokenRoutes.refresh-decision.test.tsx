@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast.js';
 import TokenRoutes from './TokenRoutes.js';
 
-const { apiMock, getBrandMock } = vi.hoisted(() => ({
+const { apiMock, getBrandMock, navigateMock } = vi.hoisted(() => ({
   apiMock: {
     getRoutesSummary: vi.fn(),
     getRouteChannels: vi.fn(),
@@ -18,11 +18,20 @@ const { apiMock, getBrandMock } = vi.hoisted(() => ({
     resetRoutingRuntimeState: vi.fn(),
   },
   getBrandMock: vi.fn(),
+  navigateMock: vi.fn(),
 }));
 
 vi.mock('../api.js', () => ({
   api: apiMock,
 }));
+
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  return {
+    ...actual,
+    useNavigate: () => navigateMock,
+  };
+});
 
 vi.mock('../components/BrandIcon.js', () => ({
   BrandGlyph: ({ brand, icon, model }: { brand?: { name?: string } | null; icon?: string | null; model?: string | null }) => (
@@ -59,6 +68,7 @@ async function flushMicrotasks() {
 describe('TokenRoutes refresh decision action', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    navigateMock.mockReset();
     getBrandMock.mockReset();
     getBrandMock.mockReturnValue(null);
     apiMock.getRoutesSummary.mockResolvedValue([
@@ -339,6 +349,79 @@ describe('TokenRoutes refresh decision action', () => {
       expect(pageText).toContain('模型熔断 1');
       expect(pageText).toContain('站点惩罚 1');
       expect(pageText).toContain('来源异常群组 1');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('links governance diagnostics to credential workbench with target context', async () => {
+    apiMock.getRouteGovernanceSubjects.mockResolvedValue({
+      success: true,
+      total: 1,
+      summary: {
+        total: 1,
+        suppressedCount: 1,
+        probingCount: 0,
+        countsByReason: { auth: 1 },
+        countsBySubjectType: { channel: 1 },
+      },
+      items: [{
+        id: 101,
+        subjectType: 'channel',
+        subjectId: 501,
+        diagnosticTargetType: 'token',
+        diagnosticTargetId: 77,
+        modelName: 'gpt-4o-mini',
+        state: 'suppressed',
+        reasonCode: 'auth',
+        reasonDetail: null,
+        probeModelName: null,
+        lastHttpStatus: 401,
+        failureCount: 2,
+        successCount: 0,
+        suppressUntil: '2026-04-03T10:30:00.000Z',
+        probeAfter: null,
+        lastFailureAt: '2026-04-03T10:00:00.000Z',
+        lastSuccessAt: null,
+        lastProbeAt: null,
+        lastProbeStatus: null,
+        lastProbeMessage: null,
+        createdAt: '2026-04-03T10:00:00.000Z',
+        updatedAt: '2026-04-03T10:00:00.000Z',
+      }],
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const expandButton = findButtonByText(root.root, '展开隔离列表');
+      await act(async () => {
+        expandButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const diagButtons = root.root.findAll((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node) === '诊断'
+      ));
+      const diagButton = diagButtons[0];
+      expect(diagButton).toBeTruthy();
+      await act(async () => {
+        diagButton.props.onClick();
+      });
+
+      expect(navigateMock).toHaveBeenCalledWith('/diagnostics?targetType=token&targetId=77');
     } finally {
       root?.unmount();
     }

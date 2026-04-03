@@ -580,6 +580,8 @@ export type RoutingGovernanceSubject = {
   id: number;
   subjectType: 'site' | 'account' | 'token' | 'channel';
   subjectId: number;
+  diagnosticTargetType?: 'site' | 'account' | 'token';
+  diagnosticTargetId?: number | null;
   modelName: string;
   state: 'suppressed' | 'probing';
   reasonCode: string;
@@ -747,6 +749,138 @@ export type SystemProxyTestResponse = {
   ok: boolean;
   statusCode: number;
   latencyMs: number;
+};
+
+export type CredentialDiagnosticTarget = {
+  type: 'site' | 'account' | 'token';
+  site: {
+    id: number;
+    name: string;
+    url: string;
+    platform: string;
+    status: string;
+  };
+  account: {
+    id: number;
+    username: string | null;
+    status: string | null;
+  } | null;
+  token: {
+    id: number;
+    name: string;
+    enabled: boolean;
+  } | null;
+};
+
+export type CredentialDiagnosticResponse = {
+  success: true;
+  target: CredentialDiagnosticTarget;
+  connectivity: {
+    normalizedUrl: string;
+    reachable: boolean | null;
+    status: string;
+    message: string | null;
+    checkedAt: string | null;
+    credentialPresent: boolean;
+    credentialSource: string;
+    probe: {
+      reachable: boolean | null;
+      statusCode: number | null;
+      latencyMs: number | null;
+      detail: string | null;
+    };
+  };
+  protocol: {
+    ok: boolean;
+    protocol: string | null;
+    preferredEndpoint: string | null;
+    supportedEndpoints: string[];
+    probeSource: string;
+    latencyMs: number | null;
+    attemptSummary: string[];
+    accountId: number | null;
+    accountName: string | null;
+    error?: string;
+  };
+  models: {
+    source: string;
+    total: number;
+    recommendedBaseModel: string | null;
+    items: Array<{
+      name: string;
+      latencyMs: number | null;
+      disabled: boolean;
+      isManual: boolean;
+    }>;
+  };
+  debug: {
+    ok: boolean;
+    modelName: string | null;
+    requestPath: string | null;
+    requestFormat: string | null;
+    errorSummary: string | null;
+    rawPreview: string | null;
+    classification?: string | null;
+    statusCode?: number | null;
+  };
+  routing: {
+    referencedRoutes: Array<{
+      id: number;
+      modelPattern: string;
+      displayName: string | null;
+      decisionSnapshot: unknown | null;
+      decisionRefreshedAt: string | null;
+      decisionModelName: string | null;
+    }>;
+    governance: Array<{
+      id: number;
+      subjectType: string;
+      subjectId: number;
+      state: string;
+      reasonCode: string;
+      modelName: string;
+      updatedAt: string | null;
+    }>;
+    downstreamKeys: Array<{
+      id: number;
+      name: string;
+      groupName: string | null;
+    }>;
+  };
+  capability: {
+    hasAdapter: boolean;
+    canReadModels: boolean;
+    canBenchmark: boolean;
+  };
+};
+
+export type CredentialBenchmarkResponse = {
+  success: true;
+  rounds: 1 | 3;
+  target: {
+    type: 'site' | 'account' | 'token';
+    siteId: number;
+    accountId: number | null;
+    tokenId: number | null;
+  };
+  recommended: {
+    modelName: string;
+    reason: string;
+  } | null;
+  items: Array<{
+    modelName: string;
+    rounds: number;
+    samples: Array<{
+      ok: boolean;
+      elapsedMs: number | null;
+      firstTokenMs: number | null;
+      error: string | null;
+    }>;
+    successRate: number;
+    avgLatencyMs: number | null;
+    medianLatencyMs: number | null;
+    medianFirstTokenMs: number | null;
+  }>;
 };
 
 export type ProxyLogStatusFilter = 'all' | 'success' | 'failed';
@@ -1200,6 +1334,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  getCredentialDiagnostic: (params: { targetType: 'site' | 'account' | 'token'; targetId: number }) =>
+    request(`/api/diagnostics/credential${buildQueryString(params)}`) as Promise<CredentialDiagnosticResponse>,
+  benchmarkCredentialModels: (data: { targetType: 'site' | 'account' | 'token'; targetId: number; modelNames?: string[]; rounds?: 1 | 3 }) =>
+    request('/api/diagnostics/credential/benchmark', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 120_000,
+    }) as Promise<CredentialBenchmarkResponse>,
   migrateExternalDatabase: (data: { dialect: 'sqlite' | 'mysql' | 'postgres'; connectionString: string; overwrite?: boolean; ssl?: boolean }) =>
     request('/api/settings/database/migrate', {
       method: 'POST',

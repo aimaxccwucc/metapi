@@ -282,6 +282,13 @@ function isManualGovernedRoute(route: Pick<RouteSummaryRow, 'probePolicy' | 'rou
   return normalizeRouteMode(route.routeMode) === 'explicit_group';
 }
 
+function buildDiagnosticPath(targetType: 'site' | 'account' | 'token', targetId: number): string {
+  const params = new URLSearchParams();
+  params.set('targetType', targetType);
+  params.set('targetId', String(targetId));
+  return `/diagnostics?${params.toString()}`;
+}
+
 export default function TokenRoutes() {
   const navigate = useNavigate();
   const governanceApi = api as unknown as RouteGovernanceApi;
@@ -1254,6 +1261,11 @@ export default function TokenRoutes() {
     navigate(`/tokens?${params.toString()}`);
   };
 
+  const navigateToCredentialDiagnostics = (targetType: 'site' | 'account' | 'token', targetId: number) => {
+    if (!Number.isFinite(targetId) || targetId <= 0) return;
+    navigate(buildDiagnosticPath(targetType, targetId));
+  };
+
   const handleDeleteChannel = async (channelId: number, routeId: number) => {
     try {
       await api.deleteChannel(channelId);
@@ -1744,7 +1756,20 @@ export default function TokenRoutes() {
                       <td>{item.state === 'probing' ? '复测中' : '隔离中'}</td>
                       <td>{governanceReasonLabels[item.reasonCode] || item.reasonCode}</td>
                       <td>{formatIsoDateTime(item.probeAfter || item.suppressUntil)}</td>
-                      <td>{formatIsoDateTime(item.lastFailureAt)}</td>
+                      <td>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span>{formatIsoDateTime(item.lastFailureAt)}</span>
+                          {item.diagnosticTargetType && item.diagnosticTargetId ? (
+                            <button
+                              type="button"
+                              className="btn btn-link"
+                              onClick={() => navigateToCredentialDiagnostics(item.diagnosticTargetType!, item.diagnosticTargetId!)}
+                            >
+                              诊断
+                            </button>
+                          ) : null}
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1816,9 +1841,20 @@ export default function TokenRoutes() {
                               : '-'}
                           </td>
                           <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                            {site.sampleAccounts[0]?.checkinSnapshot
-                              ? `${site.sampleAccounts[0].checkinSnapshot.status} / ${site.sampleAccounts[0].checkinSnapshot.reasonCode}`
-                              : '-'}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <span>
+                                {site.sampleAccounts[0]?.checkinSnapshot
+                                  ? `${site.sampleAccounts[0].checkinSnapshot.status} / ${site.sampleAccounts[0].checkinSnapshot.reasonCode}`
+                                  : '-'}
+                              </span>
+                              <button
+                                type="button"
+                                className="btn btn-link"
+                                onClick={() => navigateToCredentialDiagnostics('site', site.siteId)}
+                              >
+                                诊断
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1844,7 +1880,18 @@ export default function TokenRoutes() {
                     <tbody>
                       {routeDiagnostics.siteRuntimeHealth.items.map((item) => (
                         <tr key={`runtime-health-${item.siteId}-${item.scope}-${item.modelName || 'global'}`}>
-                          <td>{item.siteName}</td>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <span>{item.siteName}</span>
+                              <button
+                                type="button"
+                                className="btn btn-link"
+                                onClick={() => navigateToCredentialDiagnostics('site', item.siteId)}
+                              >
+                                诊断
+                              </button>
+                            </div>
+                          </td>
                           <td>{item.scope === 'global' ? '全站' : '模型'}</td>
                           <td>{item.modelName || '-'}</td>
                           <td>{Math.round((item.multiplier || 0) * 100)}%</td>
@@ -1875,7 +1922,20 @@ export default function TokenRoutes() {
                       {routeDiagnostics.modelCircuits.items.map((item) => (
                         <tr key={`model-circuit-${item.channelId}-${item.modelName}`}>
                           <td>{item.siteName || '-'}</td>
-                          <td>{item.accountUsername || (item.accountId != null ? `#${item.accountId}` : '-')}</td>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <span>{item.accountUsername || (item.accountId != null ? `#${item.accountId}` : '-')}</span>
+                              {item.accountId ? (
+                                <button
+                                  type="button"
+                                  className="btn btn-link"
+                                  onClick={() => navigateToCredentialDiagnostics('account', item.accountId!)}
+                                >
+                                  诊断
+                                </button>
+                              ) : null}
+                            </div>
+                          </td>
                           <td>{item.modelName}</td>
                           <td>{item.status.state}</td>
                           <td>{item.failCount}</td>
@@ -2117,6 +2177,7 @@ export default function TokenRoutes() {
                     onCreateTokenForMissing={stableCreateTokenForMissing}
                     onAddChannel={stableAddChannel}
                     onProbeChannels={stableProbeRouteChannels}
+                    onOpenDiagnostics={navigateToCredentialDiagnostics}
                     probingChannels={probingRouteId === route.id}
                     routeProbeSummary={routeProbeSummaryByRouteId[route.id] || null}
                     expandedSourceGroupMap={expandedSourceGroupMap}
@@ -2157,6 +2218,7 @@ export default function TokenRoutes() {
               onCreateTokenForMissing={stableCreateTokenForMissing}
               onAddChannel={stableAddChannel}
               onProbeChannels={stableProbeRouteChannels}
+              onOpenDiagnostics={navigateToCredentialDiagnostics}
               probingChannels={probingRouteId === route.id}
               routeProbeSummary={routeProbeSummaryByRouteId[route.id] || null}
               expandedSourceGroupMap={expandedSourceGroupMap}

@@ -1203,8 +1203,62 @@ function summarizeGovernanceEntries(entries: RoutingGovernanceEntry[]) {
   };
 }
 
-function serializeGovernanceEntry(entry: RoutingGovernanceEntry) {
+type GovernanceDiagnosticTarget = {
+  type: 'site' | 'account' | 'token';
+  id: number;
+};
+
+async function buildGovernanceDiagnosticTargetMap(entries: RoutingGovernanceEntry[]): Promise<Map<number, GovernanceDiagnosticTarget>> {
+  const targetMap = new Map<number, GovernanceDiagnosticTarget>();
+  const channelIds = Array.from(new Set(
+    entries
+      .filter((entry) => entry.subjectType === 'channel')
+      .map((entry) => entry.subjectId)
+      .filter((value) => Number.isFinite(value) && value > 0),
+  ));
+
+  if (channelIds.length > 0) {
+    const channelRows = await db.select({
+      id: schema.routeChannels.id,
+      accountId: schema.routeChannels.accountId,
+      tokenId: schema.routeChannels.tokenId,
+    }).from(schema.routeChannels)
+      .where(inArray(schema.routeChannels.id, channelIds))
+      .all();
+    const channelDiagnosticTargetByChannelId = new Map<number, GovernanceDiagnosticTarget>();
+
+    for (const row of channelRows) {
+      const diagnosticTarget = typeof row.tokenId === 'number' && row.tokenId > 0
+        ? { type: 'token' as const, id: row.tokenId }
+        : { type: 'account' as const, id: row.accountId };
+      channelDiagnosticTargetByChannelId.set(row.id, diagnosticTarget);
+    }
+
+    for (const entry of entries) {
+      if (entry.subjectType !== 'channel') continue;
+      const diagnosticTarget = channelDiagnosticTargetByChannelId.get(entry.subjectId);
+      if (diagnosticTarget) {
+        targetMap.set(entry.id, diagnosticTarget);
+      }
+    }
+  }
+
+  for (const entry of entries) {
+    if (targetMap.has(entry.id)) continue;
+    if (entry.subjectType === 'site' || entry.subjectType === 'account' || entry.subjectType === 'token') {
+      targetMap.set(entry.id, {
+        type: entry.subjectType,
+        id: entry.subjectId,
+      });
+    }
+  }
+
+  return targetMap;
+}
+
+function serializeGovernanceEntry(entry: RoutingGovernanceEntry, diagnosticTargetMap?: Map<number, GovernanceDiagnosticTarget>) {
   const sanitizedReasonDetail = entry.reasonDetail?.replace('[manual_route_probe]', '').trim() || null;
+  const diagnosticTarget = diagnosticTargetMap?.get(entry.id);
   return {
     id: entry.id,
     subjectType: entry.subjectType,
@@ -1226,6 +1280,8 @@ function serializeGovernanceEntry(entry: RoutingGovernanceEntry) {
     lastProbeMessage: entry.lastProbeMessage ?? null,
     updatedAt: entry.updatedAt ?? null,
     createdAt: entry.createdAt ?? null,
+    diagnosticTargetType: diagnosticTarget?.type,
+    diagnosticTargetId: diagnosticTarget?.id ?? null,
   };
 }
 
@@ -1556,12 +1612,13 @@ export async function tokensRoutes(app: FastifyInstance) {
       reasonCodes: reasonCode && isRoutingGovernanceReasonCode(reasonCode) ? [reasonCode] : undefined,
       limit: Number.isFinite(limit) ? limit : 200,
     });
+    const diagnosticTargetMap = await buildGovernanceDiagnosticTargetMap(items);
 
     const response: RouteGovernanceSubjectsResponse = {
       success: true,
       total: items.length,
       summary: summarizeGovernanceEntries(items),
-      items: items.map((item) => serializeGovernanceEntry(item)),
+      items: items.map((item) => serializeGovernanceEntry(item, diagnosticTargetMap)),
     };
 
     return response;
@@ -2812,4 +2869,3 @@ export async function tokensRoutes(app: FastifyInstance) {
     });
   });
 }
-

@@ -13,6 +13,12 @@ import { useIsMobile } from '../components/useIsMobile.js';
 import { tr } from '../i18n.js';
 import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
 import { getInitialVisibleCount, getNextVisibleCount } from './helpers/progressiveRender.js';
+import {
+  buildDownstreamClientGuide,
+  buildDownstreamCurlSnippet,
+  buildDownstreamEnvSnippet,
+  buildDownstreamOpenAiSdkSnippet,
+} from './helpers/downstreamExport.js';
 
 const DownstreamKeyTrendChart = lazy(() => import('../components/charts/DownstreamKeyTrendChart.js'));
 type DownstreamKeyTrendBucket = import('../components/charts/DownstreamKeyTrendChart.js').DownstreamKeyTrendBucket;
@@ -130,6 +136,8 @@ type BatchMetadataForm = {
   tagOperation: 'keep' | 'append';
   tags: string[];
 };
+
+type ExportSnippetType = 'curl' | 'env' | 'openai' | 'guide';
 
 function formatIso(value: string | null | undefined): string {
   const text = (value || '').trim();
@@ -857,6 +865,126 @@ function Drawer({
   return createPortal(panel, document.body);
 }
 
+function buildGatewayBaseUrl(): string {
+  if (typeof window === 'undefined') return '';
+  return window.location.origin;
+}
+
+function ExportSnippetModal({
+  open,
+  onClose,
+  item,
+  routeMap,
+}: {
+  open: boolean;
+  onClose: () => void;
+  item: ManagedItem | null;
+  routeMap: Map<number, RouteSelectorItem>;
+}) {
+  const toast = useToast();
+  const [snippetType, setSnippetType] = useState<ExportSnippetType>('curl');
+
+  useEffect(() => {
+    if (!open) setSnippetType('curl');
+  }, [open]);
+
+  if (!open || !item?.key) return null;
+
+  const routeTitles = item.allowedRouteIds
+    .map((routeId) => routeMap.get(routeId))
+    .filter((entry): entry is RouteSelectorItem => !!entry)
+    .map((entry) => routeTitle(entry));
+  const recommendedModel = item.supportedModels[0] || null;
+  const exportInput = {
+    keyName: item.name,
+    gatewayBaseUrl: buildGatewayBaseUrl(),
+    apiKey: item.key,
+    recommendedModel,
+    supportedModels: item.supportedModels,
+    allowedRouteTitles: routeTitles,
+  };
+
+  const snippet = snippetType === 'env'
+    ? buildDownstreamEnvSnippet(exportInput)
+    : snippetType === 'openai'
+      ? buildDownstreamOpenAiSdkSnippet(exportInput)
+      : snippetType === 'guide'
+        ? buildDownstreamClientGuide(exportInput)
+        : buildDownstreamCurlSnippet(exportInput);
+
+  return (
+    <CenteredModal
+      open={open}
+      onClose={onClose}
+      title="定向导出助手"
+      maxWidth={860}
+      bodyStyle={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+      footer={(
+        <>
+          <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={onClose}>
+            关闭
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={async () => {
+              try {
+                await copyToClipboard(snippet);
+                toast.success('已复制接入片段');
+              } catch (error: any) {
+                toast.error(error?.message || '复制失败');
+              }
+            }}
+          >
+            复制
+          </button>
+        </>
+      )}
+    >
+      <div style={{ display: 'grid', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>导出类型</div>
+            <ModernSelect
+              value={snippetType}
+              options={[
+                { value: 'curl', label: 'curl' },
+                { value: 'env', label: '环境变量' },
+                { value: 'openai', label: 'OpenAI SDK' },
+                { value: 'guide', label: '客户端说明' },
+              ]}
+              onChange={(value) => setSnippetType(value as ExportSnippetType)}
+            />
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', lineHeight: 1.6 }}>
+            <div>名称：<strong>{item.name}</strong></div>
+            <div>推荐模型：<strong>{recommendedModel || '--'}</strong></div>
+            <div>支持模型：<strong>{item.supportedModels.length > 0 ? item.supportedModels.join(', ') : '未限制'}</strong></div>
+            <div>路由限制：<strong>{routeTitles.length > 0 ? routeTitles.join(', ') : '未绑定特定路由'}</strong></div>
+          </div>
+        </div>
+        <div className="alert alert-warning">
+          这里只导出 Metapi 网关地址和下游密钥，不导出上游原始凭证或管理端令牌。
+        </div>
+        <pre style={{
+          margin: 0,
+          padding: 14,
+          background: 'var(--color-bg-card)',
+          border: '1px solid var(--color-border-light)',
+          borderRadius: 'var(--radius-sm)',
+          overflowX: 'auto',
+          fontSize: 12,
+          lineHeight: 1.6,
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}
+        >
+          {snippet}
+        </pre>
+      </div>
+    </CenteredModal>
+  );
+}
+
 function EditorModal({
   open,
   editingItem,
@@ -1260,6 +1388,7 @@ export default function DownstreamKeys() {
   const [editorForm, setEditorForm] = useState<EditorForm>(() => buildEditorForm());
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [exportingItemId, setExportingItemId] = useState<number | null>(null);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [showFilters, setShowFilters] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<DeleteConfirmState>(null);
@@ -1395,6 +1524,10 @@ export default function DownstreamKeys() {
   const selectedItem = useMemo(
     () => managedItems.find((item) => item.id === selectedId) || null,
     [managedItems, selectedId],
+  );
+  const exportingItem = useMemo(
+    () => managedItems.find((item) => item.id === exportingItemId) || null,
+    [managedItems, exportingItemId],
   );
 
   const editingItem = useMemo(
@@ -1828,6 +1961,7 @@ export default function DownstreamKeys() {
                   footerActions={(
                     <>
                       <button className="btn btn-link" onClick={() => { setSelectedId(row.id); setDrawerOpen(true); }}>查看</button>
+                      <button className="btn btn-link" onClick={() => setExportingItemId(row.id)}>导出助手</button>
                       <button className="btn btn-link" onClick={() => openEdit(row)}>编辑</button>
                       <button className="btn btn-link" onClick={() => void toggleEnabled(row)} disabled={loadingToggle}>{loadingToggle ? '处理中...' : (row.enabled ? '禁用' : '启用')}</button>
                       <button className="btn btn-link" onClick={() => void resetUsage(row)} disabled={loadingReset}>{loadingReset ? '处理中...' : '清零用量'}</button>
@@ -1924,6 +2058,7 @@ export default function DownstreamKeys() {
                       <td onClick={(e) => e.stopPropagation()}>
                         <div className="accounts-row-actions" style={{ justifyContent: 'flex-end' }}>
                           <button className="btn btn-link" onClick={() => { setSelectedId(row.id); setDrawerOpen(true); }}>查看</button>
+                          <button className="btn btn-link" onClick={() => setExportingItemId(row.id)}>导出助手</button>
                           <button className="btn btn-link" onClick={() => openEdit(row)}>编辑</button>
                           <button className="btn btn-link" onClick={() => void toggleEnabled(row)} disabled={loadingToggle}>{loadingToggle ? '处理中...' : (row.enabled ? '禁用' : '启用')}</button>
                           <button className="btn btn-link" onClick={() => void resetUsage(row)} disabled={loadingReset}>{loadingReset ? '处理中...' : '清零用量'}</button>
@@ -2030,6 +2165,12 @@ export default function DownstreamKeys() {
         onClose={() => setDrawerOpen(false)}
         item={selectedItem}
         initialRange={range}
+      />
+      <ExportSnippetModal
+        open={!!exportingItem}
+        onClose={() => setExportingItemId(null)}
+        item={exportingItem}
+        routeMap={routeMap}
       />
     </div>
   );

@@ -76,6 +76,7 @@ export default withMermaid(
           text: '使用与运维',
           items: [
             { text: '上游接入', link: '/upstream-integration' },
+            { text: '接入与诊断工作台升级', link: '/key-workbench-upgrade' },
             { text: '配置说明', link: '/configuration' },
             { text: '客户端接入', link: '/client-integration' },
             { text: '路由与签到稳定性改造', link: '/gateway-checkin-hardening' },
