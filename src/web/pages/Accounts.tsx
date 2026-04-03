@@ -78,6 +78,13 @@ function resolveConnectionsSegment(search: string): ConnectionsSegment {
   return 'session';
 }
 
+function buildDiagnosticPath(targetType: 'site' | 'account' | 'token', targetId: number): string {
+  const params = new URLSearchParams();
+  params.set('targetType', targetType);
+  params.set('targetId', String(targetId));
+  return `/diagnostics?${params.toString()}`;
+}
+
 export default function Accounts() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -1783,6 +1790,14 @@ export default function Accounts() {
                               编辑
                             </button>
                             <button
+                              type="button"
+                              onClick={() => navigate(buildDiagnosticPath('account', a.id))}
+                              className="btn btn-link btn-link-info"
+                              data-testid={`account-diagnostics-${a.id}`}
+                            >
+                              诊断
+                            </button>
+                            <button
                               onClick={() => openModelModal(a)}
                               disabled={actionLoading[`models-${a.id}`]}
                               className="btn btn-link btn-link-info"
@@ -2119,6 +2134,14 @@ export default function Accounts() {
                             )}
                             <button onClick={() => openEditPanel(a)} className="btn btn-link btn-link-info">
                               编辑
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => navigate(buildDiagnosticPath('account', a.id))}
+                              className="btn btn-link btn-link-info"
+                              data-testid={`account-diagnostics-${a.id}`}
+                            >
+                              诊断
                             </button>
                             <button onClick={() => setDeleteConfirm({ mode: 'single', accountId: a.id, accountName: resolveAccountDisplayName(a) })} disabled={actionLoading[`delete-${a.id}`]} className="btn btn-link btn-link-danger">
                               {actionLoading[`delete-${a.id}`] ? <span className="spinner spinner-sm" /> : '删除'}

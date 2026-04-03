@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, create } from 'react-test-renderer';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast.js';
 import Sites from './Sites.js';
 
@@ -18,6 +18,11 @@ vi.mock('../api.js', () => ({
 vi.mock('../components/useIsMobile.js', () => ({
   useIsMobile: () => true,
 }));
+
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>;
+}
 
 async function flushMicrotasks() {
   await act(async () => {
@@ -66,6 +71,7 @@ describe('Sites mobile actions', () => {
           <MemoryRouter initialEntries={['/sites']}>
             <ToastProvider>
               <Sites />
+              <LocationProbe />
             </ToastProvider>
           </MemoryRouter>,
         );
@@ -105,6 +111,33 @@ describe('Sites mobile actions', () => {
 
       const primaryLink = root.root.find((node) => node.type === 'a' && node.props.href === 'https://a.example.com');
       expect(primaryLink.props.target).toBe('_blank');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('navigates to diagnostics from mobile site actions', async () => {
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/sites']}>
+            <ToastProvider>
+              <Sites />
+              <LocationProbe />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const diagnosticButton = root.root.find((node) => node.props['data-testid'] === 'site-diagnostics-1');
+      await act(async () => {
+        diagnosticButton.props.onClick();
+      });
+
+      const locationProbe = root.root.find((node) => node.props['data-testid'] === 'location-probe');
+      expect(Array.isArray(locationProbe.children) ? locationProbe.children.join('') : '').toBe('/diagnostics?targetType=site&targetId=1');
     } finally {
       root?.unmount();
     }

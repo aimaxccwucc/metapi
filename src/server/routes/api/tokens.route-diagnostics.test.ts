@@ -503,6 +503,144 @@ describe('GET /api/routes/diagnostics', () => {
     expect(body.checkinTodo.sites[0]?.sampleAccounts[0]?.checkinSnapshot?.status).toBe('manual_required');
   });
 
+  it('maps governance subjects to diagnostic targets for direct and channel subjects', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'governance-map-site',
+      url: 'https://governance-map.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'governance-map-user',
+      accessToken: 'governance-map-access',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'governance-default',
+      token: 'sk-governance-default',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-governance-map',
+      enabled: true,
+    }).returning().get();
+
+    const channelWithToken = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gpt-governance-map',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const channelWithoutToken = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: null,
+      sourceModel: 'gpt-governance-map-account-only',
+      priority: 1,
+      weight: 5,
+      enabled: true,
+    }).returning().get();
+
+    await upsertRoutingGovernanceState({
+      subjectType: 'site',
+      subjectId: site.id,
+      reasonCode: 'slow_site',
+      reasonDetail: 'site degraded',
+      suppressUntil: '2099-01-01T00:00:00.000Z',
+    });
+    await upsertRoutingGovernanceState({
+      subjectType: 'account',
+      subjectId: account.id,
+      reasonCode: 'auth',
+      reasonDetail: 'account auth failed',
+      suppressUntil: '2099-01-01T00:00:00.000Z',
+    });
+    await upsertRoutingGovernanceState({
+      subjectType: 'token',
+      subjectId: token.id,
+      reasonCode: 'auth',
+      reasonDetail: 'token auth failed',
+      suppressUntil: '2099-01-01T00:00:00.000Z',
+    });
+    await upsertRoutingGovernanceState({
+      subjectType: 'channel',
+      subjectId: channelWithToken.id,
+      reasonCode: 'model_unsupported',
+      reasonDetail: 'channel token unsupported',
+      suppressUntil: '2099-01-01T00:00:00.000Z',
+    });
+    await upsertRoutingGovernanceState({
+      subjectType: 'channel',
+      subjectId: channelWithoutToken.id,
+      reasonCode: 'invalid_channel',
+      reasonDetail: 'channel missing token',
+      suppressUntil: '2099-01-01T00:00:00.000Z',
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/routes/governance/subjects?limit=20',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      success: boolean;
+      total: number;
+      items: Array<{
+        subjectType: 'site' | 'account' | 'token' | 'channel';
+        subjectId: number;
+        diagnosticTargetType?: 'site' | 'account' | 'token';
+        diagnosticTargetId: number | null;
+      }>;
+    };
+
+    expect(body.success).toBe(true);
+    expect(body.total).toBe(5);
+    expect(body.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        subjectType: 'site',
+        subjectId: site.id,
+        diagnosticTargetType: 'site',
+        diagnosticTargetId: site.id,
+      }),
+      expect.objectContaining({
+        subjectType: 'account',
+        subjectId: account.id,
+        diagnosticTargetType: 'account',
+        diagnosticTargetId: account.id,
+      }),
+      expect.objectContaining({
+        subjectType: 'token',
+        subjectId: token.id,
+        diagnosticTargetType: 'token',
+        diagnosticTargetId: token.id,
+      }),
+      expect.objectContaining({
+        subjectType: 'channel',
+        subjectId: channelWithToken.id,
+        diagnosticTargetType: 'token',
+        diagnosticTargetId: token.id,
+      }),
+      expect.objectContaining({
+        subjectType: 'channel',
+        subjectId: channelWithoutToken.id,
+        diagnosticTargetType: 'account',
+        diagnosticTargetId: account.id,
+      }),
+    ]));
+  });
+
   it('probes route channels and writes governance suppression for unavailable tokens', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'probe-site',

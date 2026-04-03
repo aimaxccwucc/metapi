@@ -130,6 +130,13 @@ function normalizeTokenGroups(response: TokenGroupResponse | null | undefined): 
   return Array.from(new Set(groups));
 }
 
+function buildDiagnosticPath(targetType: 'site' | 'account' | 'token', targetId: number): string {
+  const params = new URLSearchParams();
+  params.set('targetType', targetType);
+  params.set('targetId', String(targetId));
+  return `/diagnostics?${params.toString()}`;
+}
+
 export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: TokensPanelProps) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -1221,6 +1228,14 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                         >
                           {isPending ? '编辑补全' : '编辑'}
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => navigate(buildDiagnosticPath('token', token.id))}
+                          className="btn btn-link btn-link-info"
+                          data-testid={`token-diagnostics-${token.id}`}
+                        >
+                          诊断
+                        </button>
                       </>
                     )}
                   >
@@ -1416,6 +1431,14 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                           className="btn btn-link btn-link-info token-table-action-btn"
                         >
                           {isPending ? '编辑补全' : '编辑'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => navigate(buildDiagnosticPath('token', token.id))}
+                          className="btn btn-link btn-link-info token-table-action-btn"
+                          data-testid={`token-diagnostics-${token.id}`}
+                        >
+                          诊断
                         </button>
                         {!isPending ? (
                           <button

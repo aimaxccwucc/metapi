@@ -91,6 +91,13 @@ type SiteProtocolProbeResult = {
   } | null;
 };
 
+function buildDiagnosticPath(targetType: 'site' | 'account' | 'token', targetId: number): string {
+  const params = new URLSearchParams();
+  params.set('targetType', targetType);
+  params.set('targetId', String(targetId));
+  return `/diagnostics?${params.toString()}`;
+}
+
 function hasConfiguredCustomHeaders(customHeaders?: string | null): boolean {
   return typeof customHeaders === 'string' && customHeaders.trim().length > 0;
 }
@@ -1517,6 +1524,14 @@ export default function Sites() {
                           编辑
                         </button>
                         <button
+                          type="button"
+                          onClick={() => navigate(buildDiagnosticPath('site', site.id))}
+                          className="btn btn-link btn-link-info"
+                          data-testid={`site-diagnostics-${site.id}`}
+                        >
+                          诊断
+                        </button>
+                        <button
                           onClick={() => handleToggleStatus(site)}
                           disabled={togglingSiteId === site.id}
                           className={`btn btn-link ${site.status === 'disabled' ? 'btn-link-primary' : 'btn-link-warning'}`}
@@ -1830,6 +1845,14 @@ export default function Sites() {
                           className="btn btn-link btn-link-primary"
                         >
                           编辑
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => navigate(buildDiagnosticPath('site', site.id))}
+                          className="btn btn-link btn-link-info"
+                          data-testid={`site-diagnostics-${site.id}`}
+                        >
+                          诊断
                         </button>
                         <button
                           onClick={() => handleToggleStatus(site)}

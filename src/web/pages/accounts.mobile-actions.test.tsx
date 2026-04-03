@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, create } from 'react-test-renderer';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast.js';
 import Accounts from './Accounts.js';
 
@@ -20,6 +20,11 @@ vi.mock('../api.js', () => ({
 vi.mock('../components/useIsMobile.js', () => ({
   useIsMobile: () => true,
 }));
+
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>;
+}
 
 async function flushMicrotasks() {
   await act(async () => {
@@ -87,6 +92,7 @@ describe('Accounts mobile actions', () => {
           <MemoryRouter initialEntries={['/accounts']}>
             <ToastProvider>
               <Accounts />
+              <LocationProbe />
             </ToastProvider>
           </MemoryRouter>,
         );
@@ -141,6 +147,7 @@ describe('Accounts mobile actions', () => {
           <MemoryRouter initialEntries={['/accounts']}>
             <ToastProvider>
               <Accounts />
+              <LocationProbe />
             </ToastProvider>
           </MemoryRouter>,
         );
@@ -188,6 +195,33 @@ describe('Accounts mobile actions', () => {
         ids: [1],
         action: 'refreshBalance',
       });
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('navigates to diagnostics from mobile account actions', async () => {
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/accounts']}>
+            <ToastProvider>
+              <Accounts />
+              <LocationProbe />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const diagnosticButton = root.root.find((node) => node.props['data-testid'] === 'account-diagnostics-1');
+      await act(async () => {
+        diagnosticButton.props.onClick();
+      });
+
+      const locationProbe = root.root.find((node) => node.props['data-testid'] === 'location-probe');
+      expect(Array.isArray(locationProbe.children) ? locationProbe.children.join('') : '').toBe('/diagnostics?targetType=account&targetId=1');
     } finally {
       root?.unmount();
     }
