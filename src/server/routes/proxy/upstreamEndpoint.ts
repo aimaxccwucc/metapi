@@ -36,6 +36,7 @@ import {
   promoteResponsesCandidateAfterLegacyChatError,
   shouldPreferResponsesAfterLegacyChatError,
 } from '../../transformers/shared/endpointCompatibility.js';
+import { sanitizeJsonSchemaForFunctionTool } from '../../transformers/shared/jsonSchema.js';
 export {
   buildMinimalJsonHeadersForCompatibility,
   hasExplicitEndpointCompatibilitySignal,
@@ -525,6 +526,9 @@ function normalizeResponsesFallbackChatFunctionTool(rawTool: unknown): Record<st
       function: {
         ...rawTool.function,
         name,
+        ...(rawTool.function.parameters !== undefined
+          ? { parameters: sanitizeJsonSchemaForFunctionTool(rawTool.function.parameters) }
+          : {}),
       },
     };
   }
@@ -535,7 +539,9 @@ function normalizeResponsesFallbackChatFunctionTool(rawTool: unknown): Record<st
   const fn: Record<string, unknown> = { name };
   const description = asTrimmedString(rawTool.description);
   if (description) fn.description = description;
-  if (rawTool.parameters !== undefined) fn.parameters = rawTool.parameters;
+  if (rawTool.parameters !== undefined) {
+    fn.parameters = sanitizeJsonSchemaForFunctionTool(rawTool.parameters);
+  }
   if (rawTool.strict !== undefined) fn.strict = rawTool.strict;
 
   return {

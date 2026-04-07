@@ -2,6 +2,7 @@ import { normalizeInputFileBlock, toAnthropicDocumentBlock } from '../../shared/
 import {
   decodeAnthropicReasoningSignature,
 } from '../../shared/reasoningTransport.js';
+import { sanitizeJsonSchemaForFunctionTool } from '../../shared/jsonSchema.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -743,13 +744,18 @@ export function convertOpenAiToolsToAnthropic(rawTools: unknown): unknown {
         const mapped: Record<string, unknown> = { name };
         const description = asTrimmedString(fn.description);
         if (description) mapped.description = description;
-        if (fn.parameters !== undefined) mapped.input_schema = fn.parameters;
+        if (fn.parameters !== undefined) {
+          mapped.input_schema = sanitizeJsonSchemaForFunctionTool(fn.parameters);
+        }
         if (item.cache_control !== undefined) mapped.cache_control = item.cache_control;
         return mapped;
       }
 
       if (asTrimmedString(item.name) && item.input_schema !== undefined) {
-        return item;
+        return {
+          ...item,
+          input_schema: sanitizeJsonSchemaForFunctionTool(item.input_schema),
+        };
       }
 
       return null;

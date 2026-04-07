@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   convertOpenAiBodyToAnthropicMessagesBody,
   convertOpenAiToolChoiceToAnthropic,
+  convertOpenAiToolsToAnthropic,
   sanitizeAnthropicMessagesBody,
 } from './conversion.js';
 import { anthropicMessagesInbound } from './inbound.js';
@@ -640,6 +641,56 @@ describe('convertOpenAiBodyToAnthropicMessagesBody', () => {
       system: 'system prompt',
       messages: [{ role: 'user', content: 'hello' }],
     });
+  });
+});
+
+describe('convertOpenAiToolsToAnthropic', () => {
+  it('sanitizes invalid function tool schemas before forwarding to Anthropic', () => {
+    expect(convertOpenAiToolsToAnthropic([
+      {
+        type: 'function',
+        function: {
+          name: 'CronList',
+          parameters: {
+            type: 'object',
+            properties: null,
+            required: null,
+            additionalProperties: {
+              type: 'object',
+              required: null,
+            },
+          },
+        },
+      },
+      {
+        name: 'RawTool',
+        input_schema: {
+          type: 'object',
+          properties: null,
+          required: [null, 'jobId', 123],
+        },
+      },
+    ])).toEqual([
+      {
+        name: 'CronList',
+        input_schema: {
+          type: 'object',
+          properties: {},
+          additionalProperties: {
+            type: 'object',
+            properties: {},
+          },
+        },
+      },
+      {
+        name: 'RawTool',
+        input_schema: {
+          type: 'object',
+          properties: {},
+          required: ['jobId'],
+        },
+      },
+    ]);
   });
 });
 

@@ -17,6 +17,7 @@ import type {
   CanonicalSurface,
 } from './types.js';
 import { toOpenAiChatFileBlock } from '../shared/inputFile.js';
+import { sanitizeJsonSchemaForFunctionTool } from '../shared/jsonSchema.js';
 
 export type CreateCanonicalRequestEnvelopeInput = {
   operation?: CanonicalOperation;
@@ -221,7 +222,9 @@ function parseTools(rawTools: unknown): CanonicalTool[] | undefined {
           ...(asTrimmedString(item.function.description)
             ? { description: asTrimmedString(item.function.description) }
             : {}),
-          ...(isRecord(item.function.parameters) ? { inputSchema: cloneJsonValue(item.function.parameters) } : {}),
+          ...(isRecord(item.function.parameters)
+            ? { inputSchema: sanitizeJsonSchemaForFunctionTool(cloneJsonValue(item.function.parameters)) }
+            : {}),
         }];
       }
 
@@ -236,8 +239,10 @@ function parseTools(rawTools: unknown): CanonicalTool[] | undefined {
               ? { description: asTrimmedString(declaration.description) }
               : {}),
             ...(isRecord(declaration.parametersJsonSchema)
-              ? { inputSchema: cloneJsonValue(declaration.parametersJsonSchema) }
-              : (isRecord(declaration.parameters) ? { inputSchema: cloneJsonValue(declaration.parameters) } : {})),
+              ? { inputSchema: sanitizeJsonSchemaForFunctionTool(cloneJsonValue(declaration.parametersJsonSchema)) }
+              : (isRecord(declaration.parameters)
+                ? { inputSchema: sanitizeJsonSchemaForFunctionTool(cloneJsonValue(declaration.parameters)) }
+                : {})),
           }];
         });
       }
@@ -486,7 +491,7 @@ export function canonicalRequestToOpenAiChatBody(
       function: {
         name: tool.name,
         ...(tool.description ? { description: tool.description } : {}),
-        parameters: cloneJsonValue(tool.inputSchema ?? { type: 'object' }),
+        parameters: sanitizeJsonSchemaForFunctionTool(cloneJsonValue(tool.inputSchema ?? { type: 'object' })),
       },
     }));
   }

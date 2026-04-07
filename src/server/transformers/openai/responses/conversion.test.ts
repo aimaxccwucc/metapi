@@ -259,6 +259,50 @@ describe('convertOpenAiBodyToResponsesBody', () => {
     ]);
   });
 
+  it('sanitizes function tool schemas before building Responses requests', () => {
+    const result = convertOpenAiBodyToResponsesBody(
+      {
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'list jobs' }],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'CronList',
+              parameters: {
+                type: 'object',
+                properties: null,
+                required: null,
+                items: {
+                  type: 'object',
+                  required: ['cursor', null],
+                },
+              },
+            },
+          },
+        ],
+      },
+      'gpt-5',
+      false,
+    );
+
+    expect(result.tools).toEqual([
+      {
+        type: 'function',
+        name: 'CronList',
+        parameters: {
+          type: 'object',
+          properties: {},
+          items: {
+            type: 'object',
+            properties: {},
+            required: ['cursor'],
+          },
+        },
+      },
+    ]);
+  });
+
   it('maps extra request fields and preserves custom/image_generation tools', () => {
     const result = convertOpenAiBodyToResponsesBody(
       {

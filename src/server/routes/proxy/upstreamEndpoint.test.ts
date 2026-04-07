@@ -2276,6 +2276,63 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.body.tool_choice).toBeUndefined();
   });
 
+  it('sanitizes invalid function schemas when /v1/responses falls back to /v1/chat/completions', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'responses',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          {
+            role: 'user',
+            content: 'list scheduled jobs',
+          },
+        ],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'CronList',
+              parameters: {
+                type: 'object',
+                properties: null,
+                required: null,
+                items: {
+                  type: 'object',
+                  required: ['cursor', null],
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.tools).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'CronList',
+          parameters: {
+            type: 'object',
+            properties: {},
+            items: {
+              type: 'object',
+              properties: {},
+              required: ['cursor'],
+            },
+          },
+        },
+      },
+    ]);
+  });
+
   it('preserves Anthropic image and tool_result blocks instead of flattening to plain text', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'messages',

@@ -80,6 +80,9 @@ describe('proxyRetryPolicy', () => {
       classifyProxyFailureCategory(403, '{"error":{"message":"request_error"}}'),
     ).toBe('invalid_channel');
     expect(
+      classifyProxyFailureCategory(403, '无权访问 cc2kpro 分组'),
+    ).toBe('invalid_channel');
+    expect(
       classifyProxyFailureCategory(503, 'No available channel for model gpt-5.4 under group default (distributor)'),
     ).toBe('upstream_group_empty');
   });
@@ -94,6 +97,7 @@ describe('proxyRetryPolicy', () => {
     expect(shouldAvoidSiteForRequest(502, 'bad gateway')).toBe(true);
     expect(shouldAvoidSiteForRequest(429, 'rate limit exceeded')).toBe(true);
     expect(shouldAvoidSiteForRequest(0, 'socket hang up')).toBe(true);
+    expect(shouldAvoidSiteForRequest(403, '无权访问 cc2kpro 分组')).toBe(true);
     expect(shouldAvoidSiteForRequest(400, 'unsupported model')).toBe(false);
     expect(shouldAvoidSiteForRequest(401, 'invalid api key')).toBe(false);
     expect(shouldAvoidSiteForRequest(403, 'forbidden')).toBe(false);

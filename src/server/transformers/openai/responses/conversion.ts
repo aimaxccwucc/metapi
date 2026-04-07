@@ -4,6 +4,7 @@ import {
 } from './compatibility.js';
 import { normalizeInputFileBlock, toOpenAiChatFileBlock } from '../../shared/inputFile.js';
 import { buildShortToolNameMap, getShortToolName } from '../../shared/toolNameShortener.js';
+import { sanitizeJsonSchemaForFunctionTool } from '../../shared/jsonSchema.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -309,7 +310,9 @@ function convertOpenAiToolsToResponses(
         };
         const description = asTrimmedString(fn.description);
         if (description) mapped.description = description;
-        if (fn.parameters !== undefined) mapped.parameters = fn.parameters;
+        if (fn.parameters !== undefined) {
+          mapped.parameters = sanitizeJsonSchemaForFunctionTool(fn.parameters);
+        }
         if (fn.strict !== undefined) mapped.strict = fn.strict;
         return mapped;
       }
@@ -693,7 +696,9 @@ function convertResponsesToolsToOpenAi(rawTools: unknown): unknown {
     const fn: Record<string, unknown> = { name };
     const description = asTrimmedString(item.description);
     if (description) fn.description = description;
-    if (item.parameters !== undefined) fn.parameters = item.parameters;
+    if (item.parameters !== undefined) {
+      fn.parameters = sanitizeJsonSchemaForFunctionTool(item.parameters);
+    }
     if (item.strict !== undefined) fn.strict = item.strict;
 
     return {

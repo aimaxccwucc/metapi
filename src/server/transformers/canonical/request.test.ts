@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { createCanonicalRequestEnvelope } from './request.js';
+import { canonicalRequestFromOpenAiBody, createCanonicalRequestEnvelope } from './request.js';
 
 describe('canonical request helpers', () => {
   it('normalizes a count_tokens request without provider-owned fields', () => {
@@ -44,5 +44,46 @@ describe('canonical request helpers', () => {
       stream: false,
       messages: [],
     });
+  });
+
+  it('sanitizes tool schemas when parsing OpenAI bodies into canonical requests', () => {
+    const request = canonicalRequestFromOpenAiBody({
+      body: {
+        model: 'gpt-5.2-codex',
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'CronList',
+              parameters: {
+                type: 'object',
+                properties: null,
+                required: null,
+                items: {
+                  type: 'object',
+                  required: ['cursor', null],
+                },
+              },
+            },
+          },
+        ],
+      },
+      surface: 'openai-responses',
+    });
+
+    expect(request.tools).toEqual([
+      {
+        name: 'CronList',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+          items: {
+            type: 'object',
+            properties: {},
+            required: ['cursor'],
+          },
+        },
+      },
+    ]);
   });
 });

@@ -108,6 +108,13 @@ const INVALID_CHANNEL_PATTERNS: RegExp[] = [
   /unsupported\s+path/i,
   /unrecognized\s+request\s+url/i,
   /does\s+not\s+allow\s+\/v1\//i,
+  /无权访问\s*.+\s*分组/i,
+  /no\s+access\s+to\s+group/i,
+];
+
+const SITE_AVOID_INVALID_CHANNEL_PATTERNS: RegExp[] = [
+  /无权访问\s*.+\s*分组/i,
+  /no\s+access\s+to\s+group/i,
 ];
 
 const UPSTREAM_GROUP_EMPTY_PATTERNS: RegExp[] = [
@@ -189,5 +196,8 @@ export function shouldRetryProxyRequest(status: number, upstreamErrorText?: stri
 
 export function shouldAvoidSiteForRequest(status?: number | null, upstreamErrorText?: string | null): boolean {
   const category = classifyProxyFailureCategory(status, upstreamErrorText);
+  if (category === 'invalid_channel' && matchesAnyPattern(SITE_AVOID_INVALID_CHANNEL_PATTERNS, upstreamErrorText)) {
+    return true;
+  }
   return category === 'network' || category === 'server' || category === 'rate_limit';
 }
