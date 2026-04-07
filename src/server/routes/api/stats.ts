@@ -730,7 +730,7 @@ export async function statsRoutes(app: FastifyInstance) {
       }
 
       return query
-        .orderBy(desc(schema.proxyLogs.createdAt))
+        .orderBy(desc(schema.proxyLogs.createdAt), desc(schema.proxyLogs.id))
         .limit(limit)
         .offset(offset)
         .all();

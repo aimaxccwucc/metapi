@@ -22,10 +22,14 @@ const resolveProxyUsageWithSelfLogFallbackMock = vi.fn(async ({ usage }: any) =>
   estimatedCostFromQuota: 0,
   recoveredFromSelfLog: false,
 }));
+const insertedProxyLogs: Record<string, unknown>[] = [];
 const dbInsertMock = vi.fn((_arg?: any) => ({
-  values: () => ({
-    run: () => undefined,
-  }),
+  values: (values: Record<string, unknown>) => {
+    insertedProxyLogs.push(values);
+    return {
+      run: () => undefined,
+    };
+  },
 }));
 
 vi.mock('undici', () => ({
@@ -112,6 +116,7 @@ describe('chat proxy stream behavior', () => {
     fetchModelPricingCatalogMock.mockReset();
     resolveProxyUsageWithSelfLogFallbackMock.mockClear();
     dbInsertMock.mockClear();
+    insertedProxyLogs.length = 0;
     resetUpstreamEndpointRuntimeState();
 
     selectChannelMock.mockReturnValue({
@@ -1845,6 +1850,13 @@ describe('chat proxy stream behavior', () => {
     const body = response.json();
     expect(body.object).toBe('response');
     expect(body.output_text).toContain('ok via chat fallback from upstream_error');
+    expect(insertedProxyLogs).toHaveLength(1);
+    expect(insertedProxyLogs[0]).toMatchObject({
+      status: 'success',
+      httpStatus: 200,
+      retryCount: 0,
+    });
+    expect(String(insertedProxyLogs[0]?.errorMessage || '')).not.toContain('[upstream:/v1/responses]');
   });
 
   it('does not downgrade /v1/responses to /v1/chat/completions when upstream responses endpoint returns 502', async () => {
@@ -4294,6 +4306,13 @@ describe('chat proxy stream behavior', () => {
     const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
     expect(firstUrl).toContain('/v1/chat/completions');
     expect(secondUrl).toContain('/v1/messages');
+    expect(insertedProxyLogs).toHaveLength(1);
+    expect(insertedProxyLogs[0]).toMatchObject({
+      status: 'success',
+      httpStatus: 200,
+      retryCount: 0,
+    });
+    expect(String(insertedProxyLogs[0]?.errorMessage || '')).not.toContain('[upstream:/v1/chat/completions]');
   });
 
   it('does not downgrade endpoint when upstream returns generic openai_error bad_response_status_code', async () => {

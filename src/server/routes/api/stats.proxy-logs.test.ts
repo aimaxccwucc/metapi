@@ -182,6 +182,61 @@ describe('stats proxy logs routes', () => {
     });
   });
 
+  it('orders same-second proxy logs by id descending to keep retry chains stable', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'same-second-site',
+      url: 'https://same-second.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'same-second-user',
+      accessToken: 'same-second-token',
+      status: 'active',
+    }).returning().get();
+
+    const createdAt = formatUtcSqlDateTime(new Date('2026-03-09T08:08:08.000Z'));
+    const failed = await db.insert(schema.proxyLogs).values({
+      accountId: account.id,
+      modelRequested: 'gpt-5.2',
+      modelActual: 'gpt-5.2',
+      status: 'failed',
+      errorMessage: '[session:same-second] first attempt failed',
+      retryCount: 0,
+      createdAt,
+    }).returning().get();
+    const success = await db.insert(schema.proxyLogs).values({
+      accountId: account.id,
+      modelRequested: 'gpt-5.2',
+      modelActual: 'gpt-5.2',
+      status: 'success',
+      errorMessage: '[session:same-second] retry succeeded',
+      retryCount: 1,
+      createdAt,
+    }).returning().get();
+
+    expect(Number(success.id)).toBeGreaterThan(Number(failed.id));
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/stats/proxy-logs?limit=2',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { items: Array<Record<string, unknown>> };
+    expect(body.items[0]).toMatchObject({
+      id: Number(success.id),
+      status: 'success',
+      retryCount: 1,
+    });
+    expect(body.items[1]).toMatchObject({
+      id: Number(failed.id),
+      status: 'failed',
+      retryCount: 0,
+    });
+  });
+
   it('returns a single proxy log detail with parsed billing details', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'detail-site',

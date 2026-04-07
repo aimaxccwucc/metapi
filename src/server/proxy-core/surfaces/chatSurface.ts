@@ -465,24 +465,6 @@ export async function handleChatSurfaceRequest(
               retryCount,
               reason: ctx.errText,
             });
-            logProxy(
-              selected,
-              requestedModel,
-              'failed',
-              ctx.response.status,
-              Date.now() - startTime,
-              ctx.errText,
-              retryCount,
-              downstreamPath,
-              0,
-              0,
-              0,
-              0,
-              null,
-              null,
-              clientContext,
-              downstreamApiKeyId,
-            );
           },
         });
 
