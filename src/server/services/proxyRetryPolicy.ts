@@ -122,7 +122,10 @@ const SITE_AVOID_INVALID_CHANNEL_PATTERNS: RegExp[] = [
 
 const UPSTREAM_GROUP_EMPTY_PATTERNS: RegExp[] = [
   /no\s+available\s+channel\s+for\s+model/i,
+  /no\s+available\s+providers/i,
   /under\s+group\s+.+\(distributor\)/i,
+  /分组\s*.+\s*无可用渠道/i,
+  /无可用渠道（distributor）/i,
   /billing\s+service\s+temporarily\s+unavailable/i,
   /偷偷倒闭/i,
 ];
@@ -202,5 +205,8 @@ export function shouldAvoidSiteForRequest(status?: number | null, upstreamErrorT
   if (category === 'invalid_channel' && matchesAnyPattern(SITE_AVOID_INVALID_CHANNEL_PATTERNS, upstreamErrorText)) {
     return true;
   }
-  return category === 'network' || category === 'server' || category === 'rate_limit';
+  return category === 'network'
+    || category === 'server'
+    || category === 'rate_limit'
+    || category === 'upstream_group_empty';
 }

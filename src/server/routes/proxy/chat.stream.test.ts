@@ -473,6 +473,71 @@ describe('chat proxy stream behavior', () => {
     expect(response.json()?.choices?.[0]?.message?.content).toContain('ok from next channel');
   });
 
+  it('avoids the current site when chat returns upstream group empty', async () => {
+    shouldRetryProxyRequestMock.mockReturnValue(true);
+    shouldAvoidSiteForRequestMock.mockImplementation((_status?: unknown, message?: unknown) =>
+      typeof message === 'string' && /No available channel for model .* under group/i.test(message));
+
+    selectChannelMock.mockReturnValue({
+      channel: { id: 21, routeId: 22 },
+      site: { id: 54, name: 'empty-group-site', url: 'https://empty-group.example.com', platform: 'new-api' },
+      account: { id: 43, username: 'demo-user-empty' },
+      tokenName: 'default',
+      tokenValue: 'sk-empty',
+      actualModel: 'gpt-5.4',
+    });
+    selectNextChannelMock.mockReturnValue({
+      channel: { id: 22, routeId: 22 },
+      site: { id: 55, name: 'healthy-site', url: 'https://healthy.example.com', platform: 'new-api' },
+      account: { id: 44, username: 'demo-user-healthy' },
+      tokenName: 'default-2',
+      tokenValue: 'sk-healthy',
+      actualModel: 'gpt-5.4',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          message: 'No available channel for model gpt-5.4 under group default (distributor)',
+          type: 'upstream_error',
+        },
+      }), {
+        status: 503,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl-retried-empty-group-site',
+        object: 'chat.completion',
+        model: 'gpt-5.4',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok from healthy site' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+    const [selectedModel, excludedChannelIds, _policy, excludedSiteIds] = selectNextChannelMock.mock.calls[0] as [string, number[], unknown, Set<number>];
+    expect(selectedModel).toBe('gpt-5.4');
+    expect(excludedChannelIds).toEqual([21]);
+    expect(excludedSiteIds).toEqual(new Set([54]));
+    expect(response.json()?.choices?.[0]?.message?.content).toContain('ok from healthy site');
+  });
+
 
   it('sets anti-buffering SSE headers for streamed chat responses', async () => {
     const encoder = new TextEncoder();

@@ -955,6 +955,7 @@ function shouldApplySiteWideFailureTracking(context: SiteRuntimeFailureContext =
   return category === 'network'
     || category === 'server'
     || category === 'rate_limit'
+    || category === 'upstream_group_empty'
     || (category === 'invalid_channel' && /无权访问\s*.+\s*分组|no\s+access\s+to\s+group|no\s+tool\s+output\s+found\s+for\s+function\s+call/i.test(errorText));
 }
 
@@ -963,6 +964,7 @@ function shouldApplySiteModelFailureTracking(context: SiteRuntimeFailureContext 
   return category === 'network'
     || category === 'server'
     || category === 'rate_limit'
+    || category === 'upstream_group_empty'
     || category === 'model_unsupported';
 }
 
@@ -1285,6 +1287,7 @@ function shouldOpenImmediateRuntimeBreaker(context: SiteRuntimeFailureContext = 
   return category === 'network'
     || category === 'server'
     || category === 'rate_limit'
+    || category === 'upstream_group_empty'
     || category === 'model_unsupported'
     || (category === 'invalid_channel' && /无权访问\s*.+\s*分组|no\s+access\s+to\s+group|no\s+tool\s+output\s+found\s+for\s+function\s+call/i.test(errorText));
 }

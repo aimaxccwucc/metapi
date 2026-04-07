@@ -88,6 +88,12 @@ describe('proxyRetryPolicy', () => {
     expect(
       classifyProxyFailureCategory(503, 'No available channel for model gpt-5.4 under group default (distributor)'),
     ).toBe('upstream_group_empty');
+    expect(
+      classifyProxyFailureCategory(503, '分组 Fovt 下模型 claude-opus-4-6-thinking 无可用渠道（distributor）'),
+    ).toBe('upstream_group_empty');
+    expect(
+      classifyProxyFailureCategory(503, 'No available providers (cch_session_id: sess_123)'),
+    ).toBe('upstream_group_empty');
   });
 
   it('classifies explicit 403 model denial as model_unsupported before generic auth', () => {
@@ -102,6 +108,7 @@ describe('proxyRetryPolicy', () => {
     expect(shouldAvoidSiteForRequest(0, 'socket hang up')).toBe(true);
     expect(shouldAvoidSiteForRequest(403, '无权访问 cc2kpro 分组')).toBe(true);
     expect(shouldAvoidSiteForRequest(400, 'No tool output found for function call call_123.')).toBe(true);
+    expect(shouldAvoidSiteForRequest(503, 'No available channel for model gpt-5.4 under group default (distributor)')).toBe(true);
     expect(shouldAvoidSiteForRequest(400, 'unsupported model')).toBe(false);
     expect(shouldAvoidSiteForRequest(401, 'invalid api key')).toBe(false);
     expect(shouldAvoidSiteForRequest(403, 'forbidden')).toBe(false);
