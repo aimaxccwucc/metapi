@@ -159,6 +159,14 @@ const ACCOUNT_RATE_LIMIT_BURST_MAX = 6;
 const ACCOUNT_RATE_LIMIT_REFILL_MIN_PER_SEC = 0.15;
 const ACCOUNT_RATE_LIMIT_REFILL_MAX_PER_SEC = 1.2;
 const SHORT_WINDOW_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+const SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS = {
+  timeout: 20 * 60 * 1000,
+  ssl: 25 * 60 * 1000,
+  groupEmpty: 30 * 60 * 1000,
+  badResponseWrapper: 90 * 60 * 1000,
+} as const;
+const CODEX_CLAUDE_SUCCESS_POOL_RECENT_MS = 4 * 60 * 60 * 1000;
+const CODEX_CLAUDE_SUCCESS_POOL_SIZE = 4;
 
 const SITE_PROTOCOL_FAILURE_PATTERNS: RegExp[] = [
   /unsupported\s+legacy\s+protocol/i,
@@ -717,7 +725,8 @@ function resolveGovernanceSuppression(
   }
   if (input.failureCategory === 'invalid_channel' && normalizedModelName) {
     const siteScopedInvalidChannel = /无权访问\s*.+\s*分组|no\s+access\s+to\s+group|no\s+tool\s+output\s+found\s+for\s+function\s+call/i
-      .test(errorText);
+      .test(errorText)
+      || isGenericBadResponseStatusWrapper(errorText);
     if (siteScopedInvalidChannel) {
       return {
         subjectType: 'site',
@@ -796,6 +805,32 @@ function isUsageLimitRateLimitFailure(context: SiteRuntimeFailureContext = {}): 
   const status = typeof context.status === 'number' ? context.status : 0;
   if (status !== 429) return false;
   return matchesAnyPattern(USAGE_LIMIT_RATE_LIMIT_PATTERNS, context.errorText);
+}
+
+function isCodexOrClaudePreferenceModel(modelName?: string | null): boolean {
+  const normalized = normalizeModelAlias(modelName || '');
+  return normalized.includes('codex') || normalized.includes('claude');
+}
+
+function isGenericBadResponseStatusWrapper(errorText?: string | null): boolean {
+  const text = (errorText || '').trim().toLowerCase();
+  if (!text) return false;
+  return (
+    text.includes('bad_response_status_code')
+    || text.includes('bad response status code 400')
+    || (text.includes('openai_error') && text.includes('bad response status code'))
+  );
+}
+
+function isSslHandshakeFailure(errorText?: string | null): boolean {
+  return /ssl\s+handshake\s+failed|cloudflare\s+525|error\s+525/i.test((errorText || '').trim());
+}
+
+function isTimeoutLikeFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  const status = typeof context.status === 'number' ? context.status : 0;
+  const errorText = (context.errorText || '').trim();
+  return status === 524
+    || /timeout|timed?\s*out|gateway\s*time-?out|cloudflare\s+524|upstream\s+timeout/i.test(errorText);
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -900,6 +935,23 @@ function resolveImmediateModelBreakerDurationMs(context: SiteRuntimeFailureConte
   return 0;
 }
 
+function resolveImmediateSiteRuntimeBreakerDurationMs(context: SiteRuntimeFailureContext = {}): number {
+  const category = classifyProxyFailureCategory(context.status, context.errorText);
+  if (category === 'upstream_group_empty') return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.groupEmpty;
+  if (isGenericBadResponseStatusWrapper(context.errorText)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.badResponseWrapper;
+  if (isSslHandshakeFailure(context.errorText)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.ssl;
+  if (isTimeoutLikeFailure(context)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.timeout;
+  return 0;
+}
+
+function resolveExtendedChannelCooldownMs(context: SiteRuntimeFailureContext = {}): number {
+  const category = classifyProxyFailureCategory(context.status, context.errorText);
+  if (category === 'upstream_group_empty') return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.groupEmpty;
+  if (isSslHandshakeFailure(context.errorText)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.ssl;
+  if (isTimeoutLikeFailure(context)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.timeout;
+  return 0;
+}
+
 function isAuthLikeFailure(context: SiteRuntimeFailureContext = {}): boolean {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
@@ -956,6 +1008,7 @@ function shouldApplySiteWideFailureTracking(context: SiteRuntimeFailureContext =
     || category === 'server'
     || category === 'rate_limit'
     || category === 'upstream_group_empty'
+    || (category === 'invalid_channel' && isGenericBadResponseStatusWrapper(errorText))
     || (category === 'invalid_channel' && /无权访问\s*.+\s*分组|no\s+access\s+to\s+group|no\s+tool\s+output\s+found\s+for\s+function\s+call/i.test(errorText));
 }
 
@@ -965,7 +1018,8 @@ function shouldApplySiteModelFailureTracking(context: SiteRuntimeFailureContext 
     || category === 'server'
     || category === 'rate_limit'
     || category === 'upstream_group_empty'
-    || category === 'model_unsupported';
+    || category === 'model_unsupported'
+    || (category === 'invalid_channel' && isGenericBadResponseStatusWrapper(context.errorText));
 }
 
 function isTransientSiteRuntimeFailure(context: SiteRuntimeFailureContext = {}): boolean {
@@ -1289,12 +1343,16 @@ function shouldOpenImmediateRuntimeBreaker(context: SiteRuntimeFailureContext = 
     || category === 'rate_limit'
     || category === 'upstream_group_empty'
     || category === 'model_unsupported'
+    || (category === 'invalid_channel' && isGenericBadResponseStatusWrapper(errorText))
     || (category === 'invalid_channel' && /无权访问\s*.+\s*分组|no\s+access\s+to\s+group|no\s+tool\s+output\s+found\s+for\s+function\s+call/i.test(errorText));
 }
 
 function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
   state.penaltyScore += resolveSiteRuntimeFailurePenalty(context);
-  const immediateBreakerMs = resolveImmediateModelBreakerDurationMs(context);
+  const immediateBreakerMs = Math.max(
+    resolveImmediateModelBreakerDurationMs(context),
+    resolveImmediateSiteRuntimeBreakerDurationMs(context),
+  );
   const retryAfterMs = resolveRetryAfterMsFromContext(context, nowMs);
   if (immediateBreakerMs > 0 && shouldOpenImmediateRuntimeBreaker(context)) {
     state.breakerLevel = Math.min(
@@ -3079,13 +3137,18 @@ function partitionPreferredSuccessfulSiteCandidates<
   }
 
   const normalizedModel = normalizeModelAlias(modelName || '');
+  const preferCodexClaudePool = isCodexOrClaudePreferenceModel(normalizedModel);
   const siteSuccessAtMs = new Map<number, number>();
 
   for (const candidate of candidates) {
     const siteId = candidate.site.id;
     const persistedSuccessAtMs = getChannelPersistedSuccessAtMs(candidate.channel);
     const persistedFailureAtMs = parseIsoTimeMs(candidate.channel.lastFailAt);
-    if (persistedSuccessAtMs != null && persistedSuccessAtMs > (persistedFailureAtMs ?? 0)) {
+    if (
+      persistedSuccessAtMs != null
+      && persistedSuccessAtMs > (persistedFailureAtMs ?? 0)
+      && (!preferCodexClaudePool || (nowMs - persistedSuccessAtMs) <= CODEX_CLAUDE_SUCCESS_POOL_RECENT_MS)
+    ) {
       siteSuccessAtMs.set(siteId, Math.max(siteSuccessAtMs.get(siteId) ?? 0, persistedSuccessAtMs));
     }
 
@@ -3094,8 +3157,19 @@ function partitionPreferredSuccessfulSiteCandidates<
     const runtimeSuccessAtMs = state?.lastSuccessAtMs ?? null;
     const runtimeFailureAtMs = state?.lastFailureAtMs ?? null;
     if (runtimeSuccessAtMs == null || runtimeSuccessAtMs <= (runtimeFailureAtMs ?? 0)) continue;
+    if (preferCodexClaudePool && (nowMs - runtimeSuccessAtMs) > CODEX_CLAUDE_SUCCESS_POOL_RECENT_MS) continue;
     if (isRuntimeHealthBreakerOpen(state, nowMs)) continue;
     siteSuccessAtMs.set(siteId, Math.max(siteSuccessAtMs.get(siteId) ?? 0, runtimeSuccessAtMs));
+  }
+
+  if (preferCodexClaudePool && siteSuccessAtMs.size > CODEX_CLAUDE_SUCCESS_POOL_SIZE) {
+    const limitedRecentSites = Array.from(siteSuccessAtMs.entries())
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, CODEX_CLAUDE_SUCCESS_POOL_SIZE);
+    siteSuccessAtMs.clear();
+    for (const [siteId, successAtMs] of limitedRecentSites) {
+      siteSuccessAtMs.set(siteId, successAtMs);
+    }
   }
 
   if (siteSuccessAtMs.size === 0) {
@@ -5089,6 +5163,13 @@ export class TokenRouter {
     }
     if (retryAfterUntil && (!cooldownUntil || retryAfterUntil > cooldownUntil)) {
       cooldownUntil = retryAfterUntil;
+    }
+    const extendedCooldownMs = resolveExtendedChannelCooldownMs(normalizedContext);
+    if (extendedCooldownMs > 0) {
+      const extendedCooldownUntil = new Date(nowMs + extendedCooldownMs).toISOString();
+      if (!cooldownUntil || extendedCooldownUntil > cooldownUntil) {
+        cooldownUntil = extendedCooldownUntil;
+      }
     }
 
     await db.update(schema.routeChannels).set({

@@ -4324,6 +4324,64 @@ describe('chat proxy stream behavior', () => {
     expect(firstUrl).toContain('/v1/chat/completions');
   });
 
+  it('falls back from /v1/messages to /v1/chat/completions when claude messages gets generic bad_response wrapper on generic sites', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://generic.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-generic',
+      actualModel: 'claude-opus-4-6',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          message: 'openai_error',
+          type: 'bad_response_status_code',
+          code: 'bad_response_status_code',
+        },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl_generic_claude_fallback',
+        object: 'chat.completion',
+        created: 1_706_000_888,
+        model: 'claude-opus-4-6',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'fallback to chat completed after messages wrapper 400' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'claude-opus-4-6',
+        stream: false,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body?.choices?.[0]?.message?.content).toContain('fallback to chat completed');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
+    expect(firstUrl).toContain('/v1/messages');
+    expect(secondUrl).toContain('/v1/chat/completions');
+  });
+
   it('downgrades endpoint when upstream returns convert_request_failed/not implemented', async () => {
     fetchModelPricingCatalogMock.mockResolvedValue({
       models: [

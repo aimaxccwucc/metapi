@@ -929,6 +929,66 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.summary.join(' ')).toMatch(/最近成功通道复用|最近成功站点复用/);
   });
 
+  it('keeps codex and claude routing inside a small pool of recently successful sites', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('claude-opus-4-6-pool');
+    const router = new TokenRouter();
+    const preferredChannelIds: number[] = [];
+    const otherChannelIds: number[] = [];
+    const nowMs = Date.now();
+
+    for (let index = 0; index < 6; index += 1) {
+      const site = await createSite(`claude-pool-site-${index}`);
+      const account = await createAccount(site.id, `claude-pool-user-${index}`);
+      const token = await createToken(account.id, `claude-pool-token-${index}`);
+      const channel = await db.insert(schema.routeChannels).values({
+        routeId: route.id,
+        accountId: account.id,
+        tokenId: token.id,
+        priority: 0,
+        weight: 10,
+        enabled: true,
+      }).returning().get();
+
+      if (index < 4) {
+        preferredChannelIds.push(channel.id);
+        await router.recordSuccess(channel.id, 400 + index, 0, 'claude-opus-4-6-pool');
+        await db.update(schema.routeChannels).set({
+          lastUsedAt: new Date(nowMs - index * 60_000).toISOString(),
+          successCount: 1,
+          failCount: 0,
+        }).where(eq(schema.routeChannels.id, channel.id)).run();
+      } else {
+        otherChannelIds.push(channel.id);
+        await db.update(schema.routeChannels).set({
+          lastUsedAt: new Date(nowMs - (5 * 60 * 60 * 1000) - index * 60_000).toISOString(),
+          successCount: 1,
+          failCount: 0,
+        }).where(eq(schema.routeChannels.id, channel.id)).run();
+      }
+    }
+
+    invalidateTokenRouterCache();
+    const decision = await router.explainSelection('claude-opus-4-6-pool');
+    const preview = await router.previewSelectedChannel('claude-opus-4-6-pool');
+
+    expect(preview).toBeTruthy();
+    expect(preferredChannelIds).toContain(preview?.channel.id || -1);
+    for (const channelId of otherChannelIds) {
+      const candidate = decision.candidates.find((item) => item.channelId === channelId);
+      expect(candidate?.probability || 0).toBe(0);
+      expect(candidate?.reason || '').toMatch(/已验证成功站点|最近成功站点|未验证站点/);
+    }
+    expect(decision.summary.join(' ')).toContain('成功站点池复用');
+  });
+
   it('falls through to the next priority when all higher-priority channels recently failed', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
@@ -1670,7 +1730,7 @@ describe('TokenRouter selection scoring', () => {
 
     expect(primaryCandidate?.eligible).toBe(false);
     expect(primaryCandidate?.reason || '').toContain('系统隔离');
-    expect(primaryCandidate?.governanceSubjectType).toBe('channel');
+    expect(primaryCandidate?.governanceSubjectType).toBe('site');
     expect(primaryCandidate?.sourceModelDerived).toBe(true);
     expect(primaryCandidate?.modelCapabilityVerified).toBe(false);
     expect(backupCandidate?.eligible).toBe(true);
@@ -1678,7 +1738,7 @@ describe('TokenRouter selection scoring', () => {
     expect(events.some((event) => event.title === '路由治理抑制生效'
       && String(event.message || '').includes('failureCategory=invalid_channel')
       && String(event.message || '').includes('governanceAction=suppressed')
-      && String(event.message || '').includes('subjectType=channel')
+      && String(event.message || '').includes('subjectType=site')
       && String(event.message || '').includes('lastProbeStatus=passive_wait'))).toBe(true);
   });
 
@@ -1939,6 +1999,83 @@ describe('TokenRouter selection scoring', () => {
     expect(preview?.channel.id).toBeTruthy();
     expect(otherModelPreview?.channel.id).toBeTruthy();
     expect(otherModelPreview?.channel.id).not.toBe(backupChannel.id);
+  });
+
+  it('suppresses generic bad_response wrapper failures at site+model scope instead of only channel scope', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('claude-opus-bad-wrapper-site-scope');
+
+    const primarySite = await createSite('bad-wrapper-primary');
+    const primaryAccountA = await createAccount(primarySite.id, 'bad-wrapper-user-a');
+    const primaryTokenA = await createToken(primaryAccountA.id, 'bad-wrapper-token-a');
+    const primaryChannelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: primaryAccountA.id,
+      tokenId: primaryTokenA.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+
+    const primaryAccountB = await createAccount(primarySite.id, 'bad-wrapper-user-b');
+    const primaryTokenB = await createToken(primaryAccountB.id, 'bad-wrapper-token-b');
+    const primaryChannelB = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: primaryAccountB.id,
+      tokenId: primaryTokenB.id,
+      priority: 0,
+      weight: 20,
+      enabled: true,
+    }).returning().get();
+
+    const backupSite = await createSite('bad-wrapper-backup');
+    const backupAccount = await createAccount(backupSite.id, 'bad-wrapper-backup-user');
+    const backupToken = await createToken(backupAccount.id, 'bad-wrapper-backup-token');
+    const backupChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: backupAccount.id,
+      tokenId: backupToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(primaryChannelA.id, {
+      status: 400,
+      errorText: 'openai_error bad_response_status_code',
+      modelName: 'claude-opus-bad-wrapper-site-scope',
+    });
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).where(eq(schema.routeChannels.id, primaryChannelA.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('claude-opus-bad-wrapper-site-scope');
+    const governanceRows = await db.select().from(schema.routingGovernanceStates).all();
+    const candidateA = decision.candidates.find((candidate) => candidate.channelId === primaryChannelA.id);
+    const candidateB = decision.candidates.find((candidate) => candidate.channelId === primaryChannelB.id);
+    const backupCandidate = decision.candidates.find((candidate) => candidate.channelId === backupChannel.id);
+
+    expect(candidateA?.eligible).toBe(false);
+    expect(candidateB?.eligible).toBe(false);
+    expect(candidateB?.governanceSubjectType).toBe('site');
+    expect(candidateB?.reason || '').toContain('系统隔离');
+    expect(backupCandidate?.eligible).toBe(true);
+    expect(governanceRows.some((row) => row.subjectType === 'site'
+      && row.reasonCode === 'invalid_channel'
+      && row.modelName === 'claude-opus-bad-wrapper-site-scope')).toBe(true);
   });
 
   it('treats request-scoped site exclusion as temporary and does not turn it into a persistent site ban', async () => {

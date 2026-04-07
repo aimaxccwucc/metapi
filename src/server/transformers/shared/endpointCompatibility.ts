@@ -13,6 +13,15 @@ type PreferResponsesAfterLegacyChatErrorInput = {
   currentEndpoint?: CompatibilityEndpoint | null;
 };
 
+type GenericBadResponseWrapperDowngradeInput = {
+  status: number;
+  upstreamErrorText?: string | null;
+  sitePlatform?: string | null;
+  modelName?: string | null;
+  requestedModelHint?: string | null;
+  currentEndpoint?: CompatibilityEndpoint | null;
+};
+
 function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -223,6 +232,47 @@ export function promoteResponsesCandidateAfterLegacyChatError(
 
   endpointCandidates.splice(responsesIndex, 1);
   endpointCandidates.splice(currentIndex + 1, 0, 'responses');
+}
+
+export function shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper(
+  input: GenericBadResponseWrapperDowngradeInput,
+): boolean {
+  if (input.status !== 400) return false;
+  if (input.currentEndpoint !== 'messages') return false;
+
+  const sitePlatform = normalizePlatformName(input.sitePlatform);
+  if (
+    sitePlatform === 'claude'
+    || sitePlatform === 'anyrouter'
+    || sitePlatform === 'gemini'
+    || sitePlatform === 'gemini-cli'
+    || sitePlatform === 'antigravity'
+    || sitePlatform === 'codex'
+  ) {
+    return false;
+  }
+
+  const modelName = asTrimmedString(input.modelName);
+  const requestedModelHint = asTrimmedString(input.requestedModelHint);
+  if (!isClaudeFamilyModel(modelName) && !isClaudeFamilyModel(requestedModelHint)) {
+    return false;
+  }
+
+  const text = (input.upstreamErrorText || '').toLowerCase();
+  const { parsedCode, parsedType, parsedMessage } = parseUpstreamErrorFields(input.upstreamErrorText);
+  return (
+    parsedCode === 'bad_response_status_code'
+    || parsedType === 'bad_response_status_code'
+    || parsedMessage === 'bad response status code 400'
+    || (
+      parsedMessage === 'openai_error'
+      && (
+        text.includes('bad_response_status_code')
+        || text.includes('bad response status code')
+      )
+    )
+    || text.includes('bad response status code')
+  );
 }
 
 export function isEndpointDowngradeError(status: number, upstreamErrorText?: string | null): boolean {

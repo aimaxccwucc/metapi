@@ -985,6 +985,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           onAttemptFailure: (ctx) => {
             recordUpstreamEndpointFailure({
               ...endpointRuntimeContext,
+              sitePlatform: selected.site.platform,
               endpoint: ctx.request.endpoint,
               status: ctx.response.status,
               errorText: ctx.rawErrText,

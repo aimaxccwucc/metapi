@@ -34,6 +34,7 @@ import {
   isEndpointDowngradeError,
   isUnsupportedMediaTypeError,
   promoteResponsesCandidateAfterLegacyChatError,
+  shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper,
   shouldPreferResponsesAfterLegacyChatError,
 } from '../../transformers/shared/endpointCompatibility.js';
 import { sanitizeJsonSchemaForFunctionTool } from '../../transformers/shared/jsonSchema.js';
@@ -44,6 +45,7 @@ export {
   isEndpointDowngradeError,
   isUnsupportedMediaTypeError,
   promoteResponsesCandidateAfterLegacyChatError,
+  shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper,
   shouldPreferResponsesAfterLegacyChatError,
 };
 
@@ -1305,6 +1307,7 @@ export function recordUpstreamEndpointSuccess(input: {
 
 export function recordUpstreamEndpointFailure(input: {
   siteId: number;
+  sitePlatform?: string | null;
   accountId?: number;
   accountAccessToken?: string | null;
   accountApiToken?: string | null;
@@ -1327,7 +1330,15 @@ export function recordUpstreamEndpointFailure(input: {
     requestCapabilities: input.requestCapabilities,
   });
   if (!shouldUseEndpointRuntimeMemory(capabilityProfile)) return;
-  if (!shouldBlockEndpointByError(input.status, input.errorText)) return;
+  const shouldBlockForGenericMessagesWrapper = shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper({
+    status: input.status,
+    upstreamErrorText: input.errorText,
+    sitePlatform: input.sitePlatform,
+    modelName: input.modelName,
+    requestedModelHint: input.requestedModelHint,
+    currentEndpoint: input.endpoint,
+  });
+  if (!shouldBlockEndpointByError(input.status, input.errorText) && !shouldBlockForGenericMessagesWrapper) return;
 
   const suggestedEndpoint = inferSuggestedEndpointFromError(input.errorText);
   if (!shouldPersistFailureRuntimeMemory({

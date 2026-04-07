@@ -118,6 +118,8 @@ const SITE_AVOID_INVALID_CHANNEL_PATTERNS: RegExp[] = [
   /无权访问\s*.+\s*分组/i,
   /no\s+access\s+to\s+group/i,
   /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
+  /\bbad_response_status_code\b/i,
+  /bad\s+response\s+status\s+code\s+400/i,
 ];
 
 const UPSTREAM_GROUP_EMPTY_PATTERNS: RegExp[] = [

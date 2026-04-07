@@ -6,6 +6,7 @@ import {
   isEndpointDowngradeError,
   isUnsupportedMediaTypeError,
   promoteResponsesCandidateAfterLegacyChatError,
+  shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper,
   type CompatibilityEndpoint,
 } from './endpointCompatibility.js';
 import {
@@ -124,6 +125,14 @@ export function createChatEndpointStrategy(input: CreateChatEndpointStrategyInpu
       });
       return (
         isEndpointDowngradeError(ctx.response.status, ctx.rawErrText)
+        || shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper({
+          status: ctx.response.status,
+          upstreamErrorText: ctx.rawErrText,
+          sitePlatform: input.sitePlatform,
+          modelName: input.modelName,
+          requestedModelHint: input.requestedModelHint,
+          currentEndpoint: ctx.request.endpoint,
+        })
         || isMessagesRequiredError(ctx.rawErrText)
         || isEndpointDispatchDeniedError(ctx.response.status, ctx.rawErrText)
       );

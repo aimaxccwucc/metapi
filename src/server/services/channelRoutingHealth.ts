@@ -131,7 +131,7 @@ export function resolveWeightedFailureCooldownMs(
       cooldownMs = Math.max(Math.round(base * 2), 90_000);
       break;
     case 'upstream_group_empty':
-      cooldownMs = Math.max(Math.round(base * 3), 10 * 60 * 1000);
+      cooldownMs = Math.max(Math.round(base * 4), 20 * 60 * 1000);
       break;
     case 'payload_too_large':
       cooldownMs = Math.max(Math.round(base * 2.5), 2 * 60 * 1000);

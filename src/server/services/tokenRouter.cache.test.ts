@@ -369,6 +369,91 @@ describe('TokenRouter runtime cache', () => {
     expect(thirdRecord?.cooldownLevel).toBe(1);
   });
 
+  it('extends weighted cooldowns for timeout, ssl 525, and upstream group empty failures', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'extended-cooldown-site',
+      url: 'https://extended-cooldown-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'extended-cooldown-user',
+      accessToken: 'extended-cooldown-access-token',
+      apiToken: 'extended-cooldown-api-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'extended-cooldown-token',
+      token: 'sk-extended-cooldown-token',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini-extended-cooldown',
+      routingStrategy: 'weighted',
+      enabled: true,
+    }).returning().get();
+
+    const makeChannel = async (weight: number) => (
+      db.insert(schema.routeChannels).values({
+        routeId: route.id,
+        accountId: account.id,
+        tokenId: token.id,
+        priority: 0,
+        weight,
+        enabled: true,
+      }).returning().get()
+    );
+
+    const timeoutChannel = await makeChannel(10);
+    const sslChannel = await makeChannel(11);
+    const groupEmptyChannel = await makeChannel(12);
+    const router = new TokenRouter();
+
+    let startedAt = Date.now();
+    await router.recordFailure(timeoutChannel.id, {
+      status: 0,
+      errorText: 'upstream timeout after 10000ms',
+      modelName: 'gpt-4o-mini-extended-cooldown',
+    });
+    let record = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, timeoutChannel.id))
+      .get();
+    let cooldownMs = Date.parse(String(record?.cooldownUntil || '')) - startedAt;
+    expect(cooldownMs).toBeGreaterThanOrEqual(19 * 60 * 1000);
+    expect(cooldownMs).toBeLessThanOrEqual(21 * 60 * 1000);
+
+    startedAt = Date.now();
+    await router.recordFailure(sslChannel.id, {
+      status: 525,
+      errorText: 'Cloudflare 525: SSL handshake failed',
+      modelName: 'gpt-4o-mini-extended-cooldown',
+    });
+    record = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, sslChannel.id))
+      .get();
+    cooldownMs = Date.parse(String(record?.cooldownUntil || '')) - startedAt;
+    expect(cooldownMs).toBeGreaterThanOrEqual(24 * 60 * 1000);
+    expect(cooldownMs).toBeLessThanOrEqual(26 * 60 * 1000);
+
+    startedAt = Date.now();
+    await router.recordFailure(groupEmptyChannel.id, {
+      status: 503,
+      errorText: 'No available providers (cch_session_id: sess_123)',
+      modelName: 'gpt-4o-mini-extended-cooldown',
+    });
+    record = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, groupEmptyChannel.id))
+      .get();
+    cooldownMs = Date.parse(String(record?.cooldownUntil || '')) - startedAt;
+    expect(cooldownMs).toBeGreaterThanOrEqual(19 * 60 * 1000);
+  });
+
   it('round robins across all available channels regardless of priority', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'round-robin-site',

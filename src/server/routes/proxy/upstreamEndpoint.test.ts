@@ -16,6 +16,7 @@ import {
   recordUpstreamEndpointSuccess,
   resetUpstreamEndpointRuntimeState,
   resolveUpstreamEndpointCandidates,
+  shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper,
 } from './upstreamEndpoint.js';
 import {
   resetSiteProtocolConfigState,
@@ -499,6 +500,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
   it('keeps failed /v1/messages blocked for later generic /v1/responses requests', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
+      sitePlatform: 'new-api',
       accountId: baseContext.account.id,
       accountAccessToken: baseContext.account.accessToken,
       accountApiToken: baseContext.account.apiToken,
@@ -520,6 +522,34 @@ describe('resolveUpstreamEndpointCandidates', () => {
     );
 
     expect(order).toEqual(['responses', 'chat']);
+  });
+
+  it('blocks generic messages endpoint after claude wrapper bad_response_status_code failures', async () => {
+    recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      sitePlatform: 'new-api',
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'messages',
+      downstreamFormat: 'openai',
+      modelName: 'claude-opus-4-6',
+      requestedModelHint: 'claude-opus-4-6',
+      status: 400,
+      errorText: '{"error":{"message":"openai_error","type":"bad_response_status_code","code":"bad_response_status_code"}}',
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'claude-opus-4-6',
+      'openai',
+    );
+
+    expect(order).toEqual(['chat', 'responses']);
   });
 
   it('learns explicit upstream protocol suggestions after a protocol error', async () => {
@@ -811,6 +841,53 @@ describe('resolveUpstreamEndpointCandidates', () => {
     });
 
     expect(isEndpointDowngradeError(400, upstreamError)).toBe(true);
+  });
+
+  it('treats generic bad_response wrapper as downgrade candidate only for claude messages on generic platforms', () => {
+    expect(shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper({
+      status: 400,
+      upstreamErrorText: '{"error":{"message":"openai_error","type":"bad_response_status_code","code":"bad_response_status_code"}}',
+      sitePlatform: 'new-api',
+      modelName: 'claude-opus-4-6',
+      requestedModelHint: 'claude-opus-4-6',
+      currentEndpoint: 'messages',
+    })).toBe(true);
+
+    expect(shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper({
+      status: 400,
+      upstreamErrorText: '{"error":{"message":"openai_error","type":"bad_response_status_code","code":"bad_response_status_code"}}',
+      sitePlatform: 'openai',
+      modelName: 'claude-opus-4-6',
+      requestedModelHint: 'claude-opus-4-6',
+      currentEndpoint: 'messages',
+    })).toBe(true);
+
+    expect(shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper({
+      status: 400,
+      upstreamErrorText: '{"error":{"message":"openai_error","type":"bad_response_status_code","code":"bad_response_status_code"}}',
+      sitePlatform: 'claude',
+      modelName: 'claude-opus-4-6',
+      requestedModelHint: 'claude-opus-4-6',
+      currentEndpoint: 'messages',
+    })).toBe(false);
+
+    expect(shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper({
+      status: 400,
+      upstreamErrorText: '{"error":{"message":"openai_error","type":"bad_response_status_code","code":"bad_response_status_code"}}',
+      sitePlatform: 'new-api',
+      modelName: 'gpt-5.2',
+      requestedModelHint: 'gpt-5.2',
+      currentEndpoint: 'messages',
+    })).toBe(false);
+
+    expect(shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper({
+      status: 400,
+      upstreamErrorText: '{"error":{"message":"openai_error","type":"bad_response_status_code","code":"bad_response_status_code"}}',
+      sitePlatform: 'new-api',
+      modelName: 'claude-opus-4-6',
+      requestedModelHint: 'claude-opus-4-6',
+      currentEndpoint: 'chat',
+    })).toBe(false);
   });
 
   it('detects unsupported media type errors as compatibility retry candidates', () => {
