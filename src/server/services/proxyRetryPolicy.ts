@@ -89,6 +89,7 @@ const NON_RETRYABLE_REQUEST_PATTERNS: RegExp[] = [
 
 const RETRYABLE_UPSTREAM_COMPATIBILITY_400_PATTERNS: RegExp[] = [
   /no\s+tool\s+call\s+found\s+for\s+function\s+call\s+output/i,
+  /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]\.name['"]?/i,
 ];
 
@@ -110,11 +111,13 @@ const INVALID_CHANNEL_PATTERNS: RegExp[] = [
   /does\s+not\s+allow\s+\/v1\//i,
   /无权访问\s*.+\s*分组/i,
   /no\s+access\s+to\s+group/i,
+  /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
 ];
 
 const SITE_AVOID_INVALID_CHANNEL_PATTERNS: RegExp[] = [
   /无权访问\s*.+\s*分组/i,
   /no\s+access\s+to\s+group/i,
+  /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
 ];
 
 const UPSTREAM_GROUP_EMPTY_PATTERNS: RegExp[] = [

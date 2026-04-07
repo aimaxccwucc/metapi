@@ -405,10 +405,12 @@ describe('chat proxy stream behavior', () => {
 
   it('retries the next channel when codex-style tool continuity fails on one upstream', async () => {
     shouldRetryProxyRequestMock.mockReturnValue(true);
+    shouldAvoidSiteForRequestMock.mockImplementation((_status?: unknown, message?: unknown) =>
+      typeof message === 'string' && /No tool call found for function call output/i.test(message));
 
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
-      site: { name: 'bad-site', url: 'https://bad-upstream.example.com', platform: 'new-api' },
+      site: { id: 44, name: 'bad-site', url: 'https://bad-upstream.example.com', platform: 'new-api' },
       account: { id: 33, username: 'demo-user' },
       tokenName: 'default',
       tokenValue: 'sk-demo',
@@ -416,7 +418,7 @@ describe('chat proxy stream behavior', () => {
     });
     selectNextChannelMock.mockReturnValue({
       channel: { id: 12, routeId: 22 },
-      site: { name: 'good-site', url: 'https://good-upstream.example.com', platform: 'new-api' },
+      site: { id: 45, name: 'good-site', url: 'https://good-upstream.example.com', platform: 'new-api' },
       account: { id: 34, username: 'demo-user-2' },
       tokenName: 'default-2',
       tokenValue: 'sk-demo-2',
@@ -459,6 +461,10 @@ describe('chat proxy stream behavior', () => {
 
     expect(response.statusCode).toBe(200);
     expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+    const [selectedModel, excludedChannelIds, _policy, excludedSiteIds] = selectNextChannelMock.mock.calls[0] as [string, number[], unknown, Set<number>];
+    expect(selectedModel).toBe('gpt-5.4');
+    expect(excludedChannelIds).toEqual([11]);
+    expect(excludedSiteIds).toEqual(new Set([44]));
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
     const [secondUrl] = fetchMock.mock.calls[1] as [string, any];

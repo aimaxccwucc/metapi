@@ -716,6 +716,16 @@ function resolveGovernanceSuppression(
     };
   }
   if (input.failureCategory === 'invalid_channel' && normalizedModelName) {
+    const siteScopedInvalidChannel = /无权访问\s*.+\s*分组|no\s+access\s+to\s+group|no\s+tool\s+output\s+found\s+for\s+function\s+call/i
+      .test(errorText);
+    if (siteScopedInvalidChannel) {
+      return {
+        subjectType: 'site',
+        subjectId: input.account.siteId,
+        modelName: normalizedModelName,
+        reasonCode: 'invalid_channel',
+      };
+    }
     return {
       subjectType: 'channel',
       subjectId: input.channel.id,
@@ -941,9 +951,11 @@ function shouldApplyImmediateRoundRobinCooldown(category: ReturnType<typeof clas
 
 function shouldApplySiteWideFailureTracking(context: SiteRuntimeFailureContext = {}): boolean {
   const category = classifyProxyFailureCategory(context.status, context.errorText);
+  const errorText = (context.errorText || '').trim();
   return category === 'network'
     || category === 'server'
-    || category === 'rate_limit';
+    || category === 'rate_limit'
+    || (category === 'invalid_channel' && /无权访问\s*.+\s*分组|no\s+access\s+to\s+group|no\s+tool\s+output\s+found\s+for\s+function\s+call/i.test(errorText));
 }
 
 function shouldApplySiteModelFailureTracking(context: SiteRuntimeFailureContext = {}): boolean {
@@ -1269,10 +1281,12 @@ function getSiteRuntimeHealthDetails(siteId: number, modelName?: string | null, 
 
 function shouldOpenImmediateRuntimeBreaker(context: SiteRuntimeFailureContext = {}): boolean {
   const category = classifyProxyFailureCategory(context.status, context.errorText);
+  const errorText = (context.errorText || '').trim();
   return category === 'network'
     || category === 'server'
     || category === 'rate_limit'
-    || category === 'model_unsupported';
+    || category === 'model_unsupported'
+    || (category === 'invalid_channel' && /无权访问\s*.+\s*分组|no\s+access\s+to\s+group|no\s+tool\s+output\s+found\s+for\s+function\s+call/i.test(errorText));
 }
 
 function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
