@@ -4,7 +4,9 @@ import { config } from '../config.js';
 import {
   appendProxyDebugTrace,
   clearProxyDebugTraces,
+  flushProxyDebugTracePersistence,
   listProxyDebugTraces,
+  summarizeProxyDebugTraces,
 } from './proxyDebugTraceStore.js';
 
 describe('proxyDebugTraceStore', () => {
@@ -17,7 +19,7 @@ describe('proxyDebugTraceStore', () => {
     clearProxyDebugTraces();
   });
 
-  it('lists traces up to the configured retention ceiling', () => {
+  it('lists traces up to the configured retention ceiling', async () => {
     config.proxyDebugTraceEnabled = true;
     config.proxyDebugTraceMaxEntries = 800;
 
@@ -32,7 +34,7 @@ describe('proxyDebugTraceStore', () => {
       });
     }
 
-    const items = listProxyDebugTraces({
+    const items = await listProxyDebugTraces({
       sessionId: 'test-trace',
       limit: 9999,
     });
@@ -42,7 +44,7 @@ describe('proxyDebugTraceStore', () => {
     expect(items[items.length - 1]?.retryCount).toBe(819);
   });
 
-  it('normalizes undici headers nested inside detail payloads', () => {
+  it('normalizes undici headers nested inside detail payloads', async () => {
     config.proxyDebugTraceEnabled = true;
 
     const response = new Response('ok', {
@@ -63,12 +65,55 @@ describe('proxyDebugTraceStore', () => {
       },
     });
 
-    const [item] = listProxyDebugTraces({ sessionId: 'trace-with-headers', limit: 5 });
+    const [item] = await listProxyDebugTraces({ sessionId: 'trace-with-headers', limit: 5 });
     expect(item?.detail).toEqual({
       responseHeaders: {
         'content-type': 'application/json',
         'x-trace-id': 'trace-123',
       },
+    });
+  });
+
+  it('persists traces and builds summary buckets', async () => {
+    config.proxyDebugTraceEnabled = true;
+
+    appendProxyDebugTrace({
+      kind: 'proxy_success',
+      traceId: 'session:site-a',
+      sessionId: 'site-a',
+      traceHint: null,
+      requestedModel: 'gpt-4o',
+      siteId: 11,
+      siteName: 'Alpha',
+    });
+    appendProxyDebugTrace({
+      kind: 'proxy_exception',
+      traceId: 'session:site-a',
+      sessionId: 'site-a',
+      traceHint: null,
+      requestedModel: 'gpt-4o',
+      siteId: 11,
+      siteName: 'Alpha',
+    });
+    appendProxyDebugTrace({
+      kind: 'proxy_success',
+      traceId: 'session:site-b',
+      sessionId: 'site-b',
+      traceHint: null,
+      requestedModel: 'claude-sonnet-4.5',
+      siteId: 22,
+      siteName: 'Beta',
+    });
+
+    await flushProxyDebugTracePersistence();
+
+    const summary = await summarizeProxyDebugTraces();
+    expect(summary.total).toBeGreaterThanOrEqual(3);
+    expect(summary.kinds.proxy_success).toBeGreaterThanOrEqual(2);
+    expect(summary.sites[0]).toMatchObject({
+      siteId: 11,
+      siteName: 'Alpha',
+      count: 2,
     });
   });
 });

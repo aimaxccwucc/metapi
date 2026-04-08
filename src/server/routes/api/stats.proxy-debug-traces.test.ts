@@ -68,17 +68,67 @@ describe('stats proxy debug traces api', () => {
     const body = response.json() as {
       success: boolean;
       total: number;
+      summary?: { total?: number; kinds?: Record<string, number> };
       items: Array<Record<string, unknown>>;
     };
 
     expect(body.success).toBe(true);
     expect(body.total).toBe(1);
+    expect(body.summary?.total).toBeGreaterThanOrEqual(3);
+    expect(body.summary?.kinds?.route_selected).toBeGreaterThanOrEqual(2);
     expect(body.items).toHaveLength(1);
     expect(body.items[0]).toMatchObject({
       kind: 'proxy_retry',
       sessionId: 'turn-1',
       traceId: 'session:turn-1',
       retryCount: 1,
+    });
+  });
+
+  it('filters debug traces by kind and site id', async () => {
+    appendProxyDebugTrace({
+      kind: 'proxy_success',
+      traceId: 'session:alpha',
+      sessionId: 'alpha',
+      traceHint: null,
+      requestedModel: 'gpt-4o',
+      siteId: 1,
+      siteName: 'Alpha',
+    });
+    appendProxyDebugTrace({
+      kind: 'proxy_exception',
+      traceId: 'session:alpha',
+      sessionId: 'alpha',
+      traceHint: null,
+      requestedModel: 'gpt-4o',
+      siteId: 1,
+      siteName: 'Alpha',
+    });
+    appendProxyDebugTrace({
+      kind: 'proxy_success',
+      traceId: 'session:beta',
+      sessionId: 'beta',
+      traceHint: null,
+      requestedModel: 'gpt-4o-mini',
+      siteId: 2,
+      siteName: 'Beta',
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/stats/proxy-debug-traces?kind=proxy_success&siteId=1&limit=10',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      total: number;
+      items: Array<Record<string, unknown>>;
+    };
+    expect(body.total).toBe(1);
+    expect(body.items[0]).toMatchObject({
+      kind: 'proxy_success',
+      siteId: 1,
+      siteName: 'Alpha',
     });
   });
 });

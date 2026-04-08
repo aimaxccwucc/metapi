@@ -17,7 +17,7 @@ import {
   parseProxyLogBillingDetails,
   withProxyLogSelectFields,
 } from '../../services/proxyLogStore.js';
-import { listProxyDebugTraces } from '../../services/proxyDebugTraceStore.js';
+import { listProxyDebugTraces, summarizeProxyDebugTraces } from '../../services/proxyDebugTraceStore.js';
 import { parseProxyLogMessageMeta } from '../proxy/logPathMeta.js';
 import { requiresManagedAccountTokens } from '../../services/accountExtraConfig.js';
 import { ACCOUNT_TOKEN_VALUE_STATUS_READY } from '../../services/accountTokenService.js';
@@ -500,17 +500,21 @@ function mapProxyLogRow(
 export async function statsRoutes(app: FastifyInstance) {
   const proxyLogBaseFields = await getProxyLogBaseSelectFields();
 
-  app.get<{ Querystring: { traceId?: string; sessionId?: string; traceHint?: string; limit?: string } }>('/api/stats/proxy-debug-traces', async (request) => {
+  app.get<{ Querystring: { traceId?: string; sessionId?: string; traceHint?: string; kind?: string; siteId?: string; limit?: string } }>('/api/stats/proxy-debug-traces', async (request) => {
     const limit = Number.parseInt(request.query.limit || '100', 10);
-    const items = listProxyDebugTraces({
+    const items = await listProxyDebugTraces({
       traceId: request.query.traceId,
       sessionId: request.query.sessionId,
       traceHint: request.query.traceHint,
+      kind: request.query.kind,
+      siteId: Number.parseInt(request.query.siteId || '0', 10) || null,
       limit: Number.isFinite(limit) ? limit : 100,
     });
+    const summary = await summarizeProxyDebugTraces();
     return {
       success: true,
       total: items.length,
+      summary,
       items,
     };
   });

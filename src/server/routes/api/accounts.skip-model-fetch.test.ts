@@ -122,4 +122,42 @@ describe('accounts skipModelFetch behavior', () => {
     // Model availability should be populated since getModels was called (which refreshModels uses later or handled directly)
     // Actually our POST /api/accounts triggers rebuildTokenRoutesFromAvailability and refreshModelsForAccount asynchronously, so models might not be populated synchronously, but the mock should be called.
   });
+
+  it('supports batch api key creation with newline separated keys', async () => {
+    getModelsMock.mockResolvedValue(['gpt-4o-mini']);
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Batch API Key Site',
+      url: 'https://batch-apikey.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts',
+      payload: {
+        siteId: site.id,
+        credentialMode: 'apikey',
+        accessToken: 'sk-alpha\nsk-beta',
+        accessTokens: 'sk-alpha\nsk-beta',
+        skipModelFetch: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      batch?: boolean;
+      successCount?: number;
+      failedCount?: number;
+      successItems?: Array<{ id: number }>;
+    };
+    expect(body.batch).toBe(true);
+    expect(body.successCount).toBe(2);
+    expect(body.failedCount).toBe(0);
+    expect(body.successItems).toHaveLength(2);
+
+    const accounts = await db.select().from(schema.accounts).all();
+    expect(accounts).toHaveLength(2);
+    expect(accounts.map((item) => item.apiToken).sort()).toEqual(['sk-alpha', 'sk-beta']);
+  });
 });

@@ -49,6 +49,7 @@ function createTokenForm(credentialMode: 'session' | 'apikey' = 'session') {
     siteId: 0,
     username: '',
     accessToken: '',
+    accessTokens: '',
     platformUserId: '',
     refreshToken: '',
     tokenExpiresAt: '',
@@ -100,6 +101,16 @@ function canOpenManualCheckin(account: any): boolean {
 
 function resolveManualSiteUrl(account: any): string {
   return typeof account?.site?.url === 'string' ? account.site.url.trim() : '';
+}
+
+function resolveCheckinAttentionReason(account: any): string {
+  const snapshot = account?.checkinSnapshot;
+  const reasonCode = typeof snapshot?.reasonCode === 'string' ? snapshot.reasonCode.trim() : '';
+  const message = typeof snapshot?.message === 'string' ? snapshot.message.trim() : '';
+  if (reasonCode && message) return `${reasonCode}: ${message}`;
+  if (message) return message;
+  if (reasonCode) return reasonCode;
+  return '';
 }
 
 async function copyText(text: string) {
@@ -521,7 +532,10 @@ export default function Accounts() {
 
   const handleTokenAdd = async () => {
     if (!tokenForm.siteId || !tokenForm.accessToken) return;
-    if (activeSegment === 'apikey' && !verifyResult?.success && !tokenForm.skipModelFetch) {
+    const batchApiKeyCount = activeSegment === 'apikey'
+      ? tokenForm.accessTokens.trim().split(/[\s,，;\n\r\t]+/g).filter(Boolean).length
+      : 0;
+    if (activeSegment === 'apikey' && batchApiKeyCount <= 1 && !verifyResult?.success && !tokenForm.skipModelFetch) {
       toast.error('请先验证 Token 成功后再添加账号');
       return;
     }
@@ -532,6 +546,7 @@ export default function Accounts() {
         siteId: tokenForm.siteId,
         username: tokenForm.username.trim() || undefined,
         accessToken: tokenForm.accessToken,
+        accessTokens: activeSegment === 'apikey' ? tokenForm.accessTokens : undefined,
         platformUserId: tokenForm.platformUserId ? parseInt(tokenForm.platformUserId) : undefined,
         refreshToken: isSub2ApiSelected && tokenForm.refreshToken.trim()
           ? tokenForm.refreshToken.trim()
@@ -543,6 +558,17 @@ export default function Accounts() {
         skipModelFetch: tokenForm.skipModelFetch,
       });
       closeAddPanel();
+      if (result.batch) {
+        const successCount = Number(result.successCount || 0);
+        const failedCount = Number(result.failedCount || 0);
+        if (failedCount > 0) {
+          toast.info(result.message || `批量创建完成：成功 ${successCount}，失败 ${failedCount}`);
+        } else {
+          toast.success(result.message || `已批量创建 ${successCount} 个 API Key 连接`);
+        }
+        load();
+        return;
+      }
       if (result.queued) {
         toast.info(result.message || '账号已添加，后台正在同步初始化信息。');
       } else if (result.tokenType === 'apikey') {
@@ -1214,6 +1240,8 @@ export default function Accounts() {
     ),
   );
   const canSubmitWithoutVerification = activeSegment === 'session';
+  const hasBatchApiKeys = activeSegment === 'apikey'
+    && tokenForm.accessTokens.trim().split(/[\s,，;\n\r\t]+/g).filter(Boolean).length > 1;
 
   return (
     <div className="animate-fade-in">
@@ -1674,9 +1702,38 @@ export default function Accounts() {
                 <textarea
                   placeholder="粘贴 API Key"
                   value={tokenForm.accessToken}
-                  onChange={(e) => { setTokenForm((f) => ({ ...f, accessToken: e.target.value.trim(), credentialMode: 'apikey' })); setVerifyResult(null); }}
+                  onChange={(e) => {
+                    const nextValue = e.target.value.trim();
+                    setTokenForm((f) => ({
+                      ...f,
+                      accessToken: nextValue,
+                      accessTokens: nextValue,
+                      credentialMode: 'apikey',
+                    }));
+                    setVerifyResult(null);
+                  }}
                   style={{ ...inputStyle, fontFamily: 'var(--font-mono)', height: 72, resize: 'none' as const }}
                 />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <textarea
+                    placeholder="批量 API Key（可选，支持换行、空格、逗号分隔）"
+                    value={tokenForm.accessTokens}
+                    onChange={(e) => {
+                      const nextValue = e.target.value;
+                      setTokenForm((f) => ({
+                        ...f,
+                        accessTokens: nextValue,
+                        accessToken: nextValue.trim(),
+                        credentialMode: 'apikey',
+                      }));
+                      setVerifyResult(null);
+                    }}
+                    style={{ ...inputStyle, fontFamily: 'var(--font-mono)', minHeight: 96, resize: 'vertical' as const }}
+                  />
+                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                    填 1 个时按单连接创建；填多个时会批量创建独立连接，并自动参与路由。
+                  </div>
+                </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <input
                     placeholder="用户 ID（可选）"
@@ -1740,7 +1797,7 @@ export default function Accounts() {
                   </button>
                   <button
                     onClick={handleTokenAdd}
-                    disabled={saving || !tokenForm.siteId || !tokenForm.accessToken || (!canAddVerifiedConnection && !tokenForm.skipModelFetch)}
+                    disabled={saving || !tokenForm.siteId || !tokenForm.accessToken || (!hasBatchApiKeys && !canAddVerifiedConnection && !tokenForm.skipModelFetch)}
                     className="btn btn-success"
                   >
                     {saving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />添加中...</> : '添加连接'}
@@ -1936,6 +1993,9 @@ export default function Accounts() {
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: 'var(--color-text-muted)' }}>
                   <div>当前跳过原因：{resolveAccountAutoCheckin(manualCheckinTarget, resolveAccountCapabilities(manualCheckinTarget)).reason}</div>
+                  {resolveCheckinAttentionReason(manualCheckinTarget) && (
+                    <div>最近一次签到记录：{resolveCheckinAttentionReason(manualCheckinTarget)}</div>
+                  )}
                   <div>
                     推荐入口：
                     {resolveManualCheckinUrl(manualCheckinTarget) ? (
