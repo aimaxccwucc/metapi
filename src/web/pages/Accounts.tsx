@@ -85,6 +85,19 @@ function buildDiagnosticPath(targetType: 'site' | 'account' | 'token', targetId:
   return `/diagnostics?${params.toString()}`;
 }
 
+function resolveManualCheckinUrl(account: any): string {
+  const externalCheckinUrl = typeof account?.site?.externalCheckinUrl === 'string'
+    ? account.site.externalCheckinUrl.trim()
+    : '';
+  if (externalCheckinUrl) return externalCheckinUrl;
+  const siteUrl = typeof account?.site?.url === 'string' ? account.site.url.trim() : '';
+  return siteUrl;
+}
+
+function canOpenManualCheckin(account: any): boolean {
+  return resolveManualCheckinUrl(account).length > 0;
+}
+
 export default function Accounts() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -135,6 +148,7 @@ export default function Accounts() {
   const [rebindVerifyResult, setRebindVerifyResult] = useState<any>(null);
   const [rebindVerifying, setRebindVerifying] = useState(false);
   const [rebindSaving, setRebindSaving] = useState(false);
+  const [manualCheckinTarget, setManualCheckinTarget] = useState<any | null>(null);
   const [modelModal, setModelModal] = useState<{
     open: boolean;
     account: any | null;
@@ -986,6 +1000,41 @@ export default function Accounts() {
     setRebindSaving(false);
   };
 
+  const closeManualCheckinPanel = () => {
+    setManualCheckinTarget(null);
+  };
+
+  const openManualCheckinPanel = (account: any) => {
+    setManualCheckinTarget(account);
+  };
+
+  const openManualCheckinWindow = (account: any, mode: 'checkin' | 'site' = 'checkin') => {
+    const targetUrl = mode === 'site'
+      ? (typeof account?.site?.url === 'string' ? account.site.url.trim() : '')
+      : resolveManualCheckinUrl(account);
+    if (!targetUrl) {
+      toast.error('当前站点未配置可打开的签到入口');
+      return;
+    }
+    if (typeof window === 'undefined' || typeof window.open !== 'function') {
+      toast.error('当前环境不支持直接打开站点');
+      return;
+    }
+    window.open(targetUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleRetryManualCheckin = async (account: any) => {
+    await withLoading(`manual-checkin-${account.id}`, async () => {
+      await api.triggerCheckin(account.id);
+      await load();
+    }, '已重新触发签到，请稍后查看结果');
+  };
+
+  const handleManualCheckinRebind = (account: any) => {
+    closeManualCheckinPanel();
+    openRebindPanel(account);
+  };
+
   const handleVerifyRebindToken = async () => {
     if (!rebindTarget || !rebindForm.accessToken.trim()) return;
     setRebindVerifying(true);
@@ -1719,6 +1768,87 @@ export default function Accounts() {
           )}
 
           <CenteredModal
+            open={Boolean(manualCheckinTarget)}
+            onClose={closeManualCheckinPanel}
+            title="人工处理签到"
+            maxWidth={840}
+            bodyStyle={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+            footer={<button onClick={closeManualCheckinPanel} className="btn btn-ghost">关闭</button>}
+          >
+            {manualCheckinTarget ? (
+              <>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  连接: {resolveAccountDisplayName(manualCheckinTarget)} @ {manualCheckinTarget.site?.name || '-'}。
+                  当前账号被标记为“需要人工验证”，自动签到会跳过它，直到你在真实浏览器里完成一次校验或登录恢复。
+                </div>
+
+                <div className="alert alert-warning">
+                  <div className="alert-title">半自动处理步骤</div>
+                  <div style={{ fontSize: 12, lineHeight: 1.7, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <span>1. 先打开站点或签到页，在真实浏览器里完成 Turnstile / Cloudflare / 站点登录验证。</span>
+                    <span>2. 如果验证后站点内 Session 已更新，回到这里执行“重新绑定 Session”。</span>
+                    <span>3. 如果原 Session 仍可用，只是需要先人工过一次校验，直接点“重试签到”。</span>
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => openManualCheckinWindow(manualCheckinTarget, 'checkin')}
+                    disabled={!canOpenManualCheckin(manualCheckinTarget)}
+                  >
+                    打开签到页
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ border: '1px solid var(--color-border)' }}
+                    onClick={() => openManualCheckinWindow(manualCheckinTarget, 'site')}
+                    disabled={!(typeof manualCheckinTarget?.site?.url === 'string' && manualCheckinTarget.site.url.trim())}
+                  >
+                    打开站点主页
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ border: '1px solid var(--color-border)' }}
+                    onClick={() => handleRetryManualCheckin(manualCheckinTarget)}
+                    disabled={!!actionLoading[`manual-checkin-${manualCheckinTarget.id}`]}
+                  >
+                    {actionLoading[`manual-checkin-${manualCheckinTarget.id}`]
+                      ? <><span className="spinner spinner-sm" />重试中...</>
+                      : '重试签到'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-success"
+                    onClick={() => handleManualCheckinRebind(manualCheckinTarget)}
+                    disabled={!resolveAccountCapabilities(manualCheckinTarget).canCheckin}
+                  >
+                    重新绑定 Session
+                  </button>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  <div>当前跳过原因：{resolveAccountAutoCheckin(manualCheckinTarget, resolveAccountCapabilities(manualCheckinTarget)).reason}</div>
+                  <div>
+                    推荐入口：
+                    <span style={{ fontFamily: 'var(--font-mono)', marginLeft: 6, wordBreak: 'break-all' }}>
+                      {resolveManualCheckinUrl(manualCheckinTarget) || '未配置'}
+                    </span>
+                  </div>
+                  {manualCheckinTarget.site?.externalCheckinUrl ? (
+                    <div>已配置外部签到站 URL，优先打开该地址进行人工处理。</div>
+                  ) : (
+                    <div>当前未配置外部签到站 URL，将回退打开站点主页。可在“站点管理”里补充外部签到站 URL。</div>
+                  )}
+                </div>
+              </>
+            ) : null}
+          </CenteredModal>
+
+          <CenteredModal
             open={Boolean(editingAccount)}
             onClose={closeEditPanel}
             title="编辑账号"
@@ -2013,6 +2143,16 @@ export default function Accounts() {
                                   {actionLoading[`checkin-${a.id}`] ? <span className="spinner spinner-sm" /> : '签到'}
                                 </button>
                               )}
+                              {a.site?.autoCheckinPolicy === 'manual_required' && (
+                                <button
+                                  type="button"
+                                  onClick={() => openManualCheckinPanel(a)}
+                                  className="btn btn-link btn-link-info"
+                                  data-testid={`account-manual-checkin-${a.id}`}
+                                >
+                                  处理
+                                </button>
+                              )}
                               {a.status === 'expired' && !capabilities.proxyOnly && (
                                 <button
                                   onClick={() => openRebindPanel(a)}
@@ -2223,6 +2363,16 @@ export default function Accounts() {
                             {capabilities.canCheckin && (
                               <button onClick={() => withLoading(`checkin-${a.id}`, () => api.triggerCheckin(a.id), '签到完成')} disabled={actionLoading[`checkin-${a.id}`]} className="btn btn-link btn-link-warning">
                                 {actionLoading[`checkin-${a.id}`] ? <span className="spinner spinner-sm" /> : '签到'}
+                              </button>
+                            )}
+                            {a.site?.autoCheckinPolicy === 'manual_required' && (
+                              <button
+                                type="button"
+                                onClick={() => openManualCheckinPanel(a)}
+                                className="btn btn-link btn-link-info"
+                                data-testid={`account-manual-checkin-${a.id}`}
+                              >
+                                处理
                               </button>
                             )}
                             {a.status === 'expired' && !capabilities.proxyOnly && (
