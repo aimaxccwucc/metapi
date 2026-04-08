@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { act, create, type ReactTestInstance } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import App from './App.js';
+import { APP_VERSION_RELOAD_STORAGE_KEY } from './appVersion.js';
 
 const { apiMock, authSessionMock } = vi.hoisted(() => ({
   apiMock: {
@@ -89,6 +90,11 @@ function createLocalStorage() {
 }
 
 function setupRuntime(width: number) {
+  const location = {
+    href: 'https://metapi.test/accounts',
+    pathname: '/accounts',
+    reload: vi.fn(),
+  };
   const matchMedia = (query: string) => ({
     matches: query.includes('prefers-color-scheme')
       ? false
@@ -105,6 +111,7 @@ function setupRuntime(width: number) {
   vi.stubGlobal('localStorage', createLocalStorage());
   vi.stubGlobal('window', {
     innerWidth: width,
+    location,
     matchMedia,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
@@ -115,9 +122,21 @@ function setupRuntime(width: number) {
       setAttribute: vi.fn(),
       getAttribute: vi.fn(),
     },
+    baseURI: 'https://metapi.test/accounts',
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
+    querySelectorAll: vi.fn((selector: string) => {
+      if (selector === 'script[src]') {
+        return [{
+          getAttribute: (name: string) => (name === 'src' ? '/assets/index-old.js' : null),
+          src: 'https://metapi.test/assets/index-old.js',
+        }];
+      }
+      return [];
+    }),
   });
+
+  return { location };
 }
 
 function collectText(node: ReactTestInstance): string {
@@ -165,6 +184,15 @@ describe('App runtime banner', () => {
     vi.useFakeTimers();
     authSessionMock.hasValidAuthSession.mockReturnValue(true);
     apiMock.getEvents.mockResolvedValue([]);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/accounts') {
+        return {
+          ok: true,
+          text: async () => '<html><head><script type="module" src="/assets/index-new.js"></script></head></html>',
+        };
+      }
+      throw new Error(`Unexpected fetch: ${String(input)}`);
+    }));
   });
 
   afterEach(() => {
@@ -301,6 +329,32 @@ describe('App runtime banner', () => {
       expect(pageText).toContain('24 小时请求失败偏高');
       expect(pageText).toContain('24/120');
       expect(pageText).toContain('失败率约 20%');
+    } finally {
+      if (root) {
+        await act(async () => {
+          root.unmount();
+        });
+      }
+    }
+  });
+
+  it('reloads once when the current page is still running an old bundle after deployment', async () => {
+    const { location } = setupRuntime(1280);
+    apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({}));
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/accounts']}>
+            <App />
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      expect(location.reload).toHaveBeenCalledTimes(1);
+      expect(localStorage.getItem(APP_VERSION_RELOAD_STORAGE_KEY)).toBe('/assets/index-new.js');
     } finally {
       if (root) {
         await act(async () => {

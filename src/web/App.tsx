@@ -15,6 +15,12 @@ import { resolveLoginErrorMessage } from './loginError.js';
 import { SITE_DOCS_URL, SITE_GITHUB_URL } from './docsLink.js';
 import { useAnimatedVisibility } from './components/useAnimatedVisibility.js';
 import { useIsMobile } from './components/useIsMobile.js';
+import {
+  APP_VERSION_RELOAD_STORAGE_KEY,
+  extractEntryAssetPathFromHtml,
+  findCurrentEntryAssetPath,
+  shouldAutoReloadForVersionMismatch,
+} from './appVersion.js';
 import CenteredModal from './components/CenteredModal.js';
 import RouteErrorBoundary from './components/RouteErrorBoundary.js';
 const SearchModal = lazy(() => import('./components/SearchModal.js'));
@@ -69,6 +75,7 @@ const RUNTIME_OVERVIEW_POLL_MS = 60_000;
 const HIGH_PROXY_FAILURE_COUNT_THRESHOLD = 20;
 const EXTREME_PROXY_FAILURE_COUNT_THRESHOLD = 50;
 const HIGH_PROXY_FAILURE_RATE_THRESHOLD = 0.12;
+const APP_VERSION_CHECK_INTERVAL_MS = 60_000;
 
 function preloadRoute(path: string) {
   if (preloadedRouteSet.has(path)) return;
@@ -717,6 +724,7 @@ function AppShell() {
   const resolvedThemeLabel = resolvedTheme === 'dark' ? t('深色') : t('浅色');
   const avatarUrl = buildDicebearAvatarUrl(userProfile.avatarStyle, userProfile.avatarSeed);
   const runtimeBannerNotice = buildRuntimeBannerNotice(runtimeOverview, t);
+  const appVersionMismatchToastShownRef = useRef(false);
 
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -867,6 +875,60 @@ function AppShell() {
     localStorage.setItem(FIRST_USE_DOC_REMINDER_KEY, '1');
     toast.info(`${t('首次使用建议先阅读站点文档：')}${SITE_DOCS_URL}`);
   }, [authed, t, toast]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const checkAppVersion = async () => {
+      try {
+        const currentEntryAssetPath = findCurrentEntryAssetPath(document);
+        if (!currentEntryAssetPath) return;
+
+        const response = await fetch(window.location.pathname, {
+          method: 'GET',
+          cache: 'no-store',
+          credentials: 'same-origin',
+        });
+        if (!response.ok) return;
+
+        const html = await response.text();
+        if (cancelled) return;
+
+        const latestEntryAssetPath = extractEntryAssetPathFromHtml(html, window.location.href);
+        if (!latestEntryAssetPath) return;
+
+        if (currentEntryAssetPath === latestEntryAssetPath) {
+          localStorage.removeItem(APP_VERSION_RELOAD_STORAGE_KEY);
+          appVersionMismatchToastShownRef.current = false;
+          return;
+        }
+
+        const lastReloadTarget = localStorage.getItem(APP_VERSION_RELOAD_STORAGE_KEY);
+        if (shouldAutoReloadForVersionMismatch(currentEntryAssetPath, latestEntryAssetPath, lastReloadTarget)) {
+          localStorage.setItem(APP_VERSION_RELOAD_STORAGE_KEY, latestEntryAssetPath);
+          window.location.reload();
+          return;
+        }
+
+        if (!appVersionMismatchToastShownRef.current) {
+          appVersionMismatchToastShownRef.current = true;
+          toast.info(t('检测到后台已更新，当前页面仍在使用旧版本，已尝试自动刷新；若未恢复，请手动刷新页面。'));
+        }
+      } catch {
+        // Ignore version probe failures to avoid interrupting normal usage.
+      }
+    };
+
+    void checkAppVersion();
+    const timer = setInterval(() => {
+      void checkAppVersion();
+    }, APP_VERSION_CHECK_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [t, toast]);
 
   useEffect(() => {
     if (!authed) {
