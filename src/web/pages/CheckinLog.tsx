@@ -136,8 +136,9 @@ export default function CheckinLog() {
   );
 
   const clearTimeRange = () => {
-    setFromInput("");
-    setToInput("");
+    const nextRange = getTodayTimeRangeInput();
+    setFromInput(nextRange.from);
+    setToInput(nextRange.to);
   };
 
   const load = async () => {
@@ -147,7 +148,18 @@ export default function CheckinLog() {
       let offset = 0;
 
       while (true) {
-        const data = await api.getCheckinLogs(`limit=${CHECKIN_LOG_PAGE_SIZE}&offset=${offset}`);
+        const params = new URLSearchParams({
+          limit: String(CHECKIN_LOG_PAGE_SIZE),
+          offset: String(offset),
+        });
+        if (fromInput) {
+          params.set("from", fromInput);
+        }
+        if (toInput) {
+          params.set("to", toInput);
+        }
+
+        const data = await api.getCheckinLogs(params.toString());
         const safeRows = Array.isArray(data) ? data : [];
         if (safeRows.length === 0) break;
 
@@ -165,8 +177,13 @@ export default function CheckinLog() {
   };
 
   useEffect(() => {
+    if (hasInvalidTimeRange) {
+      setLogs([]);
+      setLoading(false);
+      return;
+    }
     load();
-  }, []);
+  }, [fromInput, hasInvalidTimeRange, toInput]);
 
   const handleTriggerAll = async () => {
     setTriggering(true);
@@ -235,7 +252,7 @@ export default function CheckinLog() {
         className="btn btn-ghost proxy-logs-filter-reset"
         onClick={clearTimeRange}
       >
-        清空筛选
+        恢复今天
       </button>
     </div>
   );
@@ -268,7 +285,7 @@ export default function CheckinLog() {
         <div>
           <h2 className="page-title">{tr("签到记录")}</h2>
           <div className="page-subtitle">
-            当前页展示的是签到执行记录，不等于账号总数。页面会自动分批拉取最近全部签到记录。
+            当前页展示的是签到执行记录，不等于账号总数。默认查询今天的签到记录；调整时间范围后会重新向后端查询。
           </div>
           {!loading && (
             <div className="page-subtitle">
@@ -598,8 +615,8 @@ export default function CheckinLog() {
             </svg>
             <div className="empty-state-title">暂无签到记录</div>
             <div className="empty-state-desc">
-              {logs.length > 0
-                ? "当前筛选条件下没有签到记录，可调整筛选条件查看已加载记录。"
+              {fromInput || toInput || filter !== "all"
+                ? "当前查询条件下没有签到记录，可调整筛选条件重新查询。"
                 : "点击“运行所有签到”开始执行。"}
             </div>
           </div>

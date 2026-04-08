@@ -82,7 +82,7 @@ describe('CheckinLog pagination', () => {
     }
   });
 
-  it('loads all checkin logs automatically after the initial 100 rows', async () => {
+  it('loads paginated checkin logs for the selected day range', async () => {
     apiMock.getCheckinLogs
       .mockResolvedValueOnce(Array.from({ length: 100 }, (_, index) => buildLog(index + 1)))
       .mockResolvedValueOnce(Array.from({ length: 20 }, (_, index) => buildLog(index + 101)));
@@ -100,11 +100,11 @@ describe('CheckinLog pagination', () => {
       });
       await flushMicrotasks();
 
-      expect(apiMock.getCheckinLogs).toHaveBeenNthCalledWith(1, 'limit=100&offset=0');
-      expect(apiMock.getCheckinLogs).toHaveBeenNthCalledWith(2, 'limit=100&offset=100');
+      expect(apiMock.getCheckinLogs).toHaveBeenNthCalledWith(1, 'limit=100&offset=0&from=2026-04-08T00%3A00&to=2026-04-08T23%3A59');
+      expect(apiMock.getCheckinLogs).toHaveBeenNthCalledWith(2, 'limit=100&offset=100&from=2026-04-08T00%3A00&to=2026-04-08T23%3A59');
       expect(collectText(root!.root)).toContain('已加载 120 条签到记录，当前筛选命中 120 条。');
       expect(collectText(root!.root)).toContain('user-120');
-      expect(collectText(root!.root)).toContain('页面会自动分批拉取最近全部签到记录。');
+      expect(collectText(root!.root)).toContain('默认查询今天的签到记录；调整时间范围后会重新向后端查询。');
       expect(collectText(root!.root)).not.toContain('加载更多签到记录');
     } finally {
       root?.unmount();
