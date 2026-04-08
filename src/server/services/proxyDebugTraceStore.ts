@@ -1,5 +1,7 @@
 import { config } from '../config.js';
 
+type HeadersLike = Headers | Record<string, unknown> | null | undefined;
+
 export type ProxyDebugTraceEvent = {
   at: string;
   kind: string;
@@ -22,6 +24,47 @@ export type ProxyDebugTraceEvent = {
 };
 
 const traceEvents: ProxyDebugTraceEvent[] = [];
+
+function normalizeHeadersLike(value: HeadersLike): Record<string, unknown> | null {
+  if (!value) return null;
+
+  const headerEntries = value as { entries?: unknown; get?: unknown };
+  if (typeof headerEntries.get === 'function' && typeof headerEntries.entries === 'function') {
+    return Object.fromEntries(
+      [...headerEntries.entries.call(value) as Iterable<[string, string]>]
+        .sort((left, right) => left[0].localeCompare(right[0])),
+    );
+  }
+  return null;
+}
+
+function normalizeTraceDetailValue(
+  value: unknown,
+  seen = new WeakSet<object>(),
+): unknown {
+  if (value == null) return value;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeTraceDetailValue(item, seen));
+  }
+  if (typeof value !== 'object') {
+    return String(value);
+  }
+
+  const headersLike = normalizeHeadersLike(value as HeadersLike);
+  if (headersLike) return headersLike;
+
+  if (seen.has(value)) return '[circular]';
+  seen.add(value);
+
+  const normalizedEntries = Object.entries(value as Record<string, unknown>).map(([key, entryValue]) => [
+    key,
+    normalizeTraceDetailValue(entryValue, seen),
+  ]);
+  return Object.fromEntries(normalizedEntries);
+}
 
 function normalizeTraceLimit(limit: unknown): number {
   const value = Number(limit);
@@ -56,6 +99,7 @@ export function appendProxyDebugTrace(input: Omit<ProxyDebugTraceEvent, 'at'>): 
 
   traceEvents.push({
     ...input,
+    detail: input.detail ? normalizeTraceDetailValue(input.detail) as Record<string, unknown> : null,
     traceId,
     at: new Date().toISOString(),
   });

@@ -98,6 +98,73 @@ function canOpenManualCheckin(account: any): boolean {
   return resolveManualCheckinUrl(account).length > 0;
 }
 
+function resolveManualSiteUrl(account: any): string {
+  return typeof account?.site?.url === 'string' ? account.site.url.trim() : '';
+}
+
+async function copyText(text: string) {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  if (typeof document === 'undefined' || !document.body) {
+    throw new Error('clipboard unavailable');
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
+}
+
+function openExternalUrl(url: string): 'popup' | 'anchor' | 'same-tab' | 'failed' {
+  if (!url || typeof window === 'undefined') return 'failed';
+
+  try {
+    if (typeof window.open === 'function') {
+      const popup = window.open(url, '_blank', 'noopener,noreferrer');
+      if (popup) return 'popup';
+    }
+  } catch {
+    // Fallbacks below cover environments that block window.open.
+  }
+
+  try {
+    if (typeof document !== 'undefined' && document.body && typeof document.createElement === 'function') {
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.style.position = 'fixed';
+      link.style.left = '-9999px';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      return 'anchor';
+    }
+  } catch {
+    // Final fallback uses same-tab navigation.
+  }
+
+  try {
+    if (typeof window.location?.assign === 'function') {
+      window.location.assign(url);
+      return 'same-tab';
+    }
+  } catch {
+    // Swallow and report failure below.
+  }
+
+  return 'failed';
+}
+
 export default function Accounts() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -1010,17 +1077,36 @@ export default function Accounts() {
 
   const openManualCheckinWindow = (account: any, mode: 'checkin' | 'site' = 'checkin') => {
     const targetUrl = mode === 'site'
-      ? (typeof account?.site?.url === 'string' ? account.site.url.trim() : '')
+      ? resolveManualSiteUrl(account)
       : resolveManualCheckinUrl(account);
     if (!targetUrl) {
       toast.error('当前站点未配置可打开的签到入口');
       return;
     }
-    if (typeof window === 'undefined' || typeof window.open !== 'function') {
-      toast.error('当前环境不支持直接打开站点');
+    const result = openExternalUrl(targetUrl);
+    if (result === 'failed') {
+      toast.error('当前环境无法直接打开页面，请使用下方链接或复制入口地址');
       return;
     }
-    window.open(targetUrl, '_blank', 'noopener,noreferrer');
+    if (result !== 'popup') {
+      toast.info('已尝试打开页面；若未弹出，请直接点击下方链接或复制入口地址');
+    }
+  };
+
+  const handleCopyManualCheckinLink = async (account: any, mode: 'checkin' | 'site' = 'checkin') => {
+    const targetUrl = mode === 'site'
+      ? resolveManualSiteUrl(account)
+      : resolveManualCheckinUrl(account);
+    if (!targetUrl) {
+      toast.error('当前站点未配置可复制的入口地址');
+      return;
+    }
+    try {
+      await copyText(targetUrl);
+      toast.success(mode === 'site' ? '站点主页链接已复制' : '签到入口链接已复制');
+    } catch (error: any) {
+      toast.error(error?.message || '复制链接失败');
+    }
   };
 
   const handleRetryManualCheckin = async (account: any) => {
@@ -1804,10 +1890,28 @@ export default function Accounts() {
                     type="button"
                     className="btn btn-ghost"
                     style={{ border: '1px solid var(--color-border)' }}
+                    onClick={() => handleCopyManualCheckinLink(manualCheckinTarget, 'checkin')}
+                    disabled={!canOpenManualCheckin(manualCheckinTarget)}
+                  >
+                    复制签到页链接
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ border: '1px solid var(--color-border)' }}
                     onClick={() => openManualCheckinWindow(manualCheckinTarget, 'site')}
-                    disabled={!(typeof manualCheckinTarget?.site?.url === 'string' && manualCheckinTarget.site.url.trim())}
+                    disabled={!resolveManualSiteUrl(manualCheckinTarget)}
                   >
                     打开站点主页
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ border: '1px solid var(--color-border)' }}
+                    onClick={() => handleCopyManualCheckinLink(manualCheckinTarget, 'site')}
+                    disabled={!resolveManualSiteUrl(manualCheckinTarget)}
+                  >
+                    复制站点主页链接
                   </button>
                   <button
                     type="button"
@@ -1834,10 +1938,36 @@ export default function Accounts() {
                   <div>当前跳过原因：{resolveAccountAutoCheckin(manualCheckinTarget, resolveAccountCapabilities(manualCheckinTarget)).reason}</div>
                   <div>
                     推荐入口：
-                    <span style={{ fontFamily: 'var(--font-mono)', marginLeft: 6, wordBreak: 'break-all' }}>
-                      {resolveManualCheckinUrl(manualCheckinTarget) || '未配置'}
-                    </span>
+                    {resolveManualCheckinUrl(manualCheckinTarget) ? (
+                      <a
+                        href={resolveManualCheckinUrl(manualCheckinTarget)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ fontFamily: 'var(--font-mono)', marginLeft: 6, wordBreak: 'break-all' }}
+                        data-testid="manual-checkin-link"
+                      >
+                        {resolveManualCheckinUrl(manualCheckinTarget)}
+                      </a>
+                    ) : (
+                      <span style={{ fontFamily: 'var(--font-mono)', marginLeft: 6, wordBreak: 'break-all' }}>
+                        未配置
+                      </span>
+                    )}
                   </div>
+                  {resolveManualSiteUrl(manualCheckinTarget) ? (
+                    <div>
+                      站点主页：
+                      <a
+                        href={resolveManualSiteUrl(manualCheckinTarget)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ fontFamily: 'var(--font-mono)', marginLeft: 6, wordBreak: 'break-all' }}
+                        data-testid="manual-site-link"
+                      >
+                        {resolveManualSiteUrl(manualCheckinTarget)}
+                      </a>
+                    </div>
+                  ) : null}
                   {manualCheckinTarget.site?.externalCheckinUrl ? (
                     <div>已配置外部签到站 URL，优先打开该地址进行人工处理。</div>
                   ) : (

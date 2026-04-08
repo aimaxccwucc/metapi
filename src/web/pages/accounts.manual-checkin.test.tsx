@@ -29,7 +29,36 @@ async function flushMicrotasks() {
   });
 }
 
+async function renderAccountsPage() {
+  let root: ReturnType<typeof create> | null = null;
+  await act(async () => {
+    root = create(
+      <MemoryRouter initialEntries={['/accounts']}>
+        <ToastProvider>
+          <Accounts />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+  });
+  await flushMicrotasks();
+  return root!;
+}
+
+async function openManualCheckinPanel(root: ReturnType<typeof create>) {
+  const manualButton = root.root.find((node) => (
+    node.type === 'button'
+    && node.props['data-testid'] === 'account-manual-checkin-1'
+  ));
+
+  await act(async () => {
+    manualButton.props.onClick();
+  });
+  await flushMicrotasks();
+}
+
 describe('Accounts manual checkin panel', () => {
+  const originalWindow = globalThis.window;
+
   beforeEach(() => {
     vi.clearAllMocks();
     apiMock.getAccounts.mockResolvedValue([
@@ -60,42 +89,124 @@ describe('Accounts manual checkin panel', () => {
     apiMock.getSites.mockResolvedValue([
       { id: 10, name: 'Demo Site', platform: 'new-api', status: 'active' },
     ]);
+    vi.stubGlobal('window', {
+      ...(originalWindow || {}),
+      innerWidth: 1280,
+      matchMedia: vi.fn(() => ({
+        matches: false,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      location: {
+        ...(originalWindow?.location || {}),
+        assign: vi.fn(),
+      },
+      open: vi.fn(() => ({ closed: false })),
+    });
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    if (originalWindow) {
+      vi.stubGlobal('window', originalWindow);
+    } else {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('opens the manual checkin panel from row actions', async () => {
     let root: ReturnType<typeof create> | null = null;
     try {
-      await act(async () => {
-        root = create(
-          <MemoryRouter initialEntries={['/accounts']}>
-            <ToastProvider>
-              <Accounts />
-            </ToastProvider>
-          </MemoryRouter>,
-        );
-      });
-      await flushMicrotasks();
-
-      const manualButton = root.root.find((node) => (
-        node.type === 'button'
-        && node.props['data-testid'] === 'account-manual-checkin-1'
-      ));
-
-      await act(async () => {
-        manualButton.props.onClick();
-      });
-      await flushMicrotasks();
+      root = await renderAccountsPage();
+      await openManualCheckinPanel(root);
 
       const rendered = JSON.stringify(root.toJSON());
       expect(rendered).toContain('人工处理签到');
       expect(rendered).toContain('打开签到页');
+      expect(rendered).toContain('复制签到页链接');
       expect(rendered).toContain('重试签到');
       expect(rendered).toContain('重新绑定 Session');
       expect(rendered).toContain('https://checkin.example.com/welfare');
+      expect(rendered).toContain('https://example.com');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('opens the checkin url via window.open when available', async () => {
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      root = await renderAccountsPage();
+      await openManualCheckinPanel(root);
+
+      const openButton = root.root.find((node) => (
+        node.type === 'button'
+        && collectText(node) === '打开签到页'
+      ));
+
+      await act(async () => {
+        openButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(globalThis.window.open).toHaveBeenCalledWith(
+        'https://checkin.example.com/welfare',
+        '_blank',
+        'noopener,noreferrer',
+      );
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('keeps clickable fallback links visible when popup opening is blocked', async () => {
+    vi.stubGlobal('window', {
+      ...(originalWindow || {}),
+      innerWidth: 1280,
+      matchMedia: vi.fn(() => ({
+        matches: false,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      location: {
+        ...(originalWindow?.location || {}),
+        assign: vi.fn(),
+      },
+      open: vi.fn(() => null),
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      root = await renderAccountsPage();
+      await openManualCheckinPanel(root);
+
+      const openButton = root.root.find((node) => (
+        node.type === 'button'
+        && collectText(node) === '打开签到页'
+      ));
+
+      await act(async () => {
+        openButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const checkinLink = root.root.find((node) => (
+        node.type === 'a'
+        && node.props['data-testid'] === 'manual-checkin-link'
+      ));
+      const siteLink = root.root.find((node) => (
+        node.type === 'a'
+        && node.props['data-testid'] === 'manual-site-link'
+      ));
+
+      expect(checkinLink.props.href).toBe('https://checkin.example.com/welfare');
+      expect(siteLink.props.href).toBe('https://example.com');
+      expect(JSON.stringify(root.toJSON())).toContain('请直接点击下方链接或复制入口地址');
+      expect(globalThis.window.location.assign).toHaveBeenCalledWith('https://checkin.example.com/welfare');
     } finally {
       root?.unmount();
     }

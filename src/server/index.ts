@@ -37,6 +37,10 @@ import { startSiteAnnouncementPolling } from './services/siteAnnouncementPolling
 import { reloadBackupWebdavScheduler } from './services/backupService.js';
 import { ensureRuntimeDatabaseReady } from './runtimeDatabaseBootstrap.js';
 import { isPublicApiRoute } from './publicApiRoutes.js';
+import {
+  startSub2ApiManagedRefreshScheduler,
+  stopSub2ApiManagedRefreshScheduler,
+} from './services/sub2apiRefreshScheduler.js';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, normalize, resolve, sep } from 'path';
@@ -449,6 +453,7 @@ if (existsSync(webDir)) {
 await startScheduler();
 await reloadBackupWebdavScheduler();
 startSiteAnnouncementPolling();
+startSub2ApiManagedRefreshScheduler();
 try {
   await startOAuthLoopbackCallbackServers();
 } catch (error) {
@@ -459,6 +464,7 @@ startProxyFileRetentionService();
 app.addHook('onClose', async () => {
   stopProxyFileRetentionService();
   stopProxyLogRetentionService();
+  await stopSub2ApiManagedRefreshScheduler();
   await stopOAuthLoopbackCallbackServers();
 });
 

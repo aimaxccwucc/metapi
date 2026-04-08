@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { Response } from 'undici';
 import { config } from '../config.js';
 import {
   appendProxyDebugTrace,
@@ -39,5 +40,35 @@ describe('proxyDebugTraceStore', () => {
     expect(items).toHaveLength(800);
     expect(items[0]?.retryCount).toBe(20);
     expect(items[items.length - 1]?.retryCount).toBe(819);
+  });
+
+  it('normalizes undici headers nested inside detail payloads', () => {
+    config.proxyDebugTraceEnabled = true;
+
+    const response = new Response('ok', {
+      headers: {
+        'content-type': 'application/json',
+        'x-trace-id': 'trace-123',
+      },
+    });
+
+    appendProxyDebugTrace({
+      kind: 'endpoint_final_failure',
+      traceId: 'session:trace-with-headers',
+      sessionId: 'trace-with-headers',
+      traceHint: null,
+      requestedModel: 'gpt-4o',
+      detail: {
+        responseHeaders: response.headers,
+      },
+    });
+
+    const [item] = listProxyDebugTraces({ sessionId: 'trace-with-headers', limit: 5 });
+    expect(item?.detail).toEqual({
+      responseHeaders: {
+        'content-type': 'application/json',
+        'x-trace-id': 'trace-123',
+      },
+    });
   });
 });
