@@ -435,7 +435,6 @@ function isPreservedManagedRoute(input: {
 }): boolean {
   const { route, routeChannels, explicitGroupSourceRouteIds } = input;
   if ((route.routeMode || 'pattern') === 'explicit_group') return true;
-  if (!isExactModelPattern(route.modelPattern || '')) return true;
   if (explicitGroupSourceRouteIds.has(route.id)) return true;
   if ((route.probePolicy || 'system') === 'manual') return true;
   if (hasCustomRouteDisplayName(route)) return true;
