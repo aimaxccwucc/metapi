@@ -9,6 +9,7 @@ const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getProxyLogs: vi.fn(),
     getProxyLogDetail: vi.fn(),
+    getProxyDebugTraces: vi.fn(),
     getSites: vi.fn(),
   },
 }));
@@ -98,6 +99,34 @@ describe('ProxyLogs server-driven page', () => {
       { id: 12, name: 'backup-site', status: 'active' },
     ]);
     apiMock.getProxyLogs.mockResolvedValue(buildListResponse());
+    apiMock.getProxyDebugTraces.mockResolvedValue({
+      success: true,
+      total: 1,
+      summary: {
+        total: 3,
+        kinds: {
+          proxy_exception: 1,
+        },
+        sites: [{ siteId: 9, siteName: 'main-site', count: 1 }],
+      },
+      items: [
+        {
+          at: '2026-03-09T08:00:00.000Z',
+          kind: 'proxy_exception',
+          traceId: 'session:turn-1',
+          sessionId: 'turn-1',
+          traceHint: 'turn-1',
+          requestedModel: 'gpt-4o',
+          actualModel: 'gpt-4o',
+          siteId: 9,
+          siteName: 'main-site',
+          status: 502,
+          retryCount: 1,
+          reason: 'upstream timeout',
+          detail: { phase: 'proxy', upstreamStatus: 502 },
+        },
+      ],
+    });
     apiMock.getProxyLogDetail.mockResolvedValue({
       id: 101,
       createdAt: '2026-03-09 16:00:00',
@@ -414,6 +443,54 @@ describe('ProxyLogs server-driven page', () => {
 
       const rendered = JSON.stringify(root!.toJSON());
       expect(rendered).toContain('main-site');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('queries proxy debug traces with server-side filters and renders trace rows', async () => {
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const inputs = root!.root.findAll((node) => node.type === 'input');
+      const sessionIdInput = inputs.find((node) => node.props.placeholder === 'Session ID');
+      expect(sessionIdInput).toBeDefined();
+      await act(async () => {
+        sessionIdInput!.props.onChange({ target: { value: 'turn-1' } });
+      });
+
+      const traceButton = root!.root.find((node) => node.props['data-testid'] === 'proxy-trace-query');
+      await act(async () => {
+        await traceButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.getProxyDebugTraces).toHaveBeenCalledWith({
+        sessionId: 'turn-1',
+        traceId: undefined,
+        traceHint: undefined,
+        kind: undefined,
+        siteId: undefined,
+        limit: 50,
+      });
+
+      const rendered = JSON.stringify(root!.toJSON());
+      expect(rendered).toContain('Proxy Trace 排障');
+      expect(rendered).toContain('代理异常');
+      expect(rendered).toContain('upstream timeout');
+      expect(rendered).toContain('session:turn-1');
+      expect(rendered).toContain('查看 detail');
     } finally {
       root?.unmount();
     }

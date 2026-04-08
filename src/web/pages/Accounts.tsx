@@ -17,7 +17,7 @@ import {
   buildVerifyFailureHint,
   normalizeVerifyFailureMessage,
 } from './helpers/accountVerifyFeedback.js';
-import { clearFocusParams, readFocusAccountIntent } from './helpers/navigationFocus.js';
+import { buildAccountFocusPath, clearFocusParams, readFocusAccountIntent } from './helpers/navigationFocus.js';
 import { TokensPanel } from './Tokens.js';
 import { tr } from '../i18n.js';
 import { buildCustomReorderUpdates, compareCustomOrderedItems, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
@@ -64,6 +64,13 @@ function createRebindForm(platformUserId = '') {
 
 function countBatchApiKeys(input: string): number {
   return String(input || '').trim().split(/[\s,，;\n\r\t]+/g).filter(Boolean).length;
+}
+
+function maskCredentialPreview(value: string): string {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '-';
+  if (normalized.length <= 10) return normalized;
+  return `${normalized.slice(0, 6)}...${normalized.slice(-4)}`;
 }
 
 function isTruthyFlag(value: string | null): boolean {
@@ -199,6 +206,16 @@ export default function Accounts() {
   const [verifyResult, setVerifyResult] = useState<any>(null);
   const [verifying, setVerifying] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [batchCreateResult, setBatchCreateResult] = useState<null | {
+    siteId: number;
+    siteName: string;
+    total: number;
+    successCount: number;
+    failedCount: number;
+    message: string;
+    successItems: Array<{ id: number; username: string | null; queued: boolean; tokenType: string }>;
+    failedItems: Array<{ value: string; message: string }>;
+  }>(null);
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [embeddedTokenActions, setEmbeddedTokenActions] = useState<React.ReactNode>(null);
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
@@ -309,6 +326,10 @@ export default function Accounts() {
     setVerifying(false);
     setSaving(false);
     resetAddForms();
+  };
+
+  const closeBatchCreateResult = () => {
+    setBatchCreateResult(null);
   };
 
   const resolveAccountCredentialMode = (account: any): 'session' | 'apikey' => {
@@ -563,6 +584,31 @@ export default function Accounts() {
       if (result.batch) {
         const successCount = Number(result.successCount || 0);
         const failedCount = Number(result.failedCount || 0);
+        const siteName = selectedTokenSite?.name || `站点 #${tokenForm.siteId}`;
+        startTransition(() => {
+          setBatchCreateResult({
+            siteId: tokenForm.siteId,
+            siteName,
+            total: Number(result.total || successCount + failedCount),
+            successCount,
+            failedCount,
+            message: result.message || `批量创建完成：成功 ${successCount}，失败 ${failedCount}`,
+            successItems: Array.isArray(result.successItems)
+              ? result.successItems.map((item: any) => ({
+                id: Number(item?.id || 0),
+                username: typeof item?.username === 'string' ? item.username : null,
+                queued: item?.queued === true,
+                tokenType: typeof item?.tokenType === 'string' ? item.tokenType : 'unknown',
+              }))
+              : [],
+            failedItems: Array.isArray(result.failedItems)
+              ? result.failedItems.map((item: any) => ({
+                value: typeof item?.value === 'string' ? item.value : '',
+                message: typeof item?.message === 'string' ? item.message : '创建失败',
+              }))
+              : [],
+          });
+        });
         if (failedCount > 0) {
           toast.info(result.message || `批量创建完成：成功 ${successCount}，失败 ${failedCount}`);
         } else {
@@ -1812,6 +1858,100 @@ export default function Accounts() {
                 )}
               </div>
             )}
+          </CenteredModal>
+
+          <CenteredModal
+            open={Boolean(batchCreateResult)}
+            onClose={closeBatchCreateResult}
+            title="批量 API Key 创建结果"
+            maxWidth={880}
+            bodyStyle={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+            footer={(
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <button onClick={closeBatchCreateResult} className="btn btn-ghost">关闭</button>
+              </div>
+            )}
+          >
+            {batchCreateResult ? (
+              <>
+                <div className={`alert ${batchCreateResult.failedCount > 0 ? 'alert-warning' : 'alert-success'}`}>
+                  <div className="alert-title">{batchCreateResult.message}</div>
+                  <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                    <div>站点：<strong>{batchCreateResult.siteName}</strong></div>
+                    <div>
+                      共 <strong>{batchCreateResult.total}</strong> 条，
+                      成功 <strong>{batchCreateResult.successCount}</strong> 条，
+                      失败 <strong>{batchCreateResult.failedCount}</strong> 条
+                    </div>
+                  </div>
+                </div>
+
+                {batchCreateResult.successItems.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ fontWeight: 600 }}>成功项</div>
+                    <div style={{ maxHeight: 220, overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: 10 }}>
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>ID</th>
+                            <th>连接</th>
+                            <th>类型</th>
+                            <th>状态</th>
+                            <th>操作</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {batchCreateResult.successItems.map((item) => (
+                            <tr key={`batch-create-success-${item.id}`}>
+                              <td>{item.id}</td>
+                              <td>{item.username || 'API Key 连接'}</td>
+                              <td>{item.tokenType === 'apikey' ? 'API Key' : item.tokenType === 'session' ? 'Session' : '未知'}</td>
+                              <td>{item.queued ? '后台补全中' : '已创建'}</td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="btn btn-link"
+                                  onClick={() => {
+                                    closeBatchCreateResult();
+                                    navigate(buildAccountFocusPath(item.id, { segment: 'apikey' }));
+                                  }}
+                                >
+                                  定位连接
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+
+                {batchCreateResult.failedItems.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ fontWeight: 600 }}>失败项</div>
+                    <div style={{ maxHeight: 240, overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: 10 }}>
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>API Key</th>
+                            <th>失败原因</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {batchCreateResult.failedItems.map((item, index) => (
+                            <tr key={`batch-create-failed-${index}`}>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{maskCredentialPreview(item.value)}</td>
+                              <td style={{ fontSize: 12, color: 'var(--color-danger)' }}>{item.message}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            ) : null}
           </CenteredModal>
 
           {activeSegment === 'session' && (

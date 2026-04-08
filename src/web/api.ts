@@ -310,6 +310,36 @@ export type RouteDecision = {
   candidates: RouteDecisionCandidate[];
 };
 
+export type AddAccountResponse = {
+  batch?: false;
+  id?: number;
+  username?: string | null;
+  queued?: boolean;
+  message?: string;
+  tokenType?: 'session' | 'apikey' | 'unknown';
+  credentialMode?: 'session' | 'apikey';
+  usernameDetected?: boolean;
+  apiTokenFound?: boolean;
+} | {
+  success: boolean;
+  batch: true;
+  total: number;
+  successCount: number;
+  failedCount: number;
+  successItems: Array<{
+    id: number;
+    username: string | null;
+    tokenType: 'session' | 'apikey' | 'unknown';
+    queued: boolean;
+    jobId?: string;
+  }>;
+  failedItems: Array<{
+    value: string;
+    message: string;
+  }>;
+  message: string;
+};
+
 export type RouteDiagnosticsResponse = {
   success: boolean;
   generatedAt: string;
@@ -574,6 +604,44 @@ export type RouteDiagnosticsResponse = {
       }>;
     }>;
   };
+};
+
+export type ProxyDebugTraceItem = {
+  at: string;
+  kind: string;
+  traceId: string;
+  sessionId: string | null;
+  traceHint: string | null;
+  requestedModel: string | null;
+  actualModel?: string | null;
+  downstreamPath?: string | null;
+  routeId?: number | null;
+  channelId?: number | null;
+  siteId?: number | null;
+  siteName?: string | null;
+  endpoint?: string | null;
+  endpointPath?: string | null;
+  status?: number | null;
+  retryCount?: number | null;
+  reason?: string | null;
+  detail?: Record<string, unknown> | null;
+};
+
+export type ProxyDebugTraceSummary = {
+  total: number;
+  kinds: Record<string, number>;
+  sites: Array<{
+    siteId: number | null;
+    siteName: string | null;
+    count: number;
+  }>;
+};
+
+export type ProxyDebugTracesResponse = {
+  success: boolean;
+  total: number;
+  summary?: ProxyDebugTraceSummary;
+  items: ProxyDebugTraceItem[];
 };
 
 export type RouteOverviewResponse = {
@@ -1175,7 +1243,7 @@ export const api = {
 
   // Accounts
   getAccounts: () => request('/api/accounts'),
-  addAccount: (data: any) => request('/api/accounts', { method: 'POST', body: JSON.stringify(data) }),
+  addAccount: (data: any) => request('/api/accounts', { method: 'POST', body: JSON.stringify(data) }) as Promise<AddAccountResponse>,
   loginAccount: (data: { siteId: number; username: string; password: string }) => request('/api/accounts/login', { method: 'POST', body: JSON.stringify(data) }),
   verifyToken: (data: { siteId: number; accessToken: string; platformUserId?: number; credentialMode?: 'auto' | 'session' | 'apikey' }) => request('/api/accounts/verify-token', { method: 'POST', body: JSON.stringify(data) }),
   rebindAccountSession: (id: number, data: { accessToken: string; platformUserId?: number; refreshToken?: string; tokenExpiresAt?: number }) =>
@@ -1283,6 +1351,8 @@ export const api = {
   getRuntimeOverview: () => request('/api/system/runtime-overview') as Promise<RuntimeOverview>,
   getProxyLogs: (params?: ProxyLogsQuery) => request(`/api/stats/proxy-logs${buildQueryString(params)}`) as Promise<ProxyLogsResponse>,
   getProxyLogDetail: (id: number) => request(`/api/stats/proxy-logs/${id}`) as Promise<ProxyLogDetail>,
+  getProxyDebugTraces: (params?: { traceId?: string; sessionId?: string; traceHint?: string; kind?: string; siteId?: number | null; limit?: number }) =>
+    request(`/api/stats/proxy-debug-traces${buildQueryString(params)}`) as Promise<ProxyDebugTracesResponse>,
   checkModels: (accountId: number) => request(`/api/models/check/${accountId}`, { method: 'POST' }),
   getSiteDistribution: () => request('/api/stats/site-distribution'),
   getSiteTrend: (days = 7) => request(`/api/stats/site-trend?days=${days}`),

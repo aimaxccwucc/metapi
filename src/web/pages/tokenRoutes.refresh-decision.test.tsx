@@ -426,4 +426,146 @@ describe('TokenRoutes refresh decision action', () => {
       root?.unmount();
     }
   });
+
+  it('shows richer checkin todo account details and links back to account management', async () => {
+    apiMock.getRouteDiagnostics.mockResolvedValue({
+      success: true,
+      generatedAt: '2026-03-26T00:00:00.000Z',
+      limits: { itemLimit: 120 },
+      routeSummary: { routeCount: 1, enabledRouteCount: 1, channelCount: 1, enabledChannelCount: 1 },
+      snapshotCounts: {
+        endpointRuntimeMemory: 0,
+        endpointCredentialScopes: 0,
+        persistedEndpointProfiles: 0,
+        modelCircuits: 0,
+        siteRuntimeStates: 0,
+        accountRuntimeStates: 0,
+        unavailableModels: 0,
+        siteProfiles: 0,
+        checkinTodoSites: 1,
+        checkinSiteRuntimeStates: 1,
+      },
+      endpointRuntimeMemory: { total: 0, items: [] },
+      endpointCredentialScopes: { total: 0, items: [] },
+      persistedEndpointProfiles: { total: 0, items: [] },
+      modelCircuits: { total: 0, openCount: 0, halfOpenCount: 0, items: [] },
+      siteRuntimeHealth: { total: 0, breakerOpenCount: 0, penalizedCount: 0, items: [] },
+      accountRuntimeHealth: { total: 0, busyCount: 0, stickyActiveCount: 0, items: [] },
+      unavailableModels: { total: 0, blockingCount: 0, items: [] },
+      checkinSiteRuntime: { total: 1, blockedCount: 1, items: [] },
+      siteProfiles: { total: 0, manualConfiguredCount: 0, items: [] },
+      checkinTodo: {
+        scheduleMode: 'interval',
+        intervalHours: 6,
+        totalSchedulableAccounts: 1,
+        dueNowCount: 1,
+        manualRequiredCount: 1,
+        unsupportedCount: 0,
+        failedRecentCount: 1,
+        attentionCount: 1,
+        siteBackoffBlockedCount: 1,
+        sites: [
+          {
+            siteId: 21,
+            siteName: 'Checkin Site',
+            siteStatus: 'active',
+            siteBackoffBlocked: true,
+            siteBackoffUntil: '2026-03-26T03:00:00.000Z',
+            siteBackoffUntilMs: 0,
+            siteBackoffFailureStreak: 3,
+            siteBackoffReasonCode: 'upstream_error',
+            siteBackoffMessage: 'cloudflare challenge',
+            totalSchedulableAccounts: 1,
+            dueNowCount: 1,
+            manualRequiredCount: 1,
+            unsupportedCount: 0,
+            failedRecentCount: 1,
+            expiredCount: 1,
+            unhealthyCount: 1,
+            attentionCount: 1,
+            sampleAccounts: [
+              {
+                accountId: 88,
+                username: 'need-human',
+                status: 'expired',
+                dueNow: true,
+                requiresManual: true,
+                unsupported: false,
+                failedRecent: true,
+                checkinSnapshot: {
+                  status: 'manual_required',
+                  reasonCode: 'manual_turnstile_required',
+                  retryable: true,
+                  requiresManual: true,
+                  unsupported: false,
+                  lastAttemptAt: '2026-03-26T01:00:00.000Z',
+                  lastSuccessAt: null,
+                  nextRetryAt: '2026-03-26T04:00:00.000Z',
+                  message: 'Need turnstile',
+                  reward: null,
+                  source: 'checkin',
+                },
+                runtimeHealth: {
+                  state: 'unhealthy',
+                  reason: 'session expired',
+                  source: 'runtime',
+                  checkedAt: '2026-03-26T01:00:00.000Z',
+                },
+                latestCheckinStatus: 'failed',
+                latestCheckinMessage: 'Need turnstile',
+                latestCheckinAt: '2026-03-26T01:00:00.000Z',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const expandButton = findButtonByText(root.root, '展开诊断');
+      await act(async () => {
+        expandButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const detailsSummary = root.root.find((node) => (
+        node.type === 'summary'
+        && collectText(node).includes('签到待办站点')
+      ));
+      expect(detailsSummary).toBeTruthy();
+
+      const rendered = collectText(root.root);
+      expect(rendered).toContain('need-human');
+      expect(rendered).toContain('人工验证');
+      expect(rendered).toContain('运行时：unhealthy / session expired');
+      expect(rendered).toContain('站点退避原因：upstream_error / cloudflare challenge');
+      expect(rendered).toContain('下一次重试');
+      expect(rendered).toContain('定位账号');
+
+      const accountLinkButton = root.root.findAll((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node) === '定位账号'
+      ))[0];
+      await act(async () => {
+        accountLinkButton.props.onClick();
+      });
+
+      expect(navigateMock).toHaveBeenCalledWith('/accounts?focusAccountId=88&openRebind=1');
+    } finally {
+      root?.unmount();
+    }
+  });
 });

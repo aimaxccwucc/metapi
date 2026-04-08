@@ -62,6 +62,7 @@ import RouteFilterBar from './token-routes/RouteFilterBar.js';
 import ManualRoutePanel from './token-routes/ManualRoutePanel.js';
 import RouteCard from './token-routes/RouteCard.js';
 import AddChannelModal from './token-routes/AddChannelModal.js';
+import { buildAccountFocusPath } from './helpers/navigationFocus.js';
 
 const EMPTY_ROUTE_CANDIDATE_VIEW: RouteCandidateView = {
   routeCandidates: [],
@@ -274,6 +275,27 @@ function formatIsoDateTime(input?: string | null): string {
   const date = new Date(input);
   if (Number.isNaN(date.getTime())) return '-';
   return date.toLocaleString();
+}
+
+function formatCheckinSnapshotSummary(account: {
+  checkinSnapshot?: {
+    status?: string;
+    reasonCode?: string;
+    message?: string;
+    nextRetryAt?: string | null;
+  } | null;
+  latestCheckinStatus?: string | null;
+  latestCheckinMessage?: string | null;
+  latestCheckinAt?: string | null;
+}) {
+  const snapshot = account.checkinSnapshot;
+  const parts: string[] = [];
+  if (snapshot?.status) parts.push(snapshot.status);
+  if (snapshot?.reasonCode) parts.push(snapshot.reasonCode);
+  if (snapshot?.message) parts.push(snapshot.message);
+  if (parts.length === 0 && account.latestCheckinStatus) parts.push(account.latestCheckinStatus);
+  if (parts.length === 0 && account.latestCheckinMessage) parts.push(account.latestCheckinMessage);
+  return parts.length > 0 ? parts.join(' / ') : '-';
 }
 
 function isManualGovernedRoute(route: Pick<RouteSummaryRow, 'probePolicy' | 'routeMode'>): boolean {
@@ -1824,6 +1846,7 @@ export default function TokenRoutes() {
                         <th>人工验证</th>
                         <th>失败</th>
                         <th>站点退避</th>
+                        <th>样例账号</th>
                         <th>快照</th>
                       </tr>
                     </thead>
@@ -1840,20 +1863,69 @@ export default function TokenRoutes() {
                               ? `${site.siteBackoffFailureStreak} 次 / ${site.siteBackoffUntil ? new Date(site.siteBackoffUntil).toLocaleString() : '恢复中'}`
                               : '-'}
                           </td>
+                          <td style={{ fontSize: 12, color: 'var(--color-text-secondary)', minWidth: 240 }}>
+                            {site.sampleAccounts.length > 0 ? (
+                              <div style={{ display: 'grid', gap: 6 }}>
+                                {site.sampleAccounts.slice(0, 2).map((account) => (
+                                  <div key={`checkin-todo-account-${site.siteId}-${account.accountId}`} style={{ display: 'grid', gap: 4 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                      <span>{account.username || `账号 #${account.accountId}`}</span>
+                                      {account.requiresManual ? <span className="badge badge-warning" style={{ fontSize: 10 }}>人工验证</span> : null}
+                                      {account.failedRecent ? <span className="badge badge-error" style={{ fontSize: 10 }}>最近失败</span> : null}
+                                      {account.unsupported ? <span className="badge badge-muted" style={{ fontSize: 10 }}>永久跳过</span> : null}
+                                      {account.dueNow ? <span className="badge badge-info" style={{ fontSize: 10 }}>应执行</span> : null}
+                                    </div>
+                                    {account.runtimeHealth ? (
+                                      <div style={{ color: 'var(--color-text-muted)' }}>
+                                        运行时：{account.runtimeHealth.state} / {account.runtimeHealth.reason || account.runtimeHealth.source || '-'}
+                                      </div>
+                                    ) : null}
+                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                      <button
+                                        type="button"
+                                        className="btn btn-link"
+                                        onClick={() => navigate(buildAccountFocusPath(account.accountId, {
+                                          openRebind: account.requiresManual || account.status === 'expired',
+                                          segment: 'session',
+                                        }))}
+                                      >
+                                        定位账号
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="btn btn-link"
+                                        onClick={() => navigateToCredentialDiagnostics('account', account.accountId)}
+                                      >
+                                        诊断账号
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : '-'}
+                          </td>
                           <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                              <span>
-                                {site.sampleAccounts[0]?.checkinSnapshot
-                                  ? `${site.sampleAccounts[0].checkinSnapshot.status} / ${site.sampleAccounts[0].checkinSnapshot.reasonCode}`
-                                  : '-'}
-                              </span>
-                              <button
-                                type="button"
-                                className="btn btn-link"
-                                onClick={() => navigateToCredentialDiagnostics('site', site.siteId)}
-                              >
-                                诊断
-                              </button>
+                            <div style={{ display: 'grid', gap: 6 }}>
+                              <div>{formatCheckinSnapshotSummary(site.sampleAccounts[0] || {})}</div>
+                              {site.siteBackoffReasonCode || site.siteBackoffMessage ? (
+                                <div style={{ color: 'var(--color-warning)' }}>
+                                  站点退避原因：{site.siteBackoffReasonCode || '-'} {site.siteBackoffMessage ? `/ ${site.siteBackoffMessage}` : ''}
+                                </div>
+                              ) : null}
+                              {site.sampleAccounts[0]?.checkinSnapshot?.nextRetryAt ? (
+                                <div style={{ color: 'var(--color-text-muted)' }}>
+                                  下一次重试：{formatIsoDateTime(site.sampleAccounts[0]?.checkinSnapshot?.nextRetryAt)}
+                                </div>
+                              ) : null}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                <button
+                                  type="button"
+                                  className="btn btn-link"
+                                  onClick={() => navigateToCredentialDiagnostics('site', site.siteId)}
+                                >
+                                  诊断站点
+                                </button>
+                              </div>
                             </div>
                           </td>
                         </tr>

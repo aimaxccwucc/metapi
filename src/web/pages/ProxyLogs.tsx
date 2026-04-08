@@ -2,6 +2,8 @@ import React, { startTransition, useDeferredValue, useEffect, useMemo, useRef, u
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   api,
+  type ProxyDebugTraceItem,
+  type ProxyDebugTraceSummary,
   type ProxyLogBillingDetails,
   type ProxyLogClientOption,
   type ProxyLogDetail,
@@ -48,6 +50,13 @@ const PROXY_LOG_CLIENT_FAMILY_LABELS: Record<string, string> = {
   gemini_cli: 'Gemini CLI',
   generic: '通用',
 };
+const PROXY_TRACE_KIND_OPTIONS = [
+  { value: '', label: '全部事件' },
+  { value: 'route_selected', label: '选路命中' },
+  { value: 'proxy_retry', label: '代理重试' },
+  { value: 'proxy_success', label: '代理成功' },
+  { value: 'proxy_exception', label: '代理异常' },
+];
 const EMPTY_SUMMARY: ProxyLogsSummary = {
   totalCount: 0,
   successCount: 0,
@@ -58,6 +67,11 @@ const EMPTY_SUMMARY: ProxyLogsSummary = {
   cacheMissCount: 0,
   cacheStaleCount: 0,
   cacheSavedCost: 0,
+};
+const EMPTY_PROXY_TRACE_SUMMARY: ProxyDebugTraceSummary = {
+  total: 0,
+  kinds: {},
+  sites: [],
 };
 
 function normalizeProxyLogsSummary(summary?: Partial<ProxyLogsSummary> | null): ProxyLogsSummary {
@@ -320,12 +334,33 @@ function renderProxyLogClientCell(
   );
 }
 
+function formatProxyTraceKindLabel(kind: string) {
+  const match = PROXY_TRACE_KIND_OPTIONS.find((option) => option.value === kind);
+  return match?.label || kind || '未知事件';
+}
+
+function formatProxyTraceDetail(detail: Record<string, unknown> | null | undefined) {
+  if (!detail || typeof detail !== 'object') return '-';
+  try {
+    return JSON.stringify(detail, null, 2);
+  } catch {
+    return '[unserializable detail]';
+  }
+}
+
 function toApiTimeBoundary(value: string): string | undefined {
   const text = value.trim();
   if (!text) return undefined;
   const parsed = new Date(text);
   if (Number.isNaN(parsed.getTime())) return undefined;
   return parsed.toISOString();
+}
+
+function formatTraceDateTime(value?: string | null) {
+  if (!value) return '-';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString();
 }
 
 export default function ProxyLogs() {
@@ -351,6 +386,20 @@ export default function ProxyLogs() {
   const [sites, setSites] = useState<Array<{ id: number; name: string; status?: string | null }>>([]);
   const [clientOptions, setClientOptions] = useState<ProxyLogClientOption[]>([]);
   const [autoRefresh, setAutoRefresh] = useState(false);
+  const [traceFilters, setTraceFilters] = useState({
+    sessionId: '',
+    traceId: '',
+    traceHint: '',
+    kind: '',
+    siteId: '',
+    limit: '50',
+  });
+  const [traceLoading, setTraceLoading] = useState(false);
+  const [traceResult, setTraceResult] = useState<null | {
+    total: number;
+    summary: ProxyDebugTraceSummary;
+    items: ProxyDebugTraceItem[];
+  }>(null);
   const isMobile = useIsMobile(768);
   const toast = useToast();
   const loadSeq = useRef(0);
@@ -467,6 +516,13 @@ export default function ProxyLogs() {
     if (!siteFilter) return '全部站点';
     return siteOptions.find((option) => option.value === String(siteFilter))?.label || `站点 #${siteFilter}`;
   }, [siteFilter, siteOptions]);
+  const traceSiteOptions = useMemo(() => ([
+    { value: '', label: '全部站点' },
+    ...sites.map((site) => ({
+      value: String(site.id),
+      label: site.status === 'disabled' ? `${site.name}（已禁用）` : site.name,
+    })),
+  ]), [sites]);
   const siteIdByName = useMemo(() => {
     const index = new Map<string, number>();
     for (const site of sites) {
@@ -518,6 +574,32 @@ export default function ProxyLogs() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const loadProxyDebugTraces = useCallback(async () => {
+    setTraceLoading(true);
+    try {
+      const limit = Number.parseInt(traceFilters.limit || '50', 10);
+      const response = await api.getProxyDebugTraces({
+        sessionId: traceFilters.sessionId.trim() || undefined,
+        traceId: traceFilters.traceId.trim() || undefined,
+        traceHint: traceFilters.traceHint.trim() || undefined,
+        kind: traceFilters.kind.trim() || undefined,
+        siteId: traceFilters.siteId ? Number.parseInt(traceFilters.siteId, 10) : undefined,
+        limit: Number.isFinite(limit) && limit > 0 ? limit : 50,
+      });
+      startTransition(() => {
+        setTraceResult({
+          total: Number(response?.total || 0),
+          summary: response?.summary || EMPTY_PROXY_TRACE_SUMMARY,
+          items: Array.isArray(response?.items) ? response.items : [],
+        });
+      });
+    } catch (e: any) {
+      toast.error(e?.message || '加载 Proxy Trace 失败');
+    } finally {
+      setTraceLoading(false);
+    }
+  }, [toast, traceFilters]);
 
   useEffect(() => {
     if (!autoRefresh) return;
@@ -746,6 +828,182 @@ export default function ProxyLogs() {
           结束时间必须晚于开始时间
         </div>
       )}
+
+      <div className="card" style={{ padding: 16, marginBottom: 12, display: 'grid', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span className="badge badge-info" style={{ fontSize: 11 }}>Proxy Trace 排障</span>
+            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              用于按 `sessionId / traceId / traceHint` 追查代理选路、重试和上游异常。
+            </span>
+          </div>
+          {traceResult ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span className="badge badge-muted" style={{ fontSize: 11 }}>命中 {traceResult.total} 条</span>
+              <span className="badge badge-muted" style={{ fontSize: 11 }}>总快照 {traceResult.summary.total}</span>
+            </div>
+          ) : null}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0, 1fr)' : 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
+          <input
+            placeholder="Session ID"
+            value={traceFilters.sessionId}
+            onChange={(e) => setTraceFilters((current) => ({ ...current, sessionId: e.target.value }))}
+            style={{ minHeight: 38 }}
+          />
+          <input
+            placeholder="Trace ID"
+            value={traceFilters.traceId}
+            onChange={(e) => setTraceFilters((current) => ({ ...current, traceId: e.target.value }))}
+            style={{ minHeight: 38 }}
+          />
+          <input
+            placeholder="Trace Hint"
+            value={traceFilters.traceHint}
+            onChange={(e) => setTraceFilters((current) => ({ ...current, traceHint: e.target.value }))}
+            style={{ minHeight: 38 }}
+          />
+          <div className="proxy-logs-filter-select">
+            <ModernSelect
+              size="sm"
+              value={traceFilters.kind}
+              onChange={(nextValue) => setTraceFilters((current) => ({ ...current, kind: nextValue }))}
+              options={PROXY_TRACE_KIND_OPTIONS}
+              placeholder="Trace 事件类型"
+            />
+          </div>
+          <div className="proxy-logs-filter-select">
+            <ModernSelect
+              size="sm"
+              value={traceFilters.siteId}
+              onChange={(nextValue) => setTraceFilters((current) => ({ ...current, siteId: nextValue }))}
+              options={traceSiteOptions}
+              placeholder="Trace 站点"
+            />
+          </div>
+          <input
+            placeholder="条数限制"
+            value={traceFilters.limit}
+            onChange={(e) => setTraceFilters((current) => ({ ...current, limit: e.target.value.replace(/\D/g, '') }))}
+            style={{ minHeight: 38 }}
+          />
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', gridColumn: isMobile ? 'auto' : 'span 2' }}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              data-testid="proxy-trace-query"
+              onClick={() => { void loadProxyDebugTraces(); }}
+              disabled={traceLoading}
+              style={{ border: '1px solid var(--color-border)' }}
+            >
+              {traceLoading ? '查询中...' : '查询 Trace'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => {
+                setTraceFilters({
+                  sessionId: '',
+                  traceId: '',
+                  traceHint: '',
+                  kind: '',
+                  siteId: '',
+                  limit: '50',
+                });
+                setTraceResult(null);
+              }}
+            >
+              清空 Trace
+            </button>
+          </div>
+        </div>
+
+        {traceResult ? (
+          traceResult.items.length > 0 ? (
+            <div style={{ display: 'grid', gap: 12 }}>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {Object.entries(traceResult.summary.kinds || {})
+                  .sort((left, right) => right[1] - left[1])
+                  .slice(0, 6)
+                  .map(([kind, count]) => (
+                    <span key={`trace-kind-${kind}`} className="badge badge-muted" style={{ fontSize: 11 }}>
+                      {formatProxyTraceKindLabel(kind)} {count}
+                    </span>
+                  ))}
+              </div>
+
+              <div style={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>事件</th>
+                      <th>链路</th>
+                      <th>站点</th>
+                      <th>模型</th>
+                      <th>状态</th>
+                      <th>详情</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {traceResult.items.map((item, index) => (
+                      <tr key={`${item.traceId}-${item.at}-${index}`} data-testid={`proxy-trace-row-${index}`}>
+                        <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>{formatTraceDateTime(item.at)}</td>
+                        <td style={{ fontSize: 12 }}>{formatProxyTraceKindLabel(item.kind)}</td>
+                        <td style={{ fontSize: 12, minWidth: 220 }}>
+                          <div style={{ display: 'grid', gap: 4 }}>
+                            <span><strong>session:</strong> {item.sessionId || '-'}</span>
+                            <span><strong>trace:</strong> {item.traceId}</span>
+                            {item.traceHint ? <span><strong>hint:</strong> {item.traceHint}</span> : null}
+                          </div>
+                        </td>
+                        <td style={{ fontSize: 12 }}>{item.siteName || (item.siteId ? `站点 #${item.siteId}` : '-')}</td>
+                        <td style={{ fontSize: 12 }}>
+                          <div style={{ display: 'grid', gap: 4 }}>
+                            <span>{item.requestedModel || '-'}</span>
+                            {item.actualModel && item.actualModel !== item.requestedModel ? (
+                              <span style={{ color: 'var(--color-text-muted)' }}>实际 {item.actualModel}</span>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td style={{ fontSize: 12 }}>
+                          <div style={{ display: 'grid', gap: 4 }}>
+                            <span>{typeof item.status === 'number' ? item.status : '-'}</span>
+                            <span style={{ color: 'var(--color-text-muted)' }}>重试 {item.retryCount || 0}</span>
+                            {item.reason ? <span style={{ color: 'var(--color-danger)' }}>{item.reason}</span> : null}
+                          </div>
+                        </td>
+                        <td style={{ minWidth: 300 }}>
+                          <details>
+                            <summary style={{ cursor: 'pointer', fontSize: 12 }}>查看 detail</summary>
+                            <pre style={{
+                              marginTop: 8,
+                              marginBottom: 0,
+                              whiteSpace: 'pre-wrap',
+                              wordBreak: 'break-word',
+                              fontSize: 11,
+                              lineHeight: 1.5,
+                              color: 'var(--color-text-secondary)',
+                            }}
+                            >
+                              {formatProxyTraceDetail(item.detail)}
+                            </pre>
+                          </details>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              当前筛选下没有命中的 Proxy Trace。
+            </div>
+          )
+        ) : null}
+      </div>
 
       <div className="card" style={{ overflowX: 'auto' }}>
         {loading ? (
