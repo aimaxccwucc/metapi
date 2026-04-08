@@ -62,6 +62,10 @@ function createRebindForm(platformUserId = '') {
   return { accessToken: '', platformUserId, refreshToken: '', tokenExpiresAt: '' };
 }
 
+function countBatchApiKeys(input: string): number {
+  return String(input || '').trim().split(/[\s,，;\n\r\t]+/g).filter(Boolean).length;
+}
+
 function isTruthyFlag(value: string | null): boolean {
   if (!value) return false;
   const normalized = value.trim().toLowerCase();
@@ -532,9 +536,7 @@ export default function Accounts() {
 
   const handleTokenAdd = async () => {
     if (!tokenForm.siteId || !tokenForm.accessToken) return;
-    const batchApiKeyCount = activeSegment === 'apikey'
-      ? tokenForm.accessTokens.trim().split(/[\s,，;\n\r\t]+/g).filter(Boolean).length
-      : 0;
+    const batchApiKeyCount = activeSegment === 'apikey' ? countBatchApiKeys(tokenForm.accessTokens) : 0;
     if (activeSegment === 'apikey' && batchApiKeyCount <= 1 && !verifyResult?.success && !tokenForm.skipModelFetch) {
       toast.error('请先验证 Token 成功后再添加账号');
       return;
@@ -1241,7 +1243,7 @@ export default function Accounts() {
   );
   const canSubmitWithoutVerification = activeSegment === 'session';
   const hasBatchApiKeys = activeSegment === 'apikey'
-    && tokenForm.accessTokens.trim().split(/[\s,，;\n\r\t]+/g).filter(Boolean).length > 1;
+    && countBatchApiKeys(tokenForm.accessTokens) > 1;
 
   return (
     <div className="animate-fade-in">
@@ -1789,18 +1791,18 @@ export default function Accounts() {
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button
                     onClick={handleVerifyToken}
-                    disabled={verifying || !tokenForm.siteId || !tokenForm.accessToken}
+                    disabled={verifying || !tokenForm.siteId || !tokenForm.accessToken || hasBatchApiKeys}
                     className="btn btn-ghost"
                     style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
                   >
-                    {verifying ? <><span className="spinner spinner-sm" />验证中...</> : '验证 API Key'}
+                    {verifying ? <><span className="spinner spinner-sm" />验证中...</> : (hasBatchApiKeys ? '批量模式无需统一验证' : '验证 API Key')}
                   </button>
                   <button
                     onClick={handleTokenAdd}
                     disabled={saving || !tokenForm.siteId || !tokenForm.accessToken || (!hasBatchApiKeys && !canAddVerifiedConnection && !tokenForm.skipModelFetch)}
                     className="btn btn-success"
                   >
-                    {saving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />添加中...</> : '添加连接'}
+                    {saving ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />添加中...</> : (hasBatchApiKeys ? '批量添加连接' : '添加连接')}
                   </button>
                 </div>
                 {!verifyResult?.success && (
