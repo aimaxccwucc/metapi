@@ -3,6 +3,7 @@ const FOCUS_ANNOUNCEMENT_ID_KEY = 'focusAnnouncementId';
 const FOCUS_ACCOUNT_ID_KEY = 'focusAccountId';
 const FOCUS_TOKEN_ID_KEY = 'focusTokenId';
 const OPEN_REBIND_KEY = 'openRebind';
+const OPEN_MANUAL_CHECKIN_KEY = 'openManualCheckin';
 
 function normalizePositiveId(input: unknown): number | null {
   const value = Number.parseInt(String(input ?? ''), 10);
@@ -30,7 +31,7 @@ export function buildAnnouncementFocusPath(announcementId: number): string {
 
 export function buildAccountFocusPath(
   accountId: number,
-  options?: { openRebind?: boolean; segment?: 'session' | 'apikey' | 'tokens' },
+  options?: { openRebind?: boolean; openManualCheckin?: boolean; segment?: 'session' | 'apikey' | 'tokens' },
 ): string {
   const normalizedId = normalizePositiveId(accountId);
   if (!normalizedId) return '/accounts';
@@ -38,6 +39,7 @@ export function buildAccountFocusPath(
   if (options?.segment && options.segment !== 'session') params.set('segment', options.segment);
   params.set(FOCUS_ACCOUNT_ID_KEY, String(normalizedId));
   if (options?.openRebind) params.set(OPEN_REBIND_KEY, '1');
+  if (options?.openManualCheckin) params.set(OPEN_MANUAL_CHECKIN_KEY, '1');
   return `/accounts?${params.toString()}`;
 }
 
@@ -60,11 +62,12 @@ export function readFocusAnnouncementId(search: string): number | null {
   return normalizePositiveId(params.get(FOCUS_ANNOUNCEMENT_ID_KEY));
 }
 
-export function readFocusAccountIntent(search: string): { accountId: number | null; openRebind: boolean } {
+export function readFocusAccountIntent(search: string): { accountId: number | null; openRebind: boolean; openManualCheckin: boolean } {
   const params = new URLSearchParams(search);
   return {
     accountId: normalizePositiveId(params.get(FOCUS_ACCOUNT_ID_KEY)),
     openRebind: isTruthyFlag(params.get(OPEN_REBIND_KEY)),
+    openManualCheckin: isTruthyFlag(params.get(OPEN_MANUAL_CHECKIN_KEY)),
   };
 }
 
@@ -80,6 +83,7 @@ export function clearFocusParams(search: string): string {
   params.delete(FOCUS_ACCOUNT_ID_KEY);
   params.delete(FOCUS_TOKEN_ID_KEY);
   params.delete(OPEN_REBIND_KEY);
+  params.delete(OPEN_MANUAL_CHECKIN_KEY);
   const next = params.toString();
   return next ? `?${next}` : '';
 }

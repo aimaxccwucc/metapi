@@ -563,7 +563,7 @@ describe('TokenRoutes refresh decision action', () => {
         accountLinkButton.props.onClick();
       });
 
-      expect(navigateMock).toHaveBeenCalledWith('/accounts?focusAccountId=88&openRebind=1');
+      expect(navigateMock).toHaveBeenCalledWith('/accounts?focusAccountId=88&openManualCheckin=1');
     } finally {
       root?.unmount();
     }

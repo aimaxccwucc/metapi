@@ -1252,23 +1252,25 @@ export default function Accounts() {
   };
 
   useEffect(() => {
-    const { accountId, openRebind } = readFocusAccountIntent(location.search);
+    const { accountId, openRebind, openManualCheckin } = readFocusAccountIntent(location.search);
     if (!accountId || !loaded || activeSegment === 'tokens') return;
 
     const target = visibleAccounts.find((account) => account.id === accountId);
     const row = rowRefs.current.get(accountId);
     const cleanedSearch = clearFocusParams(location.search);
-    if (!target || !row) {
+    if (!target) {
       navigate({ pathname: location.pathname, search: cleanedSearch }, { replace: true });
       return;
     }
 
-    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    setHighlightAccountId(accountId);
-    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
-    highlightTimerRef.current = setTimeout(() => {
-      setHighlightAccountId((current) => (current === accountId ? null : current));
-    }, 2200);
+    if (row) {
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightAccountId(accountId);
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = setTimeout(() => {
+        setHighlightAccountId((current) => (current === accountId ? null : current));
+      }, 2200);
+    }
 
     if (openRebind && target.status === 'expired' && !resolveAccountCapabilities(target).proxyOnly) {
       setShowAdd(false);
@@ -1277,8 +1279,15 @@ export default function Accounts() {
       }
     }
 
+    if (openManualCheckin && target.site?.autoCheckinPolicy === 'manual_required') {
+      setShowAdd(false);
+      if (!manualCheckinTarget || manualCheckinTarget.id !== target.id) {
+        openManualCheckinPanel(target);
+      }
+    }
+
     navigate({ pathname: location.pathname, search: cleanedSearch }, { replace: true });
-  }, [activeSegment, loaded, location.pathname, location.search, navigate, openRebindPanel, rebindTarget, visibleAccounts]);
+  }, [activeSegment, loaded, location.pathname, location.search, manualCheckinTarget, navigate, openRebindPanel, rebindTarget, visibleAccounts]);
 
   const canAddVerifiedConnection = Boolean(
     verifyResult?.success

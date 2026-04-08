@@ -1885,7 +1885,8 @@ export default function TokenRoutes() {
                                         type="button"
                                         className="btn btn-link"
                                         onClick={() => navigate(buildAccountFocusPath(account.accountId, {
-                                          openRebind: account.requiresManual || account.status === 'expired',
+                                          openRebind: !account.requiresManual && account.status === 'expired',
+                                          openManualCheckin: account.requiresManual,
                                           segment: 'session',
                                         }))}
                                       >

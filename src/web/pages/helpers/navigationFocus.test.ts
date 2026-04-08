@@ -15,6 +15,7 @@ describe('navigationFocus helpers', () => {
     expect(buildSiteFocusPath(0)).toBe('/sites');
     expect(buildAccountFocusPath(34)).toBe('/accounts?focusAccountId=34');
     expect(buildAccountFocusPath(34, { openRebind: true })).toBe('/accounts?focusAccountId=34&openRebind=1');
+    expect(buildAccountFocusPath(34, { openManualCheckin: true })).toBe('/accounts?focusAccountId=34&openManualCheckin=1');
     expect(buildAccountFocusPath(-1)).toBe('/accounts');
   });
 
@@ -27,14 +28,22 @@ describe('navigationFocus helpers', () => {
     expect(readFocusAccountIntent('?focusAccountId=22&openRebind=1')).toEqual({
       accountId: 22,
       openRebind: true,
+      openManualCheckin: false,
     });
     expect(readFocusAccountIntent('?focusAccountId=22&openRebind=true')).toEqual({
       accountId: 22,
       openRebind: true,
+      openManualCheckin: false,
+    });
+    expect(readFocusAccountIntent('?focusAccountId=22&openManualCheckin=1')).toEqual({
+      accountId: 22,
+      openRebind: false,
+      openManualCheckin: true,
     });
     expect(readFocusAccountIntent('?focusAccountId=22')).toEqual({
       accountId: 22,
       openRebind: false,
+      openManualCheckin: false,
     });
   });
 
@@ -42,6 +51,7 @@ describe('navigationFocus helpers', () => {
     expect(clearFocusParams('?focusSiteId=12&q=abc')).toBe('?q=abc');
     expect(clearFocusParams('?focusAnnouncementId=44&type=site_notice')).toBe('?type=site_notice');
     expect(clearFocusParams('?focusAccountId=2&openRebind=1&type=token')).toBe('?type=token');
+    expect(clearFocusParams('?focusAccountId=2&openManualCheckin=1&type=token')).toBe('?type=token');
     expect(clearFocusParams('?focusAccountId=2')).toBe('');
   });
 
