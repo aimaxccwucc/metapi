@@ -5692,6 +5692,10 @@ export class TokenRouter {
       reasonParts.push(`站点状态=${candidate.site.status || 'disabled'}`);
     }
 
+    if ((candidate.site.healthStatus || 'unknown') === 'unreachable') {
+      reasonParts.push('站点健康=unreachable');
+    }
+
     if (excludeChannelIds.includes(candidate.channel.id)) {
       reasonParts.push('当前请求已尝试');
     }

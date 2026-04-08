@@ -49,6 +49,9 @@ type SiteRow = {
   healthStatus?: 'alive' | 'unreachable' | 'unknown' | string;
   healthReason?: string | null;
   healthCheckedAt?: string | null;
+  autoCheckinPolicy?: 'normal' | 'unsupported' | 'manual_required' | string;
+  autoCheckinReason?: string | null;
+  autoCheckinUpdatedAt?: string | null;
   proxyUrl?: string | null;
   useSystemProxy?: boolean;
   customHeaders?: string | null;
@@ -227,6 +230,57 @@ const siteReachabilityMap: Record<string, {
   unknown: { label: '未知', cls: 'badge-muted', dotClass: 'status-dot-muted' },
 };
 
+function resolveSiteAutoCheckinMeta(site: SiteRow): { label: string; cls: string; detail: string } {
+  const reason = (site.autoCheckinReason || '').trim();
+  const policy = (site.autoCheckinPolicy || 'normal').trim();
+
+  if (site.status === 'disabled') {
+    return {
+      label: '已关闭',
+      cls: 'badge-muted',
+      detail: '站点已禁用，批量签到不会执行',
+    };
+  }
+
+  if (policy === 'unsupported') {
+    return {
+      label: '永久跳过',
+      cls: 'badge-warning',
+      detail: reason || '站点未提供签到接口，已永久跳过自动签到',
+    };
+  }
+
+  if (policy === 'manual_required') {
+    return {
+      label: '人工处理',
+      cls: 'badge-warning',
+      detail: reason || '站点需要人工验证，已永久跳过自动签到',
+    };
+  }
+
+  if ((site.healthStatus || 'unknown') === 'unreachable') {
+    return {
+      label: '临时跳过',
+      cls: 'badge-error',
+      detail: '站点当前不可达，批量签到会临时跳过；恢复可达后会自动重新纳入',
+    };
+  }
+
+  if ((site.healthStatus || 'unknown') === 'alive') {
+    return {
+      label: '正常',
+      cls: 'badge-success',
+      detail: '当前参与批量签到',
+    };
+  }
+
+  return {
+    label: '待确认',
+    cls: 'badge-muted',
+    detail: '尚未确认自动签到状态',
+  };
+}
+
 const SITE_PLATFORM_OPTIONS = [
   { value: '', label: '平台类型（可自动检测）' },
   { value: 'new-api', label: 'new-api' },
@@ -401,6 +455,32 @@ export default function Sites() {
           title={detail}
         >
           {detail}
+        </div>
+      </div>
+    );
+  };
+
+  const renderSiteAutoCheckin = (site: SiteRow) => {
+    const meta = resolveSiteAutoCheckinMeta(site);
+    return (
+      <div>
+        <span className={`badge ${meta.cls}`} style={{ fontSize: 11 }}>
+          {meta.label}
+        </span>
+        <div
+          style={{
+            marginTop: 4,
+            maxWidth: 240,
+            fontSize: 11,
+            lineHeight: 1.35,
+            color: 'var(--color-text-muted)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+          title={meta.detail}
+        >
+          {meta.detail}
         </div>
       </div>
     );
@@ -1550,6 +1630,7 @@ export default function Sites() {
                       )}
                     />
                     <MobileField label="可达状态" value={renderSiteReachability(site)} stacked />
+                    <MobileField label="自动签到" value={renderSiteAutoCheckin(site)} stacked />
                     <MobileField
                       label="平台"
                       value={(
@@ -1701,6 +1782,7 @@ export default function Sites() {
                   >
                     可达状态 {getSiteHeaderSortMeta('reachability').active ? (getSiteHeaderSortMeta('reachability').direction === 'desc' ? '↓' : '↑') : ''}
                   </th>
+                  <th>自动签到</th>
                   <th>系统代理</th>
                   <th>权重</th>
                   <th>平台</th>
@@ -1780,6 +1862,7 @@ export default function Sites() {
                       </span>
                     </td>
                     <td>{renderSiteReachability(site)}</td>
+                    <td>{renderSiteAutoCheckin(site)}</td>
                     <td>
                       <span className={`badge ${site.useSystemProxy ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>
                         {site.useSystemProxy ? '已开启' : '未开启'}

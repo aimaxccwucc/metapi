@@ -123,6 +123,7 @@ describe('database schema parity', () => {
       mysqlUpgrade.includes('CREATE TABLE IF NOT EXISTS `routing_governance_states`')
       || mysqlUpgrade.includes('ALTER TABLE `proxy_logs` ADD COLUMN `cache_status`')
       || mysqlUpgrade.includes('ALTER TABLE `token_routes` ADD COLUMN `probe_policy`')
+      || mysqlUpgrade.includes('ALTER TABLE `sites` ADD COLUMN `auto_checkin_policy`')
       || mysqlUpgrade.includes('-- no schema changes detected for mysql'),
     ).toBe(true);
     expect(postgresBootstrap).toContain('CREATE TABLE IF NOT EXISTS "response_cache"');
@@ -133,6 +134,7 @@ describe('database schema parity', () => {
       postgresUpgrade.includes('CREATE TABLE IF NOT EXISTS "routing_governance_states"')
       || postgresUpgrade.includes('ALTER TABLE "proxy_logs" ADD COLUMN "cache_status"')
       || postgresUpgrade.includes('ALTER TABLE "token_routes" ADD COLUMN "probe_policy"')
+      || postgresUpgrade.includes('ALTER TABLE "sites" ADD COLUMN "auto_checkin_policy"')
       || postgresUpgrade.includes('-- no schema changes detected for postgres'),
     ).toBe(true);
   });

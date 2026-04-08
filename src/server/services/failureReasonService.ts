@@ -10,6 +10,7 @@ type FailureReasonCategory =
 
 type FailureReasonCode =
   | 'site_disabled'
+  | 'site_unreachable'
   | 'checkin_not_supported'
   | 'manual_turnstile_required'
   | 'cloudflare_tunnel_unavailable'
@@ -33,6 +34,7 @@ export type CheckinSnapshotStatus =
   | 'already_checked'
   | 'manual_required'
   | 'unsupported'
+  | 'site_unreachable'
   | 'retryable_failed'
   | 'terminal_failed'
   | 'site_disabled';
@@ -73,12 +75,29 @@ export function classifyFailureReason(
     };
   }
 
+  if (status === 'skipped' && includesAny(text, [
+    'site unreachable',
+    '站点当前不可达',
+    '批量签到已临时跳过',
+    '恢复后会自动重新纳入',
+  ])) {
+    return {
+      code: 'site_unreachable',
+      category: 'network',
+      title: '站点暂时不可达',
+      actionHint: '等待健康检查恢复后自动重试',
+      detailHint: '站点健康检查已标记为不可达，批量签到会临时跳过，恢复可达后会自动重新纳入。',
+    };
+  }
+
   if (includesAny(text, [
     'invalid url (post /api/user/checkin)',
     'http 404: {"error":{"message":"invalid url (post /api/user/checkin)"}}',
     'checkin endpoint not found',
     '签到端点不存在',
     '站点不支持签到',
+    '签到功能未启用',
+    '未提供签到接口',
     'not support checkin',
     'check-in is not supported',
     'checkin is not supported',
@@ -90,6 +109,19 @@ export function classifyFailureReason(
       title: '站点未开启签到',
       actionHint: '无需重试（非故障）',
       detailHint: '该站点未提供签到端点，账号会被自动跳过。',
+    };
+  }
+
+  if (includesAny(text, [
+    '站点需要人工验证，已永久跳过自动签到',
+    '需要人工验证，已永久跳过自动签到',
+  ])) {
+    return {
+      code: 'manual_turnstile_required',
+      category: 'verification',
+      title: '需要人工验证',
+      actionHint: '浏览器先人工签到一次',
+      detailHint: '站点开启了 Turnstile 人机验证，自动签到无法直接通过。',
     };
   }
 
@@ -201,6 +233,21 @@ export function resolveCheckinExecution(input: {
         refreshBalance: false,
         healthState: 'disabled',
         logMessage: 'site disabled',
+        eventLevel: 'info',
+      };
+    case 'site_unreachable':
+      return {
+        ...base,
+        lifecycle: 'skipped',
+        normalizedStatus: 'skipped',
+        checkinSnapshotStatus: 'site_unreachable',
+        retryable: true,
+        requiresManual: false,
+        unsupported: false,
+        advanceLastCheckinAt: false,
+        refreshBalance: false,
+        healthState: 'degraded',
+        logMessage: normalizedMessage,
         eventLevel: 'info',
       };
     case 'already_checked_in':

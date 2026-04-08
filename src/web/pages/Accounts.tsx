@@ -685,6 +685,65 @@ export default function Accounts() {
     return { state, reason, ...cfg };
   };
 
+  const resolveAccountAutoCheckin = (account: any, capabilities: { canCheckin: boolean; proxyOnly: boolean }) => {
+    const site = account?.site || {};
+    const storedReason = typeof site.autoCheckinReason === 'string' ? site.autoCheckinReason.trim() : '';
+
+    if (!capabilities.canCheckin) {
+      return {
+        label: '不参与',
+        cls: 'badge-muted',
+        reason: '当前连接仅用于 API Key 代理，不参与签到',
+      };
+    }
+
+    if (account?.checkinEnabled === false) {
+      return {
+        label: '账号关闭',
+        cls: 'badge-muted',
+        reason: '账号已关闭签到，批量签到会忽略此账号',
+      };
+    }
+
+    if (site.status === 'disabled') {
+      return {
+        label: '站点禁用',
+        cls: 'badge-muted',
+        reason: '站点已禁用，批量签到不会执行',
+      };
+    }
+
+    if (site.autoCheckinPolicy === 'unsupported') {
+      return {
+        label: '永久跳过',
+        cls: 'badge-warning',
+        reason: storedReason || '站点未提供签到接口，已永久跳过自动签到',
+      };
+    }
+
+    if (site.autoCheckinPolicy === 'manual_required') {
+      return {
+        label: '人工处理',
+        cls: 'badge-warning',
+        reason: storedReason || '站点需要人工验证，已永久跳过自动签到',
+      };
+    }
+
+    if ((site.healthStatus || 'unknown') === 'unreachable') {
+      return {
+        label: '临时跳过',
+        cls: 'badge-error',
+        reason: '站点当前不可达，批量签到会临时跳过；恢复可达后会自动重新纳入',
+      };
+    }
+
+    return {
+      label: '正常参与',
+      cls: 'badge-success',
+      reason: '当前参与批量签到',
+    };
+  };
+
   const resolveAccountCapabilities = (account: any) => {
     const fromServer = account?.capabilities;
     if (fromServer && typeof fromServer === 'object') {
@@ -1754,6 +1813,7 @@ export default function Accounts() {
                   {renderedAccounts.map((a: any) => {
                     const capabilities = resolveAccountCapabilities(a);
                     const connectionMode = resolveAccountCredentialMode(a);
+                    const autoCheckin = resolveAccountAutoCheckin(a, capabilities);
                     const health = resolveRuntimeHealth(a);
                     const isExpanded = expandedAccountIds.includes(a.id);
                     const hintMessage = (a.status === 'expired' && !capabilities.proxyOnly)
@@ -1889,6 +1949,26 @@ export default function Accounts() {
                               )}
                             />
                             <MobileField
+                              label="批量签到"
+                              stacked
+                              value={(
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                  <span className={`badge ${autoCheckin.cls}`} style={{ fontSize: 11, width: 'fit-content' }}>
+                                    {autoCheckin.label}
+                                  </span>
+                                  <span
+                                    style={{
+                                      fontSize: 11,
+                                      color: 'var(--color-text-muted)',
+                                      lineHeight: 1.35,
+                                    }}
+                                  >
+                                    {autoCheckin.reason}
+                                  </span>
+                                </div>
+                              )}
+                            />
+                            <MobileField
                               label="账号状态"
                               value={a.status === 'expired' ? '已过期' : (a.status || '-')}
                             />
@@ -1987,6 +2067,7 @@ export default function Accounts() {
                   {renderedAccounts.map((a: any, i: number) => {
                     const capabilities = resolveAccountCapabilities(a);
                     const connectionMode = resolveAccountCredentialMode(a);
+                    const autoCheckin = resolveAccountAutoCheckin(a, capabilities);
                     return (
                       <tr
                         key={a.id}
@@ -2063,24 +2144,42 @@ export default function Accounts() {
                           </div>
                         </td>
                         <td>
-                          {capabilities.canCheckin ? (
-                            <button
-                              type="button"
-                              className={`checkin-toggle-badge ${a.checkinEnabled ? 'is-on' : 'is-off'}`}
-                              onClick={() => handleToggleCheckin(a)}
-                              disabled={!!actionLoading[`checkin-toggle-${a.id}`]}
-                              data-tooltip={a.checkinEnabled ? '点击关闭签到，全部签到会忽略此账号' : '点击开启签到'}
-                              aria-label={a.checkinEnabled ? '点击关闭签到，全部签到会忽略此账号' : '点击开启签到'}
-                            >
-                              {actionLoading[`checkin-toggle-${a.id}`]
-                                ? <span className="spinner spinner-sm" />
-                                : (a.checkinEnabled ? '开启' : '关闭')}
-                            </button>
-                          ) : (
-                            <span className="badge badge-muted" style={{ fontSize: 11 }}>
-                              不支持
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+                            {capabilities.canCheckin ? (
+                              <button
+                                type="button"
+                                className={`checkin-toggle-badge ${a.checkinEnabled ? 'is-on' : 'is-off'}`}
+                                onClick={() => handleToggleCheckin(a)}
+                                disabled={!!actionLoading[`checkin-toggle-${a.id}`]}
+                                data-tooltip={a.checkinEnabled ? '点击关闭签到，全部签到会忽略此账号' : '点击开启签到'}
+                                aria-label={a.checkinEnabled ? '点击关闭签到，全部签到会忽略此账号' : '点击开启签到'}
+                              >
+                                {actionLoading[`checkin-toggle-${a.id}`]
+                                  ? <span className="spinner spinner-sm" />
+                                  : (a.checkinEnabled ? '开启' : '关闭')}
+                              </button>
+                            ) : (
+                              <span className="badge badge-muted" style={{ fontSize: 11 }}>
+                                不支持
+                              </span>
+                            )}
+                            <span className={`badge ${autoCheckin.cls}`} style={{ fontSize: 10 }}>
+                              {autoCheckin.label}
                             </span>
-                          )}
+                            <span
+                              style={{
+                                fontSize: 11,
+                                color: 'var(--color-text-muted)',
+                                maxWidth: 220,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                              data-tooltip={autoCheckin.reason}
+                            >
+                              {autoCheckin.reason}
+                            </span>
+                          </div>
                         </td>
                         <td className="accounts-actions-cell" style={{ textAlign: 'right' }}>
                           <div className="accounts-row-actions">

@@ -1379,6 +1379,24 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "auto_checkin_policy": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'normal'",
+          "primaryKey": false
+        },
+        "auto_checkin_reason": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "auto_checkin_updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },
@@ -1950,6 +1968,14 @@
         "model_name"
       ],
       "unique": true
+    },
+    {
+      "name": "sites_auto_checkin_policy_idx",
+      "table": "sites",
+      "columns": [
+        "auto_checkin_policy"
+      ],
+      "unique": false
     },
     {
       "name": "sites_health_status_idx",

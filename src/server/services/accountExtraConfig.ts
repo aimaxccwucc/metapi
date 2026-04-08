@@ -42,7 +42,7 @@ type AccountExtraConfig = {
 
 export type StoredCheckinSnapshot = {
   version: 1;
-  status: 'success' | 'already_checked' | 'manual_required' | 'unsupported' | 'retryable_failed' | 'terminal_failed' | 'site_disabled';
+  status: 'success' | 'already_checked' | 'manual_required' | 'unsupported' | 'retryable_failed' | 'terminal_failed' | 'site_disabled' | 'site_unreachable';
   reasonCode: string;
   retryable: boolean;
   requiresManual: boolean;

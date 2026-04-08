@@ -22,6 +22,11 @@ import {
   getCheckinSiteBackoffDecision,
   recordCheckinSiteResolution,
 } from './checkinSiteRuntime.js';
+import {
+  deriveSiteAutoCheckinPolicyUpdate,
+  normalizeSiteAutoCheckinPolicy,
+  resolveSiteAutoCheckinSkip,
+} from './siteAutoCheckinService.js';
 
 export function isSchedulableCheckinAccountStatus(status?: string | null): boolean {
   return status === 'active' || status === 'expired';
@@ -29,6 +34,112 @@ export function isSchedulableCheckinAccountStatus(status?: string | null): boole
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
+}
+
+async function syncSiteAutoCheckinPolicy(
+  site: typeof schema.sites.$inferSelect,
+  resolution: ReturnType<typeof resolveCheckinExecution>,
+  rawSuccess: boolean,
+): Promise<void> {
+  const nextPolicy = deriveSiteAutoCheckinPolicyUpdate(resolution);
+  const currentPolicy = normalizeSiteAutoCheckinPolicy(site.autoCheckinPolicy);
+  const now = new Date().toISOString();
+
+  if (nextPolicy) {
+    if (currentPolicy === nextPolicy.policy && (site.autoCheckinReason || '') === nextPolicy.reason) {
+      return;
+    }
+
+    await db.update(schema.sites)
+      .set({
+        autoCheckinPolicy: nextPolicy.policy,
+        autoCheckinReason: nextPolicy.reason,
+        autoCheckinUpdatedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(schema.sites.id, site.id))
+      .run();
+    return;
+  }
+
+  if (rawSuccess && currentPolicy !== 'normal') {
+    await db.update(schema.sites)
+      .set({
+        autoCheckinPolicy: 'normal',
+        autoCheckinReason: null,
+        autoCheckinUpdatedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(schema.sites.id, site.id))
+      .run();
+  }
+}
+
+async function persistSkippedCheckin(
+  account: typeof schema.accounts.$inferSelect,
+  site: typeof schema.sites.$inferSelect,
+  resolution: ReturnType<typeof resolveCheckinExecution>,
+  options?: { skipEvent?: boolean; scheduleMode?: 'cron' | 'interval' },
+) {
+  const createdAt = formatUtcSqlDateTime(new Date());
+  setAccountRuntimeHealth(account.id, {
+    state: resolution.healthState,
+    reason: resolution.title,
+    source: 'checkin',
+  });
+  await db.insert(schema.checkinLogs).values({
+    accountId: account.id,
+    status: resolution.normalizedStatus,
+    message: resolution.logMessage,
+    createdAt,
+  }).run();
+  const snapshotNow = new Date().toISOString();
+  await db.update(schema.accounts)
+    .set({
+      extraConfig: mergeCheckinSnapshot(account.extraConfig, {
+        version: 1,
+        status: resolution.checkinSnapshotStatus,
+        reasonCode: resolution.code,
+        retryable: resolution.retryable,
+        requiresManual: resolution.requiresManual,
+        unsupported: resolution.unsupported,
+        lastAttemptAt: snapshotNow,
+        lastIntervalAttemptAt: options?.scheduleMode === 'interval' ? snapshotNow : null,
+        lastSuccessAt: extractCheckinSnapshot(account.extraConfig)?.lastSuccessAt ?? null,
+        nextRetryAt: null,
+        message: resolution.logMessage,
+        reward: null,
+        scheduleMode: options?.scheduleMode === 'interval' ? 'interval' : 'cron',
+        source: 'checkin',
+      }),
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(schema.accounts.id, account.id))
+    .run();
+
+  if (!options?.skipEvent) {
+    await db.insert(schema.events).values({
+      type: 'checkin',
+      title: 'checkin skipped',
+      message: `${account.username || 'ID:' + account.id} @ ${site.name}: ${resolution.logMessage}`,
+      level: 'info',
+      relatedId: account.id,
+      relatedType: 'account',
+      createdAt,
+    }).run();
+  }
+
+  await recordCheckinSiteResolution(site.id, resolution);
+
+  return {
+    success: true,
+    status: 'skipped' as const,
+    skipped: true,
+    reason: resolution.code,
+    reasonCode: resolution.code,
+    checkinSnapshotStatus: resolution.checkinSnapshotStatus,
+    message: resolution.logMessage,
+  };
 }
 
 
@@ -106,69 +217,13 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   const site = rows[0].sites;
 
   if (isSiteDisabled(site.status)) {
-    const createdAt = formatUtcSqlDateTime(new Date());
     const resolution = resolveCheckinExecution({
       success: false,
       message: 'site disabled',
       status: 'skipped',
       scheduleMode: options?.scheduleMode,
     });
-    setAccountRuntimeHealth(account.id, {
-      state: resolution.healthState,
-      reason: resolution.title,
-      source: 'checkin',
-    });
-    await db.insert(schema.checkinLogs).values({
-      accountId: account.id,
-      status: resolution.normalizedStatus,
-      message: resolution.logMessage,
-      createdAt,
-    }).run();
-    const snapshotNow = new Date().toISOString();
-    await db.update(schema.accounts)
-      .set({
-        extraConfig: mergeCheckinSnapshot(account.extraConfig, {
-          version: 1,
-          status: resolution.checkinSnapshotStatus,
-          reasonCode: resolution.code,
-          retryable: resolution.retryable,
-          requiresManual: resolution.requiresManual,
-          unsupported: resolution.unsupported,
-          lastAttemptAt: snapshotNow,
-          lastIntervalAttemptAt: options?.scheduleMode === 'interval' ? snapshotNow : null,
-          lastSuccessAt: extractCheckinSnapshot(account.extraConfig)?.lastSuccessAt ?? null,
-          nextRetryAt: null,
-          message: resolution.logMessage,
-          reward: null,
-          scheduleMode: options?.scheduleMode === 'interval' ? 'interval' : 'cron',
-          source: 'checkin',
-        }),
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(schema.accounts.id, account.id))
-      .run();
-
-    if (!options?.skipEvent) {
-      await db.insert(schema.events).values({
-        type: 'checkin',
-        title: 'checkin skipped',
-        message: `${account.username || 'ID:' + accountId} @ ${site.name}: site disabled`,
-        level: 'info',
-        relatedId: accountId,
-        relatedType: 'account',
-        createdAt,
-      }).run();
-    }
-
-    await recordCheckinSiteResolution(site.id, resolution);
-
-    return {
-      success: true,
-      status: 'skipped' as const,
-      skipped: true,
-      reason: 'site_disabled',
-      message: 'site disabled',
-    };
+    return await persistSkippedCheckin(account, site, resolution, options);
   }
 
   const adapter = getAdapter(site.platform);
@@ -349,6 +404,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   }
 
   await recordCheckinSiteResolution(site.id, resolution);
+  await syncSiteAutoCheckinPolicy(site, resolution, result.success === true);
 
 
   return {
@@ -386,6 +442,29 @@ export async function checkinAll(options?: { accountIds?: number[]; scheduleMode
   }
 
   const promises = Array.from(grouped.entries()).map(async ([siteId, siteRows]) => {
+    const siteSkip = resolveSiteAutoCheckinSkip(siteRows[0]?.sites);
+    if (siteSkip) {
+      for (const row of siteRows) {
+        const resolution = resolveCheckinExecution({
+          success: false,
+          message: siteSkip.message,
+          status: 'skipped',
+          scheduleMode: options?.scheduleMode,
+        });
+        const r = await persistSkippedCheckin(row.accounts, row.sites, resolution, {
+          skipEvent: true,
+          scheduleMode: options?.scheduleMode,
+        });
+        results.push({
+          accountId: row.accounts.id,
+          username: row.accounts.username,
+          site: row.sites.name,
+          result: r,
+        });
+      }
+      return;
+    }
+
     const siteBackoff = await getCheckinSiteBackoffDecision(siteId);
     if (siteBackoff.blocked) {
       for (const row of siteRows) {

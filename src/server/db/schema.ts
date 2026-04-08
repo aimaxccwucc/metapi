@@ -14,6 +14,9 @@ export const sites = sqliteTable('sites', {
   healthStatus: text('health_status').notNull().default('unknown'), // 'unknown' | 'alive' | 'unreachable'
   healthReason: text('health_reason'),
   healthCheckedAt: text('health_checked_at'),
+  autoCheckinPolicy: text('auto_checkin_policy').notNull().default('normal'), // 'normal' | 'unsupported' | 'manual_required'
+  autoCheckinReason: text('auto_checkin_reason'),
+  autoCheckinUpdatedAt: text('auto_checkin_updated_at'),
   isPinned: integer('is_pinned', { mode: 'boolean' }).default(false),
   sortOrder: integer('sort_order').default(0),
   globalWeight: real('global_weight').default(1),
@@ -23,6 +26,7 @@ export const sites = sqliteTable('sites', {
 }, (table) => ({
   statusIdx: index('sites_status_idx').on(table.status),
   healthStatusIdx: index('sites_health_status_idx').on(table.healthStatus),
+  autoCheckinPolicyIdx: index('sites_auto_checkin_policy_idx').on(table.autoCheckinPolicy),
   platformUrlUnique: uniqueIndex('sites_platform_url_unique').on(table.platform, table.url),
 }));
 

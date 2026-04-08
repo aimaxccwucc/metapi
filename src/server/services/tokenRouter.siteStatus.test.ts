@@ -84,6 +84,48 @@ describe('TokenRouter site status guard', () => {
     expect(candidate?.eligible).toBe(false);
   });
 
+  it('does not select channels from unreachable sites', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'unreachable-site',
+      url: 'https://unreachable.example.com',
+      platform: 'new-api',
+      healthStatus: 'unreachable',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'unreachable-user',
+      accessToken: 'access-unreachable',
+      apiToken: 'sk-unreachable',
+      status: 'active',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      enabled: true,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const selected = await router.selectChannel('gpt-4o-mini');
+    expect(selected).toBeNull();
+
+    const decision = await router.explainSelection('gpt-4o-mini');
+    expect(decision.matched).toBe(true);
+    const candidate = decision.candidates.find((item) => item.channelId === channel.id);
+    expect(candidate?.eligible).toBe(false);
+    expect(String(candidate?.reason || '')).toContain('站点健康=unreachable');
+  });
+
   it('does not fallback to deprecated site apiKey when channel and account tokens are missing', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-api-key-only',

@@ -64,7 +64,7 @@ vi.mock('../db/index.js', () => {
     },
     schema: {
       accounts: { id: 'id', siteId: 'siteId', checkinEnabled: 'checkinEnabled', status: 'status' },
-      sites: { id: 'id' },
+      sites: { id: 'id', autoCheckinPolicy: 'autoCheckinPolicy', autoCheckinReason: 'autoCheckinReason' },
       checkinLogs: {},
       events: {},
     },
@@ -754,6 +754,74 @@ describe('checkinService auto relogin', () => {
     expect(results[0]?.result?.reasonCode).toBe('upstream_error');
     expect(results[0]?.result?.failureStreak).toBe(3);
     expect(recordCheckinSiteResolutionMock).not.toHaveBeenCalled();
+  });
+
+  it('temporarily skips batch checkin when site health is unreachable', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 21,
+          username: 'batch-user',
+          accessToken: 'token',
+          status: 'active',
+          checkinEnabled: true,
+          extraConfig: null,
+        },
+        sites: {
+          id: 21,
+          name: 'offline-site',
+          url: 'https://offline.example.com',
+          platform: 'new-api',
+          healthStatus: 'unreachable',
+          autoCheckinPolicy: 'normal',
+          autoCheckinReason: null,
+        },
+      },
+    ]);
+
+    const { checkinAll } = await import('./checkinService.js');
+    const results = await checkinAll({ scheduleMode: 'cron' });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.result?.status).toBe('skipped');
+    expect(results[0]?.result?.reasonCode).toBe('site_unreachable');
+    expect(adapterMock.checkin).not.toHaveBeenCalled();
+    const firstInsertPayload = insertValuesMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(firstInsertPayload?.status).toBe('skipped');
+    expect(String(firstInsertPayload?.message || '')).toContain('批量签到已临时跳过');
+  });
+
+  it('stores site auto-checkin policy when checkin endpoint is unsupported', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 22,
+          username: 'unsupported-user',
+          accessToken: 'token',
+          status: 'active',
+          extraConfig: null,
+        },
+        sites: {
+          id: 22,
+          name: 'unsupported-site',
+          url: 'https://unsupported.example.com',
+          platform: 'new-api',
+          autoCheckinPolicy: 'normal',
+          autoCheckinReason: null,
+        },
+      },
+    ]);
+
+    adapterMock.checkin.mockResolvedValue({
+      success: false,
+      message: '签到功能未启用',
+    });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(22);
+
+    expect(result.status).toBe('skipped');
+    expect(updateSetMock.mock.calls.some((call) => call?.[0]?.autoCheckinPolicy === 'unsupported')).toBe(true);
   });
 
   it('keeps batch checkin isolated when one account throws unexpectedly', async () => {
