@@ -82,7 +82,7 @@ describe('CheckinLog pagination', () => {
     }
   });
 
-  it('loads more checkin logs after the initial 100 rows', async () => {
+  it('loads all checkin logs automatically after the initial 100 rows', async () => {
     apiMock.getCheckinLogs
       .mockResolvedValueOnce(Array.from({ length: 100 }, (_, index) => buildLog(index + 1)))
       .mockResolvedValueOnce(Array.from({ length: 20 }, (_, index) => buildLog(index + 101)));
@@ -101,22 +101,11 @@ describe('CheckinLog pagination', () => {
       await flushMicrotasks();
 
       expect(apiMock.getCheckinLogs).toHaveBeenNthCalledWith(1, 'limit=100&offset=0');
-      expect(collectText(root!.root)).toContain('已加载 100 条签到记录，当前筛选命中 100 条。');
-
-      const loadMoreButton = root!.root.find((node) => (
-        node.type === 'button'
-        && node.props['data-testid'] === 'checkin-load-more'
-      ));
-
-      await act(async () => {
-        loadMoreButton.props.onClick();
-      });
-      await flushMicrotasks();
-
       expect(apiMock.getCheckinLogs).toHaveBeenNthCalledWith(2, 'limit=100&offset=100');
       expect(collectText(root!.root)).toContain('已加载 120 条签到记录，当前筛选命中 120 条。');
       expect(collectText(root!.root)).toContain('user-120');
-      expect(root!.root.findAll((node) => node.props['data-testid'] === 'checkin-load-more')).toHaveLength(0);
+      expect(collectText(root!.root)).toContain('页面会自动分批拉取最近全部签到记录。');
+      expect(collectText(root!.root)).not.toContain('加载更多签到记录');
     } finally {
       root?.unmount();
     }

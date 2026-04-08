@@ -69,8 +69,6 @@ function parseLocalDateTimeInput(value: string): Date | null {
 export default function CheckinLog() {
   const [logs, setLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
   const [triggering, setTriggering] = useState(false);
   const [filter, setFilter] = useState<LogFilter>("all");
   const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
@@ -142,20 +140,27 @@ export default function CheckinLog() {
     setToInput("");
   };
 
-  const load = async (append = false) => {
-    if (append) setLoadingMore(true);
-    else setLoading(true);
+  const load = async () => {
+    setLoading(true);
     try {
-      const offset = append ? logs.length : 0;
-      const data = await api.getCheckinLogs(`limit=${CHECKIN_LOG_PAGE_SIZE}&offset=${offset}`);
-      const safeRows = Array.isArray(data) ? data : [];
-      setLogs((prev) => (append ? [...prev, ...safeRows] : safeRows));
-      setHasMore(safeRows.length >= CHECKIN_LOG_PAGE_SIZE);
+      const nextLogs: any[] = [];
+      let offset = 0;
+
+      while (true) {
+        const data = await api.getCheckinLogs(`limit=${CHECKIN_LOG_PAGE_SIZE}&offset=${offset}`);
+        const safeRows = Array.isArray(data) ? data : [];
+        if (safeRows.length === 0) break;
+
+        nextLogs.push(...safeRows);
+        if (safeRows.length < CHECKIN_LOG_PAGE_SIZE) break;
+        offset += safeRows.length;
+      }
+
+      setLogs(nextLogs);
     } catch (e: any) {
       toast.error(e.message || "加载签到记录失败");
     } finally {
       setLoading(false);
-      setLoadingMore(false);
     }
   };
 
@@ -263,7 +268,7 @@ export default function CheckinLog() {
         <div>
           <h2 className="page-title">{tr("签到记录")}</h2>
           <div className="page-subtitle">
-            当前页展示的是签到执行记录，不等于账号总数。默认先加载最近 {CHECKIN_LOG_PAGE_SIZE} 条，可继续加载更多。
+            当前页展示的是签到执行记录，不等于账号总数。页面会自动分批拉取最近全部签到记录。
           </div>
           {!loading && (
             <div className="page-subtitle">
@@ -594,27 +599,12 @@ export default function CheckinLog() {
             <div className="empty-state-title">暂无签到记录</div>
             <div className="empty-state-desc">
               {logs.length > 0
-                ? "当前筛选条件下没有签到记录，可调整筛选条件或继续加载更多记录。"
+                ? "当前筛选条件下没有签到记录，可调整筛选条件查看已加载记录。"
                 : "点击“运行所有签到”开始执行。"}
             </div>
           </div>
         )}
       </div>
-
-      {!loading && logs.length > 0 && hasMore && (
-        <div style={{ marginTop: 12, display: "flex", justifyContent: "center" }}>
-          <button
-            type="button"
-            data-testid="checkin-load-more"
-            className="btn btn-ghost"
-            onClick={() => load(true)}
-            disabled={loadingMore}
-            style={{ border: "1px solid var(--color-border)", padding: "8px 16px" }}
-          >
-            {loadingMore ? <><span className="spinner spinner-sm" /> 加载中...</> : "加载更多签到记录"}
-          </button>
-        </div>
-      )}
     </div>
   );
 }
