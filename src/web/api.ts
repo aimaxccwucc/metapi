@@ -1188,8 +1188,8 @@ export const api = {
   }),
 
   // Check-in
-  triggerCheckinAll: () => request('/api/checkin/trigger', { method: 'POST' }),
-  triggerCheckin: (id: number) => request(`/api/checkin/trigger/${id}`, { method: 'POST' }),
+  triggerCheckinAll: () => request('/api/checkin/trigger', { method: 'POST', body: JSON.stringify({}) }),
+  triggerCheckin: (id: number) => request(`/api/checkin/trigger/${id}`, { method: 'POST', body: JSON.stringify({}) }),
   getCheckinLogs: (params?: string) => request(`/api/checkin/logs${params ? '?' + params : ''}`),
   updateCheckinSchedule: (cron: string) => request('/api/checkin/schedule', { method: 'PUT', body: JSON.stringify({ cron }) }),
 

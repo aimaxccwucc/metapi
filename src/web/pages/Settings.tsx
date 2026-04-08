@@ -1149,6 +1149,7 @@ export default function Settings() {
               />
             </div>
             <button
+              type="button"
               onClick={triggerScheduleCheckin}
               disabled={testingCheckin}
               className="btn btn-ghost"

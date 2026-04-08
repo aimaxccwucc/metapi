@@ -1060,6 +1060,7 @@ export default function Accounts() {
                 </div>
                 {activeSegment === 'session' && (
                   <button
+                    type="button"
                     onClick={() => withLoading('checkin-all', () => api.triggerCheckinAll(), '已触发全部签到')}
                     disabled={actionLoading['checkin-all']}
                     className="btn btn-soft-primary"
@@ -1110,6 +1111,7 @@ export default function Accounts() {
           </div>
           {activeSegment === 'session' && (
             <button
+              type="button"
               onClick={async () => {
                 setShowMobileTools(false);
                 await withLoading('checkin-all', () => api.triggerCheckinAll(), '已触发全部签到');

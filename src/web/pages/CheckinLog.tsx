@@ -253,6 +253,7 @@ export default function CheckinLog() {
       <div className="page-header">
         <h2 className="page-title">{tr("签到记录")}</h2>
         <button
+          type="button"
           onClick={handleTriggerAll}
           disabled={triggering}
           className="btn btn-soft-primary"
