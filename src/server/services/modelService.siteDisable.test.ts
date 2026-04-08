@@ -81,7 +81,7 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
         expect(routes).toHaveLength(0);
     });
 
-    it('only blocks the disabled site, not other sites providing the same model', async () => {
+    it('only blocks the disabled site when syncing an existing manual route', async () => {
         const siteA = await db.insert(schema.sites).values({
             name: 'site-a',
             url: 'https://site-a.example.com',
@@ -124,17 +124,18 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
             modelName: 'claude-sonnet-4-5-20250929',
         }).run();
 
+        const route = await db.insert(schema.tokenRoutes).values({
+            modelPattern: 'claude-sonnet-4-5-20250929',
+            probePolicy: 'manual',
+            enabled: true,
+        }).returning().get();
+
         const rebuild = await rebuildTokenRoutesFromAvailability();
 
         expect(rebuild.models).toBe(1);
 
-        const route = await db.select().from(schema.tokenRoutes)
-            .where(eq(schema.tokenRoutes.modelPattern, 'claude-sonnet-4-5-20250929'))
-            .get();
-        expect(route).toBeDefined();
-
         const channels = await db.select().from(schema.routeChannels)
-            .where(eq(schema.routeChannels.routeId, route!.id))
+            .where(eq(schema.routeChannels.routeId, route.id))
             .all();
 
         // Only site B's channel should exist
@@ -142,7 +143,7 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
         expect(channels[0]?.accountId).toBe(accountB.id);
     });
 
-    it('allows model when no disabled models are configured', async () => {
+    it('allows model when no disabled models are configured for an existing manual route', async () => {
         const site = await db.insert(schema.sites).values({
             name: 'normal-site',
             url: 'https://normal.example.com',
@@ -165,13 +166,20 @@ describe('rebuildTokenRoutesFromAvailability with site disabled models', () => {
             latencyMs: 200,
         }).run();
 
+        const route = await db.insert(schema.tokenRoutes).values({
+            modelPattern: 'gpt-5',
+            probePolicy: 'manual',
+            enabled: true,
+        }).returning().get();
+
         const rebuild = await rebuildTokenRoutesFromAvailability();
 
         expect(rebuild.models).toBe(1);
 
-        const route = await db.select().from(schema.tokenRoutes)
-            .where(eq(schema.tokenRoutes.modelPattern, 'gpt-5'))
-            .get();
-        expect(route).toBeDefined();
+        const channels = await db.select().from(schema.routeChannels)
+            .where(eq(schema.routeChannels.routeId, route.id))
+            .all();
+        expect(channels).toHaveLength(1);
+        expect(channels[0]?.accountId).toBe(account.id);
     });
 });

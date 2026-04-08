@@ -40,7 +40,7 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('creates an exact route with an account-direct channel for apikey model availability', async () => {
+  it('syncs an existing exact manual route with an account-direct channel for apikey model availability', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'apikey-site',
       url: 'https://apikey-site.example.com',
@@ -64,19 +64,21 @@ describe('rebuildTokenRoutesFromAvailability', () => {
       checkedAt: '2026-03-08T08:00:00.000Z',
     }).run();
 
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.2-codex',
+      probePolicy: 'manual',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+
     const rebuild = await rebuildTokenRoutesFromAvailability();
 
     expect(rebuild.models).toBe(1);
-
-    const route = await db.select().from(schema.tokenRoutes)
-      .where(eq(schema.tokenRoutes.modelPattern, 'gpt-5.2-codex'))
-      .get();
-    expect(route).toBeDefined();
-    expect(route?.routingStrategy).toBe('stable_first');
+    expect(rebuild.createdRoutes).toBe(0);
 
     const channels = await db.select().from(schema.routeChannels)
       .where(and(
-        eq(schema.routeChannels.routeId, route!.id),
+        eq(schema.routeChannels.routeId, route.id),
         eq(schema.routeChannels.accountId, account.id),
       ))
       .all();
@@ -86,7 +88,7 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     expect(channels[0]?.manualOverride).toBe(false);
   });
 
-  it('ignores hidden account_tokens for direct apikey connections when rebuilding routes', async () => {
+  it('ignores hidden account_tokens for direct apikey connections when syncing existing routes', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'apikey-legacy-site',
       url: 'https://apikey-legacy.example.com',
@@ -127,19 +129,19 @@ describe('rebuildTokenRoutesFromAvailability', () => {
       checkedAt: '2026-03-20T08:00:00.000Z',
     }).run();
 
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4.1',
+      probePolicy: 'manual',
+      enabled: true,
+    }).returning().get();
+
     const rebuild = await rebuildTokenRoutesFromAvailability();
 
     expect(rebuild.models).toBe(1);
 
-    const route = await db.select().from(schema.tokenRoutes)
-      .where(eq(schema.tokenRoutes.modelPattern, 'gpt-4.1'))
-      .get();
-    expect(route).toBeDefined();
-    expect(route?.routingStrategy).toBe('stable_first');
-
     const channels = await db.select().from(schema.routeChannels)
       .where(and(
-        eq(schema.routeChannels.routeId, route!.id),
+        eq(schema.routeChannels.routeId, route.id),
         eq(schema.routeChannels.accountId, account.id),
       ))
       .all();
@@ -148,7 +150,7 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     expect(channels[0]?.tokenId ?? null).toBeNull();
   });
 
-  it('creates an exact route with an account-direct channel for oauth model availability', async () => {
+  it('syncs an existing exact manual route with an account-direct channel for oauth model availability', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'codex-site',
       url: 'https://chatgpt.com/backend-api/codex',
@@ -180,19 +182,19 @@ describe('rebuildTokenRoutesFromAvailability', () => {
       checkedAt: '2026-03-17T00:00:00.000Z',
     }).run();
 
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.2-codex',
+      probePolicy: 'manual',
+      enabled: true,
+    }).returning().get();
+
     const rebuild = await rebuildTokenRoutesFromAvailability();
 
     expect(rebuild.models).toBe(1);
 
-    const route = await db.select().from(schema.tokenRoutes)
-      .where(eq(schema.tokenRoutes.modelPattern, 'gpt-5.2-codex'))
-      .get();
-    expect(route).toBeDefined();
-    expect(route?.routingStrategy).toBe('stable_first');
-
     const channels = await db.select().from(schema.routeChannels)
       .where(and(
-        eq(schema.routeChannels.routeId, route!.id),
+        eq(schema.routeChannels.routeId, route.id),
         eq(schema.routeChannels.accountId, account.id),
       ))
       .all();
@@ -202,7 +204,40 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     expect(channels[0]?.manualOverride).toBe(false);
   });
 
-  it('removes stale exact routes and keeps wildcard routes on rebuild', async () => {
+  it('does not auto-create exact routes when no manual routes exist', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-no-routes',
+      url: 'https://site-no-routes.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'no-routes-user',
+      accessToken: '',
+      apiToken: 'sk-no-routes',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+      latencyMs: 120,
+    }).run();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.models).toBe(1);
+    expect(rebuild.createdRoutes).toBe(0);
+    expect(rebuild.createdChannels).toBe(0);
+
+    const routes = await db.select().from(schema.tokenRoutes).all();
+    expect(routes).toHaveLength(0);
+  });
+
+  it('removes stale auto exact routes and keeps manual wildcard routes on rebuild', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-1',
       url: 'https://site-1.example.com',
@@ -248,6 +283,7 @@ describe('rebuildTokenRoutesFromAvailability', () => {
 
     const wildcardRoute = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-*',
+      probePolicy: 'manual',
       enabled: true,
     }).returning().get();
 
@@ -273,13 +309,178 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     expect(oldChannels).toHaveLength(0);
 
     const latestRoute = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.modelPattern, 'latest-model')).get();
-    expect(latestRoute).toBeDefined();
-    const latestChannels = await db.select().from(schema.routeChannels)
-      .where(and(eq(schema.routeChannels.routeId, latestRoute!.id), eq(schema.routeChannels.tokenId, token.id)))
-      .all();
-    expect(latestChannels.length).toBeGreaterThan(0);
+    expect(latestRoute).toBeUndefined();
 
     const wildcardRouteAfter = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, wildcardRoute.id)).get();
     expect(wildcardRouteAfter).toBeDefined();
+  });
+
+  it('syncs wildcard route channels for newly added matching tokens and removes stale automatic channels', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-pattern',
+      url: 'https://site-pattern.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const staleAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'stale-user',
+      accessToken: 'stale-access',
+      status: 'active',
+    }).returning().get();
+
+    const staleToken = await db.insert(schema.accountTokens).values({
+      accountId: staleAccount.id,
+      name: 'stale-token',
+      token: 'sk-stale',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    const activeAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'active-user',
+      accessToken: 'active-access',
+      status: 'active',
+    }).returning().get();
+
+    const activeToken = await db.insert(schema.accountTokens).values({
+      accountId: activeAccount.id,
+      name: 'active-token',
+      token: 'sk-active',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: activeToken.id,
+      modelName: 'gpt-4o-mini',
+      available: true,
+    }).run();
+
+    const wildcardRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-*',
+      probePolicy: 'manual',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values([
+      {
+        routeId: wildcardRoute.id,
+        accountId: staleAccount.id,
+        tokenId: staleToken.id,
+        sourceModel: 'gpt-3.5-turbo',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+        manualOverride: false,
+      },
+      {
+        routeId: wildcardRoute.id,
+        accountId: staleAccount.id,
+        tokenId: staleToken.id,
+        sourceModel: 'legacy-special',
+        priority: 9,
+        weight: 2,
+        enabled: true,
+        manualOverride: true,
+      },
+    ]).run();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.createdChannels).toBeGreaterThanOrEqual(1);
+    expect(rebuild.removedChannels).toBeGreaterThanOrEqual(1);
+
+    const routeChannels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, wildcardRoute.id))
+      .all();
+
+    expect(routeChannels.some((channel) =>
+      channel.accountId === activeAccount.id
+      && channel.tokenId === activeToken.id
+      && channel.sourceModel === 'gpt-4o-mini'
+      && channel.manualOverride === false,
+    )).toBe(true);
+
+    expect(routeChannels.some((channel) =>
+      channel.accountId === staleAccount.id
+      && channel.tokenId === staleToken.id
+      && channel.sourceModel === 'gpt-3.5-turbo',
+    )).toBe(false);
+
+    expect(routeChannels.some((channel) =>
+      channel.accountId === staleAccount.id
+      && channel.tokenId === staleToken.id
+      && channel.sourceModel === 'legacy-special'
+      && channel.manualOverride === true,
+    )).toBe(true);
+  });
+
+  it('preserves exact source routes referenced by explicit groups and syncs their channels', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-grouped',
+      url: 'https://site-grouped.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'group-user',
+      accessToken: 'group-access',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'group-token',
+      token: 'sk-group',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'claude-sonnet-4-5',
+      available: true,
+    }).run();
+
+    const sourceRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-sonnet-4-5',
+      enabled: true,
+    }).returning().get();
+
+    const groupRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-stable',
+      displayName: 'claude-stable',
+      routeMode: 'explicit_group',
+      probePolicy: 'manual',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeGroupSources).values({
+      groupRouteId: groupRoute.id,
+      sourceRouteId: sourceRoute.id,
+    }).run();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.removedRoutes).toBe(0);
+
+    const sourceRouteAfter = await db.select().from(schema.tokenRoutes)
+      .where(eq(schema.tokenRoutes.id, sourceRoute.id))
+      .get();
+    expect(sourceRouteAfter).toBeDefined();
+
+    const channels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, sourceRoute.id))
+      .all();
+    expect(channels).toHaveLength(1);
+    expect(channels[0]?.accountId).toBe(account.id);
+    expect(channels[0]?.tokenId).toBe(token.id);
+    expect(channels[0]?.sourceModel).toBe('claude-sonnet-4-5');
   });
 });

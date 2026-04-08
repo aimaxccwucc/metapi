@@ -2716,10 +2716,11 @@ export async function tokensRoutes(app: FastifyInstance) {
     const insertedChannel = await db.insert(schema.routeChannels).values({
       routeId,
       accountId: body.accountId,
-      tokenId: body.tokenId,
+      tokenId: effectiveTokenId,
       sourceModel: sourceModel || null,
       priority: body.priority ?? 0,
       weight: body.weight ?? 10,
+      manualOverride: true,
     }).run();
     const channelId = Number(insertedChannel.lastInsertRowid || 0);
     if (channelId <= 0) {

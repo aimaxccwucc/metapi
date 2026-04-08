@@ -6,7 +6,6 @@ import { getAdapter } from './platforms/index.js';
 import {
   ACCOUNT_TOKEN_VALUE_STATUS_READY,
   ensureDefaultTokenForAccount,
-  getPreferredAccountToken,
   isMaskedTokenValue,
   isUsableAccountToken,
 } from './accountTokenService.js';
@@ -18,7 +17,7 @@ import {
   resolvePlatformUserId,
   supportsDirectAccountRoutingConnection,
 } from './accountExtraConfig.js';
-import { invalidateTokenRouterCache } from './tokenRouter.js';
+import { invalidateTokenRouterCache, matchesModelPattern } from './tokenRouter.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { clearAllRouteDecisionSnapshots } from './routeDecisionSnapshotStore.js';
 import { withAccountProxyOverride, withExplicitProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
@@ -402,6 +401,110 @@ function isExactModelPattern(modelPattern: string): boolean {
   if (!normalized) return false;
   if (normalized.toLowerCase().startsWith('re:')) return false;
   return !/[\*\?]/.test(normalized);
+}
+
+type RouteSyncCandidate = {
+  accountId: number;
+  tokenId: number | null;
+  sourceModel: string;
+};
+
+type AvailabilityCandidate = {
+  accountId: number;
+  tokenId: number | null;
+};
+
+function buildRouteSyncCandidateKey(candidate: Pick<RouteSyncCandidate, 'accountId' | 'tokenId' | 'sourceModel'>): string {
+  return `${candidate.accountId}:${candidate.tokenId ?? 'account'}:${candidate.sourceModel.trim().toLowerCase()}`;
+}
+
+function buildRouteChannelKey(channel: Pick<typeof schema.routeChannels.$inferSelect, 'accountId' | 'tokenId' | 'sourceModel'>): string {
+  return `${channel.accountId}:${channel.tokenId ?? 'account'}:${(channel.sourceModel || '').trim().toLowerCase()}`;
+}
+
+function hasCustomRouteDisplayName(route: Pick<typeof schema.tokenRoutes.$inferSelect, 'modelPattern' | 'displayName'>): boolean {
+  const displayName = (route.displayName || '').trim();
+  const modelPattern = (route.modelPattern || '').trim();
+  return !!displayName && displayName !== modelPattern;
+}
+
+function isPreservedManagedRoute(input: {
+  route: typeof schema.tokenRoutes.$inferSelect;
+  routeChannels: Array<Pick<typeof schema.routeChannels.$inferSelect, 'manualOverride'>>;
+  explicitGroupSourceRouteIds: Set<number>;
+}): boolean {
+  const { route, routeChannels, explicitGroupSourceRouteIds } = input;
+  if ((route.routeMode || 'pattern') === 'explicit_group') return true;
+  if (!isExactModelPattern(route.modelPattern || '')) return true;
+  if (explicitGroupSourceRouteIds.has(route.id)) return true;
+  if ((route.probePolicy || 'system') === 'manual') return true;
+  if (hasCustomRouteDisplayName(route)) return true;
+  return routeChannels.some((channel) => !!channel.manualOverride);
+}
+
+function collectPatternRouteCandidates(
+  modelPattern: string,
+  modelCandidates: Map<string, Map<string, AvailabilityCandidate>>,
+): RouteSyncCandidate[] {
+  const merged = new Map<string, RouteSyncCandidate>();
+  for (const [modelName, candidateMap] of modelCandidates.entries()) {
+    if (!matchesModelPattern(modelName, modelPattern)) continue;
+    for (const candidate of candidateMap.values()) {
+      const normalizedSourceModel = modelName.trim();
+      if (!normalizedSourceModel) continue;
+      const item: RouteSyncCandidate = {
+        accountId: candidate.accountId,
+        tokenId: candidate.tokenId,
+        sourceModel: normalizedSourceModel,
+      };
+      merged.set(buildRouteSyncCandidateKey(item), item);
+    }
+  }
+  return Array.from(merged.values());
+}
+
+async function syncRouteChannelsToCandidates(input: {
+  route: typeof schema.tokenRoutes.$inferSelect;
+  channels: typeof schema.routeChannels.$inferSelect[];
+  desiredCandidates: RouteSyncCandidate[];
+}): Promise<{ createdChannels: number; removedChannels: number }> {
+  const routeChannels = input.channels.filter((channel) => channel.routeId === input.route.id);
+  const desiredKeys = new Set(input.desiredCandidates.map((candidate) => buildRouteSyncCandidateKey(candidate)));
+  let createdChannels = 0;
+  let removedChannels = 0;
+
+  for (const candidate of input.desiredCandidates) {
+    const candidateKey = buildRouteSyncCandidateKey(candidate);
+    const exists = routeChannels.some((channel) => buildRouteChannelKey(channel) === candidateKey);
+    if (exists) continue;
+
+    const inserted = await db.insert(schema.routeChannels).values({
+      routeId: input.route.id,
+      accountId: candidate.accountId,
+      tokenId: candidate.tokenId,
+      sourceModel: candidate.sourceModel,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).run();
+    const insertedId = Number(inserted.lastInsertRowid || 0);
+    if (insertedId <= 0) continue;
+    const created = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, insertedId)).get();
+    if (!created) continue;
+    input.channels.push(created);
+    createdChannels++;
+  }
+
+  for (const channel of routeChannels) {
+    if (channel.manualOverride) continue;
+    const channelKey = buildRouteChannelKey(channel);
+    if (desiredKeys.has(channelKey)) continue;
+    await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
+    removedChannels++;
+  }
+
+  return { createdChannels, removedChannels };
 }
 
 async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
@@ -1172,95 +1275,40 @@ export async function rebuildTokenRoutesFromAvailability() {
   let removedChannels = 0;
   let removedRoutes = 0;
 
-  for (const [modelName, candidateMap] of modelCandidates.entries()) {
-    let route = routes.find((r) => (r.routeMode || 'pattern') !== 'explicit_group' && r.modelPattern === modelName);
-    if (!route) {
-      const inserted = await db.insert(schema.tokenRoutes).values({
-        modelPattern: modelName,
-        probePolicy: 'system',
-        routingStrategy: 'stable_first',
-        enabled: true,
-      }).run();
-      const insertedId = Number(inserted.lastInsertRowid || 0);
-      route = insertedId > 0
-        ? await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, insertedId)).get()
-        : undefined;
-      if (!route) continue;
-      routes.push(route);
-      createdRoutes++;
-    }
+  const routeGroupSourceRows = await db.select().from(schema.routeGroupSources).all();
+  const explicitGroupSourceRouteIds = new Set<number>(routeGroupSourceRows.map((row) => row.sourceRouteId));
 
-    const routeChannels = channels.filter((channel) => channel.routeId === route.id);
-    const desiredKeys = new Set(Array.from(candidateMap.keys()));
-
-    for (const [candidateKey, candidate] of candidateMap.entries()) {
-      const exists = routeChannels.some((channel) => (
-        channel.accountId === candidate.accountId
-        && (channel.tokenId ?? null) === candidate.tokenId
-      ));
-      if (exists) continue;
-
-      const inserted = await db.insert(schema.routeChannels).values({
-        routeId: route.id,
-        accountId: candidate.accountId,
-        tokenId: candidate.tokenId,
-        priority: 0,
-        weight: 10,
-        enabled: true,
-        manualOverride: false,
-      }).run();
-      const insertedId = Number(inserted.lastInsertRowid || 0);
-      if (insertedId <= 0) continue;
-      const created = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, insertedId)).get();
-      if (!created) continue;
-      channels.push(created);
-      createdChannels++;
-      desiredKeys.add(candidateKey);
-    }
-
-    for (const channel of routeChannels) {
-      const channelKey = `${channel.accountId}:${channel.tokenId ?? 'account'}`;
-      if (desiredKeys.has(channelKey)) {
-        continue;
-      }
-
-      if (!channel.tokenId) {
-        const preferred = await getPreferredAccountToken(channel.accountId);
-        if (preferred && desiredKeys.has(`${channel.accountId}:${preferred.id}`)) {
-          await db.update(schema.routeChannels)
-            .set({ tokenId: preferred.id })
-            .where(eq(schema.routeChannels.id, channel.id))
-            .run();
-          continue;
-        }
-      }
-
-      if (!channel.manualOverride) {
-        await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
-        removedChannels++;
-      }
-    }
-  }
-
-  const latestModelNames = new Set<string>(Array.from(modelCandidates.keys()));
   for (const route of routes) {
-    if ((route.routeMode || 'pattern') === 'explicit_group') {
+    const routeChannels = channels.filter((channel) => channel.routeId === route.id);
+    const preserved = isPreservedManagedRoute({
+      route,
+      routeChannels,
+      explicitGroupSourceRouteIds,
+    });
+
+    if (!preserved) {
+      if (routeChannels.length > 0) {
+        removedChannels += routeChannels.length;
+      }
+      const deleted = (await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).run()).changes;
+      if (deleted > 0) {
+        removedRoutes += deleted;
+      }
       continue;
     }
+
+    if ((route.routeMode || 'pattern') === 'explicit_group') continue;
+
     const modelPattern = (route.modelPattern || '').trim();
-    if (!modelPattern || !isExactModelPattern(modelPattern) || latestModelNames.has(modelPattern)) {
-      continue;
-    }
-
-    const routeChannelCount = channels.filter((channel) => channel.routeId === route.id).length;
-    if (routeChannelCount > 0) {
-      removedChannels += routeChannelCount;
-    }
-
-    const deleted = (await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).run()).changes;
-    if (deleted > 0) {
-      removedRoutes += deleted;
-    }
+    if (!modelPattern) continue;
+    const desiredCandidates = collectPatternRouteCandidates(modelPattern, modelCandidates);
+    const syncResult = await syncRouteChannelsToCandidates({
+      route,
+      channels,
+      desiredCandidates,
+    });
+    createdChannels += syncResult.createdChannels;
+    removedChannels += syncResult.removedChannels;
   }
 
   if (createdRoutes > 0 || createdChannels > 0 || removedChannels > 0 || removedRoutes > 0) {

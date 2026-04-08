@@ -395,4 +395,38 @@ describe('PUT /api/routes/:id route rebuild', () => {
       },
     });
   });
+
+  it('marks single manually added channels as manual overrides and persists the default token', async () => {
+    const candidate = await seedAccountWithToken('gpt-4o-mini');
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o-mini',
+      enabled: true,
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/channels`,
+      payload: {
+        accountId: candidate.account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      routeId: route.id,
+      accountId: candidate.account.id,
+      tokenId: candidate.token.id,
+      sourceModel: 'gpt-4o-mini',
+      manualOverride: true,
+    });
+
+    const stored = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, route.id))
+      .get();
+
+    expect(stored).toBeDefined();
+    expect(stored?.tokenId).toBe(candidate.token.id);
+    expect(stored?.manualOverride).toBe(true);
+  });
 });
