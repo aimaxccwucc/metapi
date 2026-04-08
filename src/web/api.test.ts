@@ -176,6 +176,43 @@ describe('api proxy test timeout handling', () => {
     }));
   });
 
+  it('adds an empty json body for authenticated POST requests without explicit payload', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.checkModels(27);
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/models/check/27', expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+      body: '{}',
+      headers: expect.objectContaining({
+        'Content-Type': 'application/json',
+      }),
+    }));
+  });
+
+  it('does not add a json body for authenticated DELETE requests', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.deleteAccount(27);
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/accounts/27', expect.objectContaining({
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: expect.objectContaining({}),
+    }));
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init?.body).toBeUndefined();
+  });
+
   it('keeps the local session when a forbidden business request does not invalidate the admin session', async () => {
     const reloadMock = vi.fn();
     vi.stubGlobal('window', {

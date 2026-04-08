@@ -4,6 +4,31 @@ type RequestOptions = RequestInit & {
   timeoutMs?: number | null;
 };
 
+function hasContentTypeHeader(headers?: HeadersInit): boolean {
+  if (!headers) return false;
+  if (headers instanceof Headers) return headers.has('Content-Type') || headers.has('content-type');
+  if (Array.isArray(headers)) {
+    return headers.some(([key]) => key.toLowerCase() === 'content-type');
+  }
+  return Object.keys(headers).some((key) => key.toLowerCase() === 'content-type');
+}
+
+function normalizeJsonRequestInit(fetchOptions: RequestInit): RequestInit {
+  const method = String(fetchOptions.method || 'GET').toUpperCase();
+  const shouldEnsureJsonBody = (
+    (method === 'POST' || method === 'PUT' || method === 'PATCH')
+    && fetchOptions.body == null
+    && !hasContentTypeHeader(fetchOptions.headers)
+  );
+
+  if (!shouldEnsureJsonBody) return fetchOptions;
+
+  return {
+    ...fetchOptions,
+    body: '{}',
+  };
+}
+
 function ensureAuthSession(): void {
   const token = getAuthToken(localStorage);
   if (!token) {
@@ -86,6 +111,7 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 
 async function fetchAuthenticatedResponse(url: string, options: RequestOptions = {}): Promise<Response> {
   const { timeoutMs = 30_000, signal: externalSignal, ...fetchOptions } = options;
+  const normalizedFetchOptions = normalizeJsonRequestInit(fetchOptions);
   const controller = new AbortController();
   const effectiveTimeoutMs = typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
     ? timeoutMs
@@ -113,16 +139,16 @@ async function fetchAuthenticatedResponse(url: string, options: RequestOptions =
   if (bearerToken) {
     headers['Authorization'] = `Bearer ${bearerToken}`;
   }
-  if (fetchOptions.body) headers['Content-Type'] = 'application/json';
+  if (normalizedFetchOptions.body) headers['Content-Type'] = 'application/json';
 
   try {
     const res = await fetch(url, {
-      ...fetchOptions,
-      credentials: fetchOptions.credentials ?? 'same-origin',
+      ...normalizedFetchOptions,
+      credentials: normalizedFetchOptions.credentials ?? 'same-origin',
       signal: controller.signal,
       headers: {
         ...headers,
-        ...fetchOptions.headers as Record<string, string>,
+        ...normalizedFetchOptions.headers as Record<string, string>,
       },
     });
     if (res.status === 401 || res.status === 403) {
