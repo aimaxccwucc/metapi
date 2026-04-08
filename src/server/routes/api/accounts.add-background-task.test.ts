@@ -9,6 +9,7 @@ const getApiTokensMock = vi.fn();
 const refreshBalanceMock = vi.fn();
 const refreshModelsForAccountMock = vi.fn();
 const rebuildTokenRoutesFromAvailabilityMock = vi.fn();
+const rebuildTokenRoutesFromAvailabilityScopedMock = vi.fn();
 const ensureDefaultTokenForAccountMock = vi.fn();
 const syncTokensFromUpstreamMock = vi.fn();
 
@@ -26,6 +27,7 @@ vi.mock('../../services/balanceService.js', () => ({
 vi.mock('../../services/modelService.js', () => ({
   refreshModelsForAccount: (...args: unknown[]) => refreshModelsForAccountMock(...args),
   rebuildTokenRoutesFromAvailability: (...args: unknown[]) => rebuildTokenRoutesFromAvailabilityMock(...args),
+  rebuildTokenRoutesFromAvailabilityScoped: (...args: unknown[]) => rebuildTokenRoutesFromAvailabilityScopedMock(...args),
 }));
 
 vi.mock('../../services/accountTokenService.js', () => ({
@@ -66,6 +68,7 @@ describe('accounts background initialization', () => {
     refreshBalanceMock.mockReset();
     refreshModelsForAccountMock.mockReset();
     rebuildTokenRoutesFromAvailabilityMock.mockReset();
+    rebuildTokenRoutesFromAvailabilityScopedMock.mockReset();
     ensureDefaultTokenForAccountMock.mockReset();
     syncTokensFromUpstreamMock.mockReset();
     resetBackgroundTasks?.();
@@ -107,7 +110,7 @@ describe('accounts background initialization', () => {
     ensureDefaultTokenForAccountMock.mockResolvedValue(undefined);
     refreshBalanceMock.mockResolvedValue({ balance: 1, used: 0, quota: 1 });
     refreshModelsForAccountMock.mockResolvedValue(undefined);
-    rebuildTokenRoutesFromAvailabilityMock.mockResolvedValue(undefined);
+    rebuildTokenRoutesFromAvailabilityScopedMock.mockResolvedValue(undefined);
     syncTokensFromUpstreamMock.mockResolvedValue(undefined);
 
     let releaseTokens: ((value: Array<{ name: string; value: string }>) => void) | null = null;
@@ -168,7 +171,7 @@ describe('accounts background initialization', () => {
       expect(syncTokensFromUpstreamMock).toHaveBeenCalledTimes(1);
       expect(refreshBalanceMock).toHaveBeenCalledTimes(1);
       expect(refreshModelsForAccountMock).toHaveBeenCalledTimes(1);
-      expect(rebuildTokenRoutesFromAvailabilityMock).toHaveBeenCalledTimes(1);
+      expect(rebuildTokenRoutesFromAvailabilityScopedMock).toHaveBeenCalledTimes(1);
       expect(getBackgroundTask?.(body.jobId!)).toMatchObject({ status: 'succeeded' });
     } finally {
       releaseTokens?.([]);

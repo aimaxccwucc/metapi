@@ -1202,7 +1202,59 @@ async function refreshModelsForAllActiveAccounts(): Promise<ModelRefreshResult[]
   return results;
 }
 
-export async function rebuildTokenRoutesFromAvailability() {
+type RebuildTokenRoutesScope = {
+  accountIds?: number[];
+  siteIds?: number[];
+};
+
+function normalizePositiveIntList(values?: number[]): number[] {
+  return Array.from(new Set(
+    (values || [])
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .map((value) => Math.trunc(value)),
+  ));
+}
+
+function buildScopedRouteSyncCandidateFilter(scope: RebuildTokenRoutesScope): {
+  accountIds: number[];
+  siteIds: number[];
+  hasScope: boolean;
+} {
+  const accountIds = normalizePositiveIntList(scope.accountIds);
+  const siteIds = normalizePositiveIntList(scope.siteIds);
+  return {
+    accountIds,
+    siteIds,
+    hasScope: accountIds.length > 0 || siteIds.length > 0,
+  };
+}
+
+function isCandidateWithinScope(
+  candidate: RouteSyncCandidate,
+  accountSiteIdByAccountId: Map<number, number>,
+  scope: { accountIds: number[]; siteIds: number[]; hasScope: boolean },
+): boolean {
+  if (!scope.hasScope) return true;
+  if (scope.accountIds.includes(candidate.accountId)) return true;
+  const siteId = accountSiteIdByAccountId.get(candidate.accountId);
+  if (siteId && scope.siteIds.includes(siteId)) return true;
+  return false;
+}
+
+function isRouteChannelWithinScope(
+  channel: typeof schema.routeChannels.$inferSelect,
+  accountSiteIdByAccountId: Map<number, number>,
+  scope: { accountIds: number[]; siteIds: number[]; hasScope: boolean },
+): boolean {
+  if (!scope.hasScope) return true;
+  if (scope.accountIds.includes(channel.accountId)) return true;
+  const siteId = accountSiteIdByAccountId.get(channel.accountId);
+  if (siteId && scope.siteIds.includes(siteId)) return true;
+  return false;
+}
+
+export async function rebuildTokenRoutesFromAvailabilityScoped(scope: RebuildTokenRoutesScope = {}) {
+  const scoped = buildScopedRouteSyncCandidateFilter(scope);
   const tokenRows = await db.select().from(schema.tokenModelAvailability)
     .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
     .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
@@ -1266,6 +1318,14 @@ export async function rebuildTokenRoutesFromAvailability() {
     addModelCandidate(row.model_availability.modelName, row.accounts.id, null, row.accounts.siteId);
   }
 
+  const accountSiteIdByAccountId = new Map<number, number>();
+  for (const row of usableTokenRows) {
+    accountSiteIdByAccountId.set(row.accounts.id, row.accounts.siteId);
+  }
+  for (const row of accountRows) {
+    accountSiteIdByAccountId.set(row.accounts.id, row.accounts.siteId);
+  }
+
   const routes = await db.select().from(schema.tokenRoutes).all();
   const channels = await db.select().from(schema.routeChannels).all();
 
@@ -1300,10 +1360,15 @@ export async function rebuildTokenRoutesFromAvailability() {
 
     const modelPattern = (route.modelPattern || '').trim();
     if (!modelPattern) continue;
-    const desiredCandidates = collectPatternRouteCandidates(modelPattern, modelCandidates);
+    const desiredCandidates = collectPatternRouteCandidates(modelPattern, modelCandidates)
+      .filter((candidate) => isCandidateWithinScope(candidate, accountSiteIdByAccountId, scoped));
     const syncResult = await syncRouteChannelsToCandidates({
       route,
-      channels,
+      channels: scoped.hasScope
+        ? channels.filter((channel) => (
+          channel.routeId !== route.id || isRouteChannelWithinScope(channel, accountSiteIdByAccountId, scoped)
+        ))
+        : channels,
       desiredCandidates,
     });
     createdChannels += syncResult.createdChannels;
@@ -1323,6 +1388,10 @@ export async function rebuildTokenRoutesFromAvailability() {
     removedChannels,
     removedRoutes,
   };
+}
+
+export async function rebuildTokenRoutesFromAvailability() {
+  return rebuildTokenRoutesFromAvailabilityScoped();
 }
 
 async function runRefreshModelsAndRebuildRoutes() {

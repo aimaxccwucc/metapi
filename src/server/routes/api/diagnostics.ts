@@ -9,6 +9,7 @@ import { parseRouteDecisionSnapshot } from '../../services/routeDecisionSnapshot
 import { listActiveRoutingGovernanceStates } from '../../services/routingGovernanceService.js';
 import { getDownstreamApiKeyById } from '../../services/downstreamApiKeyService.js';
 import { probeModelAvailabilityViaRealtimeCall } from '../../services/marketplaceModelProbeService.js';
+import { getNormalizedSiteLifecycle } from '../../services/siteLifecycleService.js';
 
 type DiagnosticTargetType = 'site' | 'account' | 'token';
 type BenchmarkRoundCount = 1 | 3;
@@ -176,11 +177,12 @@ async function resolveDiagnosticTarget(type: DiagnosticTargetType, id: number): 
 
 function buildConnectivityPayload(target: DiagnosticResolvedTarget) {
   const normalizedUrl = normalizeSiteUrl(target.site.url);
+  const lifecycle = getNormalizedSiteLifecycle(target.site);
   return {
     normalizedUrl,
-    reachable: target.site.healthStatus === 'alive' ? true : (target.site.healthStatus === 'unreachable' ? false : null),
-    status: target.site.healthStatus || 'unknown',
-    message: target.site.healthReason || null,
+    reachable: lifecycle.reachable,
+    status: lifecycle.phase,
+    message: lifecycle.reason || target.site.healthReason || null,
     checkedAt: target.site.healthCheckedAt || null,
     credentialPresent: !!target.credential,
     credentialSource: target.credentialSource,

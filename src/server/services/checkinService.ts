@@ -25,8 +25,8 @@ import {
 import {
   deriveSiteAutoCheckinPolicyUpdate,
   normalizeSiteAutoCheckinPolicy,
-  resolveSiteAutoCheckinSkip,
 } from './siteAutoCheckinService.js';
+import { resolveSiteAutoCheckinSkip } from './siteLifecycleService.js';
 
 export function isSchedulableCheckinAccountStatus(status?: string | null): boolean {
   return status === 'active' || status === 'expired';

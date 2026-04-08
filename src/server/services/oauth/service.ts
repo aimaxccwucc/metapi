@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { mergeAccountExtraConfig } from '../accountExtraConfig.js';
-import { refreshModelsForAccount, rebuildTokenRoutesFromAvailability } from '../modelService.js';
+import { refreshModelsForAccount, rebuildTokenRoutesFromAvailability, rebuildTokenRoutesFromAvailabilityScoped } from '../modelService.js';
 import {
   createOauthSession,
   getOauthSession,
@@ -398,7 +398,10 @@ export async function handleOauthCallback(input: {
           updatedAt: previousAccount.updatedAt,
         }).where(eq(schema.accounts.id, previousAccount.id)).run();
       }
-      await rebuildTokenRoutesFromAvailability();
+      await rebuildTokenRoutesFromAvailabilityScoped({
+        accountIds: [account.id],
+        siteIds: [site.id],
+      });
       const errorMessage = refreshResult.errorMessage || `${input.provider} model discovery failed`;
       markOauthSessionError(input.state, errorMessage);
       throw new Error(errorMessage);
@@ -411,7 +414,10 @@ export async function handleOauthCallback(input: {
       }).where(eq(schema.accounts.id, account.id)).run();
     }
 
-    await rebuildTokenRoutesFromAvailability();
+    await rebuildTokenRoutesFromAvailabilityScoped({
+      accountIds: [account.id],
+      siteIds: [site.id],
+    });
     markOauthSessionSuccess(input.state, {
       accountId: account.id,
       siteId: site.id,
@@ -558,7 +564,7 @@ export async function deleteOauthConnection(accountId: number) {
     throw new Error('account is not managed by oauth');
   }
   await db.delete(schema.accounts).where(eq(schema.accounts.id, accountId)).run();
-  await rebuildTokenRoutesFromAvailability();
+  await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [accountId], siteIds: [account.siteId] });
   return { success: true };
 }
 

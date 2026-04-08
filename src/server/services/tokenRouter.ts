@@ -34,6 +34,7 @@ import { classifyProxyFailureCategory } from './proxyRetryPolicy.js';
 import { parseCodexQuotaResetHint } from './oauth/quota.js';
 import { extractRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
+import { isSiteReachableForRouting } from './siteLifecycleService.js';
 import {
   clearRoutingGovernanceState,
   listActiveRoutingGovernanceStates,
@@ -5692,7 +5693,7 @@ export class TokenRouter {
       reasonParts.push(`站点状态=${candidate.site.status || 'disabled'}`);
     }
 
-    if ((candidate.site.healthStatus || 'unknown') === 'unreachable') {
+    if (!isSiteReachableForRouting(candidate.site)) {
       reasonParts.push('站点健康=unreachable');
     }
 

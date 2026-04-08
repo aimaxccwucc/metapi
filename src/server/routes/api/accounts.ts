@@ -3,7 +3,11 @@ import { db, schema, runtimeDbDialect } from '../../db/index.js';
 import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { refreshBalance } from '../../services/balanceService.js';
 import { getAdapter } from '../../services/platforms/index.js';
-import { refreshModelsForAccount, rebuildTokenRoutesFromAvailability } from '../../services/modelService.js';
+import {
+  refreshModelsForAccount,
+  rebuildTokenRoutesFromAvailability,
+  rebuildTokenRoutesFromAvailabilityScoped,
+} from '../../services/modelService.js';
 import { ensureDefaultTokenForAccount, syncTokensFromUpstream } from '../../services/accountTokenService.js';
 import {
   getCredentialModeFromExtraConfig,
@@ -180,7 +184,7 @@ async function initializeAccountInBackground({
     try {
       await refreshModelsForAccount(accountId);
       summary.refreshedModels = true;
-      await rebuildTokenRoutesFromAvailability();
+      await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [accountId], siteIds: [site.id] });
       summary.rebuiltRoutes = true;
     } catch {}
   }
@@ -626,7 +630,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     try { await refreshBalance(result.id); } catch { }
     try {
       await refreshModelsForAccount(result.id);
-      await rebuildTokenRoutesFromAvailability();
+      await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [result.id], siteIds: [result.siteId] });
     } catch { }
 
     const account = await db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
@@ -1054,7 +1058,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       } catch {}
       try {
         await refreshModelsForAccount(accountId);
-        await rebuildTokenRoutesFromAvailability();
+        await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [accountId], siteIds: [site.id] });
       } catch {}
 
       const latest = await db.select().from(schema.accounts).where(eq(schema.accounts.id, accountId)).get();
@@ -1344,7 +1348,7 @@ export async function accountsRoutes(app: FastifyInstance) {
 
     try {
       await refreshModelsForAccount(id);
-      await rebuildTokenRoutesFromAvailability();
+      await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [id] });
     } catch { }
 
     return await db.select().from(schema.accounts).where(eq(schema.accounts.id, id)).get();
@@ -1353,9 +1357,13 @@ export async function accountsRoutes(app: FastifyInstance) {
   // Delete an account
   app.delete<{ Params: { id: string } }>('/api/accounts/:id', async (request) => {
     const id = parseInt(request.params.id);
+    const existing = await db.select().from(schema.accounts).where(eq(schema.accounts.id, id)).get();
     await db.delete(schema.accounts).where(eq(schema.accounts.id, id)).run();
     try {
-      await rebuildTokenRoutesFromAvailability();
+      await rebuildTokenRoutesFromAvailabilityScoped({
+        accountIds: [id],
+        siteIds: existing?.siteId ? [existing.siteId] : [],
+      });
     } catch { }
     return { success: true };
   });
@@ -1411,7 +1419,7 @@ export async function accountsRoutes(app: FastifyInstance) {
 
     if (shouldRebuildRoutes) {
       try {
-        await rebuildTokenRoutesFromAvailability();
+        await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: successIds });
       } catch { }
     }
 
@@ -1622,7 +1630,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       });
 
       try {
-        await rebuildTokenRoutesFromAvailability();
+        await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [accountId], siteIds: [account.siteId] });
       } catch { }
 
       return { success: true };

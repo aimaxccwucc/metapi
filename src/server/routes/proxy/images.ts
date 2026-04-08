@@ -21,6 +21,7 @@ import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { markTokenModelUnavailable } from '../../services/mediaRoutingSupport.js';
 import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
 import { DefaultProxyConductor } from '../../proxy-core/conductor/DefaultProxyConductor.js';
+import { recordProxyDebugTrace } from './proxyDebugTrace.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
 
@@ -116,6 +117,15 @@ async function executeImageProxyRequest(params: {
       }
 
       const actualModel = selected.actualModel || requestedModel;
+      recordProxyDebugTrace({
+        clientContext,
+        kind: 'channel_selected',
+        requestedModel,
+        actualModel,
+        downstreamPath,
+        selected,
+        retryCount,
+      });
       const { targetUrl, requestInit } = await buildRequest(selected, actualModel);
       const startTime = Date.now();
 
@@ -127,6 +137,18 @@ async function executeImageProxyRequest(params: {
         const text = await upstream.text();
         if (!upstream.ok) {
           const retryAfterHeader = upstream.headers.get('retry-after');
+          recordProxyDebugTrace({
+            clientContext,
+            kind: 'endpoint_final_failure',
+            requestedModel,
+            actualModel,
+            downstreamPath,
+            selected,
+            status: upstream.status,
+            retryCount,
+            reason: text,
+            endpointPath: targetUrl,
+          });
           await tokenRouter.recordFailure(selected.channel.id, {
             status: upstream.status,
             errorText: text,
@@ -198,11 +220,33 @@ async function executeImageProxyRequest(params: {
         });
         await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
         recordDownstreamCostUsage(request, estimatedCost);
+        recordProxyDebugTrace({
+          clientContext,
+          kind: 'proxy_success',
+          requestedModel,
+          actualModel,
+          downstreamPath,
+          selected,
+          status: upstream.status,
+          retryCount,
+          endpointPath: targetUrl,
+        });
         logProxy(selected, requestedModel, 'success', upstream.status, latency, null, retryCount, downstreamApiKeyId, estimatedCost, downstreamPath, clientContext);
         reply.code(upstream.status).send(data);
         return { ok: true, response: upstream, latencyMs: latency, cost: estimatedCost };
       } catch (err: any) {
         const errorMessage = err?.message || 'network failure';
+        recordProxyDebugTrace({
+          clientContext,
+          kind: 'proxy_exception',
+          requestedModel,
+          actualModel,
+          downstreamPath,
+          selected,
+          retryCount,
+          reason: errorMessage,
+          endpointPath: targetUrl,
+        });
         await tokenRouter.recordFailure(selected.channel.id, {
           status: 0,
           errorText: errorMessage,
@@ -424,4 +468,3 @@ async function logProxy(
     console.warn('[proxy/images] failed to write proxy log', error);
   }
 }
-

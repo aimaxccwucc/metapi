@@ -30,6 +30,7 @@ describe('task routes', () => {
     const taskModule = await import('../../services/backgroundTaskService.js');
     taskModule.__resetBackgroundTasksForTests();
     await db.delete(schema.events).run();
+    await db.delete(schema.settings).run();
     await db.delete(schema.checkinLogs).run();
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
@@ -130,5 +131,48 @@ describe('task routes', () => {
     }
 
     throw new Error('task did not finish in time');
+  });
+
+  it('restores persisted tasks from settings snapshot after reset', async () => {
+    const {
+      startBackgroundTask,
+      __resetBackgroundTasksForTests,
+      __loadBackgroundTasksForTests,
+      __flushBackgroundTaskPersistenceForTests,
+    } = await import('../../services/backgroundTaskService.js');
+    const { task } = startBackgroundTask(
+      {
+        type: 'status',
+        title: '持久化任务',
+      },
+      async () => ({ ok: true }),
+    );
+
+    for (let i = 0; i < 20; i += 1) {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/tasks/${task.id}`,
+      });
+      if (response.statusCode === 200 && response.json().task?.status === 'succeeded') {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    await __flushBackgroundTaskPersistenceForTests();
+    __resetBackgroundTasksForTests();
+    await __loadBackgroundTasksForTests();
+
+    const restored = await app.inject({
+      method: 'GET',
+      url: `/api/tasks/${task.id}`,
+    });
+
+    expect(restored.statusCode).toBe(200);
+    const body = restored.json() as { success: boolean; task: { title: string; status: string } };
+    expect(body.task).toMatchObject({
+      title: '持久化任务',
+      status: 'succeeded',
+    });
   });
 });

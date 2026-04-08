@@ -11,6 +11,7 @@ describe('rebuildTokenRoutesFromAvailability', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let rebuildTokenRoutesFromAvailability: ModelServiceModule['rebuildTokenRoutesFromAvailability'];
+  let rebuildTokenRoutesFromAvailabilityScoped: ModelServiceModule['rebuildTokenRoutesFromAvailabilityScoped'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -24,6 +25,7 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     db = dbModule.db;
     schema = dbModule.schema;
     rebuildTokenRoutesFromAvailability = modelService.rebuildTokenRoutesFromAvailability;
+    rebuildTokenRoutesFromAvailabilityScoped = modelService.rebuildTokenRoutesFromAvailabilityScoped;
   });
 
   beforeEach(async () => {
@@ -482,5 +484,88 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     expect(channels[0]?.accountId).toBe(account.id);
     expect(channels[0]?.tokenId).toBe(token.id);
     expect(channels[0]?.sourceModel).toBe('claude-sonnet-4-5');
+  });
+
+  it('scoped rebuild only removes stale automatic channels for affected accounts', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-scoped',
+      url: 'https://site-scoped.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const staleAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'scoped-stale',
+      accessToken: 'scoped-stale-access',
+      status: 'active',
+    }).returning().get();
+    const healthyAccount = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'scoped-healthy',
+      accessToken: 'scoped-healthy-access',
+      status: 'active',
+    }).returning().get();
+
+    const staleToken = await db.insert(schema.accountTokens).values({
+      accountId: staleAccount.id,
+      name: 'stale',
+      token: 'sk-scoped-stale',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+    const healthyToken = await db.insert(schema.accountTokens).values({
+      accountId: healthyAccount.id,
+      name: 'healthy',
+      token: 'sk-scoped-healthy',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: healthyToken.id,
+      modelName: 'gpt-4.1-mini',
+      available: true,
+    }).run();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-*',
+      probePolicy: 'manual',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values([
+      {
+        routeId: route.id,
+        accountId: staleAccount.id,
+        tokenId: staleToken.id,
+        sourceModel: 'gpt-4.1-mini',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+        manualOverride: false,
+      },
+      {
+        routeId: route.id,
+        accountId: healthyAccount.id,
+        tokenId: healthyToken.id,
+        sourceModel: 'gpt-4.1-mini',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+        manualOverride: false,
+      },
+    ]).run();
+
+    const rebuild = await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [staleAccount.id] });
+    expect(rebuild.removedChannels).toBe(1);
+
+    const remainingChannels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, route.id))
+      .all();
+
+    expect(remainingChannels.some((item) => item.accountId === staleAccount.id)).toBe(false);
+    expect(remainingChannels.some((item) => item.accountId === healthyAccount.id && item.tokenId === healthyToken.id)).toBe(true);
   });
 });

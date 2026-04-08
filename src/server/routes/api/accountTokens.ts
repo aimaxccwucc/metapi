@@ -22,6 +22,7 @@ import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { withAccountProxyOverride } from '../../services/siteProxy.js';
 import {
   rebuildTokenRoutesFromAvailability,
+  rebuildTokenRoutesFromAvailabilityScoped,
   refreshModelsForAccount,
   type ModelRefreshResult,
 } from '../../services/modelService.js';
@@ -421,7 +422,7 @@ async function refreshCoverageForAccounts(accountIds: number[]) {
   try {
     rebuild = {
       success: true,
-      result: await rebuildTokenRoutesFromAvailability(),
+      result: await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: uniqueAccountIds }),
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error || 'route rebuild failed');
@@ -677,6 +678,10 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     if (existing.isDefault) {
       repairDefaultToken(existing.accountId);
     }
+
+    try {
+      await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [existing.accountId] });
+    } catch {}
 
     return { success: true };
   };

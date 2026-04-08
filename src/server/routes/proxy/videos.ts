@@ -26,6 +26,7 @@ import {
 } from '../../services/proxyVideoTaskStore.js';
 import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
 import { DefaultProxyConductor } from '../../proxy-core/conductor/DefaultProxyConductor.js';
+import { recordProxyDebugTrace } from './proxyDebugTrace.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
 
@@ -119,6 +120,15 @@ async function executeVideoCreateRequest(params: {
       }
 
       const actualModel = selected.actualModel || requestedModel;
+      recordProxyDebugTrace({
+        clientContext,
+        kind: 'channel_selected',
+        requestedModel,
+        actualModel,
+        downstreamPath,
+        selected,
+        retryCount,
+      });
       const targetUrl = buildUpstreamUrl(selected.site.url, '/v1/videos');
       const accountProxy = getProxyUrlFromExtraConfig(selected.account.extraConfig);
       const requestInit = multipartForm
@@ -152,6 +162,18 @@ async function executeVideoCreateRequest(params: {
         const text = await upstream.text();
         if (!upstream.ok) {
           const retryAfterHeader = upstream.headers.get('retry-after');
+          recordProxyDebugTrace({
+            clientContext,
+            kind: 'endpoint_final_failure',
+            requestedModel,
+            actualModel,
+            downstreamPath,
+            selected,
+            status: upstream.status,
+            retryCount,
+            reason: text,
+            endpointPath: '/v1/videos',
+          });
           await tokenRouter.recordFailure(selected.channel.id, {
             status: upstream.status,
             errorText: text,
@@ -263,6 +285,17 @@ async function executeVideoCreateRequest(params: {
           totalTokens: 0,
         });
         await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
+        recordProxyDebugTrace({
+          clientContext,
+          kind: 'proxy_success',
+          requestedModel,
+          actualModel,
+          downstreamPath,
+          selected,
+          status: upstream.status,
+          retryCount,
+          endpointPath: '/v1/videos',
+        });
         logProxy(
           selected,
           requestedModel,
@@ -282,6 +315,17 @@ async function executeVideoCreateRequest(params: {
         return { ok: true, response: upstream, latencyMs: latency, cost: estimatedCost };
       } catch (error: any) {
         const errorMessage = error?.message || 'network failure';
+        recordProxyDebugTrace({
+          clientContext,
+          kind: 'proxy_exception',
+          requestedModel,
+          actualModel,
+          downstreamPath,
+          selected,
+          retryCount,
+          reason: errorMessage,
+          endpointPath: '/v1/videos',
+        });
         await tokenRouter.recordFailure(selected.channel.id, {
           status: 0,
           errorText: errorMessage,

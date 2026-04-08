@@ -22,6 +22,7 @@ import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
 import { wrapReaderWithIdleTimeout } from './streamTimeout.js';
+import { recordProxyDebugTrace } from './proxyDebugTrace.js';
 import {
   buildCacheKey,
   buildRouteScope,
@@ -171,6 +172,16 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           };
         }
 
+        recordProxyDebugTrace({
+          clientContext,
+          kind: 'channel_selected',
+          requestedModel,
+          actualModel: selected.actualModel || requestedModel,
+          downstreamPath,
+          selected,
+          retryCount,
+        });
+
         const targetUrl = buildUpstreamUrl(selected.site.url, '/v1/completions');
         const forwardBody = { ...body, model: selected.actualModel };
         const startTime = Date.now();
@@ -188,6 +199,18 @@ export async function completionsProxyRoute(app: FastifyInstance) {
 
           if (!upstream.ok) {
             const errText = await upstream.text().catch(() => 'unknown error');
+            recordProxyDebugTrace({
+              clientContext,
+              kind: 'endpoint_final_failure',
+              requestedModel,
+              actualModel: selected.actualModel || requestedModel,
+              downstreamPath,
+              selected,
+              status: upstream.status,
+              retryCount,
+              reason: errText,
+              endpointPath: '/v1/completions',
+            });
             await tokenRouter.recordFailure(selected.channel.id, {
               status: upstream.status,
               errorText: errText,
@@ -325,6 +348,17 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             });
             await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
             recordDownstreamCostUsage(request, estimatedCost);
+            recordProxyDebugTrace({
+              clientContext,
+              kind: 'proxy_success',
+              requestedModel,
+              actualModel: selected.actualModel || requestedModel,
+              downstreamPath,
+              selected,
+              status: 200,
+              retryCount,
+              endpointPath: '/v1/completions',
+            });
             logProxy(
               selected,
               requestedModel,
@@ -435,6 +469,17 @@ export async function completionsProxyRoute(app: FastifyInstance) {
 
           await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
           recordDownstreamCostUsage(request, estimatedCost);
+          recordProxyDebugTrace({
+            clientContext,
+            kind: 'proxy_success',
+            requestedModel,
+            actualModel: selected.actualModel || requestedModel,
+            downstreamPath,
+            selected,
+            status: 200,
+            retryCount,
+            endpointPath: '/v1/completions',
+          });
           logProxy(
             selected,
             requestedModel,
@@ -474,6 +519,17 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           };
         } catch (err: any) {
           const errorMessage = err?.message || 'network failure';
+          recordProxyDebugTrace({
+            clientContext,
+            kind: 'proxy_exception',
+            requestedModel,
+            actualModel: selected.actualModel || requestedModel,
+            downstreamPath,
+            selected,
+            retryCount,
+            reason: errorMessage,
+            endpointPath: '/v1/completions',
+          });
           await tokenRouter.recordFailure(selected.channel.id, {
             status: 0,
             errorText: errorMessage,

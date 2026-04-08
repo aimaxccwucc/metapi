@@ -21,6 +21,7 @@ import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
 import { DefaultProxyConductor } from '../../proxy-core/conductor/DefaultProxyConductor.js';
+import { recordProxyDebugTrace } from './proxyDebugTrace.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
 
@@ -101,6 +102,15 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
         const targetUrl = buildUpstreamUrl(selected.site.url, '/v1/embeddings');
         const forwardBody = { ...body, model: selected.actualModel || requestedModel };
         const startTime = Date.now();
+        recordProxyDebugTrace({
+          clientContext,
+          kind: 'channel_selected',
+          requestedModel,
+          actualModel: selected.actualModel || requestedModel,
+          downstreamPath,
+          selected,
+          retryCount,
+        });
 
         try {
           const upstream = await fetch(targetUrl, withSiteRecordProxyRequestInit(selected.site, {
@@ -116,6 +126,18 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
           const text = await upstream.text();
           if (!upstream.ok) {
             const retryAfterHeader = upstream.headers.get('retry-after');
+            recordProxyDebugTrace({
+              clientContext,
+              kind: 'endpoint_final_failure',
+              requestedModel,
+              actualModel: selected.actualModel || requestedModel,
+              downstreamPath,
+              selected,
+              status: upstream.status,
+              retryCount,
+              reason: text,
+              endpointPath: '/v1/embeddings',
+            });
             await tokenRouter.recordFailure(selected.channel.id, {
               status: upstream.status,
               errorText: text,
@@ -206,6 +228,17 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
 
           await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
           recordDownstreamCostUsage(request, estimatedCost);
+          recordProxyDebugTrace({
+            clientContext,
+            kind: 'proxy_success',
+            requestedModel,
+            actualModel: selected.actualModel || requestedModel,
+            downstreamPath,
+            selected,
+            status: upstream.status,
+            retryCount,
+            endpointPath: '/v1/embeddings',
+          });
           logProxy(
             selected, requestedModel, 'success', upstream.status, latency, null, retryCount, downstreamApiKeyId,
             resolvedUsage.promptTokens, resolvedUsage.completionTokens, resolvedUsage.totalTokens, estimatedCost, billingDetails, clientContext, downstreamPath,
@@ -214,6 +247,17 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
           return { ok: true, response: upstream, latencyMs: latency, cost: estimatedCost };
         } catch (err: any) {
           const errorMessage = err?.message || 'network failure';
+          recordProxyDebugTrace({
+            clientContext,
+            kind: 'proxy_exception',
+            requestedModel,
+            actualModel: selected.actualModel || requestedModel,
+            downstreamPath,
+            selected,
+            retryCount,
+            reason: errorMessage,
+            endpointPath: '/v1/embeddings',
+          });
           await tokenRouter.recordFailure(selected.channel.id, {
             status: 0,
             errorText: errorMessage,
@@ -341,4 +385,3 @@ async function logProxy(
     console.warn('[proxy/embeddings] failed to write proxy log', error);
   }
 }
-

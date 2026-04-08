@@ -7,10 +7,12 @@ import { eq } from 'drizzle-orm';
 
 const refreshModelsForAccountMock = vi.fn();
 const rebuildTokenRoutesFromAvailabilityMock = vi.fn();
+const rebuildTokenRoutesFromAvailabilityScopedMock = vi.fn();
 
 vi.mock('../../services/modelService.js', () => ({
   refreshModelsForAccount: (...args: unknown[]) => refreshModelsForAccountMock(...args),
   rebuildTokenRoutesFromAvailability: (...args: unknown[]) => rebuildTokenRoutesFromAvailabilityMock(...args),
+  rebuildTokenRoutesFromAvailabilityScoped: (...args: unknown[]) => rebuildTokenRoutesFromAvailabilityScopedMock(...args),
 }));
 
 type DbModule = typeof import('../../db/index.js');
@@ -38,6 +40,7 @@ describe('account token coverage refresh failure handling', () => {
   beforeEach(async () => {
     refreshModelsForAccountMock.mockReset();
     rebuildTokenRoutesFromAvailabilityMock.mockReset();
+    rebuildTokenRoutesFromAvailabilityScopedMock.mockReset();
 
     await db.delete(schema.proxyLogs).run();
     await db.delete(schema.checkinLogs).run();
@@ -82,7 +85,7 @@ describe('account token coverage refresh failure handling', () => {
       discoveredByCredential: false,
       discoveredApiToken: false,
     });
-    rebuildTokenRoutesFromAvailabilityMock.mockRejectedValue(new Error('rebuild failed'));
+    rebuildTokenRoutesFromAvailabilityScopedMock.mockRejectedValue(new Error('rebuild failed'));
 
     const response = await app.inject({
       method: 'POST',
