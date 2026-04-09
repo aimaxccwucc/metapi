@@ -7,6 +7,20 @@ export interface TokenCoverageAutoprovisionSchemaInspector {
   execute(sqlText: string): Promise<void>;
 }
 
+function isIgnorableExistingIndexError(
+  dialect: TokenCoverageAutoprovisionSchemaDialect,
+  error: unknown,
+): boolean {
+  if (dialect !== 'mysql') return false;
+  const code = typeof error === 'object' && error && 'code' in error
+    ? String((error as { code?: unknown }).code || '')
+    : '';
+  const message = error instanceof Error
+    ? error.message
+    : String(error || '');
+  return code === 'ER_DUP_KEYNAME' || message.includes('Duplicate key name');
+}
+
 const CREATE_TABLE_SQL: Record<TokenCoverageAutoprovisionSchemaDialect, string> = {
   sqlite: `CREATE TABLE IF NOT EXISTS token_coverage_autoprovision_states (
     id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -56,6 +70,13 @@ export async function ensureTokenCoverageAutoprovisionSchemaCompatibility(
     await inspector.execute(CREATE_TABLE_SQL[inspector.dialect]);
   }
   for (const sqlText of CREATE_INDEX_SQL[inspector.dialect]) {
-    await inspector.execute(sqlText);
+    try {
+      await inspector.execute(sqlText);
+    } catch (error) {
+      if (isIgnorableExistingIndexError(inspector.dialect, error)) {
+        continue;
+      }
+      throw error;
+    }
   }
 }
