@@ -175,4 +175,54 @@ describe('task routes', () => {
       status: 'succeeded',
     });
   });
+
+  it('preserves auto provision summary fields in task detail response', async () => {
+    const { startBackgroundTask } = await import('../../services/backgroundTaskService.js');
+    const { task } = startBackgroundTask(
+      {
+        type: 'token',
+        title: '自动补齐模型覆盖 Key',
+      },
+      async () => ({
+        summary: {
+          total: 4,
+          created: 1,
+          reused: 2,
+          skipped: 0,
+          cooldown: 1,
+          failed: 0,
+        },
+      }),
+    );
+
+    for (let i = 0; i < 20; i += 1) {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/tasks/${task.id}`,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json() as {
+        task: {
+          status: string;
+          result?: {
+            summary?: Record<string, unknown>;
+          };
+        };
+      };
+      if (body.task.status === 'succeeded') {
+        expect(body.task.result?.summary).toEqual({
+          total: 4,
+          created: 1,
+          reused: 2,
+          skipped: 0,
+          cooldown: 1,
+          failed: 0,
+        });
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    throw new Error('auto provision task did not finish in time');
+  });
 });

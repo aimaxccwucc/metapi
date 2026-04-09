@@ -7,6 +7,7 @@ export type RequestBudget = {
   isExpired: () => boolean;
   buildTimeoutMessage: () => string;
   getPerAttemptTimeoutMs: (options?: { preferFastFail?: boolean }) => number;
+  getStreamFirstByteTimeoutMs: (options?: { preferFastFail?: boolean }) => number;
 };
 
 type RetryBackoffInput = {
@@ -40,6 +41,10 @@ function recordRetryBackoff(delayMs: number): void {
 export function createRequestBudget(totalBudgetMs = config.upstreamRequestBudgetMs): RequestBudget {
   const startedAtMs = Date.now();
   const normalizedBudgetMs = Math.max(1_000, totalBudgetMs);
+  const resolveCappedTimeout = (hardCap: number) => {
+    const remainingMs = Math.max(0, normalizedBudgetMs - (Date.now() - startedAtMs));
+    return Math.max(1_000, Math.min(remainingMs, hardCap));
+  };
   return {
     startedAtMs,
     totalBudgetMs: normalizedBudgetMs,
@@ -47,9 +52,14 @@ export function createRequestBudget(totalBudgetMs = config.upstreamRequestBudget
     isExpired: () => (Date.now() - startedAtMs) >= normalizedBudgetMs,
     buildTimeoutMessage: () => `upstream request budget exceeded after ${normalizedBudgetMs}ms`,
     getPerAttemptTimeoutMs: (options) => {
-      const remainingMs = Math.max(0, normalizedBudgetMs - (Date.now() - startedAtMs));
       const hardCap = options?.preferFastFail ? 10_000 : config.upstreamRequestTimeoutMs;
-      return Math.max(1_000, Math.min(remainingMs, hardCap));
+      return resolveCappedTimeout(hardCap);
+    },
+    getStreamFirstByteTimeoutMs: (options) => {
+      const hardCap = options?.preferFastFail
+        ? Math.min(10_000, config.upstreamStreamFirstByteTimeoutMs)
+        : config.upstreamStreamFirstByteTimeoutMs;
+      return resolveCappedTimeout(hardCap);
     },
   };
 }

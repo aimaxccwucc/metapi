@@ -26,6 +26,7 @@ describe('requestBudget', () => {
       vi.advanceTimersByTime(450);
       expect(budget.getRemainingMs()).toBe(550);
       expect(budget.getPerAttemptTimeoutMs({ preferFastFail: true })).toBe(1000);
+      expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true })).toBe(1000);
       expect(budget.isExpired()).toBe(false);
 
       vi.advanceTimersByTime(550);
@@ -33,6 +34,20 @@ describe('requestBudget', () => {
       expect(budget.isExpired()).toBe(true);
       expect(budget.buildTimeoutMessage()).toBe('upstream request budget exceeded after 1000ms');
       expect(budget.getPerAttemptTimeoutMs()).toBe(1000);
+      expect(budget.getStreamFirstByteTimeoutMs()).toBe(1000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps stream first-byte timeout independently from non-stream attempt timeout', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-31T09:05:00.000Z'));
+    try {
+      const budget = createRequestBudget(60_000);
+      expect(budget.getPerAttemptTimeoutMs()).toBe(20_000);
+      expect(budget.getStreamFirstByteTimeoutMs()).toBe(15_000);
+      expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true })).toBe(10_000);
     } finally {
       vi.useRealTimers();
     }

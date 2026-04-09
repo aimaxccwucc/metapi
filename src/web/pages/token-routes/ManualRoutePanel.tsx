@@ -8,7 +8,7 @@ import { tr } from '../../i18n.js';
 import { getInitialVisibleCount, getNextVisibleCount } from '../helpers/progressiveRender.js';
 import type { MissingTokenModelsByName } from '../helpers/routeMissingTokenHints.js';
 import type { RouteModelCandidatesByModelName } from '../helpers/routeModelCandidatesIndex.js';
-import type { RouteIconOption, RouteMode, RouteProbePolicy, RouteSummaryRow } from './types.js';
+import type { RouteIconOption, RouteMode, RouteProbePolicy, RouteSummaryRow, SourceRouteOption } from './types.js';
 import {
   ROUTE_ICON_NONE_VALUE,
   getModelPatternError,
@@ -28,7 +28,7 @@ type RouteEditorForm = {
   displayName: string;
   displayIcon: string;
   modelPattern: string;
-  sourceRouteIds: number[];
+  sourceRouteKeys: string[];
   advancedOpen: boolean;
 };
 
@@ -41,8 +41,8 @@ type ManualRoutePanelProps = {
   canSave: boolean;
   routeIconSelectOptions: RouteIconOption[];
   previewModelSamples: string[];
-  exactSourceRouteOptions: RouteSummaryRow[];
-  sourceEndpointTypesByRouteId: Record<number, string[]>;
+  sourceRouteOptions: SourceRouteOption[];
+  sourceEndpointTypesBySourceKey: Record<string, string[]>;
   modelCandidates: RouteModelCandidatesByModelName;
   missingTokenModelsByName: MissingTokenModelsByName;
   missingTokenGroupModelsByName: MissingTokenModelsByName;
@@ -58,16 +58,16 @@ type SourceRouteProbeState = {
 
 const SOURCE_PICKER_RENDER_CHUNK = 40;
 
-function renderRouteOptionLabel(route: RouteSummaryRow): string {
+function renderRouteOptionLabel(route: SourceRouteOption): string {
   const displayName = (route.displayName || '').trim();
   return displayName || route.modelPattern;
 }
 
-function toggleSourceRouteId(sourceRouteIds: number[], routeId: number): number[] {
-  if (sourceRouteIds.includes(routeId)) {
-    return sourceRouteIds.filter((id) => id !== routeId);
+function toggleSourceRouteKey(sourceRouteKeys: string[], sourceKey: string): string[] {
+  if (sourceRouteKeys.includes(sourceKey)) {
+    return sourceRouteKeys.filter((key) => key !== sourceKey);
   }
-  return [...sourceRouteIds, routeId].sort((a, b) => a - b);
+  return [...sourceRouteKeys, sourceKey].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
 }
 
 function SearchField({
@@ -137,8 +137,8 @@ export default function ManualRoutePanel({
   canSave,
   routeIconSelectOptions,
   previewModelSamples,
-  exactSourceRouteOptions,
-  sourceEndpointTypesByRouteId,
+  sourceRouteOptions,
+  sourceEndpointTypesBySourceKey,
   modelCandidates,
   missingTokenModelsByName,
   missingTokenGroupModelsByName,
@@ -148,12 +148,12 @@ export default function ManualRoutePanel({
   const toast = useToast();
   const [showSourcePicker, setShowSourcePicker] = useState(false);
   const [sourceSearch, setSourceSearch] = useState('');
-  const [sourcePickerSelection, setSourcePickerSelection] = useState<number[]>([]);
+  const [sourcePickerSelection, setSourcePickerSelection] = useState<string[]>([]);
   const [activeSourceBrand, setActiveSourceBrand] = useState<string | null>(null);
   const [activeSourceSite, setActiveSourceSite] = useState<string | null>(null);
   const [activeSourceEndpointType, setActiveSourceEndpointType] = useState<string | null>(null);
   const [visibleSourceCount, setVisibleSourceCount] = useState(SOURCE_PICKER_RENDER_CHUNK);
-  const [sourceProbeStateByRouteId, setSourceProbeStateByRouteId] = useState<Record<number, SourceRouteProbeState>>({});
+  const [sourceProbeStateBySourceKey, setSourceProbeStateBySourceKey] = useState<Record<string, SourceRouteProbeState>>({});
 
   useEffect(() => {
     if (!show) {
@@ -164,7 +164,7 @@ export default function ManualRoutePanel({
       setActiveSourceSite(null);
       setActiveSourceEndpointType(null);
       setVisibleSourceCount(SOURCE_PICKER_RENDER_CHUNK);
-      setSourceProbeStateByRouteId({});
+      setSourceProbeStateBySourceKey({});
     }
   }, [show]);
 
@@ -191,20 +191,20 @@ export default function ManualRoutePanel({
     return previewModelSamples.filter((modelName) => matchesModelPattern(modelName, normalizedPattern));
   }, [form.modelPattern, modelPatternError, previewModelSamples]);
 
-  const sourceRouteBrandById = useMemo(() => {
-    const next = new Map<number, BrandInfo | null>();
-    for (const route of exactSourceRouteOptions) {
-      next.set(route.id, resolveRouteBrand(route));
+  const sourceRouteBrandByKey = useMemo(() => {
+    const next = new Map<string, BrandInfo | null>();
+    for (const route of sourceRouteOptions) {
+      next.set(route.sourceKey, resolveRouteBrand(route));
     }
     return next;
-  }, [exactSourceRouteOptions]);
+  }, [sourceRouteOptions]);
 
   const sourceBrandList = useMemo(() => {
     const grouped = new Map<string, { count: number; brand: BrandInfo }>();
     let otherCount = 0;
 
-    for (const route of exactSourceRouteOptions) {
-      const brand = sourceRouteBrandById.get(route.id) || null;
+    for (const route of sourceRouteOptions) {
+      const brand = sourceRouteBrandByKey.get(route.sourceKey) || null;
       if (!brand) {
         otherCount += 1;
         continue;
@@ -226,12 +226,12 @@ export default function ManualRoutePanel({
       }) as [string, { count: number; brand: BrandInfo }][],
       otherCount,
     };
-  }, [exactSourceRouteOptions, sourceRouteBrandById]);
+  }, [sourceRouteBrandByKey, sourceRouteOptions]);
 
   const sourceSiteList = useMemo(() => {
     const grouped = new Map<string, number>();
 
-    for (const route of exactSourceRouteOptions) {
+    for (const route of sourceRouteOptions) {
       const seenSites = new Set<string>();
       for (const siteName of route.siteNames || []) {
         const normalizedSite = String(siteName || '').trim();
@@ -247,13 +247,13 @@ export default function ManualRoutePanel({
       }
       return b[1] - a[1];
     }) as [string, number][];
-  }, [exactSourceRouteOptions]);
+  }, [sourceRouteOptions]);
 
   const sourceEndpointTypeList = useMemo(() => {
     const grouped = new Map<string, number>();
 
-    for (const route of exactSourceRouteOptions) {
-      const endpointTypes = sourceEndpointTypesByRouteId[route.id] || [];
+    for (const route of sourceRouteOptions) {
+      const endpointTypes = sourceEndpointTypesBySourceKey[route.sourceKey] || [];
       for (const endpointType of endpointTypes) {
         const normalizedType = String(endpointType || '').trim();
         if (!normalizedType) continue;
@@ -267,16 +267,16 @@ export default function ManualRoutePanel({
       }
       return b[1] - a[1];
     }) as [string, number][];
-  }, [exactSourceRouteOptions, sourceEndpointTypesByRouteId]);
+  }, [sourceEndpointTypesBySourceKey, sourceRouteOptions]);
 
   const filteredSourceRoutes = useMemo(() => {
-    let list = [...exactSourceRouteOptions];
+    let list = [...sourceRouteOptions];
 
     if (activeSourceBrand) {
       if (activeSourceBrand === '__other__') {
-        list = list.filter((route) => !(sourceRouteBrandById.get(route.id) || null));
+        list = list.filter((route) => !(sourceRouteBrandByKey.get(route.sourceKey) || null));
       } else {
-        list = list.filter((route) => (sourceRouteBrandById.get(route.id)?.name || '') === activeSourceBrand);
+        list = list.filter((route) => (sourceRouteBrandByKey.get(route.sourceKey)?.name || '') === activeSourceBrand);
       }
     }
 
@@ -285,7 +285,7 @@ export default function ManualRoutePanel({
     }
 
     if (activeSourceEndpointType) {
-      list = list.filter((route) => (sourceEndpointTypesByRouteId[route.id] || []).includes(activeSourceEndpointType));
+      list = list.filter((route) => (sourceEndpointTypesBySourceKey[route.sourceKey] || []).includes(activeSourceEndpointType));
     }
 
     const normalizedSearch = sourceSearch.trim().toLowerCase();
@@ -293,9 +293,9 @@ export default function ManualRoutePanel({
       list = list.filter((route) => {
         const label = renderRouteOptionLabel(route).toLowerCase();
         const modelPattern = route.modelPattern.toLowerCase();
-        const brandName = (sourceRouteBrandById.get(route.id)?.name || '').toLowerCase();
+        const brandName = (sourceRouteBrandByKey.get(route.sourceKey)?.name || '').toLowerCase();
         const siteText = (route.siteNames || []).join(' ').toLowerCase();
-        const endpointTypes = (sourceEndpointTypesByRouteId[route.id] || []).join(' ').toLowerCase();
+        const endpointTypes = (sourceEndpointTypesBySourceKey[route.sourceKey] || []).join(' ').toLowerCase();
         return (
           label.includes(normalizedSearch)
           || modelPattern.includes(normalizedSearch)
@@ -307,11 +307,11 @@ export default function ManualRoutePanel({
     }
 
     return list.sort((a, b) => {
-      const aSelected = sourcePickerSelection.includes(a.id);
-      const bSelected = sourcePickerSelection.includes(b.id);
+      const aSelected = sourcePickerSelection.includes(a.sourceKey);
+      const bSelected = sourcePickerSelection.includes(b.sourceKey);
       if (aSelected !== bSelected) return aSelected ? -1 : 1;
-      const aProbed = !!sourceProbeStateByRouteId[a.id]?.status && sourceProbeStateByRouteId[a.id]?.status !== 'idle';
-      const bProbed = !!sourceProbeStateByRouteId[b.id]?.status && sourceProbeStateByRouteId[b.id]?.status !== 'idle';
+      const aProbed = !!sourceProbeStateBySourceKey[a.sourceKey]?.status && sourceProbeStateBySourceKey[a.sourceKey]?.status !== 'idle';
+      const bProbed = !!sourceProbeStateBySourceKey[b.sourceKey]?.status && sourceProbeStateBySourceKey[b.sourceKey]?.status !== 'idle';
       if (aProbed !== bProbed) return aProbed ? -1 : 1;
       if (a.channelCount === b.channelCount) {
         return renderRouteOptionLabel(a).localeCompare(renderRouteOptionLabel(b), undefined, { sensitivity: 'base' });
@@ -322,11 +322,11 @@ export default function ManualRoutePanel({
     activeSourceBrand,
     activeSourceEndpointType,
     activeSourceSite,
-    exactSourceRouteOptions,
-    sourceEndpointTypesByRouteId,
+    sourceEndpointTypesBySourceKey,
     sourcePickerSelection,
-    sourceProbeStateByRouteId,
-    sourceRouteBrandById,
+    sourceProbeStateBySourceKey,
+    sourceRouteBrandByKey,
+    sourceRouteOptions,
     sourceSearch,
   ]);
 
@@ -343,7 +343,7 @@ export default function ManualRoutePanel({
     setVisibleSourceCount((current) => getNextVisibleCount(current, filteredSourceRoutes.length, SOURCE_PICKER_RENDER_CHUNK));
   };
 
-  const resolveProbeTarget = (route: RouteSummaryRow): { accountId?: number; siteName?: string } => {
+  const resolveProbeTarget = (route: SourceRouteOption): { accountId?: number; siteName?: string } => {
     const exactModel = String(route.modelPattern || '').trim();
     const candidate = (modelCandidates[exactModel] || [])[0];
     if (candidate) {
@@ -356,12 +356,12 @@ export default function ManualRoutePanel({
     return {};
   };
 
-  const handleProbeSourceRoute = async (route: RouteSummaryRow) => {
+  const handleProbeSourceRoute = async (route: SourceRouteOption) => {
     const modelName = String(route.modelPattern || '').trim();
     if (!modelName) return;
-    setSourceProbeStateByRouteId((prev) => ({
+    setSourceProbeStateBySourceKey((prev) => ({
       ...prev,
-      [route.id]: { status: 'checking', message: '检测中...' },
+      [route.sourceKey]: { status: 'checking', message: '检测中...' },
     }));
     try {
       const target = resolveProbeTarget(route);
@@ -372,9 +372,9 @@ export default function ManualRoutePanel({
       }) as { available?: boolean; reason?: string; autoKeyCreated?: boolean };
       const available = res?.available === true;
       const message = available ? '模型可用' : String(res?.reason || '暂未确认该模型可用性');
-      setSourceProbeStateByRouteId((prev) => ({
+      setSourceProbeStateBySourceKey((prev) => ({
         ...prev,
-        [route.id]: {
+        [route.sourceKey]: {
           status: available ? 'available' : 'unavailable',
           message,
           autoKeyCreated: res?.autoKeyCreated === true,
@@ -383,9 +383,9 @@ export default function ManualRoutePanel({
       toast.success(available ? `${modelName}: 模型可用` : `${modelName}: ${message}`);
     } catch (error: any) {
       const message = String(error?.message || '检测失败');
-      setSourceProbeStateByRouteId((prev) => ({
+      setSourceProbeStateBySourceKey((prev) => ({
         ...prev,
-        [route.id]: { status: 'error', message },
+        [route.sourceKey]: { status: 'error', message },
       }));
       toast.error(`${modelName}: ${message}`);
     }
@@ -400,11 +400,11 @@ export default function ManualRoutePanel({
   };
 
   const selectedSourceRoutes = useMemo(() => {
-    const routeById = new Map(exactSourceRouteOptions.map((route) => [route.id, route]));
-    return form.sourceRouteIds
-      .map((routeId) => routeById.get(routeId))
-      .filter((route): route is RouteSummaryRow => !!route);
-  }, [exactSourceRouteOptions, form.sourceRouteIds]);
+    const routeByKey = new Map(sourceRouteOptions.map((route) => [route.sourceKey, route]));
+    return form.sourceRouteKeys
+      .map((sourceKey) => routeByKey.get(sourceKey))
+      .filter((route): route is SourceRouteOption => !!route);
+  }, [form.sourceRouteKeys, sourceRouteOptions]);
 
   const sourcePickerSelectionSet = useMemo(
     () => new Set(sourcePickerSelection),
@@ -415,7 +415,7 @@ export default function ManualRoutePanel({
   const hasExplicitIconValue = !!normalizeRouteDisplayIconValue(form.displayIcon);
 
   const openSourcePicker = () => {
-    setSourcePickerSelection([...form.sourceRouteIds]);
+    setSourcePickerSelection([...form.sourceRouteKeys]);
     setSourceSearch('');
     setActiveSourceBrand(null);
     setActiveSourceSite(null);
@@ -434,7 +434,7 @@ export default function ManualRoutePanel({
   const confirmSourcePicker = () => {
     setForm((current) => ({
       ...current,
-      sourceRouteIds: [...sourcePickerSelection].sort((a, b) => a - b),
+      sourceRouteKeys: [...sourcePickerSelection].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
     }));
     setShowSourcePicker(false);
     setSourceSearch('');
@@ -628,14 +628,14 @@ export default function ManualRoutePanel({
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                  <div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 4 }}>
-                      {tr('来源模型')}
+                    <div>
+                      <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 4 }}>
+                        {tr('来源模型')}
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                      {tr('选择一个或多个精确模型作为来源；未建路由的模型会在保存时自动补建。')}
+                      </div>
                     </div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                      {tr('选择一个或多个现有精确模型路由作为来源。')}
-                    </div>
-                  </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     {!editingRouteId && (
                       <button
@@ -677,13 +677,13 @@ export default function ManualRoutePanel({
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                       {selectedSourceRoutes.slice(0, 8).map((route) => (
                         <button
-                          key={`selected-${route.id}`}
+                          key={`selected-${route.sourceKey}`}
                           type="button"
                           className="badge badge-info"
                           style={{ fontSize: 11, cursor: 'pointer' }}
                           onClick={() => setForm((current) => ({
                             ...current,
-                            sourceRouteIds: toggleSourceRouteId(current.sourceRouteIds, route.id),
+                            sourceRouteKeys: toggleSourceRouteKey(current.sourceRouteKeys, route.sourceKey),
                           }))}
                         >
                           {renderRouteOptionLabel(route)} ×
@@ -933,11 +933,11 @@ export default function ManualRoutePanel({
                 {`已选择 ${sourcePickerSelection.length} 个来源模型`}
               </div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                {`候选 ${filteredSourceRoutes.length} / ${exactSourceRouteOptions.length}`}
+                {`候选 ${filteredSourceRoutes.length} / ${sourceRouteOptions.length}`}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => setSourcePickerSelection((current) => [...current].sort((a, b) => a - b))}>
+              <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => setSourcePickerSelection((current) => [...current].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })))}>
                 {tr('已选置顶')}
               </button>
               <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => { void handleProbeVisibleRoutes(); }}>
@@ -958,7 +958,7 @@ export default function ManualRoutePanel({
                 <FilterChip
                   active={!activeSourceBrand}
                   label={tr('全部')}
-                  count={exactSourceRouteOptions.length}
+                  count={sourceRouteOptions.length}
                   icon={<span style={{ fontSize: 10 }}>✦</span>}
                   onClick={() => setActiveSourceBrand(null)}
                 />
@@ -988,7 +988,7 @@ export default function ManualRoutePanel({
                   <FilterChip
                     active={!activeSourceSite}
                     label={tr('全部')}
-                    count={exactSourceRouteOptions.length}
+                    count={sourceRouteOptions.length}
                     icon={<span style={{ fontSize: 10 }}>⚡</span>}
                     onClick={() => setActiveSourceSite(null)}
                   />
@@ -1022,7 +1022,7 @@ export default function ManualRoutePanel({
                 <FilterChip
                   active={!activeSourceEndpointType}
                   label={tr('全部')}
-                  count={exactSourceRouteOptions.length}
+                  count={sourceRouteOptions.length}
                   icon={<span style={{ fontSize: 10 }}>⚙</span>}
                   onClick={() => setActiveSourceEndpointType(null)}
                 />
@@ -1057,8 +1057,8 @@ export default function ManualRoutePanel({
           >
             {filteredSourceRoutes.length === 0 ? (
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', padding: '12px 0', textAlign: 'center' }}>
-                {exactSourceRouteOptions.length === 0
-                  ? tr('当前没有可选的精确模型路由。')
+                {sourceRouteOptions.length === 0
+                  ? tr('当前没有可选的来源模型。')
                   : tr('没有匹配的来源模型。')}
               </div>
             ) : (
@@ -1072,12 +1072,12 @@ export default function ManualRoutePanel({
                 }}
               >
                 {visibleSourceRoutes.map((route) => {
-                  const selected = sourcePickerSelectionSet.has(route.id);
+                  const selected = sourcePickerSelectionSet.has(route.sourceKey);
                   const label = renderRouteOptionLabel(route);
-                  const brand = sourceRouteBrandById.get(route.id) || null;
-                  const endpointTypes = (sourceEndpointTypesByRouteId[route.id] || []).slice(0, 3);
+                  const brand = sourceRouteBrandByKey.get(route.sourceKey) || null;
+                  const endpointTypes = (sourceEndpointTypesBySourceKey[route.sourceKey] || []).slice(0, 3);
                   const siteNames = Array.from(new Set((route.siteNames || []).filter((siteName) => String(siteName || '').trim())));
-                  const probeState = sourceProbeStateByRouteId[route.id];
+                  const probeState = sourceProbeStateBySourceKey[route.sourceKey];
                   const probeTone = probeState?.status === 'available'
                     ? 'badge-success'
                     : probeState?.status === 'checking'
@@ -1090,9 +1090,9 @@ export default function ManualRoutePanel({
 
                   return (
                     <button
-                      key={route.id}
+                      key={route.sourceKey}
                       type="button"
-                      onClick={() => setSourcePickerSelection((current) => toggleSourceRouteId(current, route.id))}
+                      onClick={() => setSourcePickerSelection((current) => toggleSourceRouteKey(current, route.sourceKey))}
                       className="btn btn-ghost source-route-picker-card"
                       style={{
                         minHeight: 208,
@@ -1164,7 +1164,7 @@ export default function ManualRoutePanel({
                             {siteNames.length} {tr('站点')}
                           </span>
                           {endpointTypes.map((endpointType) => (
-                            <span key={`${route.id}-${endpointType}`} className="badge badge-muted" style={{ fontSize: 10 }}>
+                            <span key={`${route.sourceKey}-${endpointType}`} className="badge badge-muted" style={{ fontSize: 10 }}>
                               {endpointType}
                             </span>
                           ))}
@@ -1174,7 +1174,7 @@ export default function ManualRoutePanel({
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                             {siteNames.slice(0, 3).map((siteName) => (
                               <span
-                                key={`${route.id}-${siteName}`}
+                                key={`${route.sourceKey}-${siteName}`}
                                 className="badge badge-muted"
                                 style={{ fontSize: 10 }}
                               >
@@ -1216,7 +1216,7 @@ export default function ManualRoutePanel({
                           <span
                             role="button"
                             tabIndex={0}
-                            data-testid={`source-route-probe-${route.id}`}
+                            data-testid={`source-route-probe-${route.backingRouteId ?? route.sourceKey}`}
                             className="btn btn-ghost"
                             style={{ border: '1px solid var(--color-border)', fontSize: 11, padding: '4px 10px', flexShrink: 0 }}
                             onClick={(event) => {

@@ -367,6 +367,33 @@ export const routingGovernanceStates = sqliteTable('routing_governance_states', 
   reasonStateIdx: index('routing_governance_states_reason_state_idx').on(table.reasonCode, table.state),
 }));
 
+export const tokenCoverageAutoprovisionStates = sqliteTable('token_coverage_autoprovision_states', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  modelName: text('model_name').notNull(),
+  targetGroup: text('target_group').notNull().default('default'),
+  status: text('status').notNull().default('pending'),
+  reasonCode: text('reason_code'),
+  message: text('message'),
+  attemptCount: integer('attempt_count').notNull().default(0),
+  lastAttemptAt: text('last_attempt_at'),
+  lastSuccessAt: text('last_success_at'),
+  cooldownUntil: text('cooldown_until'),
+  lastCreatedTokenName: text('last_created_token_name'),
+  lastCreatedTokenGroup: text('last_created_token_group'),
+  createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+}, (table) => ({
+  accountModelGroupUnique: uniqueIndex('token_coverage_autoprovision_states_account_model_group_unique').on(
+    table.accountId,
+    table.modelName,
+    table.targetGroup,
+  ),
+  statusCooldownIdx: index('token_coverage_autoprovision_states_status_cooldown_idx').on(table.status, table.cooldownUntil),
+  siteAccountIdx: index('token_coverage_autoprovision_states_site_account_idx').on(table.siteId, table.accountId),
+}));
+
 export const events = sqliteTable('events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   type: text('type').notNull(), // 'checkin' | 'balance' | 'token' | 'proxy' | 'status'

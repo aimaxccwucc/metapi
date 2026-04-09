@@ -19,6 +19,7 @@ import {
   tokenRouter,
 } from '../../services/tokenRouter.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
+import { autoProvisionTokenCoverage } from '../../services/tokenCoverageAutoProvisionService.js';
 import { getAdapter } from '../../services/platforms/index.js';
 import { extractCheckinSnapshot, requiresManagedAccountTokens, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import {
@@ -713,7 +714,15 @@ async function getMatchedExactRouteChannelCandidates(modelPattern: string): Prom
 
 async function populateRouteChannelsByModelPattern(routeId: number, modelPattern: string): Promise<number> {
   await runWithSoftTimeout(
-    ensurePreferredTokenCoverageForPattern(modelPattern),
+    autoProvisionTokenCoverage({
+      routeIds: [routeId],
+      modelNames: isExactModelPattern(modelPattern) ? [modelPattern] : undefined,
+    }, {
+      provisionMode: 'shared_group',
+      refreshRouteChannels: false,
+    }).then(() => undefined).catch((error) => {
+      console.warn(`[routes] auto provision failed for route ${routeId} (${modelPattern}): ${error instanceof Error ? error.message : String(error || 'unknown error')}`);
+    }),
     ROUTE_AUTOCREATE_SOFT_TIMEOUT_MS,
   );
   const routeCandidates = await getMatchedExactRouteChannelCandidates(modelPattern);

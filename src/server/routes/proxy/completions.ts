@@ -194,7 +194,11 @@ export async function completionsProxyRoute(app: FastifyInstance) {
               'Authorization': `Bearer ${selected.tokenValue}`,
             },
             body: JSON.stringify(forwardBody),
-            signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true })),
+            signal: AbortSignal.timeout(
+              isStream
+                ? requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: true })
+                : requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+            ),
           }, getProxyUrlFromExtraConfig((selected.account as { extraConfig?: string | null | undefined }).extraConfig)));
 
           if (!upstream.ok) {

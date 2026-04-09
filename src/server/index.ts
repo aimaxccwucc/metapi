@@ -48,6 +48,7 @@ import { normalizeLogCleanupRetentionDays } from './services/logCleanupService.j
 import {
   db,
   ensureProxyFileCompatibilityColumns,
+  ensureTokenCoverageAutoprovisionCompatibilityColumns,
   ensureProxyLogCacheColumns,
   ensureProxyLogClientColumns,
   ensureProxyLogDownstreamApiKeyIdColumn,
@@ -354,6 +355,7 @@ try {
   await ensureSiteCompatibilityColumns();
   await ensureRouteGroupingCompatibilityColumns();
   await ensureProxyFileCompatibilityColumns();
+  await ensureTokenCoverageAutoprovisionCompatibilityColumns();
   await ensureProxyLogCacheColumns();
   await ensureProxyLogClientColumns();
   await ensureProxyLogDownstreamApiKeyIdColumn();

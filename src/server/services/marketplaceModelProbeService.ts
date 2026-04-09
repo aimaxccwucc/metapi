@@ -5,6 +5,7 @@ import { resolvePlatformUserId } from './accountExtraConfig.js';
 import { fetchModelPricingCatalog } from './modelPricingService.js';
 import { getAdapter } from './platforms/index.js';
 import { withSiteProxyRequestInit } from './siteProxy.js';
+import { autoProvisionTokenCoverage } from './tokenCoverageAutoProvisionService.js';
 
 const MARKETPLACE_MODEL_TEST_TIMEOUT_MS = 15_000;
 const MARKETPLACE_AUTO_KEY_TIMEOUT_MS = 8_000;
@@ -367,48 +368,6 @@ function isModelAliasEquivalent(left: string, right: string): boolean {
   return !!a && !!b && a === b;
 }
 
-function buildAutoTokenName(modelName: string, preferredGroup: string): string {
-  const normalizedGroup = preferredGroup.trim() || 'default';
-  const normalizedModel = modelName
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 36) || 'model';
-  return `metapi-${normalizedGroup}-${normalizedModel}`.slice(0, 64);
-}
-
-function selectPreferredTokenGroupForModel(
-  modelName: string,
-  availableGroups: string[],
-  catalog: Awaited<ReturnType<typeof fetchModelPricingCatalog>>,
-): string {
-  const normalizedGroups = Array.from(new Set(
-    availableGroups.map((group) => String(group || '').trim()).filter(Boolean),
-  ));
-  if (normalizedGroups.length === 0) return 'default';
-  if (normalizedGroups.length === 1) return normalizedGroups[0] || 'default';
-
-  const groupRatio = catalog?.groupRatio || {};
-  const modelEntry = catalog?.models.find((item) => item.modelName === modelName)
-    || catalog?.models.find((item) => isModelAliasEquivalent(item.modelName, modelName))
-    || catalog?.models.find((item) => normalizedGroups.some((group) => item.enableGroups.includes(group)));
-  const allowedGroups = new Set(modelEntry?.enableGroups || normalizedGroups);
-
-  const rankedGroups = normalizedGroups
-    .filter((group) => allowedGroups.has(group))
-    .map((group) => ({
-      group,
-      ratio: typeof groupRatio[group] === 'number' && Number.isFinite(groupRatio[group])
-        ? groupRatio[group]
-        : Number.POSITIVE_INFINITY,
-    }))
-    .sort((left, right) => left.ratio - right.ratio || left.group.localeCompare(right.group));
-
-  const preferred = rankedGroups.find((item) => Number.isFinite(item.ratio));
-  return preferred?.group || normalizedGroups[0] || 'default';
-}
-
 async function resolvePreferredTokenForCandidate(
   candidate: MarketplaceProbeCandidate,
   preferredTokenId?: number | null,
@@ -523,45 +482,34 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
 
   if (!modelCredential && allowAutoCreateKey && accountAccessToken) {
     try {
-      const availableGroups = await withTimeout(
-        () => adapter.getUserGroups(site.url, accountAccessToken, platformUserId),
-        MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
-        `list groups timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
-      );
-      const pricingCatalog = await fetchModelPricingCatalog({
-        site: {
-          id: site.id,
-          url: site.url,
-          platform: site.platform,
-        },
-        account: {
-          id: account.id,
-          accessToken: accountAccessToken,
-          apiToken: account.apiToken,
-        },
-        modelName: '__metadata__',
-        totalTokens: 0,
-      }).catch(() => null);
-      const targetGroup = selectPreferredTokenGroupForModel(modelName, availableGroups, pricingCatalog);
-      const generatedName = buildAutoTokenName(modelName, targetGroup);
-      const created = await withTimeout(
-        () => adapter.createApiToken(site.url, accountAccessToken, platformUserId, {
-          name: generatedName,
-          group: targetGroup,
-          modelLimitsEnabled: true,
-          modelLimits: modelName,
+      const provision = await withTimeout(
+        () => autoProvisionTokenCoverage({
+          accountIds: [account.id],
+          siteIds: [site.id],
+          modelNames: [modelName],
+        }, {
+          provisionMode: 'scoped_model',
+          refreshRouteChannels: false,
         }),
         MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
-        `create api key timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
+        `auto provision timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
       );
-      if (created) {
-        const upstreamTokens = await withTimeout(
-          () => adapter.getApiTokens(site.url, accountAccessToken, platformUserId),
-          MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
-          `list api keys timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
-        );
-        await syncTokensFromUpstream(account.id, upstreamTokens);
-        preferredToken = await getPreferredAccountToken(account.id);
+      const createdItem = provision.results.find((item) => item.status === 'created' || item.status === 'reused') || null;
+      if (createdItem) {
+        preferredToken = createdItem.createdTokenId
+          ? await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, createdItem.createdTokenId)).get()
+          : null;
+        if (!preferredToken && createdItem.createdTokenName) {
+          preferredToken = await db.select().from(schema.accountTokens)
+            .where(and(
+              eq(schema.accountTokens.accountId, account.id),
+              eq(schema.accountTokens.name, createdItem.createdTokenName),
+            ))
+            .get();
+        }
+        if (!preferredToken) {
+          preferredToken = await getPreferredAccountToken(account.id);
+        }
         modelCredential = (
           (input.preferredCredential || '').trim()
           || (preferredToken?.token || '').trim()
@@ -569,9 +517,9 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
           || fallbackSiteApiKey
         );
         autoKeyCreated = !!modelCredential;
-        autoKeyName = generatedName;
-        autoKeyGroup = targetGroup;
-        autoKeyTokenId = typeof preferredToken?.id === 'number' ? preferredToken.id : null;
+        autoKeyName = createdItem.createdTokenName || preferredToken?.name || null;
+        autoKeyGroup = createdItem.createdTokenGroup || null;
+        autoKeyTokenId = createdItem.createdTokenId || (typeof preferredToken?.id === 'number' ? preferredToken.id : null);
       }
     } catch {
       // Keep probe behavior conservative: fall through to the explicit credential error below.

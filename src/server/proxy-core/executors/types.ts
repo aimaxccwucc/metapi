@@ -24,6 +24,7 @@ export type ProxyRuntimeRequest = {
     oauthProjectId?: string | null;
     action?: 'generateContent' | 'streamGenerateContent' | 'countTokens';
     timeoutMs?: number;
+    firstByteTimeoutMs?: number;
   };
 };
 
@@ -100,6 +101,10 @@ function mergeAbortSignals(
 }
 
 function resolveRuntimeRequestTimeoutMs(request: ProxyRuntimeRequest): number {
+  const runtimeFirstByteTimeoutMs = Math.trunc(request.runtime?.firstByteTimeoutMs || 0);
+  if (request.runtime?.stream && runtimeFirstByteTimeoutMs > 0) {
+    return Math.max(1_000, runtimeFirstByteTimeoutMs);
+  }
   const runtimeTimeoutMs = Math.trunc(request.runtime?.timeoutMs || 0);
   if (runtimeTimeoutMs > 0) {
     return Math.max(1_000, runtimeTimeoutMs);

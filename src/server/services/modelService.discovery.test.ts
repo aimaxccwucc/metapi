@@ -48,6 +48,8 @@ describe('refreshModelsForAccount credential discovery', () => {
   let refreshModelsAndRebuildRoutes: ModelServiceModule['refreshModelsAndRebuildRoutes'];
   let refreshModelsAndRebuildRoutesOnDemand: ModelServiceModule['refreshModelsAndRebuildRoutesOnDemand'];
   let modelServiceTestUtils: ModelServiceModule['__modelServiceTestUtils'];
+  let listBackgroundTasks: (limit?: number) => Array<{ title: string; status: string; dedupeKey: string | null }>;
+  let resetBackgroundTasks: (() => void) | null = null;
   let dataDir = '';
 
   beforeAll(async () => {
@@ -57,6 +59,7 @@ describe('refreshModelsForAccount credential discovery', () => {
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const modelService = await import('./modelService.js');
+    const backgroundTaskService = await import('./backgroundTaskService.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
@@ -64,6 +67,8 @@ describe('refreshModelsForAccount credential discovery', () => {
     refreshModelsAndRebuildRoutes = modelService.refreshModelsAndRebuildRoutes;
     refreshModelsAndRebuildRoutesOnDemand = modelService.refreshModelsAndRebuildRoutesOnDemand;
     modelServiceTestUtils = modelService.__modelServiceTestUtils;
+    listBackgroundTasks = backgroundTaskService.listBackgroundTasks;
+    resetBackgroundTasks = backgroundTaskService.__resetBackgroundTasksForTests;
   });
 
   beforeEach(async () => {
@@ -74,6 +79,7 @@ describe('refreshModelsForAccount credential discovery', () => {
     refreshOauthAccessTokenSingleflightMock.mockReset();
     modelServiceTestUtils.resetOnDemandRefreshWindow();
     modelServiceTestUtils.resetOnDemandRefreshMetrics();
+    resetBackgroundTasks?.();
 
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
@@ -231,6 +237,52 @@ describe('refreshModelsForAccount credential discovery', () => {
       .where(eq(schema.tokenModelAvailability.tokenId, token!.id))
       .all();
     expect(tokenRows.map((row) => row.modelName)).toEqual(['gpt-5-nano']);
+  });
+
+  it('queues auto provision task after full refresh and rebuild finishes', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockResolvedValue(['gpt-5-nano']);
+
+    const site = await db.insert(schema.sites).values({
+      name: 'site-full-refresh',
+      url: 'https://site-full-refresh.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'full-refresh-user',
+      accessToken: 'shared-credential',
+      apiToken: 'shared-credential',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    }).returning().get();
+
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'shared-credential',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+    }).run();
+
+    await refreshModelsAndRebuildRoutes();
+
+    for (let i = 0; i < 20; i += 1) {
+      const task = listBackgroundTasks(20).find((item) => item.dedupeKey === 'auto-provision-token-coverage:full-refresh');
+      if (task) {
+        expect(task).toMatchObject({
+          title: '全量刷新后自动补齐模型覆盖 Key',
+          status: expect.stringMatching(/pending|running|succeeded|failed/),
+        });
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    throw new Error('auto provision full refresh task was not queued');
   });
 
   it('throttles on-demand full refresh calls within the cooldown window', async () => {

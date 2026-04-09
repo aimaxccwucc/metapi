@@ -40,6 +40,7 @@ import type {
   GroupRouteItem,
   ExplicitGroupSourceHealthSummary,
   RouteProbeSummary,
+  SourceRouteOption,
 } from './token-routes/types.js';
 import {
   AUTO_ROUTE_DECISION_LIMIT,
@@ -81,7 +82,7 @@ type RouteEditorForm = {
   displayName: string;
   displayIcon: string;
   modelPattern: string;
-  sourceRouteIds: number[];
+  sourceRouteKeys: string[];
   advancedOpen: boolean;
 };
 
@@ -91,7 +92,7 @@ const EMPTY_ROUTE_FORM: RouteEditorForm = {
   displayName: '',
   displayIcon: '',
   modelPattern: '',
-  sourceRouteIds: [],
+  sourceRouteKeys: [],
   advancedOpen: false,
 };
 
@@ -142,6 +143,19 @@ type RouteGovernanceApi = {
 
 function pickFeedbackExamples(names: string[]): string {
   return names.slice(0, 2).join('、');
+}
+
+function buildVirtualSourceRouteKey(modelName: string): string {
+  return `model:${modelName.trim()}`;
+}
+
+function buildPersistedSourceRouteKey(routeId: number): string {
+  return `route:${routeId}`;
+}
+
+function resolveSourceKeyFromRoute(route: Pick<RouteSummaryRow, 'id' | 'modelPattern' | 'routeMode'>): string {
+  if (Number.isFinite(route.id) && route.id > 0) return buildPersistedSourceRouteKey(route.id);
+  return buildVirtualSourceRouteKey(route.modelPattern);
 }
 
 function buildExplicitGroupSaveFeedback(
@@ -647,10 +661,10 @@ export default function TokenRoutes() {
   const canSaveRoute = useMemo(() => {
     if (saving) return false;
     if (form.routeMode === 'explicit_group') {
-      return !!form.displayName.trim() && form.sourceRouteIds.length > 0;
+      return !!form.displayName.trim() && form.sourceRouteKeys.length > 0;
     }
     return !!form.modelPattern.trim() && !getModelPatternError(form.modelPattern);
-  }, [form.displayName, form.modelPattern, form.routeMode, form.sourceRouteIds.length, saving]);
+  }, [form.displayName, form.modelPattern, form.routeMode, form.sourceRouteKeys.length, saving]);
 
   const previewModelSamples = useMemo(() => {
     const names = new Set<string>();
@@ -667,15 +681,172 @@ export default function TokenRoutes() {
       .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
   }, [modelCandidates, routeSummaries]);
 
-  const exactSourceRouteOptions = useMemo(
-    () => routeSummaries.filter((route) => isRouteExactModel(route)),
-    [routeSummaries],
-  );
+  const sourceRouteOptions = useMemo<SourceRouteOption[]>(() => {
+    const exactRoutes = routeSummaries.filter((route) => isRouteExactModel(route));
+    const coveredModels = new Set<string>();
+    const options: SourceRouteOption[] = exactRoutes.map((route) => {
+      const modelName = route.modelPattern.trim();
+      if (modelName) coveredModels.add(modelName);
+      return {
+        ...route,
+        sourceKey: resolveSourceKeyFromRoute(route),
+        backingRouteId: route.id,
+      };
+    });
+
+    const fallbackSiteNamesByModel = new Map<string, string[]>();
+    const mergeSiteNames = (modelName: string, siteNames: string[]) => {
+      if (siteNames.length === 0) return;
+      const existing = new Set(fallbackSiteNamesByModel.get(modelName) || []);
+      for (const siteName of siteNames) existing.add(siteName);
+      fallbackSiteNamesByModel.set(
+        modelName,
+        Array.from(existing).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
+      );
+    };
+
+    for (const [modelName, candidates] of Object.entries(modelCandidates || {})) {
+      const normalized = modelName.trim();
+      if (!normalized) continue;
+      mergeSiteNames(
+        normalized,
+        (candidates || []).map((item) => String(item.siteName || '').trim()).filter(Boolean),
+      );
+    }
+    for (const [modelName, accounts] of Object.entries(missingTokenModelsByName || {})) {
+      const normalized = modelName.trim();
+      if (!normalized) continue;
+      mergeSiteNames(
+        normalized,
+        (accounts || []).map((item) => String(item.siteName || '').trim()).filter(Boolean),
+      );
+    }
+    for (const [modelName, accounts] of Object.entries(missingTokenGroupModelsByName || {})) {
+      const normalized = modelName.trim();
+      if (!normalized) continue;
+      mergeSiteNames(
+        normalized,
+        (accounts || []).map((item) => String(item.siteName || '').trim()).filter(Boolean),
+      );
+    }
+
+    for (const route of routeSummaries) {
+      const modelName = route.modelPattern.trim();
+      if (!modelName) continue;
+      if (!isRouteExactModel(route)) continue;
+      coveredModels.add(modelName);
+    }
+
+    const virtualModelNames = new Set<string>();
+    for (const modelName of Object.keys(modelCandidates || {})) {
+      const normalized = modelName.trim();
+      if (normalized && !coveredModels.has(normalized)) virtualModelNames.add(normalized);
+    }
+    for (const modelName of Object.keys(missingTokenModelsByName || {})) {
+      const normalized = modelName.trim();
+      if (normalized && !coveredModels.has(normalized)) virtualModelNames.add(normalized);
+    }
+    for (const modelName of Object.keys(missingTokenGroupModelsByName || {})) {
+      const normalized = modelName.trim();
+      if (normalized && !coveredModels.has(normalized)) virtualModelNames.add(normalized);
+    }
+
+    for (const modelName of Array.from(virtualModelNames).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))) {
+      const channelCount = (modelCandidates[modelName] || []).length;
+      const enabledChannelCount = channelCount;
+      options.push({
+        id: 0,
+        modelPattern: modelName,
+        displayName: null,
+        displayIcon: null,
+        routeMode: 'pattern',
+        probePolicy: 'system',
+        sourceRouteIds: [],
+        modelMapping: null,
+        routingStrategy: null,
+        enabled: true,
+        channelCount,
+        enabledChannelCount,
+        siteNames: fallbackSiteNamesByModel.get(modelName) || [],
+        decisionSnapshot: null,
+        decisionRefreshedAt: null,
+        sourceKey: buildVirtualSourceRouteKey(modelName),
+        backingRouteId: null,
+        isVirtual: true,
+        readOnly: true,
+      });
+    }
+
+    return options;
+  }, [modelCandidates, missingTokenGroupModelsByName, missingTokenModelsByName, routeSummaries]);
+
+  const sourceEndpointTypesBySourceKey = useMemo(() => {
+    const next: Record<string, string[]> = {};
+    for (const option of sourceRouteOptions) {
+      next[option.sourceKey] = Array.from(endpointTypesByModel[option.modelPattern] || [])
+        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    }
+    return next;
+  }, [endpointTypesByModel, sourceRouteOptions]);
 
   const resetRouteForm = () => {
     setForm(EMPTY_ROUTE_FORM);
     setEditingRouteId(null);
   };
+
+  const resolveExplicitGroupSourceRouteIds = useCallback(async (sourceRouteKeys: string[]): Promise<number[]> => {
+    const normalizedKeys = Array.from(new Set(
+      (sourceRouteKeys || []).map((key) => String(key || '').trim()).filter(Boolean),
+    ));
+    if (normalizedKeys.length === 0) return [];
+
+    const exactRouteById = new Map<number, RouteSummaryRow>();
+    const exactRouteByModel = new Map<string, RouteSummaryRow[]>();
+    for (const route of routeSummaries) {
+      if (!isRouteExactModel(route)) continue;
+      const modelName = route.modelPattern.trim();
+      if (!modelName) continue;
+      exactRouteById.set(route.id, route);
+      if (!exactRouteByModel.has(modelName)) exactRouteByModel.set(modelName, []);
+      exactRouteByModel.get(modelName)!.push(route);
+    }
+
+    const resolvedIds: number[] = [];
+    for (const sourceKey of normalizedKeys) {
+      if (sourceKey.startsWith('route:')) {
+        const routeId = Number.parseInt(sourceKey.slice('route:'.length), 10);
+        const existingRoute = Number.isFinite(routeId) ? exactRouteById.get(routeId) : null;
+        if (!existingRoute?.id) {
+          throw new Error(`来源模型路由不存在: ${sourceKey}`);
+        }
+        resolvedIds.push(existingRoute.id);
+        continue;
+      }
+
+      const modelName = sourceKey.startsWith('model:') ? sourceKey.slice('model:'.length).trim() : '';
+      if (!modelName) continue;
+
+      const existingRoutes = exactRouteByModel.get(modelName) || [];
+      if (existingRoutes[0]?.id) {
+        resolvedIds.push(existingRoutes[0].id);
+        continue;
+      }
+
+      const created = await api.addRoute({
+        routeMode: 'pattern',
+        probePolicy: 'system',
+        modelPattern: modelName,
+      }) as RouteSummaryRow;
+      if (!created?.id) {
+        throw new Error(`自动补建来源模型失败: ${modelName}`);
+      }
+      exactRouteById.set(created.id, created);
+      exactRouteByModel.set(modelName, [created]);
+      resolvedIds.push(created.id);
+    }
+
+    return Array.from(new Set(resolvedIds));
+  }, [routeSummaries]);
 
   const handleAddRoute = async () => {
     const trimmedDisplayName = form.displayName.trim() ? form.displayName.trim() : undefined;
@@ -687,7 +858,7 @@ export default function TokenRoutes() {
         toast.error('请填写对外模型名');
         return;
       }
-      if (form.sourceRouteIds.length === 0) {
+      if (form.sourceRouteKeys.length === 0) {
         toast.error('请至少选择一个来源模型');
         return;
       }
@@ -702,7 +873,9 @@ export default function TokenRoutes() {
 
     setSaving(true);
     try {
-      const selectedSourceRouteIds = routeMode === 'explicit_group' ? [...form.sourceRouteIds] : [];
+      const selectedSourceRouteIds = routeMode === 'explicit_group'
+        ? await resolveExplicitGroupSourceRouteIds(form.sourceRouteKeys)
+        : [];
       if (editingRouteId) {
         const currentRoute = routeSummaries.find((route) => route.id === editingRouteId) || null;
         const modelPatternChanged = routeMode === 'pattern' && !!currentRoute && currentRoute.modelPattern !== trimmedModelPattern;
@@ -712,7 +885,7 @@ export default function TokenRoutes() {
           ...(routeMode === 'pattern' ? { modelPattern: trimmedModelPattern } : {}),
           displayName: trimmedDisplayName,
           displayIcon: trimmedDisplayIcon,
-          ...(routeMode === 'explicit_group' ? { sourceRouteIds: form.sourceRouteIds } : {}),
+          ...(routeMode === 'explicit_group' ? { sourceRouteIds: selectedSourceRouteIds } : {}),
         });
         toast.success(routeMode === 'pattern' && modelPatternChanged ? tr('群组已更新并重新匹配通道') : tr('群组已更新'));
       } else {
@@ -722,7 +895,7 @@ export default function TokenRoutes() {
           ...(routeMode === 'pattern' ? { modelPattern: trimmedModelPattern } : {}),
           displayName: trimmedDisplayName,
           displayIcon: trimmedDisplayIcon,
-          ...(routeMode === 'explicit_group' ? { sourceRouteIds: form.sourceRouteIds } : {}),
+          ...(routeMode === 'explicit_group' ? { sourceRouteIds: selectedSourceRouteIds } : {}),
         });
         toast.success(tr('群组已创建'));
       }
@@ -761,7 +934,11 @@ export default function TokenRoutes() {
       modelPattern: route.modelPattern || '',
       displayName: route.displayName || '',
       displayIcon: normalizeRouteDisplayIconValue(route.displayIcon),
-      sourceRouteIds: routeMode === 'explicit_group' ? [...(route.sourceRouteIds || [])] : [],
+      sourceRouteKeys: routeMode === 'explicit_group'
+        ? routeSummaries
+          .filter((candidate) => (route.sourceRouteIds || []).includes(candidate.id))
+          .map((candidate) => resolveSourceKeyFromRoute(candidate))
+        : [],
       advancedOpen: routeMode === 'pattern',
     });
     setShowManual(true);
@@ -946,15 +1123,6 @@ export default function TokenRoutes() {
       return b[1] - a[1];
     }) as [string, number][];
   }, [listVisibleRoutes, routeEndpointTypesByRouteId]);
-
-  const sourceEndpointTypesByRouteId = useMemo(() => {
-    const next: Record<number, string[]> = {};
-    for (const route of exactSourceRouteOptions) {
-      next[route.id] = Array.from(routeEndpointTypesByRouteId[route.id] || new Set<string>())
-        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-    }
-    return next;
-  }, [exactSourceRouteOptions, routeEndpointTypesByRouteId]);
 
   const routeBrandIconCandidates = useMemo(() => {
     const byIcon = new Map<string, BrandInfo>();
@@ -2142,8 +2310,8 @@ export default function TokenRoutes() {
         canSave={canSaveRoute}
         routeIconSelectOptions={routeIconSelectOptions}
         previewModelSamples={previewModelSamples}
-        exactSourceRouteOptions={exactSourceRouteOptions}
-        sourceEndpointTypesByRouteId={sourceEndpointTypesByRouteId}
+        sourceRouteOptions={sourceRouteOptions}
+        sourceEndpointTypesBySourceKey={sourceEndpointTypesBySourceKey}
         modelCandidates={modelCandidates}
         missingTokenModelsByName={missingTokenModelsByName}
         missingTokenGroupModelsByName={missingTokenGroupModelsByName}

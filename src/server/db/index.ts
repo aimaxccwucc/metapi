@@ -8,6 +8,7 @@ import * as schema from './schema.js';
 import { ensureSiteSchemaCompatibility, type SiteSchemaInspector } from './siteSchemaCompatibility.js';
 import { ensureRouteGroupingSchemaCompatibility } from './routeGroupingSchemaCompatibility.js';
 import { ensureProxyFileSchemaCompatibility } from './proxyFileSchemaCompatibility.js';
+import { ensureTokenCoverageAutoprovisionSchemaCompatibility } from './tokenCoverageAutoprovisionSchemaCompatibility.js';
 import { executeLegacyCompat, executeLegacyCompatSync } from './legacySchemaCompat.js';
 import { config } from '../config.js';
 import { ensureRuntimeDatabaseReady } from '../runtimeDatabaseBootstrap.js';
@@ -36,6 +37,7 @@ const TABLES_WITH_NUMERIC_ID = new Set([
   'site_announcements',
   'events',
   'routing_governance_states',
+  'token_coverage_autoprovision_states',
 ]);
 
 export let runtimeDbDialect: RuntimeDbDialect = config.dbType;
@@ -505,6 +507,12 @@ export async function ensureProxyFileCompatibilityColumns(): Promise<void> {
   const inspector = createRuntimeSchemaInspector();
   if (!inspector) return;
   await ensureProxyFileSchemaCompatibility(inspector);
+}
+
+export async function ensureTokenCoverageAutoprovisionCompatibilityColumns(): Promise<void> {
+  const inspector = createRuntimeSchemaInspector();
+  if (!inspector) return;
+  await ensureTokenCoverageAutoprovisionSchemaCompatibility(inspector);
 }
 
 export async function ensureResponseCacheTable(): Promise<boolean> {

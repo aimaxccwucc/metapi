@@ -50,11 +50,15 @@ async function enrichTask(task: BackgroundTask): Promise<BackgroundTask> {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return task;
 
   const resultRecord = result as Record<string, unknown>;
+  const summary = resultRecord.summary;
+  const normalizedSummary = summary && typeof summary === 'object' && !Array.isArray(summary)
+    ? summary as Record<string, unknown>
+    : null;
   const rows = Array.isArray(resultRecord.results) ? (resultRecord.results as TaskResultRow[]) : null;
-  if (!rows || rows.length === 0) return task;
+  if ((!rows || rows.length === 0) && !normalizedSummary) return task;
 
-  const accountMetaById = await buildAccountMetaMap(rows);
-  const enrichedRows = rows.map((item) => {
+  const accountMetaById = rows ? await buildAccountMetaMap(rows) : new Map<number, AccountMeta>();
+  const enrichedRows = rows?.map((item) => {
     const accountId = parsePositiveId(item.accountId);
     const accountMeta = accountId ? accountMetaById.get(accountId) : undefined;
     const siteId = parsePositiveId(item.siteId) ?? accountMeta?.siteId ?? null;
@@ -68,13 +72,26 @@ async function enrichTask(task: BackgroundTask): Promise<BackgroundTask> {
       ...(siteName ? { siteName, site: siteName } : {}),
       ...(accountName ? { accountName, username: accountName } : {}),
     };
-  });
+  }) || null;
+
+  const enrichedSummary = normalizedSummary
+    ? {
+      ...normalizedSummary,
+      created: Number(normalizedSummary.created || 0),
+      reused: Number(normalizedSummary.reused || 0),
+      skipped: Number(normalizedSummary.skipped || 0),
+      cooldown: Number(normalizedSummary.cooldown || 0),
+      failed: Number(normalizedSummary.failed || 0),
+      total: Number(normalizedSummary.total || 0),
+    }
+    : undefined;
 
   return {
     ...task,
     result: {
       ...resultRecord,
-      results: enrichedRows,
+      ...(enrichedRows ? { results: enrichedRows } : {}),
+      ...(enrichedSummary ? { summary: enrichedSummary } : {}),
     },
   };
 }

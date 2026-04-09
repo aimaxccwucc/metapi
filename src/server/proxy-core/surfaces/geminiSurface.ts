@@ -598,7 +598,13 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                     action: isCountTokensAction
                       ? 'countTokens'
                       : (isStreamAction ? 'streamGenerateContent' : 'generateContent'),
-                    timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                    ...(isStreamAction
+                      ? {
+                        firstByteTimeoutMs: requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: true }),
+                      }
+                      : {
+                        timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                      }),
                   },
                 },
                 buildInit: async (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
@@ -611,7 +617,11 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 method: 'POST',
                 headers: requestHeaders,
                 body: JSON.stringify(requestBody),
-                signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true })),
+                signal: AbortSignal.timeout(
+                  isStreamAction
+                    ? requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: true })
+                    : requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                ),
               });
           };
 
@@ -952,7 +962,13 @@ export async function geminiProxyRoute(app: FastifyInstance) {
               runtime: compatibilityRequest.runtime
                 ? {
                   ...compatibilityRequest.runtime,
-                  timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                  ...(compatibilityRequest.runtime.stream
+                    ? {
+                      firstByteTimeoutMs: requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: true }),
+                    }
+                    : {
+                      timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                    }),
                 }
                 : undefined,
             },

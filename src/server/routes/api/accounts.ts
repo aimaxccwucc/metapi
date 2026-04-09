@@ -23,6 +23,7 @@ import {
 } from '../../services/accountExtraConfig.js';
 import { encryptAccountPassword } from '../../services/accountCredentialService.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
+import { queueAutoProvisionTokenCoverageTask } from '../../services/tokenCoverageAutoProvisionService.js';
 import { parseCheckinRewardAmount } from '../../services/checkinRewardParser.js';
 import { estimateRewardWithTodayIncomeFallback } from '../../services/todayIncomeRewardService.js';
 import { getLocalDayRangeUtc } from '../../services/localTimeService.js';
@@ -216,6 +217,14 @@ async function initializeAccountInBackground({
       summary.refreshedModels = true;
       await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [accountId], siteIds: [site.id] });
       summary.rebuiltRoutes = true;
+      queueAutoProvisionTokenCoverageTask({
+        accountIds: [accountId],
+        siteIds: [site.id],
+      }, {
+        provisionMode: 'shared_group',
+        dedupeKey: `auto-provision-token-coverage:account-init:${accountId}`,
+        title: '账号初始化后自动补齐模型覆盖 Key',
+      });
     } catch {}
   }
 

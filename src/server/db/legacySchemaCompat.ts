@@ -19,6 +19,10 @@ import {
   ensureSiteSchemaCompatibility,
   type SiteSchemaInspector,
 } from './siteSchemaCompatibility.js';
+import {
+  ensureTokenCoverageAutoprovisionSchemaCompatibility,
+  type TokenCoverageAutoprovisionSchemaInspector,
+} from './tokenCoverageAutoprovisionSchemaCompatibility.js';
 
 export type LegacySchemaCompatClassification = 'legacy' | 'forbidden';
 
@@ -27,7 +31,8 @@ export interface LegacySchemaCompatInspector extends
   RouteGroupingSchemaInspector,
   ProxyFileSchemaInspector,
   AccountTokenSchemaInspector,
-  SharedIndexSchemaInspector {}
+  SharedIndexSchemaInspector,
+  TokenCoverageAutoprovisionSchemaInspector {}
 
 const LEGACY_COMPAT_TABLES = new Set([
   'account_tokens',
@@ -37,6 +42,7 @@ const LEGACY_COMPAT_TABLES = new Set([
   'proxy_files',
   'downstream_api_keys',
   'site_disabled_models',
+  'token_coverage_autoprovision_states',
 ]);
 
 const LEGACY_COMPAT_COLUMNS = new Set([
@@ -96,6 +102,9 @@ const LEGACY_COMPAT_INDEXES = new Set([
   'sites_health_status_idx',
   'route_group_sources_group_source_unique',
   'route_group_sources_source_route_id_idx',
+  'token_coverage_autoprovision_states_account_model_group_unique',
+  'token_coverage_autoprovision_states_status_cooldown_idx',
+  'token_coverage_autoprovision_states_site_account_idx',
   ...SHARED_INDEX_COMPATIBILITY_SPECS.map((spec) => spec.indexName),
 ]);
 
@@ -182,5 +191,6 @@ export async function ensureLegacySchemaCompatibility(inspector: LegacySchemaCom
   await ensureRouteGroupingSchemaCompatibility(wrappedInspector);
   await ensureProxyFileSchemaCompatibility(wrappedInspector);
   await ensureAccountTokenSchemaCompatibility(wrappedInspector);
+  await ensureTokenCoverageAutoprovisionSchemaCompatibility(wrappedInspector);
   await ensureSharedIndexSchemaCompatibility(wrappedInspector);
 }

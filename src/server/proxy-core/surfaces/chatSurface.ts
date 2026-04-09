@@ -372,13 +372,19 @@ export async function handleChatSurfaceRequest(
           targetUrl,
           request: {
             ...compatibilityRequest,
-            runtime: compatibilityRequest.runtime
-              ? {
-                ...compatibilityRequest.runtime,
-                timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
-              }
-              : undefined,
-          },
+              runtime: compatibilityRequest.runtime
+                ? {
+                  ...compatibilityRequest.runtime,
+                  ...(compatibilityRequest.runtime.stream
+                    ? {
+                      firstByteTimeoutMs: requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: true }),
+                    }
+                    : {
+                      timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                    }),
+                }
+                : undefined,
+            },
           buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
             method: 'POST',
             headers: requestForFetch.headers,

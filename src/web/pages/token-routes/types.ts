@@ -86,6 +86,11 @@ export type RouteSummaryRow = {
   isVirtual?: boolean;
 };
 
+export type SourceRouteOption = RouteSummaryRow & {
+  sourceKey: string;
+  backingRouteId: number | null;
+};
+
 export type RouteDecisionCandidate = {
   channelId: number;
   accountId: number;

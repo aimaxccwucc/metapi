@@ -19,6 +19,10 @@ import {
 import { getAdapter } from '../../services/platforms/index.js';
 import { getCredentialModeFromExtraConfig, getProxyUrlFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
+import {
+  autoProvisionTokenCoverage,
+  queueAutoProvisionTokenCoverageTask,
+} from '../../services/tokenCoverageAutoProvisionService.js';
 import { withAccountProxyOverride } from '../../services/siteProxy.js';
 import {
   rebuildTokenRoutesFromAvailability,
@@ -433,7 +437,19 @@ async function refreshCoverageForAccounts(accountIds: number[]) {
     console.warn(`[account-tokens] token route rebuild failed after coverage refresh: ${errorMessage}`);
   }
 
-  return { refresh, rebuild };
+  let autoProvision: Awaited<ReturnType<typeof autoProvisionTokenCoverage>> | null = null;
+  try {
+    autoProvision = await autoProvisionTokenCoverage({
+      accountIds: uniqueAccountIds,
+    }, {
+      provisionMode: 'shared_group',
+      refreshRouteChannels: true,
+    });
+  } catch (error) {
+    console.warn(`[account-tokens] auto provision failed after coverage refresh: ${error instanceof Error ? error.message : String(error || 'unknown error')}`);
+  }
+
+  return { refresh, rebuild, autoProvision };
 }
 
 function buildCoverageRefreshFailureItem(

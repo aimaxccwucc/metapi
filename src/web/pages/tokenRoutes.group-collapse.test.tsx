@@ -1309,6 +1309,100 @@ describe('TokenRoutes grouped source models', () => {
     }
   });
 
+  it('shows marketplace-only source brands and auto-creates missing exact routes before saving a group', async () => {
+    getBrandMock.mockImplementation((modelName: string) => {
+      if (String(modelName).includes('qwen')) {
+        return { name: 'Qwen', icon: 'qwen', color: 'linear-gradient(135deg,#0f766e,#14b8a6)' };
+      }
+      return null;
+    });
+    apiMock.getRoutesSummary.mockResolvedValue([]);
+    apiMock.getModelTokenCandidates.mockResolvedValue({
+      models: {
+        'qwen-max-latest': [{ accountId: 501, tokenId: 601, tokenName: 'default', isDefault: true, username: 'tester', siteId: 71, siteName: 'Lab' }],
+      },
+      endpointTypesByModel: {
+        'qwen-max-latest': ['openai'],
+      },
+    });
+    apiMock.addRoute
+      .mockResolvedValueOnce({
+        id: 91,
+        modelPattern: 'qwen-max-latest',
+        displayName: null,
+        displayIcon: null,
+        modelMapping: null,
+        enabled: true,
+        routeMode: 'pattern',
+        sourceRouteIds: [],
+        channelCount: 1,
+        enabledChannelCount: 1,
+        siteNames: ['Lab'],
+        decisionSnapshot: null,
+        decisionRefreshedAt: null,
+      })
+      .mockResolvedValueOnce({});
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/routes']}>
+            <ToastProvider>
+              <TokenRoutes />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '新建群组').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findInputByPlaceholder(root.root, '对外模型名').props.onChange({ target: { value: 'qwen-unified' } });
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '选择来源模型').props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(findButtonByClassAndText(root.root, 'filter-chip', 'Qwen')).toBeTruthy();
+      expect(collectText(root.root)).toContain('qwen-max-latest');
+
+      await act(async () => {
+        findButtonByText(root.root, 'qwen-max-latest').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '确认选择').props.onClick();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        findButtonByText(root.root, '创建群组').props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.addRoute).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        routeMode: 'pattern',
+        modelPattern: 'qwen-max-latest',
+      }));
+      expect(apiMock.addRoute).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        routeMode: 'explicit_group',
+        displayName: 'qwen-unified',
+        sourceRouteIds: [91],
+      }));
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('shows source readiness feedback after saving an explicit group', async () => {
     apiMock.getRoutesSummary.mockResolvedValue([
       {
