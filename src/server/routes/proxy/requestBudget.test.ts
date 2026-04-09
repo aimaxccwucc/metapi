@@ -46,7 +46,7 @@ describe('requestBudget', () => {
     try {
       const budget = createRequestBudget(60_000);
       expect(budget.getPerAttemptTimeoutMs()).toBe(20_000);
-      expect(budget.getStreamFirstByteTimeoutMs()).toBe(15_000);
+      expect(budget.getStreamFirstByteTimeoutMs()).toBe(45_000);
       expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true })).toBe(10_000);
     } finally {
       vi.useRealTimers();
