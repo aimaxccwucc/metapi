@@ -827,6 +827,14 @@ export async function accountsRoutes(app: FastifyInstance) {
     try {
       await refreshModelsForAccount(result.id);
       await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [result.id], siteIds: [result.siteId] });
+      queueAutoProvisionTokenCoverageTask({
+        accountIds: [result.id],
+        siteIds: [result.siteId],
+      }, {
+        provisionMode: 'shared_group',
+        dedupeKey: `auto-provision-token-coverage:legacy-login:${result.id}`,
+        title: '登录建号后自动补齐模型覆盖 Key',
+      });
     } catch { }
 
     const account = await db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
@@ -1255,6 +1263,14 @@ export async function accountsRoutes(app: FastifyInstance) {
       try {
         await refreshModelsForAccount(accountId);
         await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [accountId], siteIds: [site.id] });
+        queueAutoProvisionTokenCoverageTask({
+          accountIds: [accountId],
+          siteIds: [site.id],
+        }, {
+          provisionMode: 'shared_group',
+          dedupeKey: `auto-provision-token-coverage:rebind:${accountId}`,
+          title: '重绑 Session 后自动补齐模型覆盖 Key',
+        });
       } catch {}
 
       const latest = await db.select().from(schema.accounts).where(eq(schema.accounts.id, accountId)).get();
@@ -1441,6 +1457,13 @@ export async function accountsRoutes(app: FastifyInstance) {
     try {
       await refreshModelsForAccount(id);
       await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [id] });
+      queueAutoProvisionTokenCoverageTask({
+        accountIds: [id],
+      }, {
+        provisionMode: 'shared_group',
+        dedupeKey: `auto-provision-token-coverage:account-update:${id}`,
+        title: '更新账号后自动补齐模型覆盖 Key',
+      });
     } catch { }
 
     return await db.select().from(schema.accounts).where(eq(schema.accounts.id, id)).get();
@@ -1512,6 +1535,15 @@ export async function accountsRoutes(app: FastifyInstance) {
     if (shouldRebuildRoutes) {
       try {
         await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: successIds });
+        if (successIds.length > 0) {
+          queueAutoProvisionTokenCoverageTask({
+            accountIds: successIds,
+          }, {
+            provisionMode: 'shared_group',
+            dedupeKey: `auto-provision-token-coverage:account-batch:${successIds.sort((a, b) => a - b).join(',')}`,
+            title: '批量账号操作后自动补齐模型覆盖 Key',
+          });
+        }
       } catch { }
     }
 
@@ -1723,6 +1755,14 @@ export async function accountsRoutes(app: FastifyInstance) {
 
       try {
         await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [accountId], siteIds: [account.siteId] });
+        queueAutoProvisionTokenCoverageTask({
+          accountIds: [accountId],
+          siteIds: [account.siteId],
+        }, {
+          provisionMode: 'shared_group',
+          dedupeKey: `auto-provision-token-coverage:manual-models:${accountId}`,
+          title: '手动模型维护后自动补齐模型覆盖 Key',
+        });
       } catch { }
 
       return { success: true };

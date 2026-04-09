@@ -20,6 +20,8 @@ describe('accounts rebind-session api', { timeout: 15_000 }, () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let dataDir = '';
+  let listBackgroundTasks: ((limit?: number) => Array<{ title: string; dedupeKey: string | null }>) | null = null;
+  let resetBackgroundTasks: (() => void) | null = null;
 
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'metapi-accounts-rebind-session-'));
@@ -28,8 +30,11 @@ describe('accounts rebind-session api', { timeout: 15_000 }, () => {
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');
     const routesModule = await import('./accounts.js');
+    const backgroundTaskModule = await import('../../services/backgroundTaskService.js');
     db = dbModule.db;
     schema = dbModule.schema;
+    listBackgroundTasks = backgroundTaskModule.listBackgroundTasks;
+    resetBackgroundTasks = backgroundTaskModule.__resetBackgroundTasksForTests;
 
     app = Fastify();
     await app.register(routesModule.accountsRoutes);
@@ -37,6 +42,7 @@ describe('accounts rebind-session api', { timeout: 15_000 }, () => {
 
   beforeEach(async () => {
     verifyTokenMock.mockReset();
+    resetBackgroundTasks?.();
 
     await db.delete(schema.proxyLogs).run();
     await db.delete(schema.checkinLogs).run();
@@ -158,6 +164,11 @@ describe('accounts rebind-session api', { timeout: 15_000 }, () => {
     expect(latest?.apiToken).toBe('sk-rebound-token');
     expect(latest?.username).toBe('linuxdo_1002');
     expect(latest?.status).toBe('active');
+
+    expect(listBackgroundTasks?.(20).some((task) => (
+      task.dedupeKey === `auto-provision-token-coverage:rebind:${account.id}`
+        && task.title === '重绑 Session 后自动补齐模型覆盖 Key'
+    ))).toBe(true);
   });
 
   it('stores managed sub2api refresh token fields when provided during rebind', async () => {

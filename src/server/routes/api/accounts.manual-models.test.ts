@@ -12,6 +12,8 @@ describe('accounts manual models endpoint', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let dataDir = '';
+  let listBackgroundTasks: ((limit?: number) => Array<{ title: string; dedupeKey: string | null }>) | null = null;
+  let resetBackgroundTasks: (() => void) | null = null;
 
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'metapi-accounts-manual-models-'));
@@ -20,14 +22,18 @@ describe('accounts manual models endpoint', () => {
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');
     const routesModule = await import('./accounts.js');
+    const backgroundTaskModule = await import('../../services/backgroundTaskService.js');
     db = dbModule.db;
     schema = dbModule.schema;
+    listBackgroundTasks = backgroundTaskModule.listBackgroundTasks;
+    resetBackgroundTasks = backgroundTaskModule.__resetBackgroundTasksForTests;
 
     app = Fastify();
     await app.register(routesModule.accountsRoutes);
   });
 
   beforeEach(async () => {
+    resetBackgroundTasks?.();
     await db.delete(schema.proxyLogs).run();
     await db.delete(schema.checkinLogs).run();
     await db.delete(schema.routeChannels).run();
@@ -76,6 +82,10 @@ describe('accounts manual models endpoint', () => {
     expect(models.map(m => m.modelName).sort()).toEqual(['claude-3-manual', 'gpt-4-manual']);
     expect(models[0]?.isManual).toBe(true);
     expect(models[1]?.isManual).toBe(true);
+    expect(listBackgroundTasks?.(20).some((task) => (
+      task.dedupeKey === `auto-provision-token-coverage:manual-models:${account.id}`
+        && task.title === '手动模型维护后自动补齐模型覆盖 Key'
+    ))).toBe(true);
   });
 
   it('updates existing synced models to manual if provided', async () => {

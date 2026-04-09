@@ -26,6 +26,7 @@ import { proxyRoutes } from './routes/proxy/router.js';
 import { registerCustomRoutes } from './custom/register.js';
 import { startScheduler } from './services/checkinScheduler.js';
 import { rebuildTokenRoutesFromAvailability } from './services/modelService.js';
+import { queueAutoProvisionTokenCoverageTask } from './services/tokenCoverageAutoProvisionService.js';
 import { startProxyFileRetentionService, stopProxyFileRetentionService } from './services/proxyFileRetentionService.js';
 import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
 import { buildStartupSummaryLines } from './services/startupInfo.js';
@@ -381,6 +382,11 @@ try {
   await migrateSiteApiKeysToAccounts();
   await ensureDefaultSitesSeeded();
   await rebuildTokenRoutesFromAvailability();
+  queueAutoProvisionTokenCoverageTask({}, {
+    provisionMode: 'shared_group',
+    dedupeKey: 'auto-provision-token-coverage:startup-bootstrap',
+    title: '启动后自动补齐历史模型覆盖 Key',
+  });
 
   console.log('Loaded runtime settings overrides');
 } catch (error) {
