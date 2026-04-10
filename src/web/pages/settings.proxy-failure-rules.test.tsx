@@ -103,7 +103,9 @@ describe('Settings proxy failure rules', () => {
 
       const failureRulesCard = root.root.find((node) => (
         typeof node.type === 'string'
-        && node.props?.className === 'card animate-slide-up stagger-4'
+        && typeof node.props?.className === 'string'
+        && node.props.className.includes('card')
+        && node.props.className.includes('surface-card')
         && hasNodeText(node, '代理失败判定')
       ));
 

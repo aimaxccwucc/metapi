@@ -948,29 +948,32 @@ export default function Models() {
   /* ---- loading skeleton ---- */
   if (loading) {
     return (
-      <div className="animate-fade-in" style={{ display: 'flex', gap: 24, minHeight: 400 }}>
+      <div className="page-shell animate-fade-in" style={{ display: 'flex', gap: 24, minHeight: 400 }}>
         {!isMobile && (
           <div style={{ width: 240 }}>
             {[...Array(6)].map((_, i) => <div key={i} className="skeleton" style={{ height: 28, marginBottom: 8, borderRadius: 8 }} />)}
           </div>
         )}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="page-header" style={{ marginBottom: 16 }}>
-            <div>
-              <div className="skeleton" style={{ width: 220, height: 28, marginBottom: 8 }} />
-              <div className="skeleton" style={{ width: 160, height: 16 }} />
-            </div>
-            <div className="page-actions">
-              {isMobile && (
-                <button
-                  className="btn btn-ghost"
-                  style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}
-                  onClick={() => setShowFilters(true)}
-                >
-                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>
-                  {tr('筛选')}
-                </button>
-              )}
+          <div className="page-hero">
+            <div className="page-kicker">Model Atlas</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
+              <div>
+                <div className="skeleton" style={{ width: 220, height: 28, marginBottom: 8 }} />
+                <div className="skeleton" style={{ width: 160, height: 16 }} />
+              </div>
+              <div className="page-actions">
+                {isMobile && (
+                  <button
+                    className="btn btn-ghost"
+                    style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}
+                    onClick={() => setShowFilters(true)}
+                  >
+                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>
+                    {tr('筛选')}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
           {isMobile && (
@@ -989,7 +992,7 @@ export default function Models() {
   }
 
   return (
-    <div className="animate-fade-in" style={{ display: 'flex', gap: 24, minHeight: 400 }}>
+    <div className="page-shell animate-fade-in" style={{ display: 'flex', gap: 24, minHeight: 400 }}>
       {!isMobile && filterPanelPresence.shouldRender && (
         <div className={`filter-panel filter-collapsible ${filterPanelPresence.isVisible ? '' : 'is-closing'}`.trim()}>
           {filterControls}
@@ -1005,56 +1008,58 @@ export default function Models() {
 
       {/* ====== RIGHT: Content Area ====== */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        {/* Header */}
-        <div className="page-header" style={{ marginBottom: 16 }}>
-          <div>
-            <h2 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {activeBrand || activeSite || tr('模型广场')}
-              <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500 }}>
-                {tr('共')} {filteredModels.length} {tr('个模型')}
-              </span>
-            </h2>
-            {(activeBrand || activeSite) && (
-              <p style={{ fontSize: 12, color: 'var(--color-text-muted)', margin: '4px 0 0' }}>
-                {activeBrand && activeBrand !== '__other__' ? `${tr('查看')} ${activeBrand} ${tr('品牌的所有模型')}` : activeSite ? `${tr('来自供应商')} ${activeSite} ${tr('的模型')}` : tr('其他未归类的模型')}
-              </p>
-            )}
-          </div>
-          <div className="page-actions">
-            {(isMobile || filterCollapsed) && (
-              <button
-                className="btn btn-ghost"
-                style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}
-                onClick={() => {
-                  if (isMobile) {
-                    setShowFilters(true);
-                    return;
-                  }
-                  setFilterCollapsed(false);
-                }}
-              >
-                <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>
-                {tr('筛选')}
-              </button>
-            )}
-            <button onClick={handleRefresh} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}>
-              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-            </button>
-            {metadataHydrating && (
-              <span className="badge badge-muted" style={{ fontSize: 11 }}>{tr('加载元数据中...')}</span>
-            )}
-            {!isMobile && (
-              <div className="view-toggle">
-                <button className={`view-toggle-btn ${viewMode === 'card' ? 'active' : ''}`} onClick={() => setViewMode('card')} data-tooltip={tr('卡片视图')} aria-label={tr('卡片视图')}>
-                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
-                </button>
-                <button className={`view-toggle-btn ${viewMode === 'table' ? 'active' : ''}`} onClick={() => setViewMode('table')} data-tooltip={tr('表格视图')} aria-label={tr('表格视图')}>
-                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18M3 6h18M3 18h18M10 3v18M14 3v18" /></svg>
-                </button>
+        <div className="page-hero">
+          <div className="page-kicker">Model Atlas</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
+            <div>
+              <h2 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {activeBrand || activeSite || tr('模型广场')}
+                <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500 }}>
+                  {tr('共')} {filteredModels.length} {tr('个模型')}
+                </span>
+              </h2>
+              <div className="page-subtitle">
+                {(activeBrand || activeSite)
+                  ? (activeBrand && activeBrand !== '__other__' ? `${tr('查看')} ${activeBrand} ${tr('品牌的所有模型')}` : activeSite ? `${tr('来自供应商')} ${activeSite} ${tr('的模型')}` : tr('其他未归类的模型'))
+                  : tr('聚合展示各站点可用模型、账号覆盖、成功率、延迟与余额，便于快速筛选可用上游。')}
               </div>
-            )}
+            </div>
+            <div className="page-actions">
+              {(isMobile || filterCollapsed) && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}
+                  onClick={() => {
+                    if (isMobile) {
+                      setShowFilters(true);
+                      return;
+                    }
+                    setFilterCollapsed(false);
+                  }}
+                >
+                  <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>
+                  {tr('筛选')}
+                </button>
+              )}
+              <button onClick={handleRefresh} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}>
+                <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+              {metadataHydrating && (
+                <span className="badge badge-muted" style={{ fontSize: 11 }}>{tr('加载元数据中...')}</span>
+              )}
+              {!isMobile && (
+                <div className="view-toggle">
+                  <button className={`view-toggle-btn ${viewMode === 'card' ? 'active' : ''}`} onClick={() => setViewMode('card')} data-tooltip={tr('卡片视图')} aria-label={tr('卡片视图')}>
+                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
+                  </button>
+                  <button className={`view-toggle-btn ${viewMode === 'table' ? 'active' : ''}`} onClick={() => setViewMode('table')} data-tooltip={tr('表格视图')} aria-label={tr('表格视图')}>
+                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18M3 6h18M3 18h18M10 3v18M14 3v18" /></svg>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -1069,7 +1074,7 @@ export default function Models() {
         )}
 
         {/* Toolbar */}
-        <div className="toolbar">
+        <div className="toolbar surface-card">
           <div className="toolbar-search">
             <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -1319,7 +1324,7 @@ export default function Models() {
           </div>
         ) : (
           /* ====== Table View ====== */
-          <div className="card" style={{ overflowX: 'auto' }}>
+          <div className="card surface-card" style={{ overflowX: 'auto' }}>
             <table className="data-table" style={{ width: '100%' }}>
               <thead>
                 <tr>

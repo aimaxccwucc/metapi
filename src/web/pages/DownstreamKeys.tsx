@@ -1834,22 +1834,33 @@ export default function DownstreamKeys() {
   const empty = !loading && visibleItems.length === 0;
 
   return (
-    <div className="animate-fade-in" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div className="page-header" style={{ marginBottom: 0 }}>
-        <div>
-          <h2 className="page-title">下游密钥</h2>
-          <div className="page-subtitle">统一管理分发给下游项目的密钥、主分组、标签、额度、模型白名单、群组范围与历史用量。</div>
-        </div>
-        <div className="page-actions">
-          <RangeToggle range={range} onChange={setRange} />
-          <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => void load()} disabled={loading}>
-            {loading ? <><span className="spinner spinner-sm" /> 刷新中...</> : '刷新'}
-          </button>
-          <button className="btn btn-primary" onClick={openCreate}>+ 新增下游密钥</button>
+    <div className="page-shell animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="page-hero">
+        <div className="page-kicker">Gateway Keys</div>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            gap: 16,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div>
+            <h2 className="page-title">下游密钥</h2>
+            <div className="page-subtitle">统一管理分发给下游项目的密钥、主分组、标签、额度、模型白名单、群组范围与历史用量。</div>
+          </div>
+          <div className="page-actions">
+            <RangeToggle range={range} onChange={setRange} />
+            <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => void load()} disabled={loading}>
+              {loading ? <><span className="spinner spinner-sm" /> 刷新中...</> : '刷新'}
+            </button>
+            <button className="btn btn-primary" onClick={openCreate}>+ 新增下游密钥</button>
+          </div>
         </div>
       </div>
 
-      <div className="card" style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="card surface-card" style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)' }}>范围概览</div>
@@ -1887,7 +1898,7 @@ export default function DownstreamKeys() {
             <button className="btn btn-link btn-link-danger" onClick={() => setDeleteConfirm({ mode: 'batch', ids: [...selectedIds] })} disabled={batchActionLoading}>删除</button>
           </MobileBatchBar>
         ) : (
-          <div className="card" style={{ padding: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div className="card surface-card" style={{ padding: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)' }}>已选 {selectedIds.length} 个密钥</span>
             <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={openBatchMetadata} disabled={batchActionLoading}>批量归类/标签</button>
             <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => void batchRun('批量启用', selectedIds)} disabled={batchActionLoading}>批量启用</button>
@@ -1898,7 +1909,7 @@ export default function DownstreamKeys() {
         )
       ) : null}
 
-      <div className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="card surface-card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
             <div>

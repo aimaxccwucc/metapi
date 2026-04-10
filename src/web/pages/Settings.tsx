@@ -1093,7 +1093,7 @@ export default function Settings() {
 
   if (loading) {
     return (
-      <div className="animate-fade-in">
+      <div className="page-shell animate-fade-in">
         <div className="skeleton" style={{ width: 220, height: 28, marginBottom: 20 }} />
         <div className="skeleton" style={{ width: '100%', height: 320, borderRadius: 'var(--radius-sm)' }} />
       </div>
@@ -1101,13 +1101,17 @@ export default function Settings() {
   }
 
   return (
-    <div className="animate-fade-in">
-      <div className="page-header">
-        <h2 className="page-title">系统设置</h2>
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Runtime Control</div>
+        <div>
+          <h2 className="page-title">系统设置</h2>
+          <div className="page-subtitle">统一维护调度、代理、路由、安全、数据库和运行时维护开关，避免把平台配置分散在多个入口。</div>
+        </div>
       </div>
 
       <div style={{ maxWidth: 720, display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <div className="card animate-slide-up stagger-1" style={{ padding: 20 }}>
+        <div className="card surface-card animate-slide-up stagger-1" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>管理员登录令牌</div>
           <code style={{ display: 'block', padding: '10px 14px', background: 'var(--color-bg)', borderRadius: 'var(--radius-sm)', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border-light)', marginBottom: 12 }}>
             {maskedToken || '****'}
@@ -1122,7 +1126,7 @@ export default function Settings() {
           />
         </div>
 
-        <div className="card animate-slide-up stagger-2" style={{ padding: 20 }}>
+        <div className="card surface-card animate-slide-up stagger-2" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>定时任务</div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '180px 180px auto', gap: 12, alignItems: 'end', marginBottom: 12 }}>
             <div>
@@ -1252,7 +1256,7 @@ export default function Settings() {
           </div>
         </div>
 
-        <div className="card animate-slide-up stagger-3" style={{ padding: 20 }}>
+        <div className="card surface-card animate-slide-up stagger-3" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>系统代理</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
             配置一个全局出站代理地址，站点页可按站点决定是否启用系统代理。
@@ -1294,7 +1298,7 @@ export default function Settings() {
           )}
         </div>
 
-        <div className="card animate-slide-up stagger-4" style={{ padding: 20 }}>
+        <div className="card surface-card animate-slide-up stagger-4" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>代理失败判定</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
             命中任一关键词或空内容时判定失败，可触发重试。
@@ -1377,7 +1381,7 @@ export default function Settings() {
           </div>
         </div>
 
-        <div className="card animate-slide-up stagger-4" style={{ padding: 20 }}>
+        <div className="card surface-card animate-slide-up stagger-4" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>下游访问令牌（PROXY_TOKEN）</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
             用于下游站点或客户端访问本服务代理接口。前缀 sk- 固定不可修改，只需填写后缀。
@@ -1470,7 +1474,7 @@ export default function Settings() {
           </button>
         </div>
 
-        <div className="card animate-slide-up stagger-5" style={{ padding: 20 }}>
+        <div className="card surface-card animate-slide-up stagger-5" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>下游密钥管理入口已迁移</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12, lineHeight: 1.8 }}>
             下游 API Key 的新增、编辑、模型白名单、群组限制、趋势与用量分析，现统一收口到「控制台 / 下游密钥」页面，设置页不再保留重复管理入口。
@@ -1482,7 +1486,7 @@ export default function Settings() {
           </div>
         </div>
 
-        <div className="card animate-slide-up stagger-5" style={{ padding: 20 }}>
+        <div className="card surface-card animate-slide-up stagger-5" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>路由策略</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
             先选择预设策略，只有需要精调时再展开高级参数。
@@ -1588,7 +1592,7 @@ export default function Settings() {
           </div>
         </div>
 
-        <div className="card animate-slide-up stagger-6" style={{ padding: 20 }}>
+        <div className="card surface-card animate-slide-up stagger-6" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>数据库迁移（SQLite / MySQL / PostgreSQL）</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
             可先测试连接，再迁移数据；迁移完成后可保存为运行数据库配置（重启容器后生效）。
@@ -1759,7 +1763,7 @@ export default function Settings() {
           )}
         </div>
 
-        <div className="card animate-slide-up stagger-6" style={{ padding: 20 }}>
+        <div className="card surface-card animate-slide-up stagger-6" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12 }}>维护工具</div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button onClick={handleClearCache} disabled={clearingCache} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
@@ -1774,7 +1778,7 @@ export default function Settings() {
           </div>
         </div>
 
-        <div className="card animate-slide-up stagger-7" style={{ padding: 20, border: '1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border))' }}>
+        <div className="card surface-card animate-slide-up stagger-7" style={{ padding: 20, border: '1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border))' }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10, color: 'var(--color-danger)' }}>危险操作</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8, marginBottom: 12 }}>
             重新初始化系统会清空当前 metapi 使用中的全部数据库内容；若当前运行在外部 MySQL/Postgres，也会先清空该外部库中的 metapi 数据，然后切回默认 SQLite。
@@ -1787,7 +1791,7 @@ export default function Settings() {
           </button>
         </div>
 
-        <div className="card animate-slide-up stagger-7" style={{ padding: 20 }}>
+        <div className="card surface-card animate-slide-up stagger-7" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>会话与安全</div>
           <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
             登录会话默认 12 小时自动过期。可选配置管理端 IP 白名单（每行一个 IP）。

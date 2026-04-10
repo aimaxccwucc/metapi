@@ -280,34 +280,47 @@ export default function CheckinLog() {
   );
 
   return (
-    <div className="animate-fade-in">
-      <div className="page-header">
-        <div>
-          <h2 className="page-title">{tr("签到记录")}</h2>
-          <div className="page-subtitle">
-            当前页展示的是签到执行记录，不等于账号总数。默认查询今天的签到记录；调整时间范围后会重新向后端查询。
-          </div>
-          {!loading && (
-            <div className="page-subtitle">
-              已加载 {logs.length} 条签到记录，当前筛选命中 {filtered.length} 条。
-            </div>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={handleTriggerAll}
-          disabled={triggering}
-          className="btn btn-soft-primary"
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Checkin Journal</div>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            gap: 16,
+            flexWrap: "wrap",
+          }}
         >
-          {triggering ? (
-            <>
-              <span className="spinner spinner-sm" />
-              触发中...
-            </>
-          ) : (
-            "运行所有签到"
-          )}
-        </button>
+          <div>
+            <h2 className="page-title">{tr("签到记录")}</h2>
+            <div className="page-subtitle">
+              当前页展示的是签到执行记录，不等于账号总数。默认查询今天的签到记录；调整时间范围后会重新向后端查询。
+            </div>
+            {!loading && (
+              <div className="page-subtitle">
+                已加载 {logs.length} 条签到记录，当前筛选命中 {filtered.length} 条。
+              </div>
+            )}
+          </div>
+          <div className="page-actions">
+            <button
+              type="button"
+              onClick={handleTriggerAll}
+              disabled={triggering}
+              className="btn btn-soft-primary"
+            >
+              {triggering ? (
+                <>
+                  <span className="spinner spinner-sm" />
+                  触发中...
+                </>
+              ) : (
+                "运行所有签到"
+              )}
+            </button>
+          </div>
+        </div>
       </div>
 
       {isMobile ? (
@@ -339,7 +352,7 @@ export default function CheckinLog() {
           </MobileFilterSheet>
         </>
       ) : (
-        <div className="toolbar" style={{ marginBottom: "12px" }}>
+        <div className="toolbar surface-card" style={{ marginBottom: "12px" }}>
           <div style={{ minWidth: 280 }}>{filterTabs}</div>
           <div
             style={{
@@ -360,7 +373,7 @@ export default function CheckinLog() {
       )}
 
       <div
-        className="card"
+        className="card surface-card"
         style={{
           overflowX: "auto",
           borderTopLeftRadius: 0,

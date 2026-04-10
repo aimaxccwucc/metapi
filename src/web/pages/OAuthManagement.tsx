@@ -315,8 +315,9 @@ export default function OAuthManagement() {
   };
 
   return (
-    <div className="page-container">
-      <div className="page-header">
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Browser Auth Hub</div>
         <div>
           <div className="page-title">OAuth 管理</div>
           <div className="page-subtitle">
@@ -326,13 +327,13 @@ export default function OAuthManagement() {
       </div>
 
       {sessionMessage && (
-        <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+        <div className="card surface-card" style={{ padding: 16, marginBottom: 16 }}>
           <div style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>{sessionMessage}</div>
         </div>
       )}
 
       {activeSession && (
-        <div className="card" style={{ padding: 20, marginBottom: 16 }}>
+        <div className="card surface-card" style={{ padding: 20, marginBottom: 16 }}>
           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>授权指引</div>
           <div style={{ display: 'grid', gap: 12 }}>
             <div style={{
@@ -422,7 +423,7 @@ export default function OAuthManagement() {
         </div>
       )}
 
-      <div className="card" style={{ padding: 20, marginBottom: 16 }}>
+      <div className="card surface-card" style={{ padding: 20, marginBottom: 16 }}>
         <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>授权入口</div>
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12, lineHeight: 1.6 }}>
           适合把官方 CLI / Web 登录得到的账号统一接入 metapi，再供各种 CLI、SDK、下游密钥和模型操练场复用。
@@ -461,7 +462,7 @@ export default function OAuthManagement() {
         </div>
       </div>
 
-      <div className="card" style={{ padding: 20 }}>
+      <div className="card surface-card" style={{ padding: 20 }}>
         <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>已连接账号</div>
         <div style={{ display: 'grid', gap: 12 }}>
           {connections.map((connection) => {
