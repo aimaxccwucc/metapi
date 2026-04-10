@@ -62,6 +62,7 @@ export interface TokenVerifyResult {
 }
 
 export interface ApiTokenInfo {
+  id?: number;
   name: string;
   key: string;
   enabled?: boolean;

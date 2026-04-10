@@ -166,8 +166,9 @@ const SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS = {
   groupEmpty: 30 * 60 * 1000,
   badResponseWrapper: 90 * 60 * 1000,
 } as const;
-const CODEX_CLAUDE_SUCCESS_POOL_RECENT_MS = 4 * 60 * 60 * 1000;
+const CODEX_CLAUDE_SUCCESS_POOL_RECENT_MS = 7 * 24 * 60 * 60 * 1000;
 const CODEX_CLAUDE_SUCCESS_POOL_SIZE = 4;
+const routeAutoHealRetryModels = new Set<string>();
 
 const SITE_PROTOCOL_FAILURE_PATTERNS: RegExp[] = [
   /unsupported\s+legacy\s+protocol/i,
@@ -811,6 +812,63 @@ function isUsageLimitRateLimitFailure(context: SiteRuntimeFailureContext = {}): 
 function isCodexOrClaudePreferenceModel(modelName?: string | null): boolean {
   const normalized = normalizeModelAlias(modelName || '');
   return normalized.includes('codex') || normalized.includes('claude');
+}
+
+function getPreferenceModelFamily(modelName?: string | null): 'claude' | 'codex' | null {
+  const normalized = normalizeModelAlias(modelName || '');
+  if (!normalized) return null;
+  if (normalized.includes('claude')) return 'claude';
+  if (normalized.includes('codex')) return 'codex';
+  return null;
+}
+
+function getSiteRuntimeSuccessAtMsForPreferenceModelFamily(
+  siteId: number,
+  modelName?: string | null,
+): number | null {
+  const family = getPreferenceModelFamily(modelName);
+  if (!family) return null;
+  const modelStates = siteModelRuntimeHealthStates.get(siteId);
+  if (!modelStates || modelStates.size === 0) return null;
+
+  let latestSuccessAtMs: number | null = null;
+  for (const [runtimeModelName, state] of modelStates.entries()) {
+    if (!runtimeModelName.includes(family)) continue;
+    const runtimeSuccessAtMs = state?.lastSuccessAtMs ?? null;
+    const runtimeFailureAtMs = state?.lastFailureAtMs ?? null;
+    if (runtimeSuccessAtMs == null || runtimeSuccessAtMs <= (runtimeFailureAtMs ?? 0)) continue;
+    if (latestSuccessAtMs == null || runtimeSuccessAtMs > latestSuccessAtMs) {
+      latestSuccessAtMs = runtimeSuccessAtMs;
+    }
+  }
+  return latestSuccessAtMs;
+}
+
+function hasSiteRuntimeSuccessForPreferenceModelFamily(
+  siteId: number,
+  modelName?: string | null,
+  nowMs = Date.now(),
+): boolean {
+  const successAtMs = getSiteRuntimeSuccessAtMsForPreferenceModelFamily(siteId, modelName);
+  if (successAtMs == null) return false;
+  if (isCodexOrClaudePreferenceModel(modelName) && (nowMs - successAtMs) > CODEX_CLAUDE_SUCCESS_POOL_RECENT_MS) {
+    return false;
+  }
+  return true;
+}
+
+function tryAcquireRouteAutoHealRetry(modelName?: string | null): boolean {
+  const normalized = normalizeModelAlias(modelName || '');
+  if (!normalized) return false;
+  if (routeAutoHealRetryModels.has(normalized)) return false;
+  routeAutoHealRetryModels.add(normalized);
+  return true;
+}
+
+function releaseRouteAutoHealRetry(modelName?: string | null): void {
+  const normalized = normalizeModelAlias(modelName || '');
+  if (!normalized) return;
+  routeAutoHealRetryModels.delete(normalized);
 }
 
 function isGenericBadResponseStatusWrapper(errorText?: string | null): boolean {
@@ -3163,6 +3221,16 @@ function partitionPreferredSuccessfulSiteCandidates<
     siteSuccessAtMs.set(siteId, Math.max(siteSuccessAtMs.get(siteId) ?? 0, runtimeSuccessAtMs));
   }
 
+  if (preferCodexClaudePool) {
+    for (const candidate of candidates) {
+      const siteId = candidate.site.id;
+      const familySuccessAtMs = getSiteRuntimeSuccessAtMsForPreferenceModelFamily(siteId, normalizedModel);
+      if (familySuccessAtMs == null) continue;
+      if ((nowMs - familySuccessAtMs) > CODEX_CLAUDE_SUCCESS_POOL_RECENT_MS) continue;
+      siteSuccessAtMs.set(siteId, Math.max(siteSuccessAtMs.get(siteId) ?? 0, familySuccessAtMs));
+    }
+  }
+
   if (preferCodexClaudePool && siteSuccessAtMs.size > CODEX_CLAUDE_SUCCESS_POOL_SIZE) {
     const limitedRecentSites = Array.from(siteSuccessAtMs.entries())
       .sort((left, right) => right[1] - left[1])
@@ -3304,6 +3372,7 @@ function buildCandidateSelectionPools(
 } {
   const pools: CandidateSelectionPool[] = [];
   const sitePartition = partitionPreferredSuccessfulSiteCandidates(candidates, modelName, nowMs);
+  const preferCodexClaudePool = isCodexOrClaudePreferenceModel(modelName);
 
   const pushPool = (scope: CandidateSelectionPool['scope'], rows: RouteChannelCandidate[]) => {
     if (rows.length === 0) return;
@@ -3330,8 +3399,24 @@ function buildCandidateSelectionPools(
   };
 
   if (sitePartition.preferred.length > 0) {
-    pushScopedPools('anchor_site', sitePartition.anchor);
-    pushScopedPools('fallback_site', subtractCandidatesByChannelId(sitePartition.preferred, sitePartition.anchor));
+    if (preferCodexClaudePool) {
+      const runtimePreferredSitePartition = partitionModelPreferredSiteCandidates(
+        sitePartition.preferred,
+        modelName,
+        nowMs,
+      );
+      const anchorCandidates = runtimePreferredSitePartition.source !== 'none'
+        ? runtimePreferredSitePartition.preferred
+        : sitePartition.anchor;
+      const fallbackCandidates = runtimePreferredSitePartition.source !== 'none'
+        ? subtractCandidatesByChannelId(sitePartition.preferred, runtimePreferredSitePartition.preferred)
+        : subtractCandidatesByChannelId(sitePartition.preferred, sitePartition.anchor);
+      pushScopedPools('anchor_site', anchorCandidates);
+      pushScopedPools('fallback_site', fallbackCandidates);
+    } else {
+      pushScopedPools('anchor_site', sitePartition.anchor);
+      pushScopedPools('fallback_site', subtractCandidatesByChannelId(sitePartition.preferred, sitePartition.anchor));
+    }
   }
   pushScopedPools('other_site', sitePartition.avoided);
 
@@ -3376,11 +3461,16 @@ function partitionModelPreferredSiteCandidates<
 
   let latestSuccessAtMs: number | null = null;
   const preferredSiteIds = new Set<number>();
+  const preferCodexClaudePool = isCodexOrClaudePreferenceModel(normalizedModel);
 
   for (const candidate of candidates) {
     const state = getSiteModelRuntimeHealthState(candidate.site.id, normalizedModel);
-    const successAtMs = state?.lastSuccessAtMs ?? null;
-    const failureAtMs = state?.lastFailureAtMs ?? null;
+    let successAtMs = state?.lastSuccessAtMs ?? null;
+    let failureAtMs = state?.lastFailureAtMs ?? null;
+    if (preferCodexClaudePool && (successAtMs == null || successAtMs <= (failureAtMs ?? 0))) {
+      successAtMs = getSiteRuntimeSuccessAtMsForPreferenceModelFamily(candidate.site.id, normalizedModel);
+      failureAtMs = null;
+    }
     if (successAtMs == null || successAtMs <= (failureAtMs ?? 0)) continue;
     if (latestSuccessAtMs == null || successAtMs > latestSuccessAtMs) {
       latestSuccessAtMs = successAtMs;
@@ -3405,10 +3495,16 @@ function partitionModelPreferredSiteCandidates<
   const currentlyHealthyPreferredSiteIds = new Set<number>();
   for (const siteId of preferredSiteIds) {
     const state = getSiteModelRuntimeHealthState(siteId, normalizedModel);
-    if (state?.lastFailureAtMs != null && (state.lastFailureAtMs ?? 0) >= (state.lastSuccessAtMs ?? 0)) {
+    if (state) {
+      if (state.lastFailureAtMs != null && (state.lastFailureAtMs ?? 0) >= (state.lastSuccessAtMs ?? 0)) {
+        if (!preferCodexClaudePool) continue;
+        const familySuccessAtMs = getSiteRuntimeSuccessAtMsForPreferenceModelFamily(siteId, normalizedModel);
+        if (familySuccessAtMs == null) continue;
+      }
+      if (isRuntimeHealthBreakerOpen(state, nowMs)) continue;
+    } else if (!preferCodexClaudePool || getSiteRuntimeSuccessAtMsForPreferenceModelFamily(siteId, normalizedModel) == null) {
       continue;
     }
-    if (isRuntimeHealthBreakerOpen(state, nowMs)) continue;
     currentlyHealthyPreferredSiteIds.add(siteId);
   }
 
@@ -4043,6 +4139,9 @@ function channelSupportsRequestedModel(channelSourceModel: string | null | undef
   if (!source) return true;
   if (source === requestedModel) return true;
   if (isModelAliasEquivalent(source, requestedModel)) return true;
+  const sourceFamily = getPreferenceModelFamily(source);
+  const requestedFamily = getPreferenceModelFamily(requestedModel);
+  if (sourceFamily && requestedFamily && sourceFamily === requestedFamily) return true;
   if (matchesModelPattern(requestedModel, source)) return true;
   return false;
 }
@@ -4300,9 +4399,14 @@ export class TokenRouter {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     await ensureRoutingRuntimeStateLoaded();
 
-    const match = await this.findRoute(requestedModel, downstreamPolicy);
+    let match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
-    return await this.selectFromMatch(match, requestedModel, downstreamPolicy);
+    let selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy);
+    if (selected) return selected;
+    match = await this.tryAutoHealRouteMatch(requestedModel, match, downstreamPolicy);
+    if (!match) return null;
+    selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy);
+    return selected;
   }
 
   async previewSelectedChannel(
@@ -4312,9 +4416,14 @@ export class TokenRouter {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     await ensureRoutingRuntimeStateLoaded();
 
-    const match = await this.findRoute(requestedModel, downstreamPolicy);
+    let match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
-    return await this.selectFromMatch(match, requestedModel, downstreamPolicy, [], false);
+    let selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy, [], false);
+    if (selected) return selected;
+    match = await this.tryAutoHealRouteMatch(requestedModel, match, downstreamPolicy);
+    if (!match) return null;
+    selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy, [], false);
+    return selected;
   }
 
   /**
@@ -4329,9 +4438,14 @@ export class TokenRouter {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     await ensureRoutingRuntimeStateLoaded();
 
-    const match = await this.findRoute(requestedModel, downstreamPolicy);
+    let match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
-    return await this.selectFromMatch(match, requestedModel, downstreamPolicy, excludeChannelIds, true, excludeSiteIds);
+    let selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy, excludeChannelIds, true, excludeSiteIds);
+    if (selected) return selected;
+    match = await this.tryAutoHealRouteMatch(requestedModel, match, downstreamPolicy);
+    if (!match) return null;
+    selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy, excludeChannelIds, true, excludeSiteIds);
+    return selected;
   }
 
   async explainSelection(
@@ -5611,6 +5725,43 @@ export class TokenRouter {
     return await this.loadRouteMatch(route);
   }
 
+  private async tryAutoHealRouteMatch(
+    requestedModel: string,
+    match: RouteMatch | null,
+    downstreamPolicy: DownstreamRoutingPolicy,
+  ): Promise<RouteMatch | null> {
+    if (!match) return null;
+    if (!tryAcquireRouteAutoHealRetry(requestedModel)) return match;
+    try {
+      const accountIds = Array.from(new Set(
+        match.channels
+          .map((row) => row.account.id)
+          .filter((id) => Number.isFinite(id) && id > 0),
+      ));
+      const siteIds = Array.from(new Set(
+        match.channels
+          .map((row) => row.site.id)
+          .filter((id) => Number.isFinite(id) && id > 0),
+      ));
+      const { autoProvisionTokenCoverage } = await import('./tokenCoverageAutoProvisionService.js');
+      const { rebuildTokenRoutesFromAvailabilityScoped } = await import('./modelService.js');
+      await autoProvisionTokenCoverage({
+        accountIds,
+        siteIds,
+        routeIds: [match.route.id],
+        modelNames: [requestedModel],
+      }, {
+        provisionMode: 'shared_group',
+        refreshRouteChannels: true,
+      }).catch(() => undefined);
+      await rebuildTokenRoutesFromAvailabilityScoped({ accountIds, siteIds }).catch(() => undefined);
+      invalidateTokenRouterCache();
+      return await this.findRouteById(match.route.id, downstreamPolicy);
+    } finally {
+      releaseRouteAutoHealRetry(requestedModel);
+    }
+  }
+
   private async loadRouteMatch(route: RouteRow): Promise<RouteMatch> {
     return await loadRouteMatch(route);
   }
@@ -5942,7 +6093,11 @@ export class TokenRouter {
       contribution *= getAccountStickyMultiplier(candidate, stickyPreference.stickyBinding, stickyPreference.stickyReason);
 
       const normalizedRuntimeModelName = normalizeModelAlias(resolvedModelNames[i]);
-      if (normalizedRuntimeModelName && hasModelPreference.has(normalizedRuntimeModelName)) {
+      const shouldApplyModelPreference = normalizedRuntimeModelName && (
+        hasModelPreference.has(normalizedRuntimeModelName)
+        || hasSiteRuntimeSuccessForPreferenceModelFamily(candidate.site.id, normalizedRuntimeModelName, nowMs)
+      );
+      if (shouldApplyModelPreference) {
         contribution *= modelPreferredSiteIds.has(candidate.site.id) ? 1.3 : 0.72;
       }
       if (candidate.channel.sourceModelDerived) {

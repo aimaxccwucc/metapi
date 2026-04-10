@@ -11,12 +11,35 @@ type ConfigModule = typeof import('../config.js');
 const mockedCatalogRoutingCost = vi.fn<(
   input: { siteId: number; accountId: number; modelName: string }
 ) => number | null>(() => null);
+const {
+  mockedAutoProvisionTokenCoverage,
+  mockedRebuildTokenRoutesFromAvailabilityScoped,
+} = vi.hoisted(() => ({
+  mockedAutoProvisionTokenCoverage: vi.fn(),
+  mockedRebuildTokenRoutesFromAvailabilityScoped: vi.fn(),
+}));
 
 vi.mock('./modelPricingService.js', async () => {
   const actual = await vi.importActual<typeof import('./modelPricingService.js')>('./modelPricingService.js');
   return {
     ...actual,
     getCachedModelRoutingReferenceCost: mockedCatalogRoutingCost,
+  };
+});
+
+vi.mock('./tokenCoverageAutoProvisionService.js', async () => {
+  const actual = await vi.importActual<typeof import('./tokenCoverageAutoProvisionService.js')>('./tokenCoverageAutoProvisionService.js');
+  return {
+    ...actual,
+    autoProvisionTokenCoverage: (...args: unknown[]) => mockedAutoProvisionTokenCoverage(...args),
+  };
+});
+
+vi.mock('./modelService.js', async () => {
+  const actual = await vi.importActual<typeof import('./modelService.js')>('./modelService.js');
+  return {
+    ...actual,
+    rebuildTokenRoutesFromAvailabilityScoped: (...args: unknown[]) => mockedRebuildTokenRoutesFromAvailabilityScoped(...args),
   };
 });
 
@@ -66,6 +89,21 @@ describe('TokenRouter selection scoring', () => {
     idSeed = 0;
     mockedCatalogRoutingCost.mockReset();
     mockedCatalogRoutingCost.mockReturnValue(null);
+    mockedAutoProvisionTokenCoverage.mockReset();
+    mockedAutoProvisionTokenCoverage.mockResolvedValue({
+      mode: 'specific_models',
+      provisionMode: 'shared_group',
+      summary: { total: 0, created: 0, reused: 0, skipped: 0, cooldown: 0, failed: 0 },
+      results: [],
+    });
+    mockedRebuildTokenRoutesFromAvailabilityScoped.mockReset();
+    mockedRebuildTokenRoutesFromAvailabilityScoped.mockResolvedValue({
+      models: 0,
+      createdRoutes: 0,
+      createdChannels: 0,
+      removedChannels: 0,
+      removedRoutes: 0,
+    });
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.settings).run();
@@ -987,6 +1025,264 @@ describe('TokenRouter selection scoring', () => {
       expect(candidate?.reason || '').toMatch(/已验证成功站点|最近成功站点|未验证站点/);
     }
     expect(decision.summary.join(' ')).toContain('成功站点池复用');
+  });
+
+  it('auto-heals missing explicit token candidates before giving up selection', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('claude-auto-heal');
+    const site = await createSite('auto-heal-site');
+    const baseAccount = await createAccount(site.id, 'auto-heal-user');
+    await db.update(schema.accounts).set({
+      apiToken: null,
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    }).where(eq(schema.accounts.id, baseAccount.id)).run();
+    const account = (await db.select().from(schema.accounts).where(eq(schema.accounts.id, baseAccount.id)).get())!;
+    expect(account).toBeTruthy();
+    const token = await createToken(account.id, 'auto-heal-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    await db.delete(schema.accountTokens).where(eq(schema.accountTokens.id, token.id)).run();
+    mockedAutoProvisionTokenCoverage.mockImplementationOnce(async () => {
+      const healedToken = await createToken(account.id, 'auto-heal-rebuilt');
+      await db.update(schema.routeChannels).set({
+        tokenId: healedToken.id,
+      }).where(eq(schema.routeChannels.id, channel.id)).run();
+      return {
+        mode: 'specific_models',
+        provisionMode: 'shared_group',
+        summary: { total: 1, created: 1, reused: 0, skipped: 0, cooldown: 0, failed: 0 },
+        results: [{
+          accountId: account.id,
+          siteId: site.id,
+          modelName: 'claude-auto-heal',
+          targetGroup: 'default',
+          status: 'created',
+          reason: 'created',
+        }],
+      };
+    });
+
+    const selected = await new TokenRouter().selectChannel('claude-auto-heal');
+
+    expect(selected).toBeTruthy();
+    expect(selected?.channel.id).toBe(channel.id);
+    expect(selected?.tokenName).toBe('auto-heal-rebuilt');
+    expect(mockedAutoProvisionTokenCoverage).toHaveBeenCalledTimes(1);
+    expect(mockedRebuildTokenRoutesFromAvailabilityScoped).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps codex and claude routing inside the current preferred site before other successful sites', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-site-first',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+
+    const ccllSite = await createSite('ccll-site');
+    const ccllAccountA = await createAccount(ccllSite.id, 'ccll-user-a');
+    const ccllTokenA = await createToken(ccllAccountA.id, 'ccll-token-a');
+    const ccllChannelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: ccllAccountA.id,
+      tokenId: ccllTokenA.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      successCount: 1,
+      failCount: 0,
+      lastUsedAt: '2026-01-01T00:10:00.000Z',
+    }).returning().get();
+
+    const ccllAccountB = await createAccount(ccllSite.id, 'ccll-user-b');
+    const ccllTokenB = await createToken(ccllAccountB.id, 'ccll-token-b');
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: ccllAccountB.id,
+      tokenId: ccllTokenB.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      successCount: 0,
+      failCount: 0,
+      lastUsedAt: null,
+    }).run();
+
+    const otherSite = await createSite('other-success-site');
+    const otherAccount = await createAccount(otherSite.id, 'other-success-user');
+    const otherToken = await createToken(otherAccount.id, 'other-success-token');
+    const otherChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: otherAccount.id,
+      tokenId: otherToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      successCount: 1,
+      failCount: 0,
+      lastUsedAt: '2026-01-01T00:09:00.000Z',
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordSuccess(otherChannel.id, 280, 0, 'claude-site-first');
+    await router.recordSuccess(ccllChannelA.id, 300, 0, 'claude-site-first');
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('claude-site-first');
+
+    expect(decision.selectedChannelId).toBe(ccllChannelA.id);
+    const otherCandidate = decision.candidates.find((candidate) => candidate.channelId === otherChannel.id);
+    expect(otherCandidate?.probability || 0).toBe(0);
+  });
+
+  it('inherits claude family site success so sonnet can stay on a site proven by opus', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-sonnet-family-site',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+
+    const ccllSite = await createSite('family-ccll-site');
+    const ccllAccount = await createAccount(ccllSite.id, 'family-ccll-user');
+    const ccllToken = await createToken(ccllAccount.id, 'family-ccll-token');
+    const ccllChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: ccllAccount.id,
+      tokenId: ccllToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      successCount: 0,
+      failCount: 0,
+      lastUsedAt: null,
+    }).returning().get();
+
+    const huanSite = await createSite('family-huan-site');
+    const huanAccount = await createAccount(huanSite.id, 'family-huan-user');
+    const huanToken = await createToken(huanAccount.id, 'family-huan-token');
+    const huanChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: huanAccount.id,
+      tokenId: huanToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      successCount: 1,
+      failCount: 0,
+      lastUsedAt: '2026-01-01T00:09:00.000Z',
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordSuccess(huanChannel.id, 280, 0, 'claude-sonnet-family-site');
+    await router.recordSuccess(ccllChannel.id, 300, 0, 'claude-opus-family-site');
+    await db.update(schema.routeChannels).set({
+      lastUsedAt: '2026-01-01T00:09:00.000Z',
+      successCount: 2,
+      failCount: 0,
+    }).where(eq(schema.routeChannels.id, huanChannel.id)).run();
+    await db.update(schema.routeChannels).set({
+      lastUsedAt: '2026-01-01T00:10:00.000Z',
+      successCount: 1,
+      failCount: 0,
+    }).where(eq(schema.routeChannels.id, ccllChannel.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('claude-sonnet-family-site');
+
+    expect(decision.selectedChannelId).toBe(ccllChannel.id);
+    const huanCandidate = decision.candidates.find((candidate) => candidate.channelId === huanChannel.id);
+    expect(huanCandidate?.probability || 0).toBe(0);
+  });
+
+  it('anchors claude family routing to runtime-proven site before a different site with newer persisted success', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'claude-sonnet-runtime-anchor',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+
+    const ccllSite = await createSite('runtime-anchor-ccll-site');
+    const ccllAccount = await createAccount(ccllSite.id, 'runtime-anchor-ccll-user');
+    const ccllToken = await createToken(ccllAccount.id, 'runtime-anchor-ccll-token');
+    const ccllChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: ccllAccount.id,
+      tokenId: ccllToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      successCount: 0,
+      failCount: 0,
+      lastUsedAt: null,
+    }).returning().get();
+
+    const huanSite = await createSite('runtime-anchor-huan-site');
+    const huanAccount = await createAccount(huanSite.id, 'runtime-anchor-huan-user');
+    const huanToken = await createToken(huanAccount.id, 'runtime-anchor-huan-token');
+    const huanChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: huanAccount.id,
+      tokenId: huanToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      successCount: 3,
+      failCount: 0,
+      lastUsedAt: '2026-01-01T00:11:00.000Z',
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordSuccess(ccllChannel.id, 300, 0, 'claude-opus-runtime-anchor');
+    await db.update(schema.routeChannels).set({
+      successCount: 1,
+      failCount: 0,
+      lastUsedAt: '2026-01-01T00:10:00.000Z',
+    }).where(eq(schema.routeChannels.id, ccllChannel.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('claude-sonnet-runtime-anchor');
+
+    expect(decision.selectedChannelId).toBe(ccllChannel.id);
+    const huanCandidate = decision.candidates.find((candidate) => candidate.channelId === huanChannel.id);
+    expect(huanCandidate?.probability || 0).toBe(0);
+    expect(huanCandidate?.reason || '').toContain('已验证成功站点');
   });
 
   it('falls through to the next priority when all higher-priority channels recently failed', async () => {

@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const getApiTokensMock = vi.fn();
@@ -549,6 +549,86 @@ describe('POST /api/routes auto token coverage', () => {
       group: 'vip',
       name: 'metapi-vip-shared',
     });
+  });
+
+  it('marks auto provision as failed when upstream only returns a masked token after create', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'masked-create-site',
+      url: 'https://masked-create-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'masked-create-user',
+      accessToken: 'masked-create-session',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'masked-model',
+      available: true,
+    }).run();
+
+    getUserGroupsMock.mockResolvedValue(['default', 'vip']);
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      groupRatio: { default: 1, vip: 0.2 },
+      models: [{
+        modelName: 'masked-model',
+        quotaType: 0,
+        modelDescription: null,
+        tags: [],
+        supportedEndpointTypes: [],
+        ownerBy: null,
+        enableGroups: ['default', 'vip'],
+        groupPricing: {},
+      }],
+    });
+    createApiTokenMock.mockResolvedValue(true);
+    getApiTokensMock.mockResolvedValue([
+      { name: 'metapi-vip-shared', key: 'sk-vip***mask', enabled: true, tokenGroup: 'vip' },
+    ]);
+    getModelsMock.mockResolvedValue([]);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        modelPattern: 'masked-model',
+        enabled: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const tokens = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokens.some((token) => token.name === 'metapi-vip-shared')).toBe(false);
+
+    const state = await db.select()
+      .from(schema.tokenCoverageAutoprovisionStates)
+      .where(and(
+        eq(schema.tokenCoverageAutoprovisionStates.accountId, account.id),
+        eq(schema.tokenCoverageAutoprovisionStates.modelName, 'masked-model'),
+        eq(schema.tokenCoverageAutoprovisionStates.targetGroup, 'vip'),
+      ))
+      .get();
+    expect(state).toMatchObject({
+      status: 'failed',
+      reasonCode: 'created_token_masked_pending',
+    });
+
+    const route = response.json() as { id: number };
+    const channels = await db.select()
+      .from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, route.id))
+      .all();
+    expect(channels).toHaveLength(0);
   });
 
   it('removes stale auto-managed group token after model drifts to another group', async () => {

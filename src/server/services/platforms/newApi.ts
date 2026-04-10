@@ -3,6 +3,13 @@ import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
 
+function isMaskedTokenValue(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const token = value.trim();
+  if (!token) return false;
+  return token.includes('*') || token.includes('•');
+}
+
 function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = (baseUrl || '').trim();
   if (!trimmed) return '';
@@ -331,6 +338,7 @@ export class NewApiAdapter extends BasePlatformAdapter {
           : (typeof item?.token_group === 'string' ? item.token_group.trim() : ''));
       const status = typeof item?.status === 'number' ? item.status : undefined;
       const tokenInfo: ApiTokenInfo = {
+        id: typeof item?.id === 'number' && Number.isFinite(item.id) && item.id > 0 ? item.id : undefined,
         name: rawName || (index === 0 ? 'default' : `token-${index + 1}`),
         key,
         enabled: status === undefined ? true : status === 1,
@@ -339,6 +347,245 @@ export class NewApiAdapter extends BasePlatformAdapter {
       normalized.push(tokenInfo);
     }
     return normalized;
+  }
+
+  private async fetchTokenDetail(
+    baseUrl: string,
+    accessToken: string,
+    tokenId: number,
+    userId?: number | null,
+  ): Promise<any | null> {
+    try {
+      const res = await this.fetchJson<any>(`${baseUrl}/api/token/${tokenId}`, {
+        headers: this.authHeaders(accessToken, userId || undefined),
+      });
+      if (res?.data) return res.data;
+      return res ?? null;
+    } catch {}
+
+    for (const cookie of this.buildCookieCandidates(accessToken)) {
+      try {
+        const headers: Record<string, string> = { Cookie: cookie };
+        if (userId) headers['New-Api-User'] = String(userId);
+        const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/token/${tokenId}`, { headers });
+        if (res?.data) return res.data;
+        if (res) return res;
+      } catch {}
+    }
+
+    return null;
+  }
+
+  private extractSecretTokenKey(payload: any): string {
+    const candidates: unknown[] = [
+      payload?.data?.key,
+      payload?.key,
+      payload?.data,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string') continue;
+      const normalized = candidate.trim();
+      if (normalized) return normalized;
+    }
+    return '';
+  }
+
+  private async fetchTokenSecretKey(
+    baseUrl: string,
+    accessToken: string,
+    tokenId: number,
+    userId?: number | null,
+  ): Promise<string | null> {
+    try {
+      const res = await this.fetchJson<any>(`${baseUrl}/api/token/${tokenId}/key`, {
+        method: 'POST',
+        headers: this.authHeaders(accessToken, userId || undefined),
+      });
+      const key = this.extractSecretTokenKey(res);
+      if (key) return key;
+    } catch {}
+
+    for (const cookie of this.buildCookieCandidates(accessToken)) {
+      try {
+        const headers: Record<string, string> = { Cookie: cookie };
+        if (userId) headers['New-Api-User'] = String(userId);
+        const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/token/${tokenId}/key`, {
+          method: 'POST',
+          headers,
+        });
+        const key = this.extractSecretTokenKey(res);
+        if (key) return key;
+      } catch {}
+    }
+
+    return null;
+  }
+
+  private parseBatchTokenSecretKeys(payload: any, requestedTokenIds: number[]): Map<number, string> {
+    const tokenIds = requestedTokenIds.filter((value) => Number.isFinite(value) && value > 0);
+    const orderedTokenIds = Array.from(new Set(tokenIds.map((value) => Math.trunc(value))));
+    const result = new Map<number, string>();
+    if (orderedTokenIds.length === 0 || !payload || typeof payload !== 'object') return result;
+
+    const collectEntry = (entry: any, fallbackId?: number) => {
+      const tokenId = typeof entry?.id === 'number' && Number.isFinite(entry.id) && entry.id > 0
+        ? Math.trunc(entry.id)
+        : (typeof entry?.token_id === 'number' && Number.isFinite(entry.token_id) && entry.token_id > 0
+          ? Math.trunc(entry.token_id)
+          : fallbackId);
+      const key = this.extractSecretTokenKey(entry);
+      if (!tokenId || !key) return;
+      result.set(tokenId, key);
+    };
+
+    const arraySource = [payload?.data, payload?.data?.items, payload?.items, payload?.list, payload?.data?.list]
+      .find((value) => Array.isArray(value));
+    if (Array.isArray(arraySource)) {
+      arraySource.forEach((entry, index) => {
+        const fallbackId = orderedTokenIds[index];
+        collectEntry(entry, fallbackId);
+      });
+      return result;
+    }
+
+    const mapSource = [payload?.data, payload?.items, payload?.list].find((value) => value && typeof value === 'object');
+    if (mapSource && typeof mapSource === 'object') {
+      for (const [rawKey, entry] of Object.entries(mapSource)) {
+        const numericKey = Number(rawKey);
+        const fallbackId = Number.isFinite(numericKey) && numericKey > 0 ? Math.trunc(numericKey) : undefined;
+        if (typeof entry === 'string') {
+          const key = entry.trim();
+          if (fallbackId && key) result.set(fallbackId, key);
+          continue;
+        }
+        collectEntry(entry, fallbackId);
+      }
+    }
+
+    return result;
+  }
+
+  private async fetchTokenSecretKeysBatch(
+    baseUrl: string,
+    accessToken: string,
+    tokenIds: number[],
+    userId?: number | null,
+  ): Promise<Map<number, string>> {
+    const requestedTokenIds = Array.from(new Set(
+      tokenIds.filter((value) => Number.isFinite(value) && value > 0).map((value) => Math.trunc(value)),
+    ));
+    const empty = new Map<number, string>();
+    if (requestedTokenIds.length === 0) return empty;
+
+    const payloadCandidates = [
+      { ids: requestedTokenIds },
+      { token_ids: requestedTokenIds },
+      { tokenIds: requestedTokenIds },
+    ];
+
+    for (const body of payloadCandidates) {
+      try {
+        const res = await this.fetchJson<any>(`${baseUrl}/api/token/batch/keys`, {
+          method: 'POST',
+          headers: this.authHeaders(accessToken, userId || undefined),
+          body: JSON.stringify(body),
+        });
+        const keys = this.parseBatchTokenSecretKeys(res, requestedTokenIds);
+        if (keys.size > 0) return keys;
+      } catch {}
+    }
+
+    for (const cookie of this.buildCookieCandidates(accessToken)) {
+      const headers: Record<string, string> = { Cookie: cookie };
+      if (userId) headers['New-Api-User'] = String(userId);
+      for (const body of payloadCandidates) {
+        try {
+          const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/token/batch/keys`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+          });
+          const keys = this.parseBatchTokenSecretKeys(res, requestedTokenIds);
+          if (keys.size > 0) return keys;
+        } catch {}
+      }
+    }
+
+    return empty;
+  }
+
+  private mergeTokenDetail(listToken: ApiTokenInfo, detail: any): ApiTokenInfo {
+    const detailKey = typeof detail?.key === 'string' ? detail.key.trim() : '';
+    const detailName = typeof detail?.name === 'string' ? detail.name.trim() : '';
+    const detailGroup = typeof detail?.group === 'string'
+      ? detail.group.trim()
+      : (typeof detail?.group_name === 'string'
+        ? detail.group_name.trim()
+        : (typeof detail?.token_group === 'string' ? detail.token_group.trim() : ''));
+    const detailStatus = typeof detail?.status === 'number' ? detail.status : undefined;
+
+    return {
+      ...listToken,
+      key: detailKey || listToken.key,
+      name: detailName || listToken.name,
+      enabled: detailStatus === undefined ? listToken.enabled : detailStatus === 1,
+      tokenGroup: detailGroup || listToken.tokenGroup,
+    };
+  }
+
+  private async resolveTokenDetailsIfMasked(
+    baseUrl: string,
+    accessToken: string,
+    tokens: ApiTokenInfo[],
+    userId?: number | null,
+  ): Promise<ApiTokenInfo[]> {
+    const maskedTokenIds = tokens
+      .filter((token) => isMaskedTokenValue(token.key) && typeof token.id === 'number' && token.id > 0)
+      .map((token) => token.id as number);
+    const batchSecretKeys = maskedTokenIds.length > 1
+      ? await this.fetchTokenSecretKeysBatch(baseUrl, accessToken, maskedTokenIds, userId)
+      : new Map<number, string>();
+    const resolved: ApiTokenInfo[] = [];
+    for (const token of tokens) {
+      if (!isMaskedTokenValue(token.key) || !token.id) {
+        resolved.push(token);
+        continue;
+      }
+      const batchSecretKey = batchSecretKeys.get(token.id);
+      if (batchSecretKey) {
+        resolved.push({
+          ...token,
+          key: batchSecretKey,
+        });
+        continue;
+      }
+      const detail = await this.fetchTokenDetail(baseUrl, accessToken, token.id, userId);
+      if (detail) {
+        const merged = this.mergeTokenDetail(token, detail);
+        if (isMaskedTokenValue(merged.key)) {
+          const secretKey = await this.fetchTokenSecretKey(baseUrl, accessToken, token.id, userId);
+          if (secretKey) {
+            resolved.push({
+              ...merged,
+              key: secretKey,
+            });
+            continue;
+          }
+        }
+        resolved.push(merged);
+        continue;
+      }
+      const secretKey = await this.fetchTokenSecretKey(baseUrl, accessToken, token.id, userId);
+      if (secretKey) {
+        resolved.push({
+          ...token,
+          key: secretKey,
+        });
+        continue;
+      }
+      resolved.push(token);
+    }
+    return resolved;
   }
 
   private parseUserInfo(data: any): UserInfo {
@@ -751,7 +998,12 @@ export class NewApiAdapter extends BasePlatformAdapter {
         const headers: Record<string, string> = { Cookie: cookie };
         if (userId) headers['New-Api-User'] = String(userId);
         const res = await this.fetchJsonRaw<any>(`${baseUrl}/api/token/?p=0&size=100`, { headers });
-        const normalized = this.normalizeTokenItems(this.parseTokenItems(res));
+        const normalized = await this.resolveTokenDetailsIfMasked(
+          baseUrl,
+          token,
+          this.normalizeTokenItems(this.parseTokenItems(res)),
+          userId,
+        );
         if (normalized.length > 0) return normalized;
       } catch {}
     }
@@ -1329,7 +1581,12 @@ export class NewApiAdapter extends BasePlatformAdapter {
       const res = await this.fetchJson<any>(`${baseUrl}/api/token/?p=0&size=100`, {
         headers: this.authHeaders(accessToken, userId || undefined),
       });
-      const normalized = this.normalizeTokenItems(this.parseTokenItems(res));
+      const normalized = await this.resolveTokenDetailsIfMasked(
+        baseUrl,
+        accessToken,
+        this.normalizeTokenItems(this.parseTokenItems(res)),
+        userId,
+      );
       if (normalized.length > 0) return normalized;
       if (this.isTokenListResponse(res)) return [];
     } catch {}

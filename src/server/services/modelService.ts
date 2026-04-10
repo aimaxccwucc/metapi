@@ -9,6 +9,7 @@ import {
   isMaskedTokenValue,
   isUsableAccountToken,
 } from './accountTokenService.js';
+import { queueAutoProvisionTokenCoverageTask } from './tokenCoverageAutoProvisionService.js';
 import {
   getCredentialModeFromExtraConfig,
   getProxyUrlFromExtraConfig,
@@ -1397,6 +1398,11 @@ export async function rebuildTokenRoutesFromAvailability() {
 async function runRefreshModelsAndRebuildRoutes() {
   const refresh = await refreshModelsForAllActiveAccounts();
   const rebuild = await rebuildTokenRoutesFromAvailability();
+  queueAutoProvisionTokenCoverageTask({}, {
+    provisionMode: 'shared_group',
+    dedupeKey: 'auto-provision-token-coverage:full-refresh',
+    title: '全量刷新后自动补齐模型覆盖 Key',
+  });
   return { refresh, rebuild };
 }
 

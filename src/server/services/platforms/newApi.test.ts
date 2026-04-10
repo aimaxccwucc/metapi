@@ -12,12 +12,15 @@ interface RequestSnapshot {
 }
 
 const COOKIE_SESSION_TOKEN = 'cookie-session-token';
+const COOKIE_SESSION_MASKED_TOKEN = 'cookie-session-masked-token';
 const COOKIE_REQUIRES_USER_TOKEN = 'cookie-requires-user';
 const CHECKIN_ALREADY_TOKEN = 'checkin-already-token';
 const CHECKIN_INVALID_URL_TOKEN = 'checkin-invalid-url-token';
 const CHECKIN_CLOUDFLARE_530_TOKEN = 'checkin-cloudflare-530-token';
 const BALANCE_FAIL_TOKEN = 'balance-fail-token';
 const GROUP_EXPIRED_TOKEN = 'group-expired-token';
+const SESSION_MASKED_LIST_TOKEN = 'session-masked-list-token';
+const SESSION_BATCH_MASKED_LIST_TOKEN = 'session-batch-masked-list-token';
 const SHIELD_LOGIN_USERNAME = 'shield-user';
 const SHIELD_LOGIN_PASSWORD = 'shield-pass';
 const SHIELD_LOGIN_TOKEN = 'login-session-token';
@@ -153,6 +156,66 @@ describe('NewApiAdapter', () => {
       }
 
       if (req.url?.startsWith('/api/token/')) {
+        if (req.url === '/api/token/321/key' && req.method === 'POST' && typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${SESSION_MASKED_LIST_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            data: { key: 'sk-session-secret-key' },
+          }));
+          return;
+        }
+
+        if (req.url === '/api/token/654/key' && req.method === 'POST' && typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`session=${COOKIE_SESSION_MASKED_TOKEN}`)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            data: { key: 'sk-cookie-secret-key' },
+          }));
+          return;
+        }
+
+        if (req.url === '/api/token/batch/keys' && req.method === 'POST' && typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${SESSION_BATCH_MASKED_LIST_TOKEN}`) {
+          let bodyRaw = '';
+          req.on('data', (chunk) => {
+            bodyRaw += chunk.toString();
+          });
+          req.on('end', () => {
+            let ids: number[] = [];
+            try {
+              const payload = JSON.parse(bodyRaw || '{}');
+              ids = Array.isArray(payload?.ids) ? payload.ids : [];
+            } catch {}
+            expect(ids).toEqual([901, 902]);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              success: true,
+              data: [
+                { id: 901, key: 'sk-batch-secret-901' },
+                { id: 902, key: 'sk-batch-secret-902' },
+              ],
+            }));
+          });
+          return;
+        }
+
+        if (req.url === '/api/token/321' && typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${SESSION_MASKED_LIST_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            data: { id: 321, name: 'default', key: 'sk-ses***tail', status: 1, group: 'vip' },
+          }));
+          return;
+        }
+
+        if (req.url === '/api/token/654' && typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`session=${COOKIE_SESSION_MASKED_TOKEN}`)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            data: { id: 654, name: 'default', key: 'sk-coo***tail', status: 1, group: 'default' },
+          }));
+          return;
+        }
+
         if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${COOKIE_SHIELDED_TOKEN}`) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, message: 'unauthorized' }));
@@ -189,12 +252,49 @@ describe('NewApiAdapter', () => {
           res.end(JSON.stringify({ success: false, message: 'unauthorized' }));
           return;
         }
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${COOKIE_SESSION_MASKED_TOKEN}`) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: 'unauthorized' }));
+          return;
+        }
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${SESSION_MASKED_LIST_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            data: {
+              items: [{ id: 321, key: 'sk-ses***tail', name: 'default', status: 1, group: 'vip' }],
+            },
+          }));
+          return;
+        }
+
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${SESSION_BATCH_MASKED_LIST_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            data: {
+              items: [
+                { id: 901, key: 'sk-bat***901', name: 'batch-a', status: 1, group: 'cckpro' },
+                { id: 902, key: 'sk-bat***902', name: 'batch-b', status: 1, group: 'codex' },
+              ],
+            },
+          }));
+          return;
+        }
 
         if (typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`session=${COOKIE_SESSION_TOKEN}`)) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
             data: {
               items: [{ key: 'cookie-api-key' }],
+            },
+          }));
+          return;
+        }
+
+        if (typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`session=${COOKIE_SESSION_MASKED_TOKEN}`)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            data: {
+              items: [{ id: 654, key: 'sk-coo***tail', name: 'default', status: 1, group: 'default' }],
             },
           }));
           return;
@@ -292,6 +392,15 @@ describe('NewApiAdapter', () => {
           res.end(JSON.stringify({
             success: true,
             data: { id: 7788, username: 'cookie-user', quota: 2000000, used_quota: 500000 },
+          }));
+          return;
+        }
+
+        if (typeof req.headers.cookie === 'string' && req.headers.cookie.includes(`session=${COOKIE_SESSION_MASKED_TOKEN}`)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            data: { id: 7799, username: 'cookie-masked-user', quota: 2000000, used_quota: 500000 },
           }));
           return;
         }
@@ -431,6 +540,58 @@ describe('NewApiAdapter', () => {
     const token = await adapter.getApiToken(baseUrl, 'session-token', 11494);
 
     expect(token).toBe('api-key-from-token-list');
+  });
+
+  it('hydrates masked token list entries from token detail endpoint', async () => {
+    const adapter = new NewApiAdapter();
+    const tokens = await adapter.getApiTokens(baseUrl, SESSION_MASKED_LIST_TOKEN, 11494);
+
+    expect(tokens).toEqual([
+      expect.objectContaining({
+        id: 321,
+        name: 'default',
+        key: 'sk-session-secret-key',
+        enabled: true,
+        tokenGroup: 'vip',
+      }),
+    ]);
+    expect(requests.some((r) => r.url === '/api/token/321')).toBe(true);
+    expect(requests.some((r) => r.url === '/api/token/321/key' && r.method === 'POST')).toBe(true);
+  });
+
+  it('hydrates masked token list entries from batch key endpoint before per-token fallback', async () => {
+    const adapter = new NewApiAdapter();
+    const tokens = await adapter.getApiTokens(baseUrl, SESSION_BATCH_MASKED_LIST_TOKEN, 11494);
+
+    expect(tokens).toEqual([
+      expect.objectContaining({
+        id: 901,
+        name: 'batch-a',
+        key: 'sk-batch-secret-901',
+        enabled: true,
+        tokenGroup: 'cckpro',
+      }),
+      expect.objectContaining({
+        id: 902,
+        name: 'batch-b',
+        key: 'sk-batch-secret-902',
+        enabled: true,
+        tokenGroup: 'codex',
+      }),
+    ]);
+    expect(requests.some((r) => r.url === '/api/token/batch/keys' && r.method === 'POST')).toBe(true);
+    expect(requests.some((r) => r.url === '/api/token/901/key')).toBe(false);
+    expect(requests.some((r) => r.url === '/api/token/902/key')).toBe(false);
+  });
+
+  it('hydrates masked cookie token list entries from token detail endpoint', async () => {
+    const adapter = new NewApiAdapter();
+    const result = await adapter.verifyToken(baseUrl, COOKIE_SESSION_MASKED_TOKEN);
+
+    expect(result.tokenType).toBe('session');
+    expect(result.apiToken).toBe('sk-cookie-secret-key');
+    expect(requests.some((r) => r.url === '/api/token/654')).toBe(true);
+    expect(requests.some((r) => r.url === '/api/token/654/key' && r.method === 'POST')).toBe(true);
   });
 
   it('solves anyrouter acw challenge for account-password login', async () => {

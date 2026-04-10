@@ -512,6 +512,30 @@ async function findReusableTokenByGroup(accountId: number, targetGroup: string):
   }) || null;
 }
 
+async function findProvisionedUsableToken(
+  accountId: number,
+  targetGroup: string,
+  tokenName: string,
+): Promise<TokenRow | null> {
+  const tokens = await db.select().from(schema.accountTokens)
+    .where(and(
+      eq(schema.accountTokens.accountId, accountId),
+      eq(schema.accountTokens.enabled, true),
+      eq(schema.accountTokens.valueStatus, ACCOUNT_TOKEN_VALUE_STATUS_READY),
+    ))
+    .all();
+
+  const targetGroupKey = normalizeLower(targetGroup) || 'default';
+  const normalizedTokenName = normalizeText(tokenName);
+
+  return tokens.find((token: TokenRow) => {
+    if (!isUsableAccountToken(token)) return false;
+    if (normalizeText(token.name) !== normalizedTokenName) return false;
+    const groupLabel = resolveTokenGroupLabel(token.tokenGroup, token.name);
+    return (normalizeLower(groupLabel) || 'default') === targetGroupKey;
+  }) || null;
+}
+
 async function cleanupAutoManagedTokensForAccount(
   accountId: number,
   expectedGroups: Set<string>,
@@ -531,13 +555,12 @@ async function cleanupAutoManagedTokensForAccount(
   const tokens = await db.select().from(schema.accountTokens)
     .where(and(
       eq(schema.accountTokens.accountId, accountId),
-      eq(schema.accountTokens.enabled, true),
-      eq(schema.accountTokens.valueStatus, ACCOUNT_TOKEN_VALUE_STATUS_READY),
+      inArray(schema.accountTokens.valueStatus, [ACCOUNT_TOKEN_VALUE_STATUS_READY, 'masked_pending']),
     ))
     .all();
 
   const autoTokens = tokens.filter((token) => (
-    isUsableAccountToken(token) && isAutoManagedTokenName(token.name)
+    (isUsableAccountToken(token) || isMaskedPendingAccountToken(token)) && isAutoManagedTokenName(token.name)
   ));
 
   const grouped = new Map<string, TokenRow[]>();
@@ -580,6 +603,30 @@ async function cleanupAutoManagedTokensForAccount(
     for (const token of sorted.slice(1)) {
       await deleteToken(token);
     }
+  }
+}
+
+async function deletePendingAutoManagedTokensForAccount(
+  accountId: number,
+  tokenIds: number[],
+): Promise<void> {
+  const normalizedIds = Array.from(new Set(
+    tokenIds.filter((value) => Number.isFinite(value) && value > 0).map((value) => Math.trunc(value)),
+  ));
+  if (normalizedIds.length === 0) return;
+
+  const rows = await db.select().from(schema.accountTokens)
+    .where(eq(schema.accountTokens.accountId, accountId))
+    .all();
+  const targets = rows.filter((row) => (
+    normalizedIds.includes(row.id)
+    && isMaskedPendingAccountToken(row)
+    && isAutoManagedTokenName(row.name)
+  ));
+  for (const token of targets) {
+    await db.delete(schema.accountTokens)
+      .where(eq(schema.accountTokens.id, token.id))
+      .run();
   }
 }
 
@@ -1198,9 +1245,46 @@ async function provisionSingleTarget(
       };
     }
 
-    await syncTokensFromUpstream(target.accountId, upstreamTokens);
+    const syncResult = await syncTokensFromUpstream(target.accountId, upstreamTokens);
     await refreshModelsForAccountDeferred(target.accountId);
-    const preferredToken = await getPreferredAccountToken(target.accountId);
+    const createdToken = await findProvisionedUsableToken(target.accountId, targetGroup, tokenName);
+    const hasCoverageAfterCreate = await hasCoverageInGroup(target.accountId, target.modelName, targetGroup);
+    if (!createdToken || !hasCoverageAfterCreate) {
+      const reasonCode = syncResult.maskedPending > 0
+        ? 'created_token_masked_pending'
+        : !createdToken
+          ? 'created_token_not_ready'
+          : 'created_token_missing_coverage';
+      const message = syncResult.maskedPending > 0
+        ? 'upstream returned masked token after create; local token remains pending'
+        : !createdToken
+          ? 'created token did not become a ready local token'
+          : 'created token missing model coverage after refresh';
+      if (syncResult.maskedPending > 0) {
+        await deletePendingAutoManagedTokensForAccount(target.accountId, syncResult.pendingTokenIds).catch(() => undefined);
+      }
+      await updateStateResult({
+        target,
+        targetGroup,
+        status: 'failed',
+        reasonCode,
+        message,
+        createdTokenName: tokenName,
+        createdTokenGroup: targetGroup,
+        cooldownMs: DEFAULT_COOLDOWN_MS,
+      });
+      return {
+        accountId: target.accountId,
+        siteId: target.siteId,
+        modelName: target.modelName,
+        targetGroup,
+        status: 'failed',
+        reason: reasonCode,
+        message,
+        routeId: target.routeId ?? null,
+        groupRouteId: target.groupRouteId ?? null,
+      };
+    }
     await updateStateResult({
       target,
       targetGroup,
@@ -1219,7 +1303,7 @@ async function provisionSingleTarget(
       status: 'created',
       reason: 'created',
       message: 'auto token created',
-      createdTokenId: preferredToken?.id ?? null,
+      createdTokenId: createdToken.id,
       createdTokenName: tokenName,
       createdTokenGroup: targetGroup,
       routeId: target.routeId ?? null,
