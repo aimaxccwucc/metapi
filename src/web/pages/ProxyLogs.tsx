@@ -485,15 +485,19 @@ export default function ProxyLogs() {
     const options = sites.map((site) => ({
       value: String(site.id),
       label: site.status === 'disabled' ? `${site.name}（已禁用）` : site.name,
+      description: [site.status === 'disabled' ? 'disabled' : '', `#${site.id}`].filter(Boolean).join(' · '),
+      searchText: [site.name, site.status, String(site.id)].filter(Boolean).join(' '),
     }));
     if (siteFilter && !options.some((option) => option.value === String(siteFilter))) {
       options.unshift({
         value: String(siteFilter),
         label: `站点 #${siteFilter}（已删除）`,
+        description: 'deleted',
+        searchText: String(siteFilter),
       });
     }
     return [
-      { value: '', label: '全部站点' },
+      { value: '', label: '全部站点', description: '查看所有站点' },
       ...options,
     ];
   }, [siteFilter, sites]);
@@ -517,10 +521,12 @@ export default function ProxyLogs() {
     return siteOptions.find((option) => option.value === String(siteFilter))?.label || `站点 #${siteFilter}`;
   }, [siteFilter, siteOptions]);
   const traceSiteOptions = useMemo(() => ([
-    { value: '', label: '全部站点' },
+    { value: '', label: '全部站点', description: '查看所有站点' },
     ...sites.map((site) => ({
       value: String(site.id),
       label: site.status === 'disabled' ? `${site.name}（已禁用）` : site.name,
+      description: [site.status === 'disabled' ? 'disabled' : '', `#${site.id}`].filter(Boolean).join(' · '),
+      searchText: [site.name, site.status, String(site.id)].filter(Boolean).join(' '),
     })),
   ]), [sites]);
   const siteIdByName = useMemo(() => {
@@ -695,6 +701,8 @@ export default function ProxyLogs() {
           }}
           options={siteOptions}
           placeholder="全部站点"
+          searchable
+          searchPlaceholder="搜索站点"
         />
       </div>
       <label className="proxy-logs-time-field">
@@ -753,10 +761,16 @@ export default function ProxyLogs() {
   );
 
   return (
-    <div className="animate-fade-in">
-      <div className="page-header" style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <h2 className="page-title">{tr('使用日志')}</h2>
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Usage Stream</div>
+        <div className="page-header" style={{ marginBottom: 0 }}>
+          <div>
+            <h2 className="page-title">{tr('使用日志')}</h2>
+            <p className="page-subtitle">
+              这里聚合代理调用明细、成本、缓存命中和 Trace 排障。顶部先给你当前站点视角和总体消耗，再往下做筛选和细查。
+            </p>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginTop: 10 }}>
           <span className="kpi-chip">
             {activeSiteLabel}
           </span>
@@ -775,8 +789,9 @@ export default function ProxyLogs() {
           <span className="kpi-chip kpi-chip-success">
             节省 ${summary.cacheSavedCost.toFixed(4)}
           </span>
+            </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div className="page-actions">
           <button
             onClick={() => setAutoRefresh((v) => !v)}
             className={`btn btn-ghost${autoRefresh ? ' btn-ghost-active' : ''}`}
@@ -794,6 +809,7 @@ export default function ProxyLogs() {
             </svg>
             {loading ? '加载中...' : '刷新'}
           </button>
+        </div>
         </div>
       </div>
 
@@ -829,7 +845,7 @@ export default function ProxyLogs() {
         </div>
       )}
 
-      <div className="card" style={{ padding: 16, marginBottom: 12, display: 'grid', gap: 12 }}>
+      <div className="card surface-card" style={{ padding: 16, marginBottom: 12, display: 'grid', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span className="badge badge-info" style={{ fontSize: 11 }}>Proxy Trace 排障</span>
@@ -880,6 +896,8 @@ export default function ProxyLogs() {
               onChange={(nextValue) => setTraceFilters((current) => ({ ...current, siteId: nextValue }))}
               options={traceSiteOptions}
               placeholder="Trace 站点"
+              searchable
+              searchPlaceholder="搜索 Trace 站点"
             />
           </div>
           <input

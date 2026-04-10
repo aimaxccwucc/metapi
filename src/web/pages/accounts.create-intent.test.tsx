@@ -63,6 +63,7 @@ describe('Accounts create intent handling', () => {
 
       const selects = root.root.findAllByType(ModernSelect);
       expect(selects[1]?.props.value).toBe('10');
+      expect(selects[1]?.props.searchable).toBe(true);
     } finally {
       root.unmount();
     }
@@ -76,6 +77,7 @@ describe('Accounts create intent handling', () => {
 
       const selects = root.root.findAllByType(ModernSelect);
       expect(selects[1]?.props.value).toBe('10');
+      expect(selects[1]?.props.searchable).toBe(true);
     } finally {
       root.unmount();
     }

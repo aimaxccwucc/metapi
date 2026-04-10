@@ -4,6 +4,7 @@ import { api, type CredentialBenchmarkResponse, type CredentialDiagnosticRespons
 import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
 import SiteBadgeLink from '../components/SiteBadgeLink.js';
+import { useIsMobile } from '../components/useIsMobile.js';
 import { tr } from '../i18n.js';
 
 type TargetType = 'site' | 'account' | 'token';
@@ -13,6 +14,8 @@ type SiteOption = {
   label: string;
   platform: string;
   status: string;
+  description?: string;
+  searchText?: string;
 };
 
 type AccountOption = {
@@ -20,6 +23,8 @@ type AccountOption = {
   label: string;
   siteName: string;
   status: string | null;
+  description?: string;
+  searchText?: string;
 };
 
 type TokenOption = {
@@ -28,6 +33,8 @@ type TokenOption = {
   accountName: string;
   siteName: string;
   enabled: boolean;
+  description?: string;
+  searchText?: string;
 };
 
 function formatDateTime(value: string | null | undefined): string {
@@ -64,6 +71,7 @@ function collectBenchmarkModelNames(diagnostic: CredentialDiagnosticResponse | n
 export default function CredentialDiagnostics() {
   const toast = useToast();
   const navigate = useNavigate();
+  const isMobile = useIsMobile();
   const [searchParams, setSearchParams] = useSearchParams();
   const initialTargetType = (() => {
     const raw = searchParams.get('targetType');
@@ -170,6 +178,8 @@ export default function CredentialDiagnostics() {
       label: `${site.name} · ${site.platform}`,
       platform: site.platform,
       status: site.status,
+      description: [site.url, site.status].filter(Boolean).join(' · '),
+      searchText: [site.name, site.platform, site.url, site.status, String(site.id)].filter(Boolean).join(' '),
     }))
   ), [sites]);
 
@@ -179,6 +189,8 @@ export default function CredentialDiagnostics() {
       label: `${account.username || '未命名'} · ${account.site?.name || '未知站点'}`,
       siteName: account.site?.name || '未知站点',
       status: account.status || null,
+      description: [account.status, account.site?.name].filter(Boolean).join(' · '),
+      searchText: [account.username, account.site?.name, account.status, String(account.id)].filter(Boolean).join(' '),
     }))
   ), [accounts]);
 
@@ -189,6 +201,8 @@ export default function CredentialDiagnostics() {
       accountName: token.accountName || token.account?.username || '未知账号',
       siteName: token.siteName || token.site?.name || '未知站点',
       enabled: !!token.enabled,
+      description: [token.siteName || token.site?.name || '未知站点', token.enabled ? 'enabled' : 'disabled'].join(' · '),
+      searchText: [token.name, token.accountName, token.account?.username, token.siteName, token.site?.name, String(token.id)].filter(Boolean).join(' '),
     }))
   ), [tokens]);
 
@@ -232,12 +246,14 @@ export default function CredentialDiagnostics() {
   };
 
   return (
-    <div className="page-enter">
-      <div className="card" style={{ padding: 18, marginBottom: 16 }}>
+    <div className="page-shell page-enter">
+      <div className="page-hero">
+        <div className="page-kicker">Credential Drilldown</div>
+        <div className="page-header" style={{ marginBottom: 0 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
           <div>
             <h2 className="page-title" style={{ marginBottom: 6 }}>{tr('接入诊断')}</h2>
-            <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+            <div className="page-subtitle" style={{ marginTop: 0 }}>
               围绕单个站点、账号或令牌查看连通性、协议、模型、最小请求与路由影响。
             </div>
           </div>
@@ -251,9 +267,10 @@ export default function CredentialDiagnostics() {
           </div>
         </div>
       </div>
+      </div>
 
-      <div className="card" style={{ padding: 18, marginBottom: 16 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '180px minmax(0,1fr) 120px', gap: 12, alignItems: 'end' }}>
+      <div className="card surface-card" style={{ padding: 18, marginBottom: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0,1fr)' : '180px minmax(0,1fr) 120px', gap: 12, alignItems: 'end' }}>
           <div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 6 }}>对象类型</div>
             <ModernSelect
@@ -282,6 +299,8 @@ export default function CredentialDiagnostics() {
                 setTargetId(nextId);
                 if (nextId > 0) updateRouteTarget(targetType, nextId);
               }}
+              searchable
+              searchPlaceholder="搜索对象名称、站点或 ID"
             />
           </div>
           <div>
@@ -299,10 +318,10 @@ export default function CredentialDiagnostics() {
         <div className="card" style={{ padding: 18 }}>请选择一个可诊断对象。</div>
       ) : (
         <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 16, marginBottom: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0,1fr)' : '1.2fr 1fr', gap: 16, marginBottom: 16 }}>
             <div className="card" style={{ padding: 18 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>基础对象</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, fontSize: 13 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0,1fr)' : '1fr 1fr', gap: 12, fontSize: 13 }}>
                 <div>
                   <div style={{ color: 'var(--color-text-muted)', marginBottom: 4 }}>站点</div>
                   <div style={{ fontWeight: 600 }}>{diagnostic.target.site.name}</div>
@@ -339,7 +358,7 @@ export default function CredentialDiagnostics() {
             </div>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0,1fr)' : '1fr 1fr', gap: 16, marginBottom: 16 }}>
             <div className="card" style={{ padding: 18 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>协议探测</div>
               <div style={{ display: 'grid', gap: 10, fontSize: 13 }}>
@@ -424,7 +443,7 @@ export default function CredentialDiagnostics() {
             ) : null}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0,1fr)' : '1fr 1fr', gap: 16 }}>
             <div className="card" style={{ padding: 18 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>路由影响</div>
               {diagnostic.routing.referencedRoutes.length === 0 ? (

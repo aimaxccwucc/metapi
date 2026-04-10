@@ -311,6 +311,18 @@ export default function Accounts() {
     () => sites.find((item) => item.id === tokenForm.siteId) || null,
     [sites, tokenForm.siteId],
   );
+  const siteSelectOptions = useMemo(
+    () => [
+      { value: '0', label: '选择站点', description: '可按站点名、平台或地址搜索' },
+      ...sites.map((site: any) => ({
+        value: String(site.id),
+        label: site.name || `站点 #${site.id}`,
+        description: [site.platform, site.url].filter(Boolean).join(' · '),
+        searchText: [site.name, site.platform, site.url].filter(Boolean).join(' '),
+      })),
+    ],
+    [sites],
+  );
   const isSub2ApiSelected = (selectedTokenSite?.platform || '').toLowerCase() === 'sub2api';
   const activeAddCredentialMode = activeSegment === 'apikey' ? 'apikey' : 'session';
 
@@ -1301,9 +1313,16 @@ export default function Accounts() {
     && countBatchApiKeys(tokenForm.accessTokens) > 1;
 
   return (
-    <div className="animate-fade-in">
-      <div className="page-header">
-        <h2 className="page-title">{tr('连接管理')}</h2>
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Connections Console</div>
+        <div className="page-header" style={{ marginBottom: 0 }}>
+          <div>
+            <h2 className="page-title">{tr('连接管理')}</h2>
+            <p className="page-subtitle">
+              统一维护 Session、API Key 与账号令牌来源。优先把新增、校验、批量操作和异常处理集中在一个清晰入口，减少来回跳页和误操作。
+            </p>
+          </div>
         {activeSegment !== 'tokens' && (
           <div className="page-actions accounts-page-actions">
             {isMobile ? (
@@ -1375,6 +1394,7 @@ export default function Accounts() {
           </div>
         )}
         {activeSegment === 'tokens' && embeddedTokenActions}
+        </div>
       </div>
 
       <MobileFilterSheet open={showMobileTools} onClose={() => setShowMobileTools(false)} title="连接排序与操作">
@@ -1582,14 +1602,10 @@ export default function Accounts() {
                         setTokenForm((f) => ({ ...f, siteId: nextSiteId }));
                         setVerifyResult(null);
                       }}
-                      options={[
-                        { value: '0', label: '选择站点' },
-                        ...sites.map((s: any) => ({
-                          value: String(s.id),
-                          label: `${s.name} (${s.platform})`,
-                        })),
-                      ]}
+                      options={siteSelectOptions}
                       placeholder="选择站点"
+                      searchable
+                      searchPlaceholder="搜索站点名、平台或地址"
                     />
                     <input
                       placeholder="连接名称（可选）"
@@ -1712,14 +1728,10 @@ export default function Accounts() {
                         const nextSiteId = Number.parseInt(nextValue, 10) || 0;
                         setLoginForm((f) => ({ ...f, siteId: nextSiteId }));
                       }}
-                      options={[
-                        { value: '0', label: '选择站点' },
-                        ...sites.map((s: any) => ({
-                          value: String(s.id),
-                          label: `${s.name} (${s.platform})`,
-                        })),
-                      ]}
+                      options={siteSelectOptions}
                       placeholder="选择站点"
+                      searchable
+                      searchPlaceholder="搜索站点名、平台或地址"
                     />
                     <input placeholder="用户名" value={loginForm.username} onChange={(e) => setLoginForm((f) => ({ ...f, username: e.target.value }))} style={inputStyle} />
                     <input type="password" placeholder="密码" value={loginForm.password} onChange={(e) => setLoginForm((f) => ({ ...f, password: e.target.value }))} onKeyDown={(e) => e.key === 'Enter' && handleLoginAdd()} style={inputStyle} />
@@ -1741,14 +1753,10 @@ export default function Accounts() {
                     setTokenForm((f) => ({ ...f, siteId: nextSiteId, credentialMode: 'apikey' }));
                     setVerifyResult(null);
                   }}
-                  options={[
-                    { value: '0', label: '选择站点' },
-                    ...sites.map((s: any) => ({
-                      value: String(s.id),
-                      label: `${s.name} (${s.platform})`,
-                    })),
-                  ]}
+                  options={siteSelectOptions}
                   placeholder="选择站点"
+                  searchable
+                  searchPlaceholder="搜索站点名、平台或地址"
                 />
                 <input
                   placeholder="连接名称（可选）"

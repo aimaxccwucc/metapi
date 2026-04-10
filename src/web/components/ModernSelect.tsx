@@ -4,6 +4,7 @@ type ModernSelectOption = {
   value: string;
   label: string;
   description?: string;
+  searchText?: string;
   disabled?: boolean;
   iconNode?: ReactNode;
   iconUrl?: string;
@@ -20,6 +21,9 @@ type ModernSelectProps = {
   menuMaxHeight?: number;
   className?: string;
   size?: 'md' | 'sm';
+  searchable?: boolean;
+  searchPlaceholder?: string;
+  noSearchResultsLabel?: string;
 };
 
 export default function ModernSelect({
@@ -32,17 +36,41 @@ export default function ModernSelect({
   menuMaxHeight = 280,
   className = '',
   size = 'md',
+  searchable = false,
+  searchPlaceholder = '搜索选项',
+  noSearchResultsLabel = '没有匹配项',
 }: ModernSelectProps) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
   const rootRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   const selected = useMemo(
     () => options.find((item) => item.value === value),
     [options, value],
   );
 
+  const filteredOptions = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) return options;
+    return options.filter((item) => {
+      const haystack = [
+        item.label,
+        item.description,
+        item.searchText,
+        item.value,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(normalizedQuery);
+    });
+  }, [options, query]);
+
   useEffect(() => {
     if (!open) return;
+    const doc = rootRef.current?.ownerDocument || (typeof document !== 'undefined' ? document : null);
+    if (!doc) return;
 
     const handleOutsideClick = (event: MouseEvent) => {
       if (!rootRef.current) return;
@@ -55,17 +83,31 @@ export default function ModernSelect({
       if (event.key === 'Escape') setOpen(false);
     };
 
-    document.addEventListener('mousedown', handleOutsideClick);
-    document.addEventListener('keydown', handleEscape);
+    doc.addEventListener('mousedown', handleOutsideClick);
+    doc.addEventListener('keydown', handleEscape);
     return () => {
-      document.removeEventListener('mousedown', handleOutsideClick);
-      document.removeEventListener('keydown', handleEscape);
+      doc.removeEventListener('mousedown', handleOutsideClick);
+      doc.removeEventListener('keydown', handleEscape);
     };
   }, [open]);
 
   useEffect(() => {
     if (disabled) setOpen(false);
   }, [disabled]);
+
+  useEffect(() => {
+    if (!open) {
+      setQuery('');
+      return;
+    }
+    if (!searchable) return;
+    if (typeof window === 'undefined') return;
+    const timer = window.setTimeout(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [open, searchable]);
 
   const renderOptionIcon = (item: ModernSelectOption) => {
     if (item.iconNode) {
@@ -117,10 +159,29 @@ export default function ModernSelect({
       </button>
 
       <div className="modern-select-panel" style={{ maxHeight: menuMaxHeight }}>
+        {searchable && options.length > 0 && (
+          <div className="modern-select-search">
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={searchPlaceholder}
+              className="modern-select-search-input"
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  setOpen(false);
+                }
+              }}
+            />
+          </div>
+        )}
         {options.length === 0 ? (
           <div className="modern-select-empty">{emptyLabel}</div>
+        ) : filteredOptions.length === 0 ? (
+          <div className="modern-select-empty">{noSearchResultsLabel}</div>
         ) : (
-          options.map((item) => {
+          filteredOptions.map((item) => {
             const active = item.value === value;
             return (
               <button

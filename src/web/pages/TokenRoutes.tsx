@@ -1748,9 +1748,26 @@ export default function TokenRoutes() {
   };
 
   return (
-    <div className="animate-fade-in" style={{ minHeight: 400 }}>
+    <div className="page-shell animate-fade-in" style={{ minHeight: 400 }}>
+      <div className="page-hero">
+        <div className="page-kicker">Routing Control</div>
+        <div className="page-header" style={{ marginBottom: 0 }}>
+          <div>
+            <h2 className="page-title">{tr('模型路由')}</h2>
+            <p className="page-subtitle">
+              查看模型到通道的映射、治理状态、故障避让与来源模型补建情况。这个页面的信息密度高，所以优先把搜索、排序和运行时治理操作集中到顶部。
+            </p>
+          </div>
+          <div className="page-actions">
+            <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500 }}>
+              {tr('共')} {filteredRoutes.length} {tr('条路由')}
+            </span>
+          </div>
+        </div>
+      </div>
+
       {/* Toolbar: search + sort + actions */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+      <div className="card surface-card" style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap', padding: 12 }}>
         <div className="toolbar-search" style={{ minWidth: 220, flex: 1, maxWidth: 360 }}>
           <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path
@@ -1795,7 +1812,7 @@ export default function TokenRoutes() {
           </button>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, borderLeft: '1px solid var(--color-border)', paddingLeft: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, borderLeft: isMobile ? 'none' : '1px solid var(--color-border)', paddingLeft: isMobile ? 0 : 8, flexWrap: 'wrap' }}>
           <button
             onClick={handleRefreshRouteDecisions}
             disabled={loadingDecision}
@@ -1844,19 +1861,15 @@ export default function TokenRoutes() {
             {showZeroChannelRoutes ? tr('隐藏 0 通道路由') : tr('显示 0 通道路由')}
           </button>
         </div>
-
-        <span className="badge badge-info" style={{ fontSize: 12, fontWeight: 500, marginLeft: 'auto' }}>
-          {tr('共')} {filteredRoutes.length} {tr('条路由')}
-        </span>
       </div>
 
       {showOnlyManualRoutes ? (
-        <div className="info-tip" style={{ marginBottom: 12 }}>
+        <div className="info-tip surface-card" style={{ marginBottom: 12 }}>
           {tr('当前仅显示手工治理路由；如需排查系统自动生成或系统治理路由，请到筛选面板切换为“显示全部路由”。')}
         </div>
       ) : null}
 
-      <div className="info-tip" style={{ marginBottom: 12, display: 'grid', gap: 8 }}>
+      <div className="info-tip surface-card" style={{ marginBottom: 12, display: 'grid', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className="badge badge-info" style={{ fontSize: 11 }}>{tr('当前故障总览')}</span>
           <span className="badge badge-warning" style={{ fontSize: 11 }}>{tr('冷却中')} {routeFaultOverview.cooldownChannels}</span>
@@ -1873,7 +1886,7 @@ export default function TokenRoutes() {
         </div>
       </div>
 
-      <div className="info-tip" style={{ marginBottom: 12, display: 'grid', gap: 10 }}>
+      <div className="info-tip surface-card" style={{ marginBottom: 12, display: 'grid', gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className="badge badge-info" style={{ fontSize: 11 }}>系统隔离治理</span>
           {loadingRouteOverview ? (

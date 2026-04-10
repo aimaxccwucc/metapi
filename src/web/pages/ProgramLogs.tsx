@@ -417,9 +417,16 @@ export default function ProgramLogs() {
   };
 
   return (
-    <div className="animate-fade-in">
-      <div className="page-header">
-        <h2 className="page-title">{tr('程序日志')}</h2>
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Task Hub</div>
+        <div className="page-header" style={{ marginBottom: 0 }}>
+          <div>
+            <h2 className="page-title">{tr('程序日志')}</h2>
+            <p className="page-subtitle">
+              任务中心、后台执行状态和程序事件日志统一收口在这里。默认先看任务，再下钻到具体事件，避免首页和业务页到处弹长提示。
+            </p>
+          </div>
         <div className="page-actions">
           <button
             onClick={() => loadTasks(true)}
@@ -453,9 +460,10 @@ export default function ProgramLogs() {
             {clearing ? <><span className="spinner spinner-sm" /> 清空中...</> : '清空日志'}
           </button>
         </div>
+        </div>
       </div>
 
-      <div className="pill-tabs" style={{ marginBottom: 12 }}>
+      <div className="pill-tabs surface-card" style={{ marginBottom: 12 }}>
         <button
           className={`pill-tab ${activeTab === 'tasks' ? 'active' : ''}`}
           onClick={() => setActiveTab('tasks')}
@@ -471,7 +479,7 @@ export default function ProgramLogs() {
       </div>
 
       {activeTab === 'tasks' ? (
-      <div className="card" style={{ overflowX: 'auto', marginBottom: 12 }}>
+      <div className="card surface-card" style={{ overflowX: 'auto', marginBottom: 12 }}>
         <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--color-border-light)', display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{ fontSize: 14, fontWeight: 700 }}>任务中心</div>
           <span className="badge badge-muted" style={{ fontSize: 11 }}>自动轮询 {TASK_POLL_INTERVAL_MS / 1000}s</span>
@@ -616,7 +624,7 @@ export default function ProgramLogs() {
       ) : null}
 
       {activeTab === 'events' && !isMobile ? (
-        <div className="card" style={{ padding: 14, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
+        <div className="card surface-card" style={{ padding: 14, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
           <div style={{ minWidth: 170 }}>
             <ModernSelect
               size="sm"
@@ -650,7 +658,7 @@ export default function ProgramLogs() {
       ) : null}
 
       {activeTab === 'events' ? (
-      <div className="card" style={{ overflowX: 'auto' }}>
+      <div className="card surface-card" style={{ overflowX: 'auto' }}>
         {loading ? (
           <div style={{ padding: 20 }}>
             <div className="skeleton" style={{ width: '100%', height: 34, marginBottom: 8 }} />

@@ -574,15 +574,23 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
   };
 
   return (
-    <div className="animate-fade-in">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <h2 className="greeting">{getGreeting() + '\uFF0C' + normalizedAdminName}</h2>
-        <div style={{ display: 'flex', gap: 8 }}>
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Runtime Briefing</div>
+        <div className="page-header" style={{ marginBottom: 0, alignItems: isMobile ? 'flex-start' : 'center' }}>
+          <div>
+            <h2 className="greeting">{getGreeting() + '\uFF0C' + normalizedAdminName}</h2>
+            <p className="page-subtitle">
+              这里汇总余额、请求量、运行时健康和站点观测。目标是让你在一屏内判断系统是否稳定、哪一类资源最该优先处理。
+            </p>
+          </div>
+          <div className="page-actions">
           <button onClick={() => { load(true); loadRuntimeOverview(true); loadSiteStats(); }} disabled={refreshing} className="topbar-icon-btn" data-tooltip="刷新" aria-label="刷新">
             <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{ animation: refreshing ? 'spin 1s linear infinite' : 'none' }}>
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
           </button>
+          </div>
         </div>
       </div>
 

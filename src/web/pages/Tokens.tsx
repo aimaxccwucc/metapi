@@ -764,6 +764,32 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
     letterSpacing: '0.02em',
   };
 
+  const syncAccountOptions = useMemo(
+    () => [
+      { value: '0', label: '选择账号后同步站点令牌', description: '可按账号名或站点名搜索' },
+      ...activeAccounts.map((account) => ({
+        value: String(account.id),
+        label: `${account.username || `account-${account.id}`} @ ${account.site?.name || '-'}`,
+        description: [account.site?.platform, account.site?.url].filter(Boolean).join(' · '),
+        searchText: [account.username, account.site?.name, account.site?.platform, account.site?.url].filter(Boolean).join(' '),
+      })),
+    ],
+    [activeAccounts],
+  );
+
+  const createAccountOptions = useMemo(
+    () => [
+      { value: '0', label: '选择账号', description: '可按账号名或站点名搜索' },
+      ...activeAccounts.map((account) => ({
+        value: String(account.id),
+        label: `${account.username || `account-${account.id}`} @ ${account.site?.name || '-'}`,
+        description: [account.site?.platform, account.site?.url].filter(Boolean).join(' · '),
+        searchText: [account.username, account.site?.name, account.site?.platform, account.site?.url].filter(Boolean).join(' '),
+      })),
+    ],
+    [activeAccounts],
+  );
+
   const toggleCardStyle: React.CSSProperties = {
     display: 'flex',
     alignItems: 'flex-start',
@@ -804,14 +830,10 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
               size="sm"
               value={String(syncingAccountId || 0)}
               onChange={(nextValue) => setSyncingAccountId(Number.parseInt(nextValue, 10) || 0)}
-              options={[
-                { value: '0', label: '选择账号后同步站点令牌' },
-                ...activeAccounts.map((account) => ({
-                  value: String(account.id),
-                  label: `${account.username || `account-${account.id}`} @ ${account.site?.name || '-'}`,
-                })),
-              ]}
+              options={syncAccountOptions}
               placeholder="选择账号后同步站点令牌"
+              searchable
+              searchPlaceholder="搜索账号或站点"
             />
           </div>
           <button
@@ -839,7 +861,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
         {showAdd ? '取消' : '+ 新增令牌'}
       </button>
     </div>
-  ), [activeAccounts, allVisibleTokensSelected, embedded, handleSync, handleSyncAll, handleToggleAdd, isMobile, showAdd, syncing, syncingAccountId, syncingAll]);
+  ), [allVisibleTokensSelected, embedded, handleSync, handleSyncAll, handleToggleAdd, isMobile, showAdd, syncAccountOptions, syncing, syncingAccountId, syncingAll]);
 
   useEffect(() => {
     if (!embedded || !onEmbeddedActionsChange) return;
@@ -850,11 +872,21 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
   }, [embedded, headerActions, onEmbeddedActionsChange]);
 
   return (
-    <div className={embedded ? '' : 'animate-fade-in'}>
+    <div className={embedded ? '' : 'page-shell animate-fade-in'}>
       {(!embedded || !onEmbeddedActionsChange) && (
-        <div className="page-header">
-          {!embedded ? <h2 className="page-title">{tr('账号令牌')}</h2> : <div />}
-          {headerActions}
+        <div className="page-hero">
+          <div className="page-kicker">Managed Tokens</div>
+          <div className="page-header" style={{ marginBottom: 0 }}>
+            <div>
+              {!embedded ? <h2 className="page-title">{tr('账号令牌')}</h2> : <div />}
+              {!embedded ? (
+                <p className="page-subtitle">
+                  管理账号同步下来的真实调用令牌，支持补建、同步、编辑分组与批量治理。这里更偏向“可用 key 资产池”视角。
+                </p>
+              ) : null}
+            </div>
+            {headerActions}
+          </div>
         </div>
       )}
 
@@ -865,14 +897,10 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
             <ModernSelect
               value={String(syncingAccountId || 0)}
               onChange={(nextValue) => setSyncingAccountId(Number.parseInt(nextValue, 10) || 0)}
-              options={[
-                { value: '0', label: '选择账号后同步站点令牌' },
-                ...activeAccounts.map((account) => ({
-                  value: String(account.id),
-                  label: `${account.username || `account-${account.id}`} @ ${account.site?.name || '-'}`,
-                })),
-              ]}
+              options={syncAccountOptions}
               placeholder="选择账号后同步站点令牌"
+              searchable
+              searchPlaceholder="搜索账号或站点"
             />
           </div>
           <button
@@ -894,7 +922,7 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
         </div>
       </MobileFilterSheet>
 
-      <div className="info-tip" style={{ marginBottom: 12 }}>
+      <div className="info-tip surface-card" style={{ marginBottom: 12 }}>
         新增令牌会调用站点 API 创建新密钥，再自动同步到本地。支持设置分组、额度、过期时间和 IP 白名单；已存在密钥可直接用“同步站点令牌”读取。
       </div>
 
@@ -1077,14 +1105,10 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                   group: '',
                 }));
               }}
-              options={[
-                { value: '0', label: '选择账号' },
-                ...activeAccounts.map((account) => ({
-                  value: String(account.id),
-                  label: `${account.username || `account-${account.id}`} @ ${account.site?.name || '-'}`,
-                })),
-              ]}
+              options={createAccountOptions}
               placeholder="选择账号"
+              searchable
+              searchPlaceholder="搜索账号或站点"
             />
           </div>
           {createHintModelName ? (

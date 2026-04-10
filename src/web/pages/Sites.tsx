@@ -957,9 +957,16 @@ export default function Sites() {
   };
 
   return (
-    <div className="animate-fade-in">
-      <div className="page-header">
-        <h2 className="page-title">{tr('站点管理')}</h2>
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Site Registry</div>
+        <div className="page-header" style={{ marginBottom: 0 }}>
+          <div>
+            <h2 className="page-title">{tr('站点管理')}</h2>
+            <p className="page-subtitle">
+              管理上游站点地址、平台能力、权重、签到入口和代理设置。这里更适合做“站点级别”的健康治理，而不是逐账号排查。
+            </p>
+          </div>
         <div className="page-actions sites-page-actions">
           {isMobile ? (
             <>
@@ -995,6 +1002,7 @@ export default function Sites() {
           <button onClick={openAdd} className="btn btn-primary">
             {isAdding ? '取消' : '+ 添加站点'}
           </button>
+        </div>
         </div>
       </div>
 
@@ -1086,11 +1094,11 @@ export default function Sites() {
         </MobileBatchBar>
       )}
 
-      <div className="info-tip" style={{ marginBottom: 12 }}>
+      <div className="info-tip surface-card" style={{ marginBottom: 12 }}>
         站点权重说明：最终站点倍率 = 站点全局权重 × 设置页中下游 API Key 的站点倍率。它会与路由策略因子（基础权重、价值分、成本、余额、使用频次）共同作用。数值越大，该站点在同优先级下越容易被选中。建议范围 0.5-3，默认 1；长期不建议超过 5。
       </div>
 
-      <div className="card" style={{ marginBottom: 12, padding: 12 }}>
+      <div className="card surface-card" style={{ marginBottom: 12, padding: 12 }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
           <button
             onClick={handleRefreshSiteHealth}

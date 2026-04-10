@@ -1785,10 +1785,10 @@ export default function DownstreamKeys() {
           <InlineToggle value={tagMatchMode} onChange={setTagMatchMode} />
         </div>
         <div style={{ minWidth: 170 }}>
-          <ModernSelect value={status} onChange={(value) => setStatus((value as Status) || 'all')} options={statusOptions} />
+          <ModernSelect value={status} onChange={(value) => setStatus((value as Status) || 'all')} options={statusOptions} searchable searchPlaceholder="搜索状态" />
         </div>
         <div style={{ minWidth: 170 }}>
-          <ModernSelect value={groupFilter} onChange={(value) => setGroupFilter(String(value || '__all__'))} options={groupFilterOptions} />
+          <ModernSelect value={groupFilter} onChange={(value) => setGroupFilter(String(value || '__all__'))} options={groupFilterOptions} searchable searchPlaceholder="搜索主分组" />
         </div>
         <button className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => { setSearchInput(''); setStatus('all'); setGroupFilter('__all__'); setSelectedTags([]); setTagMatchMode('any'); }}>
           重置筛选
