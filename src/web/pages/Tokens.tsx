@@ -1004,6 +1004,8 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
                     }))}
                     placeholder={editGroupLoading ? '分组加载中...' : '选择分组'}
                     disabled={editGroupLoading}
+                    searchable
+                    searchPlaceholder="搜索分组"
                   />
                 </div>
                 <div style={{ gridColumn: '1 / -1' }}>
@@ -1058,8 +1060,11 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
       </CenteredModal>
 
       {!isMobile && selectedTokenIds.length > 0 && (
-        <div className="card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div className="card surface-card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <span style={{ fontSize: 13, fontWeight: 600 }}>已选 {selectedTokenIds.length} 项</span>
+          <button onClick={() => setSelectedTokenIds([])} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+            清空选择
+          </button>
           <button onClick={() => runBatchTokenAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
             批量启用
           </button>
@@ -1074,6 +1079,9 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
 
       {isMobile && selectedTokenIds.length > 0 && (
         <MobileBatchBar info={`已选 ${selectedTokenIds.length} 项`}>
+            <button onClick={() => setSelectedTokenIds([])} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+              清空选择
+            </button>
             <button onClick={() => runBatchTokenAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
               批量启用
             </button>
@@ -1146,6 +1154,8 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
               }))}
               placeholder={groupLoading ? '分组加载中...' : '选择分组'}
               disabled={!form.accountId || groupLoading}
+              searchable
+              searchPlaceholder="搜索分组"
             />
           </div>
           <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>

@@ -1032,8 +1032,16 @@ export default function Sites() {
       </MobileFilterSheet>
 
       {!isMobile && selectedSiteIds.length > 0 && (
-        <div className="card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div className="card surface-card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <span style={{ fontSize: 13, fontWeight: 600 }}>已选 {selectedSiteIds.length} 项</span>
+          <button
+            onClick={() => setSelectedSiteIds([])}
+            disabled={batchActionLoading}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+          >
+            清空选择
+          </button>
           <button
             data-testid="sites-batch-enable-system-proxy"
             onClick={() => runBatchAction('enableSystemProxy')}
@@ -1065,6 +1073,14 @@ export default function Sites() {
 
       {isMobile && selectedSiteIds.length > 0 && (
         <MobileBatchBar info={`已选 ${selectedSiteIds.length} 项`}>
+            <button
+              onClick={() => setSelectedSiteIds([])}
+              disabled={batchActionLoading}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+            >
+              清空选择
+            </button>
             <button
               data-testid="sites-batch-enable-system-proxy"
               onClick={() => runBatchAction('enableSystemProxy')}

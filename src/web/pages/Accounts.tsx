@@ -1486,8 +1486,11 @@ export default function Accounts() {
       />
 
       {!isMobile && activeSegment !== 'tokens' && selectedAccountIds.length > 0 && (
-        <div className="card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div className="card surface-card" style={{ padding: 12, marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <span style={{ fontSize: 13, fontWeight: 600 }}>已选 {selectedAccountIds.length} 项</span>
+          <button onClick={() => setSelectedAccountIds([])} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+            清空选择
+          </button>
           <button data-testid="accounts-batch-refresh-balance" onClick={() => runBatchAccountAction('refreshBalance')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
             批量刷新余额
           </button>
@@ -1505,6 +1508,9 @@ export default function Accounts() {
 
       {isMobile && activeSegment !== 'tokens' && selectedAccountIds.length > 0 && (
         <MobileBatchBar info={`已选 ${selectedAccountIds.length} 项`}>
+            <button onClick={() => setSelectedAccountIds([])} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
+              清空选择
+            </button>
             <button data-testid="accounts-batch-refresh-balance" onClick={() => runBatchAccountAction('refreshBalance')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
               批量刷新余额
             </button>

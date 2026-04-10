@@ -214,6 +214,35 @@ export default function CredentialDiagnostics() {
     () => collectBenchmarkModelNames(diagnostic),
     [diagnostic],
   );
+  const diagnosticHighlights = useMemo(() => {
+    if (!diagnostic) return [];
+    return [
+      {
+        key: 'connectivity',
+        label: '连通性',
+        value: diagnostic.connectivity.status || '--',
+        detail: diagnostic.connectivity.probe.reachable === null ? '等待探测' : (diagnostic.connectivity.probe.reachable ? '可达' : '失败'),
+      },
+      {
+        key: 'protocol',
+        label: '协议',
+        value: diagnostic.protocol.protocol || '--',
+        detail: diagnostic.protocol.ok ? '已识别' : '待修复',
+      },
+      {
+        key: 'models',
+        label: '推荐模型',
+        value: diagnostic.models.recommendedBaseModel || '--',
+        detail: `已识别 ${diagnostic.models.total} 个模型`,
+      },
+      {
+        key: 'routing',
+        label: '路由影响',
+        value: String(diagnostic.routing.referencedRoutes.length),
+        detail: `${diagnostic.routing.downstreamKeys.length} 个下游密钥相关`,
+      },
+    ];
+  }, [diagnostic]);
 
   const updateRouteTarget = (nextType: TargetType, nextId: number) => {
     const params = new URLSearchParams(searchParams);
@@ -313,13 +342,23 @@ export default function CredentialDiagnostics() {
       </div>
 
       {loadingDiagnostic ? (
-        <div className="card" style={{ padding: 18 }}>加载诊断结果中...</div>
+        <div className="card surface-card" style={{ padding: 18 }}>加载诊断结果中...</div>
       ) : !diagnostic ? (
-        <div className="card" style={{ padding: 18 }}>请选择一个可诊断对象。</div>
+        <div className="card surface-card" style={{ padding: 18 }}>请选择一个可诊断对象。</div>
       ) : (
         <>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))', gap: 12, marginBottom: 16 }}>
+            {diagnosticHighlights.map((item) => (
+              <div key={item.key} className="stat-summary-card">
+                <div className="stat-summary-card-label">{item.label}</div>
+                <div className="stat-summary-card-value" style={{ fontSize: 18 }}>{item.value}</div>
+                <div style={{ position: 'relative', zIndex: 1, marginTop: 6, fontSize: 12, color: 'var(--color-text-secondary)' }}>{item.detail}</div>
+              </div>
+            ))}
+          </div>
+
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0,1fr)' : '1.2fr 1fr', gap: 16, marginBottom: 16 }}>
-            <div className="card" style={{ padding: 18 }}>
+            <div className="card surface-card" style={{ padding: 18 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>基础对象</div>
               <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0,1fr)' : '1fr 1fr', gap: 12, fontSize: 13 }}>
                 <div>
@@ -345,7 +384,7 @@ export default function CredentialDiagnostics() {
               </div>
             </div>
 
-            <div className="card" style={{ padding: 18 }}>
+            <div className="card surface-card" style={{ padding: 18 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>连通性</div>
               <div style={{ display: 'grid', gap: 10, fontSize: 13 }}>
                 <div>健康状态：<strong>{diagnostic.connectivity.status}</strong></div>
@@ -359,7 +398,7 @@ export default function CredentialDiagnostics() {
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0,1fr)' : '1fr 1fr', gap: 16, marginBottom: 16 }}>
-            <div className="card" style={{ padding: 18 }}>
+            <div className="card surface-card" style={{ padding: 18 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>协议探测</div>
               <div style={{ display: 'grid', gap: 10, fontSize: 13 }}>
                 <div>状态：<strong>{diagnostic.protocol.ok ? '成功' : '失败'}</strong></div>
@@ -373,7 +412,7 @@ export default function CredentialDiagnostics() {
               </div>
             </div>
 
-            <div className="card" style={{ padding: 18 }}>
+            <div className="card surface-card" style={{ padding: 18 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>最小请求</div>
               <div style={{ display: 'grid', gap: 10, fontSize: 13 }}>
                 <div>测试模型：<strong>{diagnostic.debug.modelName || '--'}</strong></div>
@@ -387,7 +426,7 @@ export default function CredentialDiagnostics() {
             </div>
           </div>
 
-          <div className="card" style={{ padding: 18, marginBottom: 16 }}>
+          <div className="card surface-card" style={{ padding: 18, marginBottom: 16 }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 700 }}>模型与轻量测速</div>
@@ -412,7 +451,7 @@ export default function CredentialDiagnostics() {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, marginBottom: 12 }}>
               {diagnostic.models.items.slice(0, 12).map((item) => (
-                <div key={item.name} style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 12 }}>
+                <div key={item.name} className="card" style={{ padding: 12 }}>
                   <div style={{ fontWeight: 700, marginBottom: 6 }}>{item.name}</div>
                   <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
                     延迟：{formatLatency(item.latencyMs)} · {item.disabled ? '站点禁用' : '可用'} · {item.isManual ? '手工模型' : '自动发现'}
@@ -431,7 +470,7 @@ export default function CredentialDiagnostics() {
                 </div>
                 <div style={{ display: 'grid', gap: 8 }}>
                   {benchmark.items.map((item) => (
-                    <div key={item.modelName} style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                    <div key={item.modelName} className="card" style={{ padding: 10 }}>
                       <div style={{ fontWeight: 700 }}>{item.modelName}</div>
                       <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
                         成功率 {formatPercent(item.successRate)} · 中位耗时 {formatLatency(item.medianLatencyMs)} · 平均耗时 {formatLatency(item.avgLatencyMs)} · 首字中位 {formatLatency(item.medianFirstTokenMs)}
@@ -444,14 +483,14 @@ export default function CredentialDiagnostics() {
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0,1fr)' : '1fr 1fr', gap: 16 }}>
-            <div className="card" style={{ padding: 18 }}>
+            <div className="card surface-card" style={{ padding: 18 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>路由影响</div>
               {diagnostic.routing.referencedRoutes.length === 0 ? (
                 <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>当前未发现引用该对象的路由。</div>
               ) : (
                 <div style={{ display: 'grid', gap: 10 }}>
                   {diagnostic.routing.referencedRoutes.map((route) => (
-                    <div key={route.id} style={{ border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                    <div key={route.id} className="card" style={{ padding: 10 }}>
                       <div style={{ fontWeight: 700 }}>{route.displayName || route.modelPattern}</div>
                       <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
                         决策模型：{route.decisionModelName || '--'} · 刷新时间：{formatDateTime(route.decisionRefreshedAt)}
@@ -462,7 +501,7 @@ export default function CredentialDiagnostics() {
               )}
             </div>
 
-            <div className="card" style={{ padding: 18 }}>
+            <div className="card surface-card" style={{ padding: 18 }}>
               <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>治理与下游影响</div>
               <div style={{ display: 'grid', gap: 12 }}>
                 <div>

@@ -277,6 +277,32 @@ export default function TaskDetailModal({ open, task, loading = false, error = '
   const visibleRows = useMemo(() => (failedOnly ? failedRows : detailRows), [detailRows, failedOnly, failedRows]);
   const taskBadge = getTaskBadge(task?.status);
   const rawResult = task?.result === undefined ? '' : stringifyTaskResult(task.result);
+  const taskHighlights = useMemo(() => [
+    {
+      key: 'status',
+      label: tr('任务状态'),
+      value: taskBadge.label,
+      detail: task?.type || '-',
+    },
+    {
+      key: 'rows',
+      label: tr('执行项'),
+      value: String(detailRows.length),
+      detail: `${tr('失败')} ${failedRows.length}`,
+    },
+    {
+      key: 'summary',
+      label: tr('汇总字段'),
+      value: String(summaryEntries.length),
+      detail: summaryEntries.length > 0 ? tr('已生成摘要') : tr('暂无摘要'),
+    },
+    {
+      key: 'finished',
+      label: tr('更新时间'),
+      value: formatDateTimeLocal(task?.finishedAt || task?.updatedAt),
+      detail: formatDateTimeLocal(task?.createdAt),
+    },
+  ], [detailRows.length, failedRows.length, summaryEntries.length, task?.createdAt, task?.finishedAt, task?.type, task?.updatedAt, taskBadge.label]);
 
   const openSite = useCallback((siteId: number) => {
     onClose();
@@ -344,6 +370,16 @@ export default function TaskDetailModal({ open, task, loading = false, error = '
           {error ? (
             <div className="alert alert-error">{error}</div>
           ) : null}
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
+            {taskHighlights.map((item) => (
+              <div key={item.key} className="card" style={{ padding: 12 }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{item.label}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>{item.value || '-'}</div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{item.detail || '-'}</div>
+              </div>
+            ))}
+          </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
             <div className="card" style={{ padding: 12 }}>
