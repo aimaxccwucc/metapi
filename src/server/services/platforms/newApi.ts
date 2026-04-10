@@ -448,8 +448,9 @@ export class NewApiAdapter extends BasePlatformAdapter {
       return result;
     }
 
-    const mapSource = [payload?.data, payload?.items, payload?.list].find((value) => value && typeof value === 'object');
-    if (mapSource && typeof mapSource === 'object') {
+    const mapSources = [payload?.data?.keys, payload?.data, payload?.items, payload?.list]
+      .filter((value) => value && typeof value === 'object');
+    for (const mapSource of mapSources) {
       for (const [rawKey, entry] of Object.entries(mapSource)) {
         const numericKey = Number(rawKey);
         const fallbackId = Number.isFinite(numericKey) && numericKey > 0 ? Math.trunc(numericKey) : undefined;

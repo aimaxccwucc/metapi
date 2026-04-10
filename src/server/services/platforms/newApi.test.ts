@@ -21,6 +21,7 @@ const BALANCE_FAIL_TOKEN = 'balance-fail-token';
 const GROUP_EXPIRED_TOKEN = 'group-expired-token';
 const SESSION_MASKED_LIST_TOKEN = 'session-masked-list-token';
 const SESSION_BATCH_MASKED_LIST_TOKEN = 'session-batch-masked-list-token';
+const SESSION_BATCH_KEYS_MAP_TOKEN = 'session-batch-keys-map-token';
 const SHIELD_LOGIN_USERNAME = 'shield-user';
 const SHIELD_LOGIN_PASSWORD = 'shield-pass';
 const SHIELD_LOGIN_TOKEN = 'login-session-token';
@@ -198,6 +199,20 @@ describe('NewApiAdapter', () => {
           return;
         }
 
+        if (req.url === '/api/token/batch/keys' && req.method === 'POST' && typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${SESSION_BATCH_KEYS_MAP_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            data: {
+              keys: {
+                951: 'sk-map-secret-951',
+                952: 'sk-map-secret-952',
+              },
+            },
+          }));
+          return;
+        }
+
         if (req.url === '/api/token/321' && typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${SESSION_MASKED_LIST_TOKEN}`) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
@@ -274,6 +289,19 @@ describe('NewApiAdapter', () => {
               items: [
                 { id: 901, key: 'sk-bat***901', name: 'batch-a', status: 1, group: 'cckpro' },
                 { id: 902, key: 'sk-bat***902', name: 'batch-b', status: 1, group: 'codex' },
+              ],
+            },
+          }));
+          return;
+        }
+
+        if (typeof req.headers.authorization === 'string' && req.headers.authorization === `Bearer ${SESSION_BATCH_KEYS_MAP_TOKEN}`) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            data: {
+              items: [
+                { id: 951, key: 'sk-map***951', name: 'map-a', status: 1, group: 'cckpro' },
+                { id: 952, key: 'sk-map***952', name: 'map-b', status: 1, group: 'codex' },
               ],
             },
           }));
@@ -582,6 +610,29 @@ describe('NewApiAdapter', () => {
     expect(requests.some((r) => r.url === '/api/token/batch/keys' && r.method === 'POST')).toBe(true);
     expect(requests.some((r) => r.url === '/api/token/901/key')).toBe(false);
     expect(requests.some((r) => r.url === '/api/token/902/key')).toBe(false);
+  });
+
+  it('hydrates masked token list entries from batch key map payloads', async () => {
+    const adapter = new NewApiAdapter();
+    const tokens = await adapter.getApiTokens(baseUrl, SESSION_BATCH_KEYS_MAP_TOKEN, 11494);
+
+    expect(tokens).toEqual([
+      expect.objectContaining({
+        id: 951,
+        name: 'map-a',
+        key: 'sk-map-secret-951',
+        enabled: true,
+        tokenGroup: 'cckpro',
+      }),
+      expect.objectContaining({
+        id: 952,
+        name: 'map-b',
+        key: 'sk-map-secret-952',
+        enabled: true,
+        tokenGroup: 'codex',
+      }),
+    ]);
+    expect(requests.some((r) => r.url === '/api/token/batch/keys' && r.method === 'POST')).toBe(true);
   });
 
   it('hydrates masked cookie token list entries from token detail endpoint', async () => {
