@@ -17,7 +17,6 @@ import {
 import { buildOauthInfo, getOauthInfoFromExtraConfig } from './oauthAccount.js';
 import { buildCodexOauthInfo } from './codexAccount.js';
 import { buildQuotaSnapshotFromOauthInfo, refreshOauthQuotaSnapshot } from './quota.js';
-import { queueAutoProvisionTokenCoverageTask } from '../tokenCoverageAutoProvisionService.js';
 
 type OAuthProviderMetadata = ReturnType<typeof listOauthProviders>[number];
 const MANUAL_CALLBACK_DELAY_MS = 15_000;
@@ -418,14 +417,6 @@ export async function handleOauthCallback(input: {
     await rebuildTokenRoutesFromAvailabilityScoped({
       accountIds: [account.id],
       siteIds: [site.id],
-    });
-    queueAutoProvisionTokenCoverageTask({
-      accountIds: [account.id],
-      siteIds: [site.id],
-    }, {
-      provisionMode: 'shared_group',
-      dedupeKey: `auto-provision-token-coverage:oauth:${account.id}`,
-      title: 'OAuth 回调后自动补齐模型覆盖 Key',
     });
     markOauthSessionSuccess(input.state, {
       accountId: account.id,

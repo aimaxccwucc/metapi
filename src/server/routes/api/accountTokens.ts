@@ -21,7 +21,6 @@ import { getCredentialModeFromExtraConfig, getProxyUrlFromExtraConfig, resolvePl
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import {
   autoProvisionTokenCoverage,
-  queueAutoProvisionTokenCoverageTask,
 } from '../../services/tokenCoverageAutoProvisionService.js';
 import { withAccountProxyOverride } from '../../services/siteProxy.js';
 import {
@@ -437,17 +436,7 @@ async function refreshCoverageForAccounts(accountIds: number[]) {
     console.warn(`[account-tokens] token route rebuild failed after coverage refresh: ${errorMessage}`);
   }
 
-  let autoProvision: Awaited<ReturnType<typeof autoProvisionTokenCoverage>> | null = null;
-  try {
-    autoProvision = await autoProvisionTokenCoverage({
-      accountIds: uniqueAccountIds,
-    }, {
-      provisionMode: 'shared_group',
-      refreshRouteChannels: true,
-    });
-  } catch (error) {
-    console.warn(`[account-tokens] auto provision failed after coverage refresh: ${error instanceof Error ? error.message : String(error || 'unknown error')}`);
-  }
+  const autoProvision: Awaited<ReturnType<typeof autoProvisionTokenCoverage>> | null = null;
 
   return { refresh, rebuild, autoProvision };
 }

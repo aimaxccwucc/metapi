@@ -8,6 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 const getApiTokensMock = vi.fn();
 const getApiTokenMock = vi.fn();
 const createApiTokenMock = vi.fn();
+const deleteApiTokenMock = vi.fn();
 const getUserGroupsMock = vi.fn();
 const getModelsMock = vi.fn();
 const fetchModelPricingCatalogMock = vi.fn();
@@ -17,6 +18,7 @@ vi.mock('../../services/platforms/index.js', () => ({
     getApiTokens: (...args: unknown[]) => getApiTokensMock(...args),
     getApiToken: (...args: unknown[]) => getApiTokenMock(...args),
     createApiToken: (...args: unknown[]) => createApiTokenMock(...args),
+    deleteApiToken: (...args: unknown[]) => deleteApiTokenMock(...args),
     getUserGroups: (...args: unknown[]) => getUserGroupsMock(...args),
     getModels: (...args: unknown[]) => getModelsMock(...args),
   }),
@@ -127,6 +129,7 @@ describe('POST /api/routes auto token coverage', () => {
     getApiTokensMock.mockReset();
     getApiTokenMock.mockReset();
     createApiTokenMock.mockReset();
+    deleteApiTokenMock.mockReset();
     getUserGroupsMock.mockReset();
     getModelsMock.mockReset();
     fetchModelPricingCatalogMock.mockReset();
@@ -134,6 +137,7 @@ describe('POST /api/routes auto token coverage', () => {
     getApiTokensMock.mockResolvedValue([]);
     getApiTokenMock.mockResolvedValue(null);
     createApiTokenMock.mockResolvedValue(false);
+    deleteApiTokenMock.mockResolvedValue(true);
     getUserGroupsMock.mockResolvedValue(['default']);
     getModelsMock.mockResolvedValue([]);
     fetchModelPricingCatalogMock.mockResolvedValue(null);
@@ -545,5 +549,195 @@ describe('POST /api/routes auto token coverage', () => {
       group: 'vip',
       name: 'metapi-vip-shared',
     });
+  });
+
+  it('removes stale auto-managed group token after model drifts to another group', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'drift-cleanup-site',
+      url: 'https://drift-cleanup-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'drift-cleanup-user',
+      accessToken: 'drift-cleanup-session',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    const staleToken = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'metapi-cheap-shared',
+      token: 'sk-old-cheap',
+      tokenGroup: 'cheap',
+      source: 'sync',
+      enabled: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'drift-model',
+      available: true,
+    }).run();
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: staleToken.id,
+      modelName: 'drift-model',
+      available: true,
+    }).run();
+
+    getUserGroupsMock.mockResolvedValue(['cheap', 'vip']);
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      groupRatio: { cheap: 1, vip: 0.2 },
+      models: [{
+        modelName: 'drift-model',
+        quotaType: 0,
+        modelDescription: null,
+        tags: [],
+        supportedEndpointTypes: [],
+        ownerBy: null,
+        enableGroups: ['cheap', 'vip'],
+        groupPricing: {},
+      }],
+    });
+    createApiTokenMock.mockResolvedValue(true);
+    getApiTokensMock.mockResolvedValue([
+      { name: 'metapi-cheap-shared', key: 'sk-old-cheap', enabled: true, tokenGroup: 'cheap' },
+      { name: 'metapi-vip-shared', key: 'sk-new-vip', enabled: true, tokenGroup: 'vip' },
+    ]);
+    getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
+      if (credential === 'sk-new-vip') return ['drift-model'];
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        modelPattern: 'drift-model',
+        enabled: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(createApiTokenMock).toHaveBeenCalledTimes(1);
+    expect(deleteApiTokenMock).toHaveBeenCalledTimes(1);
+    expect(deleteApiTokenMock.mock.calls[0]?.[2]).toBe('sk-old-cheap');
+
+    const remainingTokens = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(remainingTokens.map((item: AccountTokenRow) => item.name)).toEqual(['metapi-vip-shared']);
+  });
+
+  it('keeps old shared-group token when another explicit target still needs that group', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'drift-preserve-site',
+      url: 'https://drift-preserve-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'drift-preserve-user',
+      accessToken: 'drift-preserve-session',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    const staleToken = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'metapi-cheap-shared',
+      token: 'sk-preserve-cheap',
+      tokenGroup: 'cheap',
+      source: 'sync',
+      enabled: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: account.id,
+        modelName: 'drift-model',
+        available: true,
+      },
+      {
+        accountId: account.id,
+        modelName: 'steady-model',
+        available: true,
+      },
+    ]).run();
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: staleToken.id,
+      modelName: 'steady-model',
+      available: true,
+    }).run();
+    await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'steady-model',
+      enabled: true,
+    }).run();
+
+    getUserGroupsMock.mockResolvedValue(['cheap', 'vip']);
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      groupRatio: { cheap: 1, vip: 0.2 },
+      models: [
+        {
+          modelName: 'drift-model',
+          quotaType: 0,
+          modelDescription: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          ownerBy: null,
+          enableGroups: ['cheap', 'vip'],
+          groupPricing: {},
+        },
+        {
+          modelName: 'steady-model',
+          quotaType: 0,
+          modelDescription: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          ownerBy: null,
+          enableGroups: ['cheap'],
+          groupPricing: {},
+        },
+      ],
+    });
+    createApiTokenMock.mockResolvedValue(true);
+    getApiTokensMock.mockResolvedValue([
+      { name: 'metapi-cheap-shared', key: 'sk-preserve-cheap', enabled: true, tokenGroup: 'cheap' },
+      { name: 'metapi-vip-shared', key: 'sk-preserve-vip', enabled: true, tokenGroup: 'vip' },
+    ]);
+    getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
+      if (credential === 'sk-preserve-cheap') return ['steady-model'];
+      if (credential === 'sk-preserve-vip') return ['drift-model'];
+      return [];
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        modelPattern: 'drift-model',
+        enabled: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(createApiTokenMock).toHaveBeenCalledTimes(1);
+    expect(deleteApiTokenMock).not.toHaveBeenCalled();
+
+    const remainingTokens = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(remainingTokens.map((item: AccountTokenRow) => item.name).sort()).toEqual([
+      'metapi-cheap-shared',
+      'metapi-vip-shared',
+    ]);
   });
 });

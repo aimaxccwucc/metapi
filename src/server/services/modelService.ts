@@ -25,7 +25,6 @@ import { getCodexOauthInfoFromExtraConfig, isCodexPlatform } from './oauth/codex
 import { buildOauthInfo, getOauthInfoFromExtraConfig } from './oauth/oauthAccount.js';
 import { CLAUDE_DEFAULT_ANTHROPIC_VERSION } from './oauth/claudeProvider.js';
 import { refreshOauthAccessTokenSingleflight } from './oauth/refreshSingleflight.js';
-import { queueAutoProvisionTokenCoverageTask } from './tokenCoverageAutoProvisionService.js';
 import {
   ANTIGRAVITY_DAILY_UPSTREAM_BASE_URL,
   ANTIGRAVITY_MODELS_USER_AGENT,
@@ -1398,11 +1397,6 @@ export async function rebuildTokenRoutesFromAvailability() {
 async function runRefreshModelsAndRebuildRoutes() {
   const refresh = await refreshModelsForAllActiveAccounts();
   const rebuild = await rebuildTokenRoutesFromAvailability();
-  queueAutoProvisionTokenCoverageTask({}, {
-    provisionMode: 'shared_group',
-    dedupeKey: 'auto-provision-token-coverage:full-refresh',
-    title: '全量刷新后自动补齐模型覆盖 Key',
-  });
   return { refresh, rebuild };
 }
 

@@ -2,14 +2,20 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import {
   ACCOUNT_TOKEN_VALUE_STATUS_READY,
+  isMaskedPendingAccountToken,
   getPreferredAccountToken,
   isUsableAccountToken,
   syncTokensFromUpstream,
 } from './accountTokenService.js';
-import { requiresManagedAccountTokens, resolvePlatformUserId } from './accountExtraConfig.js';
+import {
+  getProxyUrlFromExtraConfig,
+  requiresManagedAccountTokens,
+  resolvePlatformUserId,
+} from './accountExtraConfig.js';
 import { startBackgroundTask } from './backgroundTaskService.js';
 import { fetchModelPricingCatalog } from './modelPricingService.js';
 import { getAdapter } from './platforms/index.js';
+import { withAccountProxyOverride } from './siteProxy.js';
 import { matchesModelPattern } from './tokenRouter.js';
 
 const DEFAULT_COOLDOWN_MS = 10 * 60 * 1000;
@@ -48,6 +54,11 @@ type GroupCoverageRow = {
   availableModelName: string;
   tokenGroup: string | null;
   tokenName: string;
+};
+type AccountModelRow = {
+  accountId: number;
+  modelName: string;
+  isManual: boolean | null;
 };
 
 export type TokenCoverageProvisionMode = 'shared_group' | 'scoped_model';
@@ -107,6 +118,10 @@ export type TokenCoverageProvisionScope = {
   modelNames?: string[];
 };
 
+function hasExplicitProvisionTargets(scope: TokenCoverageProvisionScope): boolean {
+  return dedupeIds(scope.routeIds).length > 0 || dedupeModels(scope.modelNames).length > 0;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -153,6 +168,10 @@ function resolveTokenGroupLabel(tokenGroup: string | null, tokenName: string | n
   }
   if (/^token-\d+$/.test(normalized)) return null;
   return name;
+}
+
+function isAutoManagedTokenName(tokenName: string | null | undefined): boolean {
+  return /^metapi-/i.test(normalizeText(tokenName));
 }
 
 function buildAutoTokenName(groupName: string): string {
@@ -453,15 +472,7 @@ async function listProvisionCandidateTargets(scope: TokenCoverageProvisionScope)
       const requiredGroups = requiredGroupsByAccountModel.get(key) || [];
       if (requiredGroups.length === 0) continue;
       const existingGroups = coveredGroups.get(key) || new Set<string>();
-      const missingGroups = requiredGroups.filter((group) => !existingGroups.has(group.toLowerCase()));
-      if (missingGroups.length === 0) continue;
-      addTarget({
-        accountId: row.accountId,
-        siteId: row.siteId,
-        modelName,
-        reason: 'missing_group',
-        requiredGroups: missingGroups,
-      });
+      if (existingGroups.size > 0) continue;
     }
 
     for (const modelName of modelNames) {
@@ -500,6 +511,174 @@ async function findReusableTokenByGroup(accountId: number, targetGroup: string):
   }) || null;
 }
 
+async function cleanupAutoManagedTokensForAccount(
+  accountId: number,
+  expectedGroups: Set<string>,
+): Promise<void> {
+  const row = await db.select().from(schema.accounts)
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .where(eq(schema.accounts.id, accountId))
+    .get();
+  if (!row) return;
+
+  const account = row.accounts;
+  const site = row.sites;
+  const adapter = getAdapter(site.platform);
+  const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
+  const accountProxyUrl = getProxyUrlFromExtraConfig(account.extraConfig);
+
+  const tokens = await db.select().from(schema.accountTokens)
+    .where(and(
+      eq(schema.accountTokens.accountId, accountId),
+      eq(schema.accountTokens.enabled, true),
+      eq(schema.accountTokens.valueStatus, ACCOUNT_TOKEN_VALUE_STATUS_READY),
+    ))
+    .all();
+
+  const autoTokens = tokens.filter((token) => (
+    isUsableAccountToken(token) && isAutoManagedTokenName(token.name)
+  ));
+
+  const grouped = new Map<string, TokenRow[]>();
+  for (const token of autoTokens) {
+    const groupKey = normalizeLower(resolveTokenGroupLabel(token.tokenGroup, token.name)) || 'default';
+    const list = grouped.get(groupKey) || [];
+    list.push(token);
+    grouped.set(groupKey, list);
+  }
+
+  const deleteToken = async (token: TokenRow) => {
+    if (
+      adapter
+      && !isMaskedPendingAccountToken(token)
+      && normalizeText(account.accessToken)
+    ) {
+      const deleted = await withAccountProxyOverride(
+        accountProxyUrl,
+        () => adapter.deleteApiToken(site.url, account.accessToken, token.token, platformUserId),
+      ).catch(() => false);
+      if (!deleted) return;
+    }
+    await db.delete(schema.accountTokens).where(eq(schema.accountTokens.id, token.id)).run();
+  };
+
+  for (const [groupKey, groupTokens] of grouped.entries()) {
+    const sorted = [...groupTokens].sort((left, right) => {
+      const leftShared = /-shared$/i.test(normalizeText(left.name)) ? 1 : 0;
+      const rightShared = /-shared$/i.test(normalizeText(right.name)) ? 1 : 0;
+      return rightShared - leftShared || right.id - left.id;
+    });
+
+    if (!expectedGroups.has(groupKey)) {
+      for (const token of sorted) {
+        await deleteToken(token);
+      }
+      continue;
+    }
+
+    for (const token of sorted.slice(1)) {
+      await deleteToken(token);
+    }
+  }
+}
+
+async function listActiveExplicitTargetModelsByAccount(accountIds: number[]): Promise<Map<number, string[]>> {
+  const normalizedAccountIds = dedupeIds(accountIds);
+  const result = new Map<number, string[]>();
+  if (normalizedAccountIds.length === 0) return result;
+
+  const exactRoutePatterns = (await db.select({
+    modelPattern: schema.tokenRoutes.modelPattern,
+  })
+    .from(schema.tokenRoutes)
+    .where(eq(schema.tokenRoutes.enabled, true))
+    .all())
+    .map((row) => normalizeText(row.modelPattern))
+    .filter((modelPattern) => isExactModelPattern(modelPattern));
+
+  const availableRows: AccountModelRow[] = await db.select({
+    accountId: schema.modelAvailability.accountId,
+    modelName: schema.modelAvailability.modelName,
+    isManual: schema.modelAvailability.isManual,
+  })
+    .from(schema.modelAvailability)
+    .where(and(
+      inArray(schema.modelAvailability.accountId, normalizedAccountIds),
+      eq(schema.modelAvailability.available, true),
+    ))
+    .all();
+
+  for (const row of availableRows) {
+    const modelName = normalizeText(row.modelName);
+    if (!modelName) continue;
+    const isExplicitTarget = !!row.isManual || exactRoutePatterns.some((pattern) => (
+      pattern === modelName || isModelAliasEquivalent(pattern, modelName)
+    ));
+    if (!isExplicitTarget) continue;
+    const existing = result.get(row.accountId) || [];
+    if (!existing.some((item) => item === modelName || isModelAliasEquivalent(item, modelName))) {
+      existing.push(modelName);
+      result.set(row.accountId, existing);
+    }
+  }
+
+  return result;
+}
+
+async function resolveExpectedSharedGroupsForAccounts(accountIds: number[]): Promise<Map<number, Set<string>>> {
+  const normalizedAccountIds = dedupeIds(accountIds);
+  const groupsByAccount = new Map<number, Set<string>>();
+  if (normalizedAccountIds.length === 0) return groupsByAccount;
+
+  const explicitModelsByAccount = await listActiveExplicitTargetModelsByAccount(normalizedAccountIds);
+  const accountRows = normalizedAccountIds.length > 0
+    ? await db.select().from(schema.accounts)
+      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .where(inArray(schema.accounts.id, normalizedAccountIds))
+      .all()
+    : [];
+
+  for (const row of accountRows as AccountJoinRow[]) {
+    const models = explicitModelsByAccount.get(row.accounts.id) || [];
+    if (models.length === 0) continue;
+    if ((row.accounts.status || 'active') !== 'active' || (row.sites.status || 'active') !== 'active') continue;
+    if (!requiresManagedAccountTokens(row.accounts)) continue;
+
+    const adapter = getAdapter(row.sites.platform);
+    if (!adapter) continue;
+
+    const platformUserId = resolvePlatformUserId(row.accounts.extraConfig, row.accounts.username);
+    const availableGroups = await adapter.getUserGroups(row.sites.url, row.accounts.accessToken, platformUserId).catch(() => ['default']);
+    const pricingCatalog = await fetchModelPricingCatalog({
+      site: {
+        id: row.sites.id,
+        url: row.sites.url,
+        platform: row.sites.platform,
+        apiKey: row.sites.apiKey,
+      },
+      account: {
+        id: row.accounts.id,
+        accessToken: row.accounts.accessToken,
+        apiToken: row.accounts.apiToken,
+      },
+      modelName: '__metadata__',
+      totalTokens: 0,
+    }).catch(() => null);
+
+    const expectedGroups = new Set<string>();
+    for (const modelName of models) {
+      expectedGroups.add(normalizeLower(selectPreferredTokenGroupForModel(
+        modelName,
+        availableGroups,
+        pricingCatalog,
+      )) || 'default');
+    }
+    groupsByAccount.set(row.accounts.id, expectedGroups);
+  }
+
+  return groupsByAccount;
+}
+
 async function findReusableSharedTokenForModel(accountId: number, modelName: string): Promise<{
   token: TokenRow;
   groupLabel: string | null;
@@ -532,6 +711,22 @@ async function findReusableSharedTokenForModel(accountId: number, modelName: str
     };
   }
   return null;
+}
+
+async function findReusableSharedTokenForModelInGroup(
+  accountId: number,
+  modelName: string,
+  targetGroup: string,
+): Promise<{
+  token: TokenRow;
+  groupLabel: string | null;
+} | null> {
+  const reusable = await findReusableSharedTokenForModel(accountId, modelName);
+  if (!reusable) return null;
+  const reusableGroup = normalizeLower(reusable.groupLabel) || 'default';
+  const expectedGroup = normalizeLower(targetGroup) || 'default';
+  if (reusableGroup !== expectedGroup) return null;
+  return reusable;
 }
 
 async function refreshModelsForAccountDeferred(accountId: number) {
@@ -745,7 +940,7 @@ async function provisionSingleTarget(
   );
 
   if (provisionMode === 'shared_group') {
-    const reusableSharedToken = await findReusableSharedTokenForModel(target.accountId, target.modelName);
+    const reusableSharedToken = await findReusableSharedTokenForModelInGroup(target.accountId, target.modelName, targetGroup);
     if (reusableSharedToken) {
       const reusableGroup = reusableSharedToken.groupLabel || targetGroup;
       await updateStateResult({
@@ -974,6 +1169,14 @@ export async function autoProvisionTokenCoverage(
   },
 ): Promise<TokenCoverageProvisionResult> {
   const provisionMode = options?.provisionMode || 'shared_group';
+  if (!hasExplicitProvisionTargets(scope)) {
+    return {
+      mode: 'mixed',
+      provisionMode,
+      summary: buildSummary([]),
+      results: [],
+    };
+  }
   const { mode, targets } = await listProvisionCandidateTargets(scope);
   const groupedByAccount = new Map<number, TokenCoverageProvisionTarget[]>();
   for (const target of targets) {
@@ -994,6 +1197,13 @@ export async function autoProvisionTokenCoverage(
       .filter((item) => item.status === 'created' || item.status === 'reused')
       .map((item) => item.accountId),
   ));
+  if (provisionMode === 'shared_group' && successfulAccountIds.length > 0) {
+    const expectedGroupsByAccount = await resolveExpectedSharedGroupsForAccounts(successfulAccountIds).catch(() => new Map<number, Set<string>>());
+    for (const accountId of successfulAccountIds) {
+      const expectedGroups = expectedGroupsByAccount.get(accountId) || new Set<string>();
+      await cleanupAutoManagedTokensForAccount(accountId, expectedGroups).catch(() => undefined);
+    }
+  }
   if (options?.refreshRouteChannels !== false && successfulAccountIds.length > 0) {
     await rebuildTokenRoutesFromAvailabilityScopedDeferred({
       accountIds: successfulAccountIds,
