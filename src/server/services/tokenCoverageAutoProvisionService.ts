@@ -9,12 +9,14 @@ import {
 } from './accountTokenService.js';
 import {
   getProxyUrlFromExtraConfig,
+  mergeAccountExtraConfig,
   requiresManagedAccountTokens,
   resolvePlatformUserId,
 } from './accountExtraConfig.js';
 import { startBackgroundTask } from './backgroundTaskService.js';
 import { fetchModelPricingCatalog } from './modelPricingService.js';
 import { getAdapter } from './platforms/index.js';
+import { upsertRoutingGovernanceState } from './routingGovernanceService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
 import { matchesModelPattern } from './tokenRouter.js';
 
@@ -23,6 +25,7 @@ const MAX_AUTOPROVISION_TARGETS = 500;
 const HISTORICAL_RECONCILE_CONCURRENCY = 4;
 const AUTO_PROVISION_TASK_TYPE = 'token';
 const AUTO_PROVISION_TASK_TITLE = '自动补齐模型覆盖 Key';
+const CREATED_TOKEN_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 
 type AccountRow = typeof schema.accounts.$inferSelect;
 type SiteRow = typeof schema.sites.$inferSelect;
@@ -205,6 +208,77 @@ function summarizeError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'string' && error.trim()) return error.trim();
   return 'unknown error';
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function markManagedKeyInstability(params: {
+  accountId: number;
+  siteId: number;
+  modelName: string;
+  reasonCode: 'managed_key_unstable' | 'returns_masked_only';
+  message: string;
+}): Promise<void> {
+  await db.update(schema.accounts)
+    .set({
+      extraConfig: mergeAccountExtraConfig(
+        (await db.select({ extraConfig: schema.accounts.extraConfig })
+          .from(schema.accounts)
+          .where(eq(schema.accounts.id, params.accountId))
+          .get())?.extraConfig,
+        {
+          managedTokenDiagnostics: {
+            status: 'abnormal',
+            reasonCode: params.reasonCode,
+            message: params.message,
+            updatedAt: nowIso(),
+            siteId: params.siteId,
+            modelName: params.modelName,
+          },
+        },
+      ),
+      updatedAt: nowIso(),
+    })
+    .where(eq(schema.accounts.id, params.accountId))
+    .run()
+    .catch(() => undefined);
+
+  await upsertRoutingGovernanceState({
+    subjectType: 'account',
+    subjectId: params.accountId,
+    modelName: params.modelName,
+    reasonCode: params.reasonCode,
+    reasonDetail: params.message,
+    state: 'suppressed',
+    suppressUntil: new Date(Date.now() + DEFAULT_COOLDOWN_MS).toISOString(),
+    probeAfter: new Date(Date.now() + DEFAULT_COOLDOWN_MS).toISOString(),
+    lastFailureAt: nowIso(),
+    failureCountDelta: 1,
+  }).catch(() => undefined);
+}
+
+async function clearManagedKeyInstability(accountId: number): Promise<void> {
+  const current = await db.select({ extraConfig: schema.accounts.extraConfig })
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId))
+    .get()
+    .catch(() => null);
+  if (!current) return;
+  await db.update(schema.accounts)
+    .set({
+      extraConfig: mergeAccountExtraConfig(current.extraConfig, {
+        managedTokenDiagnostics: {
+          status: 'healthy',
+          updatedAt: nowIso(),
+        },
+      }),
+      updatedAt: nowIso(),
+    })
+    .where(eq(schema.accounts.id, accountId))
+    .run()
+    .catch(() => undefined);
 }
 
 function dedupeIds(ids?: number[]): number[] {
@@ -1178,11 +1252,43 @@ async function provisionSingleTarget(
     ? buildScopedAutoTokenName(target.modelName, targetGroup)
     : buildAutoTokenName(targetGroup);
 
+  const syncCreatedTokenAndCoverage = async () => {
+    let upstreamTokens = await adapter.getApiTokens(site.url, account.accessToken, platformUserId).catch(() => []);
+    if (upstreamTokens.length === 0) {
+      const single = await adapter.getApiToken(site.url, account.accessToken, platformUserId).catch(() => null);
+      if (single) {
+        upstreamTokens = [{
+          name: tokenName,
+          key: single,
+          enabled: true,
+          tokenGroup: targetGroup,
+        }];
+      }
+    }
+    if (upstreamTokens.length === 0) {
+      return {
+        upstreamTokens,
+        syncResult: null as Awaited<ReturnType<typeof syncTokensFromUpstream>> | null,
+        createdToken: null as TokenRow | null,
+        hasCoverageAfterCreate: false,
+      };
+    }
+
+    const syncResult = await syncTokensFromUpstream(target.accountId, upstreamTokens);
+    await refreshModelsForAccountDeferred(target.accountId);
+    return {
+      upstreamTokens,
+      syncResult,
+      createdToken: await findProvisionedUsableToken(target.accountId, targetGroup, tokenName),
+      hasCoverageAfterCreate: await hasCoverageInGroup(target.accountId, target.modelName, targetGroup),
+    };
+  };
+
   try {
     const created = await adapter.createApiToken(site.url, account.accessToken, platformUserId, {
       name: tokenName,
-      group: targetGroup,
-      ...(provisionMode === 'scoped_model'
+        group: targetGroup,
+        ...(provisionMode === 'scoped_model'
         ? {
           modelLimitsEnabled: true,
           modelLimits: target.modelName,
@@ -1211,19 +1317,9 @@ async function provisionSingleTarget(
       };
     }
 
-    let upstreamTokens = await adapter.getApiTokens(site.url, account.accessToken, platformUserId).catch(() => []);
-    if (upstreamTokens.length === 0) {
-      const single = await adapter.getApiToken(site.url, account.accessToken, platformUserId).catch(() => null);
-      if (single) {
-        upstreamTokens = [{
-          name: tokenName,
-          key: single,
-          enabled: true,
-          tokenGroup: targetGroup,
-        }];
-      }
-    }
-    if (upstreamTokens.length === 0) {
+    const startedAt = Date.now();
+    let syncAttempt = await syncCreatedTokenAndCoverage();
+    if (syncAttempt.upstreamTokens.length === 0) {
       await updateStateResult({
         target,
         targetGroup,
@@ -1245,23 +1341,59 @@ async function provisionSingleTarget(
       };
     }
 
-    const syncResult = await syncTokensFromUpstream(target.accountId, upstreamTokens);
-    await refreshModelsForAccountDeferred(target.accountId);
-    const createdToken = await findProvisionedUsableToken(target.accountId, targetGroup, tokenName);
-    const hasCoverageAfterCreate = await hasCoverageInGroup(target.accountId, target.modelName, targetGroup);
+    let retryCount = 0;
+    while (
+      retryCount < CREATED_TOKEN_RETRY_DELAYS_MS.length
+      && (
+        !syncAttempt.createdToken
+        || !syncAttempt.hasCoverageAfterCreate
+      )
+      && (syncAttempt.syncResult?.maskedPending || 0) > 0
+    ) {
+      await sleep(CREATED_TOKEN_RETRY_DELAYS_MS[retryCount]!);
+      retryCount += 1;
+      syncAttempt = await syncCreatedTokenAndCoverage();
+      if (syncAttempt.createdToken && syncAttempt.hasCoverageAfterCreate) break;
+    }
+
+    const syncResult = syncAttempt.syncResult;
+    const createdToken = syncAttempt.createdToken;
+    const hasCoverageAfterCreate = syncAttempt.hasCoverageAfterCreate;
+    if (syncResult) {
+      const durationMs = Date.now() - startedAt;
+      console.info('[token-autoprovision] create-token-sync', JSON.stringify({
+        accountId: target.accountId,
+        siteId: target.siteId,
+        modelName: target.modelName,
+        targetGroup,
+        tokenName,
+        maskedPending: syncResult.maskedPending,
+        createdTokenReady: !!createdToken,
+        hasCoverageAfterCreate,
+        retries: retryCount,
+        durationMs,
+      }));
+    }
     if (!createdToken || !hasCoverageAfterCreate) {
-      const reasonCode = syncResult.maskedPending > 0
+      const reasonCode = (syncResult?.maskedPending || 0) > 0
         ? 'created_token_masked_pending'
         : !createdToken
           ? 'created_token_not_ready'
           : 'created_token_missing_coverage';
-      const message = syncResult.maskedPending > 0
+      const message = (syncResult?.maskedPending || 0) > 0
         ? 'upstream returned masked token after create; local token remains pending'
         : !createdToken
           ? 'created token did not become a ready local token'
           : 'created token missing model coverage after refresh';
-      if (syncResult.maskedPending > 0) {
-        await deletePendingAutoManagedTokensForAccount(target.accountId, syncResult.pendingTokenIds).catch(() => undefined);
+      if ((syncResult?.maskedPending || 0) > 0) {
+        await deletePendingAutoManagedTokensForAccount(target.accountId, syncResult?.pendingTokenIds || []).catch(() => undefined);
+        await markManagedKeyInstability({
+          accountId: target.accountId,
+          siteId: target.siteId,
+          modelName: target.modelName,
+          reasonCode: retryCount > 0 ? 'returns_masked_only' : 'managed_key_unstable',
+          message,
+        });
       }
       await updateStateResult({
         target,
@@ -1285,6 +1417,7 @@ async function provisionSingleTarget(
         groupRouteId: target.groupRouteId ?? null,
       };
     }
+    await clearManagedKeyInstability(target.accountId);
     await updateStateResult({
       target,
       targetGroup,
@@ -1341,7 +1474,8 @@ export async function autoProvisionTokenCoverage(
   },
 ): Promise<TokenCoverageProvisionResult> {
   const provisionMode = options?.provisionMode || 'shared_group';
-  if (!hasExplicitProvisionTargets(scope)) {
+  const hasNonExplicitScope = dedupeIds(scope.accountIds).length > 0 || dedupeIds(scope.siteIds).length > 0;
+  if (!hasExplicitProvisionTargets(scope) && !hasNonExplicitScope) {
     return {
       mode: 'mixed',
       provisionMode,
@@ -1436,6 +1570,21 @@ export function queueAutoProvisionTokenCoverageTask(
       },
     ),
   );
+}
+
+export function queueCoverageHealingTask(
+  scope: TokenCoverageProvisionScope = {},
+  options?: {
+    dedupeKey?: string;
+    title?: string;
+    provisionMode?: TokenCoverageProvisionMode;
+  },
+) {
+  return queueAutoProvisionTokenCoverageTask(scope, {
+    provisionMode: options?.provisionMode || 'shared_group',
+    dedupeKey: options?.dedupeKey,
+    title: options?.title || '接入后自动诊断并补齐模型覆盖 Key',
+  });
 }
 
 export const __tokenCoverageAutoProvisionTestUtils = {

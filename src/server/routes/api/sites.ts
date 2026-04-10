@@ -18,6 +18,7 @@ import {
   upsertSiteProtocolConfig,
 } from '../../services/siteProtocolConfigService.js';
 import { SiteProtocolProbeError, probeSiteProtocol } from '../../services/siteProtocolProbeService.js';
+import { queueCoverageHealingTask } from '../../services/tokenCoverageAutoProvisionService.js';
 
 function normalizeSiteStatus(input: unknown): 'active' | 'disabled' | null {
   if (input === undefined || input === null) return null;
@@ -336,6 +337,14 @@ export async function sitesRoutes(app: FastifyInstance) {
       await flushSiteProtocolConfigPersistence();
     }
     invalidateSiteCaches();
+    if ((result.status || 'active') === 'active') {
+      queueCoverageHealingTask({
+        siteIds: [result.id],
+      }, {
+        dedupeKey: `coverage-heal:site-onboard:${result.id}`,
+        title: `站点接入后自动诊断补齐 #${result.id}`,
+      });
+    }
     return {
       ...result,
       protocolConfig: sanitizeSiteProtocolConfigForPlatform(await resolveSiteProtocolConfig(siteId), result.platform),

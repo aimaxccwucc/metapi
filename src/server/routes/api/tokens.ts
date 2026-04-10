@@ -178,6 +178,8 @@ const ROUTING_GOVERNANCE_REASON_CODES = new Set<RoutingGovernanceReasonCode>([
   'invalid_channel',
   'upstream_group_empty',
   'slow_site',
+  'managed_key_unstable',
+  'returns_masked_only',
   'manual_recheck_needed',
 ]);
 

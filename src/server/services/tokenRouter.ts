@@ -652,6 +652,8 @@ function formatGovernanceReason(block: CandidateGovernanceBlock): string {
     invalid_channel: '通道无效',
     upstream_group_empty: '上游通道池空',
     slow_site: '慢站点熔断',
+    managed_key_unstable: '托管密钥不稳定',
+    returns_masked_only: '上游仅返回掩码',
     manual_recheck_needed: '待复测',
   };
   const detail = block.reasonDetail?.replace('[manual_route_probe]', '').trim();

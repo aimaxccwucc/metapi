@@ -85,17 +85,8 @@ function preloadRoute(path: string) {
   void loader();
 }
 
-type RuntimeBannerTone = 'info' | 'warning' | 'error';
-
-type RuntimeBannerNotice = {
-  tone: RuntimeBannerTone;
-  title: string;
-  detail: string;
-  tags: string[];
-};
-
 function summarizeRecentProxyFailures(overview: RuntimeOverview): {
-  tone: RuntimeBannerTone;
+  tone: 'info' | 'warning' | 'error';
   failures: number;
   requests: number;
   rate: number;
@@ -123,103 +114,6 @@ function summarizeRecentProxyFailures(overview: RuntimeOverview): {
 
 function formatPercent(rate: number): string {
   return `${Math.round(rate * 100)}%`;
-}
-
-function buildRuntimeBannerNotice(
-  overview: RuntimeOverview | null,
-  t: (text: string) => string,
-): RuntimeBannerNotice | null {
-  if (!overview) return null;
-
-  const tags: string[] = [];
-  const pushTag = (value: string | null) => {
-    if (!value) return;
-    if (!tags.includes(value)) tags.push(value);
-  };
-
-  const taskFailures = Math.max(0, overview.backgroundTasks.failed || 0);
-  const unreadEvents = Math.max(0, overview.recentActivity.unreadEvents || 0);
-  const proxyFailureSummary = summarizeRecentProxyFailures(overview);
-
-  if (!overview.database.ready) {
-    pushTag(taskFailures > 0 ? `${t('后台失败')} ${taskFailures}` : null);
-    pushTag(unreadEvents > 0 ? `${t('未读事件')} ${unreadEvents}` : null);
-    pushTag(proxyFailureSummary ? `${t('24h 失败')} ${proxyFailureSummary.failures}` : null);
-    return {
-      tone: 'error',
-      title: t('数据库尚未就绪'),
-      detail: t('当前服务仍在等待数据库初始化完成，部分页面与写操作可能不可用。'),
-      tags,
-    };
-  }
-
-  if (taskFailures > 0) {
-    pushTag(overview.backgroundTasks.running > 0 ? `${t('运行中')} ${overview.backgroundTasks.running}` : null);
-    pushTag(unreadEvents > 0 ? `${t('未读事件')} ${unreadEvents}` : null);
-    pushTag(proxyFailureSummary ? `${t('24h 失败')} ${proxyFailureSummary.failures}` : null);
-    return {
-      tone: 'error',
-      title: t('后台任务存在失败'),
-      detail: `${taskFailures}${t(' 个后台任务已失败，建议优先查看程序日志与任务详情。')}`,
-      tags,
-    };
-  }
-
-  if (unreadEvents > 0) {
-    pushTag(proxyFailureSummary ? `${t('24h 失败')} ${proxyFailureSummary.failures}` : null);
-    return {
-      tone: 'warning',
-      title: t('存在未读状态事件'),
-      detail: `${unreadEvents}${t(' 条未读状态事件待处理，可能包含失败告警或任务结果。')}`,
-      tags,
-    };
-  }
-
-  if (proxyFailureSummary) {
-    return {
-      tone: proxyFailureSummary.tone,
-      title: t('24 小时请求失败偏高'),
-      detail: `${proxyFailureSummary.failures}/${proxyFailureSummary.requests}${t(' 次请求失败，失败率约 ')}${formatPercent(proxyFailureSummary.rate)}。${t('建议检查网关路由、站点健康和上游配额。')}`,
-      tags,
-    };
-  }
-
-  return null;
-}
-
-function RuntimeStatusBanner({
-  notice,
-  t,
-}: {
-  notice: RuntimeBannerNotice;
-  t: (text: string) => string;
-}) {
-  const alertClassName = notice.tone === 'error'
-    ? 'alert-error'
-    : (notice.tone === 'warning' ? 'alert-warning' : 'alert-info');
-
-  return (
-    <div className="app-runtime-banner-wrap">
-      <div
-        className={`alert ${alertClassName} app-runtime-banner`.trim()}
-        data-testid="app-runtime-banner"
-        role={notice.tone === 'error' ? 'alert' : 'status'}
-      >
-        <div className={`app-runtime-banner-mark app-runtime-banner-mark-${notice.tone}`} aria-hidden="true" />
-        <div className="app-runtime-banner-copy">
-          <div className="alert-title app-runtime-banner-title">{notice.title}</div>
-          <div className="app-runtime-banner-detail">{notice.detail}</div>
-          {notice.tags.length > 0 ? (
-            <div className="app-runtime-banner-tags" aria-label={t('全局状态摘要')}>
-              {notice.tags.map((tag) => (
-                <span key={tag} className="app-runtime-banner-tag">{tag}</span>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 type ThemeMode = 'system' | 'light' | 'dark';
@@ -723,7 +617,6 @@ function AppShell() {
   const displayName = rawDisplayName ? (rawDisplayName === '管理员' ? t('管理员') : rawDisplayName) : t('管理员');
   const resolvedThemeLabel = resolvedTheme === 'dark' ? t('深色') : t('浅色');
   const avatarUrl = buildDicebearAvatarUrl(userProfile.avatarStyle, userProfile.avatarSeed);
-  const runtimeBannerNotice = buildRuntimeBannerNotice(runtimeOverview, t);
   const appVersionMismatchToastShownRef = useRef(false);
 
   useEffect(() => {
@@ -1142,10 +1035,6 @@ function AppShell() {
           </div>
         </div>
       </header>
-
-      {runtimeBannerNotice ? (
-        <RuntimeStatusBanner notice={runtimeBannerNotice} t={t} />
-      ) : null}
 
       <div className="app-layout">
         {isMobile ? (

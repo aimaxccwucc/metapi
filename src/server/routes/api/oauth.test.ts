@@ -6,9 +6,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const fetchMock = vi.fn();
+const queueCoverageHealingTaskMock = vi.fn();
 
 vi.mock('undici', () => ({
   fetch: (...args: unknown[]) => fetchMock(...args),
+}));
+
+vi.mock('../../services/tokenCoverageAutoProvisionService.js', () => ({
+  queueCoverageHealingTask: (...args: unknown[]) => queueCoverageHealingTaskMock(...args),
 }));
 
 type DbModule = typeof import('../../db/index.js');
@@ -51,6 +56,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
 
   beforeEach(async () => {
     fetchMock.mockReset();
+    queueCoverageHealingTaskMock.mockReset();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.tokenModelAvailability).run();
@@ -431,6 +437,12 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     const models = await db.select().from(schema.modelAvailability).all();
     const modelNames = models.map((row) => row.modelName);
     expect(modelNames.sort()).toEqual(['gpt-5', 'gpt-5.2-codex', 'gpt-5.4']);
+    expect(queueCoverageHealingTaskMock).toHaveBeenCalledWith({
+      accountIds: [accounts[0]!.id],
+      siteIds: [sites[0]!.id],
+    }, expect.objectContaining({
+      dedupeKey: `coverage-heal:oauth:${accounts[0]!.id}`,
+    }));
   });
 
   it('marks oauth session as error and avoids creating a connection when manual codex callback model discovery fails', async () => {

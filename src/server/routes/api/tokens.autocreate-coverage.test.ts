@@ -593,7 +593,8 @@ describe('POST /api/routes auto token coverage', () => {
     ]);
     getModelsMock.mockResolvedValue([]);
 
-    const response = await app.inject({
+    vi.useFakeTimers();
+    const responsePromise = app.inject({
       method: 'POST',
       url: '/api/routes',
       payload: {
@@ -601,6 +602,9 @@ describe('POST /api/routes auto token coverage', () => {
         enabled: true,
       },
     });
+    await vi.runAllTimersAsync();
+    const response = await responsePromise;
+    vi.useRealTimers();
 
     expect(response.statusCode).toBe(200);
 
@@ -629,6 +633,91 @@ describe('POST /api/routes auto token coverage', () => {
       .where(eq(schema.routeChannels.routeId, route.id))
       .all();
     expect(channels).toHaveLength(0);
+  });
+
+  it('retries masked create result and succeeds when upstream later returns plaintext key', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'masked-retry-site',
+      url: 'https://masked-retry-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'masked-retry-user',
+      accessToken: 'masked-retry-session',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'masked-retry-model',
+      available: true,
+    }).run();
+
+    getUserGroupsMock.mockResolvedValue(['default', 'vip']);
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      groupRatio: { default: 1, vip: 0.2 },
+      models: [{
+        modelName: 'masked-retry-model',
+        quotaType: 0,
+        modelDescription: null,
+        tags: [],
+        supportedEndpointTypes: [],
+        ownerBy: null,
+        enableGroups: ['default', 'vip'],
+        groupPricing: {},
+      }],
+    });
+    createApiTokenMock.mockResolvedValue(true);
+    getApiTokensMock
+      .mockResolvedValueOnce([
+        { name: 'metapi-vip-shared', key: 'sk-vip***mask', enabled: true, tokenGroup: 'vip' },
+      ])
+      .mockResolvedValueOnce([
+        { name: 'metapi-vip-shared', key: 'sk-vip-created-plain', enabled: true, tokenGroup: 'vip' },
+      ]);
+    getModelsMock.mockImplementation(async (_baseUrl: string, credential: string) => {
+      if (credential === 'sk-vip-created-plain') return ['masked-retry-model'];
+      return [];
+    });
+
+    vi.useFakeTimers();
+    const responsePromise = app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        modelPattern: 'masked-retry-model',
+        enabled: true,
+      },
+    });
+    await vi.runAllTimersAsync();
+    const response = await responsePromise;
+    vi.useRealTimers();
+
+    expect(response.statusCode).toBe(200);
+    expect(getApiTokensMock).toHaveBeenCalledTimes(2);
+
+    const tokens = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokens.some((token) => token.token === 'sk-vip-created-plain')).toBe(true);
+
+    const state = await db.select()
+      .from(schema.tokenCoverageAutoprovisionStates)
+      .where(and(
+        eq(schema.tokenCoverageAutoprovisionStates.accountId, account.id),
+        eq(schema.tokenCoverageAutoprovisionStates.modelName, 'masked-retry-model'),
+        eq(schema.tokenCoverageAutoprovisionStates.targetGroup, 'vip'),
+      ))
+      .get();
+    expect(state).toMatchObject({
+      status: 'succeeded',
+      reasonCode: 'created',
+    });
   });
 
   it('removes stale auto-managed group token after model drifts to another group', async () => {

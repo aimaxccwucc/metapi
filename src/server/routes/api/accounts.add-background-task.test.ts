@@ -12,6 +12,7 @@ const rebuildTokenRoutesFromAvailabilityMock = vi.fn();
 const rebuildTokenRoutesFromAvailabilityScopedMock = vi.fn();
 const ensureDefaultTokenForAccountMock = vi.fn();
 const syncTokensFromUpstreamMock = vi.fn();
+const queueCoverageHealingTaskMock = vi.fn();
 
 vi.mock('../../services/platforms/index.js', () => ({
   getAdapter: () => ({
@@ -28,6 +29,11 @@ vi.mock('../../services/modelService.js', () => ({
   refreshModelsForAccount: (...args: unknown[]) => refreshModelsForAccountMock(...args),
   rebuildTokenRoutesFromAvailability: (...args: unknown[]) => rebuildTokenRoutesFromAvailabilityMock(...args),
   rebuildTokenRoutesFromAvailabilityScoped: (...args: unknown[]) => rebuildTokenRoutesFromAvailabilityScopedMock(...args),
+}));
+
+vi.mock('../../services/tokenCoverageAutoProvisionService.js', () => ({
+  queueCoverageHealingTask: (...args: unknown[]) => queueCoverageHealingTaskMock(...args),
+  queueAutoProvisionTokenCoverageTask: vi.fn(),
 }));
 
 vi.mock('../../services/accountTokenService.js', () => ({
@@ -71,6 +77,7 @@ describe('accounts background initialization', () => {
     rebuildTokenRoutesFromAvailabilityScopedMock.mockReset();
     ensureDefaultTokenForAccountMock.mockReset();
     syncTokensFromUpstreamMock.mockReset();
+    queueCoverageHealingTaskMock.mockReset();
     resetBackgroundTasks?.();
 
     await db.delete(schema.proxyLogs).run();
@@ -172,6 +179,12 @@ describe('accounts background initialization', () => {
       expect(refreshBalanceMock).toHaveBeenCalledTimes(1);
       expect(refreshModelsForAccountMock).toHaveBeenCalledTimes(1);
       expect(rebuildTokenRoutesFromAvailabilityScopedMock).toHaveBeenCalledTimes(1);
+      expect(queueCoverageHealingTaskMock).toHaveBeenCalledWith({
+        accountIds: [body.id],
+        siteIds: [site.id],
+      }, expect.objectContaining({
+        dedupeKey: `coverage-heal:account-init:${body.id}`,
+      }));
       expect(getBackgroundTask?.(body.jobId!)).toMatchObject({ status: 'succeeded' });
     } finally {
       releaseTokens?.([]);

@@ -499,11 +499,6 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
     if (!runtimeOverview.database.ready) {
       runtimeSignals.push({ tone: 'error', text: '数据库未就绪，配置与统计可能异常。' });
     }
-    if (runtimeFailedTasks > 0) {
-      runtimeSignals.push({ tone: 'error', text: `后台任务失败 ${runtimeFailedTasks} 个，请尽快排查。` });
-    } else if (runtimeRunningTasks > 0 || runtimePendingTasks > 0) {
-      runtimeSignals.push({ tone: 'warning', text: `后台任务运行中 ${runtimeRunningTasks} 个，排队 ${runtimePendingTasks} 个。` });
-    }
     if (runtimeOauthAttempted > runtimeOauthReady) {
       runtimeSignals.push({ tone: 'warning', text: `OAuth 回环监听仅 ${runtimeOauthReady}/${runtimeOauthAttempted} 已就绪。` });
     }
@@ -797,10 +792,10 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
               </div>
 
               <div style={{ padding: 14, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border-light)', background: 'var(--color-bg)' }}>
-                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>后台任务</div>
-                <div style={{ fontSize: 20, fontWeight: 700 }}>{runtimeRunningTasks} 运行中</div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>任务中心</div>
+                <div style={{ fontSize: 20, fontWeight: 700 }}>{runtimeRunningTasks + runtimePendingTasks} 活跃</div>
                 <div style={{ fontSize: 12, color: runtimeFailedTasks > 0 ? 'var(--color-danger)' : 'var(--color-text-secondary)', marginTop: 6 }}>
-                  失败 {runtimeFailedTasks} · 排队 {runtimePendingTasks}
+                  失败 {runtimeFailedTasks} · 统一在任务中心查看
                 </div>
               </div>
 
@@ -831,7 +826,7 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
               <div style={{ padding: 14, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border-light)', background: 'var(--color-bg)' }}>
                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>快捷入口</div>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  <Link to="/events" className="btn btn-ghost" style={{ fontSize: 12, padding: '6px 10px', border: '1px solid var(--color-border)' }}>状态事件</Link>
+                  <Link to="/events" className="btn btn-ghost" style={{ fontSize: 12, padding: '6px 10px', border: '1px solid var(--color-border)' }}>任务中心</Link>
                   <Link to="/routes" className="btn btn-ghost" style={{ fontSize: 12, padding: '6px 10px', border: '1px solid var(--color-border)' }}>路由策略</Link>
                   <Link to="/settings" className="btn btn-ghost" style={{ fontSize: 12, padding: '6px 10px', border: '1px solid var(--color-border)' }}>系统设置</Link>
                 </div>

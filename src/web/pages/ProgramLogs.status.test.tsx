@@ -7,7 +7,9 @@ import ProgramLogs from './ProgramLogs.js';
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getEvents: vi.fn(),
+    getTasks: vi.fn(),
     markEventRead: vi.fn(),
+    getTask: vi.fn(),
     markAllEventsRead: vi.fn(),
     clearEvents: vi.fn(),
   },
@@ -32,9 +34,22 @@ async function flushMicrotasks() {
   });
 }
 
+async function switchToEventsTab(root: ReturnType<typeof create>) {
+  const logTab = root.root.findAll((node) => (
+    node.type === 'button' && collectText(node).includes('程序日志')
+  ))[0];
+  expect(logTab).toBeTruthy();
+  await act(async () => {
+    logTab.props.onClick();
+  });
+  await flushMicrotasks();
+}
+
 describe('ProgramLogs status label', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    apiMock.getTasks.mockResolvedValue({ tasks: [] });
+    apiMock.getTask.mockResolvedValue({ success: true, task: null });
   });
 
   afterEach(() => {
@@ -65,6 +80,7 @@ describe('ProgramLogs status label', () => {
       );
     });
     await flushMicrotasks();
+    await switchToEventsTab(root!);
 
     const rows = root!.root.findAll((node) => node.type === 'tr');
     const targetRow = rows.find((row) => collectText(row).includes('同步全部账号令牌已完成'));
@@ -101,6 +117,7 @@ describe('ProgramLogs status label', () => {
       );
     });
     await flushMicrotasks();
+    await switchToEventsTab(root!);
 
     const rows = root!.root.findAll((node) => node.type === 'tr');
     const targetRow = rows.find((row) => collectText(row).includes('同步全部账号令牌已完成'));
@@ -111,5 +128,60 @@ describe('ProgramLogs status label', () => {
     expect(collectText(statusCell).trim()).toBe('成功');
     const statusBadge = statusCell.find((node) => node.type === 'span');
     expect(String(statusBadge.props.className || '')).toContain('badge-success');
+  });
+
+  it('defaults to the task center tab and can switch to program logs', async () => {
+    apiMock.getEvents.mockResolvedValue([
+      {
+        id: 3,
+        type: 'status',
+        title: '路由重建已完成',
+        message: '新增 2 条通道',
+        level: 'info',
+        read: false,
+        createdAt: '2026-03-04T06:43:03.000Z',
+      },
+    ]);
+    apiMock.getTasks.mockResolvedValue({
+      tasks: [{
+        id: 'task-1',
+        type: 'status',
+        title: '刷新模型并重建路由',
+        status: 'running',
+        message: '正在执行',
+        error: null,
+        result: null,
+        createdAt: '2026-03-04T06:43:03.000Z',
+        updatedAt: '2026-03-04T06:43:03.000Z',
+      }],
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+    await act(async () => {
+      root = create(
+        <MemoryRouter initialEntries={['/events']}>
+          <ToastProvider>
+            <ProgramLogs />
+          </ToastProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushMicrotasks();
+
+    expect(collectText(root!.root)).toContain('任务中心');
+    expect(collectText(root!.root)).toContain('刷新模型并重建路由');
+    expect(collectText(root!.root)).not.toContain('路由重建已完成');
+
+    const logTab = root!.root.findAll((node) => (
+      node.type === 'button' && collectText(node).includes('程序日志')
+    ))[0];
+    expect(logTab).toBeTruthy();
+
+    await act(async () => {
+      logTab.props.onClick();
+    });
+    await flushMicrotasks();
+
+    expect(collectText(root!.root)).toContain('路由重建已完成');
   });
 });

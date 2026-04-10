@@ -1,10 +1,15 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 type DbModule = typeof import('../../db/index.js');
+const queueCoverageHealingTaskMock = vi.fn();
+
+vi.mock('../../services/tokenCoverageAutoProvisionService.js', () => ({
+  queueCoverageHealingTask: (...args: unknown[]) => queueCoverageHealingTaskMock(...args),
+}));
 
 describe('sites url normalization', () => {
   let app: FastifyInstance;
@@ -27,6 +32,7 @@ describe('sites url normalization', () => {
   });
 
   beforeEach(async () => {
+    queueCoverageHealingTaskMock.mockReset();
     await db.delete(schema.sites).run();
   });
 
@@ -48,5 +54,11 @@ describe('sites url normalization', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ url: 'https://new.aabb1.pro' });
+    const site = response.json() as { id: number };
+    expect(queueCoverageHealingTaskMock).toHaveBeenCalledWith({
+      siteIds: [site.id],
+    }, expect.objectContaining({
+      dedupeKey: `coverage-heal:site-onboard:${site.id}`,
+    }));
   });
 });

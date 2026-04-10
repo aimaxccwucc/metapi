@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { mergeAccountExtraConfig } from '../accountExtraConfig.js';
 import { refreshModelsForAccount, rebuildTokenRoutesFromAvailability, rebuildTokenRoutesFromAvailabilityScoped } from '../modelService.js';
+import { queueCoverageHealingTask } from '../tokenCoverageAutoProvisionService.js';
 import {
   createOauthSession,
   getOauthSession,
@@ -417,6 +418,13 @@ export async function handleOauthCallback(input: {
     await rebuildTokenRoutesFromAvailabilityScoped({
       accountIds: [account.id],
       siteIds: [site.id],
+    });
+    queueCoverageHealingTask({
+      accountIds: [account.id],
+      siteIds: [site.id],
+    }, {
+      dedupeKey: `coverage-heal:oauth:${account.id}`,
+      title: `OAuth 接入后自动诊断补齐 #${account.id}`,
     });
     markOauthSessionSuccess(input.state, {
       accountId: account.id,

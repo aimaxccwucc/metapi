@@ -25,6 +25,7 @@ type BackgroundTask = BackgroundTaskDetail;
 
 const PAGE_SIZE = 80;
 const TASK_POLL_INTERVAL_MS = 5000;
+type ViewTab = 'tasks' | 'events';
 
 const TYPE_OPTIONS = [
   { value: '', label: '全部类型' },
@@ -225,6 +226,7 @@ export default function ProgramLogs() {
   const [selectedTask, setSelectedTask] = useState<BackgroundTaskDetail | null>(null);
   const [taskDetailLoading, setTaskDetailLoading] = useState(false);
   const [taskDetailError, setTaskDetailError] = useState('');
+  const [activeTab, setActiveTab] = useState<ViewTab>('tasks');
   const toast = useToast();
 
   const loadTasks = async (silent = false) => {
@@ -453,6 +455,22 @@ export default function ProgramLogs() {
         </div>
       </div>
 
+      <div className="pill-tabs" style={{ marginBottom: 12 }}>
+        <button
+          className={`pill-tab ${activeTab === 'tasks' ? 'active' : ''}`}
+          onClick={() => setActiveTab('tasks')}
+        >
+          任务中心 <span style={{ opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{taskSummary.total}</span>
+        </button>
+        <button
+          className={`pill-tab ${activeTab === 'events' ? 'active' : ''}`}
+          onClick={() => setActiveTab('events')}
+        >
+          程序日志 <span style={{ opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{events.length}</span>
+        </button>
+      </div>
+
+      {activeTab === 'tasks' ? (
       <div className="card" style={{ overflowX: 'auto', marginBottom: 12 }}>
         <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--color-border-light)', display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{ fontSize: 14, fontWeight: 700 }}>任务中心</div>
@@ -543,12 +561,13 @@ export default function ProgramLogs() {
         ) : (
           <div className="empty-state" style={{ padding: '24px 12px' }}>
             <div className="empty-state-title">暂无后台任务</div>
-            <div className="empty-state-desc">触发同步 Token、签到或模型刷新后会显示执行状态。</div>
+            <div className="empty-state-desc">后台任务会集中显示在这里，不再分散出现在首页和业务页。</div>
           </div>
         )}
       </div>
+      ) : null}
 
-      {isMobile ? (
+      {activeTab === 'events' && isMobile ? (
         <>
           <div className="mobile-filter-row" style={{ marginBottom: 12 }}>
             <button
@@ -594,7 +613,9 @@ export default function ProgramLogs() {
             </div>
           </MobileFilterSheet>
         </>
-      ) : (
+      ) : null}
+
+      {activeTab === 'events' && !isMobile ? (
         <div className="card" style={{ padding: 14, marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
           <div style={{ minWidth: 170 }}>
             <ModernSelect
@@ -626,8 +647,9 @@ export default function ProgramLogs() {
             共 {visibleRows.length} 条
           </div>
         </div>
-      )}
+      ) : null}
 
+      {activeTab === 'events' ? (
       <div className="card" style={{ overflowX: 'auto' }}>
         {loading ? (
           <div style={{ padding: 20 }}>
@@ -786,12 +808,13 @@ export default function ProgramLogs() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
             <div className="empty-state-title">暂无日志</div>
-            <div className="empty-state-desc">当前筛选条件下没有程序日志。</div>
-          </div>
+          <div className="empty-state-desc">当前筛选条件下没有程序日志。</div>
+        </div>
         )}
       </div>
+      ) : null}
 
-      {!loading && visibleRows.length > 0 && hasMore && (
+      {activeTab === 'events' && !loading && visibleRows.length > 0 && hasMore && (
         <div style={{ marginTop: 12, display: 'flex', justifyContent: 'center' }}>
           <button
             className="btn btn-ghost"

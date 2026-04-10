@@ -12,6 +12,8 @@ export type RoutingGovernanceReasonCode =
   | 'invalid_channel'
   | 'upstream_group_empty'
   | 'slow_site'
+  | 'managed_key_unstable'
+  | 'returns_masked_only'
   | 'manual_recheck_needed';
 
 export type RoutingGovernanceEntry = typeof schema.routingGovernanceStates.$inferSelect;

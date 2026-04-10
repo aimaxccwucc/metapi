@@ -202,7 +202,7 @@ describe('App runtime banner', () => {
     vi.clearAllMocks();
   });
 
-  it('prioritizes database readiness over all other runtime warnings', async () => {
+  it('does not render the legacy global runtime banner anymore', async () => {
     setupRuntime(1280);
     apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({
       databaseReady: false,
@@ -223,14 +223,11 @@ describe('App runtime banner', () => {
       });
       await flushMicrotasks();
 
-      const banner = root.root.find((node) => (
+      const banners = root.root.findAll((node) => (
         typeof node.props?.['data-testid'] === 'string'
         && node.props['data-testid'] === 'app-runtime-banner'
       ));
-
-      expect(collectText(banner)).toContain('数据库尚未就绪');
-      expect(collectText(banner)).toContain('后台失败 3');
-      expect(collectText(banner)).toContain('未读事件 8');
+      expect(banners).toHaveLength(0);
     } finally {
       if (root) {
         await act(async () => {
@@ -240,7 +237,7 @@ describe('App runtime banner', () => {
     }
   });
 
-  it('shows the failed background task banner before unread events and elevated proxy failures', async () => {
+  it('does not surface task failure copy in the removed global banner area', async () => {
     setupRuntime(1280);
     apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({
       failedTasks: 2,
@@ -262,9 +259,8 @@ describe('App runtime banner', () => {
       await flushMicrotasks();
 
       const pageText = collectText(root.root);
-      expect(pageText).toContain('后台任务存在失败');
+      expect(pageText).not.toContain('后台任务存在失败');
       expect(pageText).not.toContain('存在未读状态事件');
-      expect(pageText).toContain('运行中 1');
     } finally {
       if (root) {
         await act(async () => {
@@ -274,7 +270,7 @@ describe('App runtime banner', () => {
     }
   });
 
-  it('renders the runtime banner on mobile when unread events need attention', async () => {
+  it('keeps mobile layout without rendering the removed runtime banner', async () => {
     setupRuntime(768);
     apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({
       unreadEvents: 4,
@@ -291,13 +287,11 @@ describe('App runtime banner', () => {
       });
       await flushMicrotasks();
 
-      const banner = root.root.find((node) => (
+      const banners = root.root.findAll((node) => (
         typeof node.props?.className === 'string'
         && node.props.className.includes('app-runtime-banner')
       ));
-
-      expect(collectText(banner)).toContain('存在未读状态事件');
-      expect(collectText(banner)).toContain('4 条未读状态事件待处理');
+      expect(banners).toHaveLength(0);
     } finally {
       if (root) {
         await act(async () => {
@@ -307,7 +301,7 @@ describe('App runtime banner', () => {
     }
   });
 
-  it('surfaces elevated 24 hour proxy failures when no higher priority issue exists', async () => {
+  it('does not show the removed runtime banner for elevated proxy failures', async () => {
     setupRuntime(1280);
     apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({
       proxyFailures24h: 24,
@@ -326,9 +320,7 @@ describe('App runtime banner', () => {
       await flushMicrotasks();
 
       const pageText = collectText(root.root);
-      expect(pageText).toContain('24 小时请求失败偏高');
-      expect(pageText).toContain('24/120');
-      expect(pageText).toContain('失败率约 20%');
+      expect(pageText).not.toContain('24 小时请求失败偏高');
     } finally {
       if (root) {
         await act(async () => {

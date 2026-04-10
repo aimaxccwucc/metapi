@@ -121,7 +121,13 @@ function mapProbeClassificationToReasonCode(
 ): RoutingGovernanceReasonCode {
   if (classification === 'credential') return 'auth';
   if (classification === 'model_unavailable') return 'model_unsupported';
-  if (fallback === 'auth' || fallback === 'model_unsupported' || fallback === 'invalid_channel') return fallback;
+  if (
+    fallback === 'auth'
+    || fallback === 'model_unsupported'
+    || fallback === 'invalid_channel'
+    || fallback === 'managed_key_unstable'
+    || fallback === 'returns_masked_only'
+  ) return fallback;
   return 'manual_recheck_needed';
 }
 
@@ -413,7 +419,13 @@ async function processProbingEntry(entry: RoutingGovernanceEntry): Promise<boole
     return await handleBalanceRecovery(entry);
   }
 
-  if (reasonCode === 'invalid_channel' || reasonCode === 'upstream_group_empty' || reasonCode === 'slow_site') {
+  if (
+    reasonCode === 'invalid_channel'
+    || reasonCode === 'upstream_group_empty'
+    || reasonCode === 'slow_site'
+    || reasonCode === 'managed_key_unstable'
+    || reasonCode === 'returns_masked_only'
+  ) {
     return await handlePassiveExpiryRelease(entry);
   }
 

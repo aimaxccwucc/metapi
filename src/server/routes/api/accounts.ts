@@ -23,7 +23,7 @@ import {
 } from '../../services/accountExtraConfig.js';
 import { encryptAccountPassword } from '../../services/accountCredentialService.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
-import { queueAutoProvisionTokenCoverageTask } from '../../services/tokenCoverageAutoProvisionService.js';
+import { queueCoverageHealingTask, queueAutoProvisionTokenCoverageTask } from '../../services/tokenCoverageAutoProvisionService.js';
 import { parseCheckinRewardAmount } from '../../services/checkinRewardParser.js';
 import { estimateRewardWithTodayIncomeFallback } from '../../services/todayIncomeRewardService.js';
 import { getLocalDayRangeUtc } from '../../services/localTimeService.js';
@@ -217,6 +217,13 @@ async function initializeAccountInBackground({
       summary.refreshedModels = true;
       await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [accountId], siteIds: [site.id] });
       summary.rebuiltRoutes = true;
+      queueCoverageHealingTask({
+        accountIds: [accountId],
+        siteIds: [site.id],
+      }, {
+        dedupeKey: `coverage-heal:account-init:${accountId}`,
+        title: `账号接入后自动诊断补齐 #${accountId}`,
+      });
     } catch {}
   }
 
@@ -819,6 +826,13 @@ export async function accountsRoutes(app: FastifyInstance) {
     try {
       await refreshModelsForAccount(result.id);
       await rebuildTokenRoutesFromAvailabilityScoped({ accountIds: [result.id], siteIds: [result.siteId] });
+      queueCoverageHealingTask({
+        accountIds: [result.id],
+        siteIds: [result.siteId],
+      }, {
+        dedupeKey: `coverage-heal:login:${result.id}`,
+        title: `登录接入后自动诊断补齐 #${result.id}`,
+      });
     } catch { }
 
     const account = await db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
