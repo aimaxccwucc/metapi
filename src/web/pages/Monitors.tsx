@@ -103,38 +103,41 @@ export default function Monitors() {
     : '当前站点可能禁止 iframe 内嵌，或 OAuth 跨站 Cookie 受限。建议先新窗口授权再回到此页刷新。';
 
   return (
-    <div className="animate-fade-in monitor-page">
-      <div className="monitor-toolbar page-header">
-        <div>
-          <h2 className="page-title">{tr('监控内嵌')}</h2>
-          <div style={{ marginTop: 6, fontSize: 13, color: 'var(--color-text-muted)' }}>
-            在 metapi 内查看外部站点监控页面。
+    <div className="page-shell animate-fade-in monitor-page">
+      <div className="page-hero">
+        <div className="page-kicker">Embedded Monitor</div>
+        <div className="monitor-toolbar" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+          <div>
+            <h2 className="page-title">{tr('监控内嵌')}</h2>
+            <div className="page-subtitle">
+              在 metapi 内查看外部站点监控页面，并为需要授权的目标维护代理 Cookie。
+            </div>
           </div>
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button
-            type="button"
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)' }}
-            onClick={() => setReloadSeed((prev) => prev + 1)}
-            data-tooltip="重新加载当前站点"
-            aria-label="重新加载当前站点"
-          >
-            刷新
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => window.open(directSiteUrl, '_blank', 'noopener,noreferrer')}
-            data-tooltip="在新窗口直接打开目标站点"
-            aria-label="在新窗口直接打开目标站点"
-          >
-            新窗口打开
-          </button>
+          <div className="page-actions">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={() => setReloadSeed((prev) => prev + 1)}
+              data-tooltip="重新加载当前站点"
+              aria-label="重新加载当前站点"
+            >
+              刷新
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => window.open(directSiteUrl, '_blank', 'noopener,noreferrer')}
+              data-tooltip="在新窗口直接打开目标站点"
+              aria-label="在新窗口直接打开目标站点"
+            >
+              新窗口打开
+            </button>
+          </div>
         </div>
       </div>
 
-      <div className="monitor-tabs card">
+      <div className="monitor-tabs card surface-card">
         {MONITOR_SITES.map((site) => (
           <button
             key={site.id}
@@ -149,7 +152,7 @@ export default function Monitors() {
       </div>
 
       {oauthHintPresence.shouldRender && (
-        <div className={`monitor-oauth-hint card panel-presence ${oauthHintPresence.isVisible ? '' : 'is-closing'}`.trim()}>
+        <div className={`monitor-oauth-hint card surface-card panel-presence ${oauthHintPresence.isVisible ? '' : 'is-closing'}`.trim()}>
           <div style={{ fontSize: 13, fontWeight: 600 }}>
             {usingCookieProxy ? '已启用 Cookie 代理模式' : '该站点需要 LinuxDo OAuth 授权'}
           </div>
@@ -209,7 +212,7 @@ export default function Monitors() {
         </div>
       )}
 
-      <div className="monitor-frame-shell card">
+      <div className="monitor-frame-shell card surface-card">
         {fallbackHintPresence.shouldRender && (
           <div className={`monitor-hint panel-presence ${fallbackHintPresence.isVisible ? '' : 'is-closing'}`.trim()}>
             {fallbackHint}

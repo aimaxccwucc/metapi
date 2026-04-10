@@ -168,7 +168,7 @@ export default function NotificationSettings() {
 
     if (loading) {
         return (
-            <div className="animate-fade-in">
+            <div className="page-shell animate-fade-in">
                 <div className="skeleton" style={{ width: 220, height: 28, marginBottom: 20 }} />
                 <div className="skeleton" style={{ width: '100%', height: 320, borderRadius: 'var(--radius-sm)' }} />
             </div>
@@ -176,23 +176,30 @@ export default function NotificationSettings() {
     }
 
     return (
-        <div className="animate-fade-in" style={{ paddingBottom: 40 }}>
-            {/* 头部标题与操作 */}
-            <div className="page-header">
-                <h2 className="page-title">{tr('通知设置')}</h2>
-                <div className="page-actions">
-                    <button onClick={testNotify} disabled={testingNotify} className="btn btn-success">
-                        {testingNotify ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 发送中...</> : '发送测试通知'}
-                    </button>
-                    <button onClick={saveNotify} disabled={savingNotify} className="btn btn-primary">
-                        {savingNotify ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存通知设置'}
-                    </button>
+        <div className="page-shell animate-fade-in" style={{ paddingBottom: 40 }}>
+            <div className="page-hero">
+                <div className="page-kicker">Alert Channels</div>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+                    <div>
+                        <h2 className="page-title">{tr('通知设置')}</h2>
+                        <div className="page-subtitle">
+                            统一配置冷静期和多渠道告警，包括 Webhook、Bark、Server 酱、Telegram 与 SMTP。
+                        </div>
+                    </div>
+                    <div className="page-actions">
+                        <button onClick={testNotify} disabled={testingNotify} className="btn btn-success">
+                            {testingNotify ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 发送中...</> : '发送测试通知'}
+                        </button>
+                        <button onClick={saveNotify} disabled={savingNotify} className="btn btn-primary">
+                            {savingNotify ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存通知设置'}
+                        </button>
+                    </div>
                 </div>
             </div>
 
             <div style={{ maxWidth: 860, display: 'flex', flexDirection: 'column', gap: 20 }}>
 
-                <div className="card animate-slide-up stagger-1" style={{ padding: 20 }}>
+                <div className="card surface-card animate-slide-up stagger-1" style={{ padding: 20 }}>
                     <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 8 }}>告警去噪与冷静期</div>
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
                         相同告警在冷静期内不会重复推送；冷静期结束后会自动合并重复条数。
@@ -215,7 +222,7 @@ export default function NotificationSettings() {
                 </div>
 
                 {/* 卡片：Webhook & Bark */}
-                <div className="card animate-slide-up stagger-2" style={{ padding: 24, border: (runtime.webhookEnabled || runtime.barkEnabled) ? '1px solid var(--color-primary)' : '1px solid var(--color-border-light)' }}>
+                <div className="card surface-card animate-slide-up stagger-2" style={{ padding: 24, border: (runtime.webhookEnabled || runtime.barkEnabled) ? '1px solid var(--color-primary)' : '1px solid var(--color-border-light)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                             <div style={{ width: 32, height: 32, borderRadius: 8, background: 'var(--color-primary-light)', color: 'var(--color-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -274,7 +281,7 @@ export default function NotificationSettings() {
                 </div>
 
                 {/* 卡片：Server酱 */}
-                <div className="card animate-slide-up stagger-3" style={{ padding: 24, border: runtime.serverChanEnabled ? '1px solid var(--color-primary)' : '1px solid var(--color-border-light)' }}>
+                <div className="card surface-card animate-slide-up stagger-3" style={{ padding: 24, border: runtime.serverChanEnabled ? '1px solid var(--color-primary)' : '1px solid var(--color-border-light)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                             <div style={{ width: 32, height: 32, borderRadius: 8, background: 'var(--color-warning-soft)', color: 'var(--color-warning)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -313,7 +320,7 @@ export default function NotificationSettings() {
                 </div>
 
                 {/* 卡片：Telegram */} 
-                <div className="card animate-slide-up stagger-4" style={{ padding: 24, border: runtime.telegramEnabled ? '1px solid var(--color-primary)' : '1px solid var(--color-border-light)' }}>
+                <div className="card surface-card animate-slide-up stagger-4" style={{ padding: 24, border: runtime.telegramEnabled ? '1px solid var(--color-primary)' : '1px solid var(--color-border-light)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                             <div style={{ width: 32, height: 32, borderRadius: 8, background: 'var(--color-primary-light)', color: 'var(--color-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -399,7 +406,7 @@ export default function NotificationSettings() {
                 </div>
 
                 {/* 卡片：SMTP 邮件设置 */}
-                <div className="card animate-slide-up stagger-4" style={{ padding: 24, border: runtime.smtpEnabled ? '1px solid var(--color-primary)' : '1px solid var(--color-border-light)' }}>
+                <div className="card surface-card animate-slide-up stagger-4" style={{ padding: 24, border: runtime.smtpEnabled ? '1px solid var(--color-primary)' : '1px solid var(--color-border-light)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                             <div style={{ width: 32, height: 32, borderRadius: 8, background: 'var(--color-primary-light)', color: 'var(--color-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>

@@ -504,23 +504,26 @@ export default function ImportExport() {
   };
 
   return (
-    <div className="animate-fade-in">
-      <div className="page-header" style={{ alignItems: 'flex-end', marginBottom: 18 }}>
-        <div>
-          <h2 className="page-title" style={{ marginBottom: 6 }}>{tr('导入 / 导出')}</h2>
-          <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-            支持配置型备份、分区备份与手动恢复。
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Backup Console</div>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+          <div>
+            <h2 className="page-title" style={{ marginBottom: 6 }}>{tr('导入 / 导出')}</h2>
+            <div className="page-subtitle">
+              支持配置型备份、分区备份、手动恢复，以及 WebDAV 自动同步。
+            </div>
           </div>
-        </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <span className="badge badge-muted" style={{ fontSize: 11 }}>Schema v2.1</span>
-          <span className="badge badge-warning" style={{ fontSize: 11 }}>敏感数据请离线保管</span>
+          <div className="page-actions">
+            <span className="badge badge-muted" style={{ fontSize: 11 }}>Schema v2.1</span>
+            <span className="badge badge-warning" style={{ fontSize: 11 }}>敏感数据请离线保管</span>
+          </div>
         </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(360px,1fr))', gap: 14 }}>
         {/* ====== 导出区 ====== */}
-        <div className="card animate-slide-up stagger-1" style={{ padding: 18 }}>
+        <div className="card surface-card animate-slide-up stagger-1" style={{ padding: 18 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
             <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="var(--color-primary)">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
@@ -563,7 +566,7 @@ export default function ImportExport() {
         </div>
 
         {/* ====== 导入区 ====== */}
-        <div className="card animate-slide-up stagger-2" style={{ padding: 18 }}>
+        <div className="card surface-card animate-slide-up stagger-2" style={{ padding: 18 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
             <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="var(--color-primary)">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -713,7 +716,7 @@ export default function ImportExport() {
         </div>
       </div>
 
-      <div className="card animate-slide-up stagger-3" style={{ marginTop: 14, padding: 18 }}>
+      <div className="card surface-card animate-slide-up stagger-3" style={{ marginTop: 14, padding: 18 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
           <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="var(--color-primary)">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999A5.002 5.002 0 006 9a4 4 0 00-3 6z" />
@@ -867,7 +870,7 @@ export default function ImportExport() {
         </div>
       </div>
 
-      <div className="card animate-slide-up stagger-4" style={{ marginTop: 14, padding: 16 }}>
+      <div className="card surface-card animate-slide-up stagger-4" style={{ marginTop: 14, padding: 16 }}>
         <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>注意事项</div>
         <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.75 }}>
           <div>1. 导入连接分区会覆盖备份中的站点、账号、令牌、路由、禁用模型、手工模型和下游 Key 配置。</div>

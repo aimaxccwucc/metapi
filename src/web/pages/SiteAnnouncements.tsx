@@ -155,44 +155,52 @@ export default function SiteAnnouncements() {
   };
 
   return (
-    <div className="animate-fade-in">
-      <div className="page-header">
-        <h2 className="page-title">{tr('站点公告')}</h2>
-        <div className="page-actions">
-          <button
-            onClick={() => load(true)}
-            disabled={refreshing}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-          >
-            {refreshing ? <><span className="spinner spinner-sm" /> 刷新中...</> : '刷新'}
-          </button>
-          <button
-            onClick={markAllRead}
-            disabled={markingAll}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-          >
-            {markingAll ? <><span className="spinner spinner-sm" /> 标记中...</> : '全部已读'}
-          </button>
-          <button
-            onClick={triggerSync}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-          >
-            手动同步
-          </button>
-          <button
-            onClick={clearAll}
-            disabled={clearing}
-            className="btn btn-link btn-link-danger"
-          >
-            {clearing ? <><span className="spinner spinner-sm" /> 清空中...</> : '清空公告'}
-          </button>
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Announcement Feed</div>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+          <div>
+            <h2 className="page-title">{tr('站点公告')}</h2>
+            <div className="page-subtitle">
+              集中查看上游站点同步过来的维护通知、风控提醒和公告更新时间。
+            </div>
+          </div>
+          <div className="page-actions">
+            <button
+              onClick={() => load(true)}
+              disabled={refreshing}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+            >
+              {refreshing ? <><span className="spinner spinner-sm" /> 刷新中...</> : '刷新'}
+            </button>
+            <button
+              onClick={markAllRead}
+              disabled={markingAll}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+            >
+              {markingAll ? <><span className="spinner spinner-sm" /> 标记中...</> : '全部已读'}
+            </button>
+            <button
+              onClick={triggerSync}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+            >
+              手动同步
+            </button>
+            <button
+              onClick={clearAll}
+              disabled={clearing}
+              className="btn btn-link btn-link-danger"
+            >
+              {clearing ? <><span className="spinner spinner-sm" /> 清空中...</> : '清空公告'}
+            </button>
+          </div>
         </div>
       </div>
 
-      <div className="card" style={{ padding: 0 }}>
+      <div className="card surface-card" style={{ padding: 0 }}>
         {loading ? (
           <div style={{ padding: 24, textAlign: 'center' }}>
             <span className="spinner spinner-sm" />

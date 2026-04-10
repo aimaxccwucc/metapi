@@ -2451,7 +2451,7 @@ export default function ModelTester() {
 
   if (loadingModels) {
     return (
-      <div className="animate-fade-in">
+      <div className="page-shell animate-fade-in">
         <div className="skeleton" style={{ width: 200, height: 28, marginBottom: 20 }} />
         <div className="skeleton" style={{ height: 120, marginBottom: 12, borderRadius: 'var(--radius-md)' }} />
         <div className="skeleton" style={{ height: 520, borderRadius: 'var(--radius-md)' }} />
@@ -2460,46 +2460,49 @@ export default function ModelTester() {
   }
 
   return (
-    <div className="animate-fade-in">
-      <div className="page-header">
-        <div>
-          <h2 className="page-title">{tr('模型测试')}</h2>
-          <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '4px 0 0' }}>
-            支持流式输出、任务模式、自定义请求体和调试面板。
-          </p>
-        </div>
-        <div className="page-actions">
-          <button
-            onClick={() => setShowDebugPanel((prev) => !prev)}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-          >
-            {showDebugPanel ? '隐藏调试' : '显示调试'}
-          </button>
-          <button
-            onClick={() => { void retryPending(); }}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-            disabled={sending || !!pendingJobId || !pendingPayload}
-          >
-            重试
-          </button>
-          <button
-            onClick={() => { void stopGenerating(); }}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-            disabled={!pendingJobId && !streamAbortRef.current}
-          >
-            停止
-          </button>
-          <button
-            onClick={clearChat}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
-            disabled={messages.length === 0 && !pendingPayload && !pendingJobId}
-          >
-            清除
-          </button>
+    <div className="page-shell animate-fade-in">
+      <div className="page-hero">
+        <div className="page-kicker">Playground</div>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+          <div>
+            <h2 className="page-title">{tr('模型测试')}</h2>
+            <div className="page-subtitle">
+              支持流式输出、任务模式、自定义请求体和调试面板，用于直接验证代理链路行为。
+            </div>
+          </div>
+          <div className="page-actions">
+            <button
+              onClick={() => setShowDebugPanel((prev) => !prev)}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+            >
+              {showDebugPanel ? '隐藏调试' : '显示调试'}
+            </button>
+            <button
+              onClick={() => { void retryPending(); }}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+              disabled={sending || !!pendingJobId || !pendingPayload}
+            >
+              重试
+            </button>
+            <button
+              onClick={() => { void stopGenerating(); }}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+              disabled={!pendingJobId && !streamAbortRef.current}
+            >
+              停止
+            </button>
+            <button
+              onClick={clearChat}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+              disabled={messages.length === 0 && !pendingPayload && !pendingJobId}
+            >
+              清除
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2535,7 +2538,7 @@ export default function ModelTester() {
       </div>
 
       <div
-        className="card animate-slide-up stagger-2"
+        className="card surface-card animate-slide-up stagger-2"
         style={{
           padding: 16,
           marginBottom: 16,
@@ -2724,7 +2727,7 @@ export default function ModelTester() {
           alignItems: 'stretch',
         }}
       >
-        <div className="card" style={{ padding: 16, minHeight: isMobile ? 'auto' : 680, maxHeight: isMobile ? 'none' : 740, overflowY: isMobile ? 'visible' : 'auto', order: isMobile ? 2 : 0 }}>
+        <div className="card surface-card" style={{ padding: 16, minHeight: isMobile ? 'auto' : 680, maxHeight: isMobile ? 'none' : 740, overflowY: isMobile ? 'visible' : 'auto', order: isMobile ? 2 : 0 }}>
           <h3 style={{ margin: '0 0 12px', fontSize: 15 }}>设置</h3>
 
           <div style={{ marginBottom: 14 }}>
@@ -3020,7 +3023,7 @@ export default function ModelTester() {
           </ParameterRow>
         </div>
 
-        <div className="card" style={{ padding: 0, overflow: 'hidden', minHeight: isMobile ? 'auto' : 680, maxHeight: isMobile ? 'none' : 740, display: 'flex', flexDirection: 'column', order: isMobile ? 1 : 0 }}>
+        <div className="card surface-card" style={{ padding: 0, overflow: 'hidden', minHeight: isMobile ? 'auto' : 680, maxHeight: isMobile ? 'none' : 740, display: 'flex', flexDirection: 'column', order: isMobile ? 1 : 0 }}>
           <div style={{
             padding: '14px 16px',
             borderBottom: '1px solid var(--color-border-light)',
@@ -3546,7 +3549,7 @@ export default function ModelTester() {
         </div>
 
         {debugPanelPresence.shouldRender && (
-          <div className={`card panel-presence ${debugPanelPresence.isVisible ? '' : 'is-closing'}`.trim()} style={{ padding: 14, minHeight: isMobile ? 'auto' : 680, maxHeight: isMobile ? 'none' : 740, display: 'flex', flexDirection: 'column', order: isMobile ? 3 : 0 }}>
+          <div className={`card surface-card panel-presence ${debugPanelPresence.isVisible ? '' : 'is-closing'}`.trim()} style={{ padding: 14, minHeight: isMobile ? 'auto' : 680, maxHeight: isMobile ? 'none' : 740, display: 'flex', flexDirection: 'column', order: isMobile ? 3 : 0 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
               <h3 style={{ margin: 0, fontSize: 15 }}>调试</h3>
               <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>

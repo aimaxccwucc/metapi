@@ -31,14 +31,18 @@ const LINKS = [
 
 export default function About() {
   return (
-    <div className="animate-fade-in" style={{ maxWidth: 860 }}>
-      {/* Header */}
-      <div className="page-header" style={{ marginBottom: 14 }}>
-        <h2 className="page-title">{tr('关于 Metapi')}</h2>
+    <div className="page-shell animate-fade-in" style={{ maxWidth: 860 }}>
+      <div className="page-hero">
+        <div className="page-kicker">Project Brief</div>
+        <div>
+          <h2 className="page-title">{tr('关于 Metapi')}</h2>
+          <div className="page-subtitle">
+            产品定位、核心能力、技术栈与项目链接的统一概览页。
+          </div>
+        </div>
       </div>
 
-      {/* Hero card */}
-      <div className="card animate-slide-up stagger-1" style={{ padding: 22, marginBottom: 14 }}>
+      <div className="card surface-card animate-slide-up stagger-1" style={{ padding: 22, marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14 }}>
           <img
             src="/logo.png"
@@ -56,7 +60,7 @@ export default function About() {
       </div>
 
       {/* Features */}
-      <div className="card animate-slide-up stagger-2" style={{ padding: 22, marginBottom: 14 }}>
+      <div className="card surface-card animate-slide-up stagger-2" style={{ padding: 22, marginBottom: 14 }}>
         <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 14 }}>{tr('核心特色')}</h3>
         <div style={{
           display: 'grid',
@@ -81,7 +85,7 @@ export default function About() {
       </div>
 
       {/* Tech Stack */}
-      <div className="card animate-slide-up stagger-3" style={{ padding: 22, marginBottom: 14 }}>
+      <div className="card surface-card animate-slide-up stagger-3" style={{ padding: 22, marginBottom: 14 }}>
         <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 14 }}>{tr('技术栈')}</h3>
         <div style={{
           display: 'grid',
@@ -105,7 +109,7 @@ export default function About() {
       </div>
 
       {/* Links */}
-      <div className="card animate-slide-up stagger-4" style={{ padding: 22, marginBottom: 14 }}>
+      <div className="card surface-card animate-slide-up stagger-4" style={{ padding: 22, marginBottom: 14 }}>
         <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 14 }}>{tr('项目链接')}</h3>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           {LINKS.map((l) => (
@@ -134,7 +138,7 @@ export default function About() {
       </div>
 
       {/* Privacy */}
-      <div className="card animate-slide-up stagger-5" style={{ padding: 22 }}>
+      <div className="card surface-card animate-slide-up stagger-5" style={{ padding: 22 }}>
         <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 10 }}>{tr('数据与隐私')}</h3>
         <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', lineHeight: 1.8 }}>
           {tr('Metapi 完全自托管，所有数据（账号、令牌、路由、日志）均存储在本地 SQLite 数据库中，不会向任何第三方发送数据。代理请求仅在你的服务器与上游站点之间直连传输。')}
