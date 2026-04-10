@@ -21,6 +21,7 @@ import { getCredentialModeFromExtraConfig, getProxyUrlFromExtraConfig, resolvePl
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import {
   autoProvisionTokenCoverage,
+  reconcileHistoricalSharedGroupAutoTokens,
 } from '../../services/tokenCoverageAutoProvisionService.js';
 import { withAccountProxyOverride } from '../../services/siteProxy.js';
 import {
@@ -1024,6 +1025,40 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       message: reused
         ? '令牌同步任务执行中，请稍后查看程序日志'
         : '已开始全部账号令牌同步，请稍后查看程序日志',
+    });
+  });
+
+  app.post<{ Body?: { wait?: boolean } }>('/api/account-tokens/reconcile-auto-coverage', async (request, reply) => {
+    if (request.body?.wait) {
+      const result = await reconcileHistoricalSharedGroupAutoTokens();
+      return { success: true, ...result };
+    }
+
+    const { task, reused } = startBackgroundTask(
+      {
+        type: 'token',
+        title: '历史显式目标 Key 对齐',
+        dedupeKey: 'reconcile-historical-auto-token-coverage',
+        notifyOnFailure: true,
+        successMessage: (currentTask) => {
+          const result = currentTask.result as Awaited<ReturnType<typeof reconcileHistoricalSharedGroupAutoTokens>> | null;
+          if (!result) return '历史显式目标 Key 对齐已完成';
+          return `历史显式目标 Key 对齐完成：扫描 ${result.accountsScanned}，显式目标账号 ${result.accountsWithExplicitTargets}，仅清理账号 ${result.accountsWithoutExplicitTargets}，创建 ${result.provisionSummary.created}，复用 ${result.provisionSummary.reused}，失败 ${result.provisionSummary.failed}`;
+        },
+        failureMessage: (currentTask) => `历史显式目标 Key 对齐失败：${currentTask.error || 'unknown error'}`,
+      },
+      async () => reconcileHistoricalSharedGroupAutoTokens(),
+    );
+
+    return reply.code(202).send({
+      success: true,
+      queued: true,
+      reused,
+      jobId: task.id,
+      status: task.status,
+      message: reused
+        ? '历史显式目标 Key 对齐任务执行中，请稍后查看任务列表'
+        : '已开始历史显式目标 Key 对齐，请稍后查看任务列表',
     });
   });
 
