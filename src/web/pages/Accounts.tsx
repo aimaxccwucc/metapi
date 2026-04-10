@@ -1575,7 +1575,7 @@ export default function Accounts() {
 
                 {addMode === 'token' ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div className="info-tip">
+                    <div className="info-tip surface-card">
                       <div>
                         <div style={{ fontWeight: 600, marginBottom: 4 }}>当前分段仅创建 Session 连接</div>
                         <div><strong>推荐</strong> 使用系统访问令牌（Access Token）；浏览器 Cookie 仅用于兼容场景。</div>
@@ -1719,7 +1719,7 @@ export default function Accounts() {
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div className="info-tip">
+                    <div className="info-tip surface-card">
                       输入目标站点的账号密码，将自动登录并获取访问令牌和 API Key
                     </div>
                     <ModernSelect
@@ -1743,7 +1743,7 @@ export default function Accounts() {
               </>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div className="info-tip">
+                <div className="info-tip surface-card">
                   API Key 连接只用于代理转发，不会自动派生账号令牌。系统会按站点平台能力自动引导到 Session 或 API Key 创建流程。
                 </div>
                 <ModernSelect

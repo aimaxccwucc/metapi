@@ -1984,7 +1984,7 @@ export default function TokenRoutes() {
         ) : null}
       </div>
 
-      <div className="info-tip" style={{ marginBottom: 12, display: 'grid', gap: 10 }}>
+      <div className="info-tip surface-card" style={{ marginBottom: 12, display: 'grid', gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className="badge badge-info" style={{ fontSize: 11 }}>路由稳定性诊断</span>
           <button
@@ -2305,11 +2305,11 @@ export default function TokenRoutes() {
       )}
 
       {/* Info tip */}
-      <div className="info-tip" style={{ marginBottom: 12 }}>
+      <div className="info-tip surface-card" style={{ marginBottom: 12 }}>
         {tr('系统会根据模型可用性自动生成路由。精确模型路由会自动过滤只支持该模型的账号和令牌。优先级 P0 最高，数字越大优先级越低。选中概率表示请求到达时该通道被选中的概率。成本来源优先级为：实测成本 → 账号配置成本 → 目录参考价 → 默认回退单价。')}
       </div>
 
-      <div className="info-tip" style={{ marginBottom: 12 }}>
+      <div className="info-tip surface-card" style={{ marginBottom: 12 }}>
         {tr('如果某批通道因令牌失效、模型不支持或限流被持续避让，可先修正账号配置，再使用“清理运行时故障”快速清掉临时冷却、模型熔断和站点运行时惩罚。')}
       </div>
 

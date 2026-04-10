@@ -1115,7 +1115,7 @@ function EditorModal({
         </>
       )}
     >
-      <div className="info-tip" style={{ marginBottom: 0 }}>
+      <div className="info-tip surface-card" style={{ marginBottom: 0 }}>
         支持为每个下游密钥独立配置分组、标签、额度与有效期。高级限制项可按需展开。
       </div>
 
@@ -1770,7 +1770,7 @@ export default function DownstreamKeys() {
 
   const filterControls = (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div className="toolbar" style={{ marginBottom: 0, alignItems: 'center' }}>
+      <div className="toolbar surface-card" style={{ marginBottom: 0, alignItems: 'center' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: '1 1 420px', minWidth: 280, flexWrap: 'wrap' }}>
           <div className="toolbar-search" style={{ maxWidth: 'unset', flex: '1 1 320px' }}>
             <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -2113,7 +2113,7 @@ export default function DownstreamKeys() {
           </>
         )}
       >
-        <div className="info-tip" style={{ marginBottom: 0 }}>
+        <div className="info-tip surface-card" style={{ marginBottom: 0 }}>
           本次会对已选中的 {selectedIds.length} 个密钥批量设置主分组，并追加标签。不会改动模型白名单、群组范围、额度和倍率。
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>

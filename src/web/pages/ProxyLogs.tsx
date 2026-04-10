@@ -834,7 +834,7 @@ export default function ProxyLogs() {
           </MobileFilterSheet>
         </>
       ) : (
-        <div className="toolbar" style={{ marginBottom: 12 }}>
+        <div className="toolbar surface-card" style={{ marginBottom: 12 }}>
           {filterControls}
         </div>
       )}
