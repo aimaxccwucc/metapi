@@ -15,6 +15,7 @@ import {
   executeRoutingGovernanceAutoRecoveryPass,
   recordRoutingGovernanceAutoRecoveryEvent,
 } from './routingGovernanceAutoRecoveryService.js';
+import { reconcileHistoricalSharedGroupAutoTokens } from './tokenCoverageAutoProvisionService.js';
 
 export type CheckinScheduleMode = 'cron' | 'interval';
 
@@ -26,8 +27,10 @@ let logCleanupTask: cron.ScheduledTask | null = null;
 let siteHealthTask: cron.ScheduledTask | null = null;
 let responseCacheCleanupTask: cron.ScheduledTask | null = null;
 let routingGovernanceRecoveryTask: cron.ScheduledTask | null = null;
+let tokenCoverageReconcileTask: cron.ScheduledTask | null = null;
 let siteHealthRefreshRunning = false;
 let routingGovernanceRecoveryRunning = false;
+let tokenCoverageReconcileRunning = false;
 const intervalAttemptByAccount = new Map<number, number>();
 let intervalCheckinPassRunning = false;
 
@@ -35,6 +38,7 @@ const DAILY_SUMMARY_DEFAULT_CRON = '58 23 * * *';
 const LOG_CLEANUP_DEFAULT_CRON = '0 6 * * *';
 const CHECKIN_INTERVAL_POLL_MS = 60_000;
 const ROUTING_GOVERNANCE_RECOVERY_DEFAULT_CRON = '*/10 * * * *';
+const TOKEN_COVERAGE_RECONCILE_DEFAULT_CRON = '13 3 * * *';
 
 async function resolveJsonSetting<T>(
   settingKey: string,
@@ -324,6 +328,26 @@ function createRoutingGovernanceRecoveryTask(cronExpr: string) {
   });
 }
 
+function createTokenCoverageReconcileTask(cronExpr: string) {
+  return cron.schedule(cronExpr, async () => {
+    if (tokenCoverageReconcileRunning) {
+      console.log('[Scheduler] Token coverage reconcile skipped: existing run is in progress');
+      return;
+    }
+    tokenCoverageReconcileRunning = true;
+    try {
+      const result = await reconcileHistoricalSharedGroupAutoTokens();
+      console.log(
+        `[Scheduler] Token coverage reconcile done: scanned=${result.accountsScanned}, explicit=${result.accountsWithExplicitTargets}, cleanupOnly=${result.accountsWithoutExplicitTargets}, created=${result.provisionSummary.created}, reused=${result.provisionSummary.reused}, failed=${result.provisionSummary.failed}`,
+      );
+    } catch (err) {
+      console.error('[Scheduler] Token coverage reconcile error:', err);
+    } finally {
+      tokenCoverageReconcileRunning = false;
+    }
+  });
+}
+
 export async function startScheduler() {
   const activeCheckinCron = await resolveCronSetting('checkin_cron', config.checkinCron);
   const activeCheckinScheduleMode = await resolveJsonSetting<CheckinScheduleMode>(
@@ -368,6 +392,7 @@ export async function startScheduler() {
   siteHealthTask?.stop();
   responseCacheCleanupTask?.stop();
   routingGovernanceRecoveryTask?.stop();
+  tokenCoverageReconcileTask?.stop();
   startCheckinSchedule();
   balanceTask = createBalanceTask(activeBalanceCron);
   siteHealthTask = createSiteHealthTask(activeSiteHealthCron);
@@ -375,12 +400,14 @@ export async function startScheduler() {
   logCleanupTask = createLogCleanupTask(activeLogCleanupCron);
   responseCacheCleanupTask = createResponseCacheCleanupTask('0 * * * *');
   routingGovernanceRecoveryTask = createRoutingGovernanceRecoveryTask(ROUTING_GOVERNANCE_RECOVERY_DEFAULT_CRON);
+  tokenCoverageReconcileTask = createTokenCoverageReconcileTask(TOKEN_COVERAGE_RECONCILE_DEFAULT_CRON);
 
   console.log(`[Scheduler] Check-in schedule: ${config.checkinScheduleMode} (${config.checkinScheduleMode === 'cron' ? activeCheckinCron : `${config.checkinIntervalHours}h`})`);
   console.log(`[Scheduler] Balance refresh cron: ${activeBalanceCron}`);
   console.log(`[Scheduler] Site health refresh cron: ${activeSiteHealthCron}`);
   console.log(`[Scheduler] Daily summary cron: ${activeDailySummaryCron}`);
   console.log(`[Scheduler] Routing governance recovery cron: ${ROUTING_GOVERNANCE_RECOVERY_DEFAULT_CRON}`);
+  console.log(`[Scheduler] Token coverage reconcile cron: ${TOKEN_COVERAGE_RECONCILE_DEFAULT_CRON}`);
   console.log(
     `[Scheduler] Log cleanup cron: ${activeLogCleanupCron} (configured=${config.logCleanupConfigured}, usage=${activeLogCleanupUsageLogsEnabled}, program=${activeLogCleanupProgramLogsEnabled}, retentionDays=${activeLogCleanupRetentionDays})`,
   );
@@ -460,14 +487,17 @@ export function __resetCheckinSchedulerForTests() {
   siteHealthTask?.stop();
   responseCacheCleanupTask?.stop();
   routingGovernanceRecoveryTask?.stop();
+  tokenCoverageReconcileTask?.stop();
   balanceTask = null;
   dailySummaryTask = null;
   logCleanupTask = null;
   siteHealthTask = null;
   responseCacheCleanupTask = null;
   routingGovernanceRecoveryTask = null;
+  tokenCoverageReconcileTask = null;
   siteHealthRefreshRunning = false;
   routingGovernanceRecoveryRunning = false;
+  tokenCoverageReconcileRunning = false;
   intervalCheckinPassRunning = false;
   intervalAttemptByAccount.clear();
 }

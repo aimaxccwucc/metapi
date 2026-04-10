@@ -679,6 +679,71 @@ async function resolveExpectedSharedGroupsForAccounts(accountIds: number[]): Pro
   return groupsByAccount;
 }
 
+async function listManagedAccountIds(): Promise<number[]> {
+  const rows = await db.select({
+    id: schema.accounts.id,
+    username: schema.accounts.username,
+    accessToken: schema.accounts.accessToken,
+    apiToken: schema.accounts.apiToken,
+    extraConfig: schema.accounts.extraConfig,
+    accountStatus: schema.accounts.status,
+    siteStatus: schema.sites.status,
+  })
+    .from(schema.accounts)
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .all();
+
+  return rows
+    .filter((row) => (
+      (row.accountStatus || 'active') === 'active'
+      && (row.siteStatus || 'active') === 'active'
+      && requiresManagedAccountTokens({
+        accessToken: row.accessToken,
+        apiToken: row.apiToken,
+        extraConfig: row.extraConfig,
+      })
+    ))
+    .map((row) => row.id);
+}
+
+export async function reconcileHistoricalSharedGroupAutoTokens(): Promise<{
+  accountsScanned: number;
+  accountsWithExplicitTargets: number;
+  accountsWithoutExplicitTargets: number;
+  provisionSummary: TokenCoverageProvisionSummary;
+}> {
+  const accountIds = await listManagedAccountIds();
+  const explicitModelsByAccount = await listActiveExplicitTargetModelsByAccount(accountIds);
+  const explicitAccountIds = Array.from(explicitModelsByAccount.keys());
+
+  const provisionResults: TokenCoverageProvisionItemResult[] = [];
+  for (const accountId of explicitAccountIds) {
+    const modelNames = explicitModelsByAccount.get(accountId) || [];
+    if (modelNames.length === 0) continue;
+    const result = await autoProvisionTokenCoverage({
+      accountIds: [accountId],
+      modelNames,
+    }, {
+      provisionMode: 'shared_group',
+      refreshRouteChannels: true,
+    });
+    provisionResults.push(...result.results);
+  }
+
+  const explicitAccountIdSet = new Set(explicitAccountIds);
+  for (const accountId of accountIds) {
+    if (explicitAccountIdSet.has(accountId)) continue;
+    await cleanupAutoManagedTokensForAccount(accountId, new Set()).catch(() => undefined);
+  }
+
+  return {
+    accountsScanned: accountIds.length,
+    accountsWithExplicitTargets: explicitAccountIds.length,
+    accountsWithoutExplicitTargets: Math.max(0, accountIds.length - explicitAccountIds.length),
+    provisionSummary: buildSummary(provisionResults),
+  };
+}
+
 async function findReusableSharedTokenForModel(accountId: number, modelName: string): Promise<{
   token: TokenRow;
   groupLabel: string | null;
@@ -1269,5 +1334,8 @@ export function queueAutoProvisionTokenCoverageTask(
 export const __tokenCoverageAutoProvisionTestUtils = {
   async listTargets(scope: TokenCoverageProvisionScope = {}) {
     return await listProvisionCandidateTargets(scope);
+  },
+  async listExplicitTargetModelsByAccount(accountIds: number[]) {
+    return await listActiveExplicitTargetModelsByAccount(accountIds);
   },
 };

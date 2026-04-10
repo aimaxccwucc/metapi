@@ -9,6 +9,7 @@ const allMock = vi.fn();
 const dbSelectAllMock = vi.fn();
 const executeRefreshSiteReachabilityMock = vi.fn();
 const isSiteBackoffBlockedMock = vi.fn();
+const reconcileHistoricalSharedGroupAutoTokensMock = vi.fn();
 
 vi.mock('node-cron', () => ({
   default: {
@@ -51,6 +52,10 @@ vi.mock('./checkinSiteRuntime.js', () => ({
   getCheckinSiteBackoffDecision: (...args: unknown[]) => isSiteBackoffBlockedMock(...args),
 }));
 
+vi.mock('./tokenCoverageAutoProvisionService.js', () => ({
+  reconcileHistoricalSharedGroupAutoTokens: (...args: unknown[]) => reconcileHistoricalSharedGroupAutoTokensMock(...args),
+}));
+
 describe('checkinScheduler', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -61,6 +66,7 @@ describe('checkinScheduler', () => {
     dbSelectAllMock.mockReset();
     executeRefreshSiteReachabilityMock.mockReset();
     isSiteBackoffBlockedMock.mockReset();
+    reconcileHistoricalSharedGroupAutoTokensMock.mockReset();
     isSiteBackoffBlockedMock.mockResolvedValue({
       siteId: 0,
       blocked: false,
@@ -236,6 +242,27 @@ describe('checkinScheduler', () => {
 
     validateMock.mockReturnValueOnce(false);
     expect(() => scheduler.updateSiteHealthRefreshCron('invalid-cron')).toThrow('Invalid cron: invalid-cron');
+  });
+
+  it('registers daily token coverage reconcile cron on scheduler start', async () => {
+    const scheduler = await import('./checkinScheduler.js');
+    reconcileHistoricalSharedGroupAutoTokensMock.mockResolvedValue({
+      accountsScanned: 0,
+      accountsWithExplicitTargets: 0,
+      accountsWithoutExplicitTargets: 0,
+      provisionSummary: {
+        total: 0,
+        created: 0,
+        reused: 0,
+        skipped: 0,
+        cooldown: 0,
+        failed: 0,
+      },
+    });
+
+    await scheduler.startScheduler();
+
+    expect(scheduleMock).toHaveBeenCalledWith('13 3 * * *', expect.any(Function));
   });
 
   it('retries failed interval accounts but suppresses recently skipped ones', async () => {
