@@ -20,6 +20,7 @@ import { matchesModelPattern } from './tokenRouter.js';
 
 const DEFAULT_COOLDOWN_MS = 10 * 60 * 1000;
 const MAX_AUTOPROVISION_TARGETS = 500;
+const HISTORICAL_RECONCILE_CONCURRENCY = 4;
 const AUTO_PROVISION_TASK_TYPE = 'token';
 const AUTO_PROVISION_TASK_TITLE = '自动补齐模型覆盖 Key';
 
@@ -717,23 +718,45 @@ export async function reconcileHistoricalSharedGroupAutoTokens(): Promise<{
   const explicitAccountIds = Array.from(explicitModelsByAccount.keys());
 
   const provisionResults: TokenCoverageProvisionItemResult[] = [];
-  for (const accountId of explicitAccountIds) {
-    const modelNames = explicitModelsByAccount.get(accountId) || [];
-    if (modelNames.length === 0) continue;
-    const result = await autoProvisionTokenCoverage({
-      accountIds: [accountId],
-      modelNames,
-    }, {
-      provisionMode: 'shared_group',
-      refreshRouteChannels: true,
-    });
-    provisionResults.push(...result.results);
+  const accountsNeedingRouteRefresh = new Set<number>();
+
+  for (let index = 0; index < explicitAccountIds.length; index += HISTORICAL_RECONCILE_CONCURRENCY) {
+    const batchAccountIds = explicitAccountIds.slice(index, index + HISTORICAL_RECONCILE_CONCURRENCY);
+    const batchResults = await Promise.all(
+      batchAccountIds.map(async (accountId) => {
+        const modelNames = explicitModelsByAccount.get(accountId) || [];
+        if (modelNames.length === 0) return null;
+        const result = await autoProvisionTokenCoverage({
+          accountIds: [accountId],
+          modelNames,
+        }, {
+          provisionMode: 'shared_group',
+          refreshRouteChannels: false,
+        });
+        if (result.results.some((item) => item.status === 'created' || item.status === 'reused')) {
+          accountsNeedingRouteRefresh.add(accountId);
+        }
+        return result;
+      }),
+    );
+
+    for (const result of batchResults) {
+      if (!result) continue;
+      provisionResults.push(...result.results);
+    }
   }
 
   const explicitAccountIdSet = new Set(explicitAccountIds);
   for (const accountId of accountIds) {
     if (explicitAccountIdSet.has(accountId)) continue;
     await cleanupAutoManagedTokensForAccount(accountId, new Set()).catch(() => undefined);
+    accountsNeedingRouteRefresh.add(accountId);
+  }
+
+  if (accountsNeedingRouteRefresh.size > 0) {
+    await rebuildTokenRoutesFromAvailabilityScopedDeferred({
+      accountIds: Array.from(accountsNeedingRouteRefresh),
+    }).catch(() => undefined);
   }
 
   return {
