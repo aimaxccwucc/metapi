@@ -29,6 +29,7 @@ import { rebuildTokenRoutesFromAvailability } from './services/modelService.js';
 import { startProxyFileRetentionService, stopProxyFileRetentionService } from './services/proxyFileRetentionService.js';
 import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
 import { buildStartupSummaryLines } from './services/startupInfo.js';
+import { queueStartupCacheWarmup } from './services/startupCacheWarmup.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
 import { migrateSiteApiKeysToAccounts } from './services/siteApiKeyMigrationService.js';
 import { ensureDefaultSitesSeeded } from './services/defaultSiteSeedService.js';
@@ -480,6 +481,7 @@ try {
   for (const line of summaryLines) {
     console.log(line);
   }
+  queueStartupCacheWarmup();
 } catch (err) {
   app.log.error(err);
   process.exit(1);
