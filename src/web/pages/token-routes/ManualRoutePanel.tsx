@@ -70,6 +70,37 @@ function toggleSourceRouteKey(sourceRouteKeys: string[], sourceKey: string): str
   return [...sourceRouteKeys, sourceKey].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
 }
 
+function normalizeSearchToken(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\s._:/-]+/g, '')
+    .trim();
+}
+
+function buildSearchVariants(value: string): string[] {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return [];
+  const variants = new Set<string>([raw]);
+  const collapsed = normalizeSearchToken(raw);
+  if (collapsed) variants.add(collapsed);
+  return Array.from(variants);
+}
+
+function matchesSearchVariants(haystacks: string[], needle: string): boolean {
+  const variants = buildSearchVariants(needle);
+  if (variants.length === 0) return true;
+
+  const normalizedHaystacks = haystacks
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .flatMap((item) => {
+      const collapsed = normalizeSearchToken(item);
+      return collapsed ? [item.toLowerCase(), collapsed] : [item.toLowerCase()];
+    });
+
+  return variants.some((variant) => normalizedHaystacks.some((haystack) => haystack.includes(variant)));
+}
+
 function SearchField({
   value,
   onChange,
@@ -199,11 +230,55 @@ export default function ManualRoutePanel({
     return next;
   }, [sourceRouteOptions]);
 
+  const filterSourceRoutes = (
+    inputRoutes: SourceRouteOption[],
+    options?: {
+      includeBrand?: boolean;
+      includeSite?: boolean;
+      includeEndpointType?: boolean;
+    },
+  ) => {
+    const includeBrand = options?.includeBrand !== false;
+    const includeSite = options?.includeSite !== false;
+    const includeEndpointType = options?.includeEndpointType !== false;
+    let list = [...inputRoutes];
+
+    if (includeBrand && activeSourceBrand) {
+      if (activeSourceBrand === '__other__') {
+        list = list.filter((route) => !(sourceRouteBrandByKey.get(route.sourceKey) || null));
+      } else {
+        list = list.filter((route) => (sourceRouteBrandByKey.get(route.sourceKey)?.name || '') === activeSourceBrand);
+      }
+    }
+
+    if (includeSite && activeSourceSite) {
+      list = list.filter((route) => (route.siteNames || []).includes(activeSourceSite));
+    }
+
+    if (includeEndpointType && activeSourceEndpointType) {
+      list = list.filter((route) => (sourceEndpointTypesBySourceKey[route.sourceKey] || []).includes(activeSourceEndpointType));
+    }
+
+    const normalizedSearch = sourceSearch.trim();
+    if (normalizedSearch) {
+      list = list.filter((route) => matchesSearchVariants([
+        renderRouteOptionLabel(route),
+        route.modelPattern,
+        sourceRouteBrandByKey.get(route.sourceKey)?.name || '',
+        ...(route.siteNames || []),
+        ...(sourceEndpointTypesBySourceKey[route.sourceKey] || []),
+      ], normalizedSearch));
+    }
+
+    return list;
+  };
+
   const sourceBrandList = useMemo(() => {
+    const facetRoutes = filterSourceRoutes(sourceRouteOptions, { includeBrand: false });
     const grouped = new Map<string, { count: number; brand: BrandInfo }>();
     let otherCount = 0;
 
-    for (const route of sourceRouteOptions) {
+    for (const route of facetRoutes) {
       const brand = sourceRouteBrandByKey.get(route.sourceKey) || null;
       if (!brand) {
         otherCount += 1;
@@ -226,12 +301,20 @@ export default function ManualRoutePanel({
       }) as [string, { count: number; brand: BrandInfo }][],
       otherCount,
     };
-  }, [sourceRouteBrandByKey, sourceRouteOptions]);
+  }, [
+    activeSourceEndpointType,
+    activeSourceSite,
+    sourceRouteBrandByKey,
+    sourceRouteOptions,
+    sourceSearch,
+    sourceEndpointTypesBySourceKey,
+  ]);
 
   const sourceSiteList = useMemo(() => {
+    const facetRoutes = filterSourceRoutes(sourceRouteOptions, { includeSite: false });
     const grouped = new Map<string, number>();
 
-    for (const route of sourceRouteOptions) {
+    for (const route of facetRoutes) {
       const seenSites = new Set<string>();
       for (const siteName of route.siteNames || []) {
         const normalizedSite = String(siteName || '').trim();
@@ -247,12 +330,20 @@ export default function ManualRoutePanel({
       }
       return b[1] - a[1];
     }) as [string, number][];
-  }, [sourceRouteOptions]);
+  }, [
+    activeSourceBrand,
+    activeSourceEndpointType,
+    sourceRouteBrandByKey,
+    sourceRouteOptions,
+    sourceSearch,
+    sourceEndpointTypesBySourceKey,
+  ]);
 
   const sourceEndpointTypeList = useMemo(() => {
+    const facetRoutes = filterSourceRoutes(sourceRouteOptions, { includeEndpointType: false });
     const grouped = new Map<string, number>();
 
-    for (const route of sourceRouteOptions) {
+    for (const route of facetRoutes) {
       const endpointTypes = sourceEndpointTypesBySourceKey[route.sourceKey] || [];
       for (const endpointType of endpointTypes) {
         const normalizedType = String(endpointType || '').trim();
@@ -267,44 +358,17 @@ export default function ManualRoutePanel({
       }
       return b[1] - a[1];
     }) as [string, number][];
-  }, [sourceEndpointTypesBySourceKey, sourceRouteOptions]);
+  }, [
+    activeSourceBrand,
+    activeSourceSite,
+    sourceRouteBrandByKey,
+    sourceEndpointTypesBySourceKey,
+    sourceRouteOptions,
+    sourceSearch,
+  ]);
 
   const filteredSourceRoutes = useMemo(() => {
-    let list = [...sourceRouteOptions];
-
-    if (activeSourceBrand) {
-      if (activeSourceBrand === '__other__') {
-        list = list.filter((route) => !(sourceRouteBrandByKey.get(route.sourceKey) || null));
-      } else {
-        list = list.filter((route) => (sourceRouteBrandByKey.get(route.sourceKey)?.name || '') === activeSourceBrand);
-      }
-    }
-
-    if (activeSourceSite) {
-      list = list.filter((route) => (route.siteNames || []).includes(activeSourceSite));
-    }
-
-    if (activeSourceEndpointType) {
-      list = list.filter((route) => (sourceEndpointTypesBySourceKey[route.sourceKey] || []).includes(activeSourceEndpointType));
-    }
-
-    const normalizedSearch = sourceSearch.trim().toLowerCase();
-    if (normalizedSearch) {
-      list = list.filter((route) => {
-        const label = renderRouteOptionLabel(route).toLowerCase();
-        const modelPattern = route.modelPattern.toLowerCase();
-        const brandName = (sourceRouteBrandByKey.get(route.sourceKey)?.name || '').toLowerCase();
-        const siteText = (route.siteNames || []).join(' ').toLowerCase();
-        const endpointTypes = (sourceEndpointTypesBySourceKey[route.sourceKey] || []).join(' ').toLowerCase();
-        return (
-          label.includes(normalizedSearch)
-          || modelPattern.includes(normalizedSearch)
-          || brandName.includes(normalizedSearch)
-          || siteText.includes(normalizedSearch)
-          || endpointTypes.includes(normalizedSearch)
-        );
-      });
-    }
+    let list = filterSourceRoutes(sourceRouteOptions);
 
     return list.sort((a, b) => {
       const aSelected = sourcePickerSelection.includes(a.sourceKey);
@@ -328,6 +392,7 @@ export default function ManualRoutePanel({
     sourceRouteBrandByKey,
     sourceRouteOptions,
     sourceSearch,
+    sourceEndpointTypesBySourceKey,
   ]);
 
   useEffect(() => {
