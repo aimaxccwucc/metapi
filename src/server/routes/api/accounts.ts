@@ -37,6 +37,7 @@ import { parseSiteProxyUrlInput, withAccountProxyOverride, withSiteRecordProxyRe
 import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import { parseApiKeyBatch } from '../../services/apiKeyBatch.js';
 import { invalidateModelTokenCandidatesCache } from '../../services/modelTokenCandidatesCache.js';
+import { invalidateModelsMarketplaceCache } from '../../services/modelsMarketplaceCache.js';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -1680,6 +1681,7 @@ export async function accountsRoutes(app: FastifyInstance) {
 
     try {
       invalidateModelTokenCandidatesCache();
+      invalidateModelsMarketplaceCache();
       await db.transaction(async (tx) => {
         const checkedAt = new Date().toISOString();
         for (const modelName of normalizedModels) {

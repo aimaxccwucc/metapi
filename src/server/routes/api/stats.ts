@@ -19,6 +19,11 @@ import {
   type ModelTokenCandidatesPayload,
 } from '../../services/modelTokenCandidatesCache.js';
 import {
+  invalidateModelsMarketplaceCache,
+  readModelsMarketplaceCache,
+  writeModelsMarketplaceCache,
+} from '../../services/modelsMarketplaceCache.js';
+import {
   getProxyLogBaseSelectFields,
   parseProxyLogBillingDetails,
   withProxyLogSelectFields,
@@ -44,40 +49,11 @@ function parseBooleanFlag(raw?: string): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 }
 
-const MODELS_MARKETPLACE_BASE_TTL_MS = 15_000;
-const MODELS_MARKETPLACE_PRICING_TTL_MS = 90_000;
 const limitModelTokenCandidatesRead = createRateLimitGuard({
   bucket: 'models-token-candidates-read',
   max: 30,
   windowMs: 60_000,
 });
-
-type ModelsMarketplaceCacheEntry = {
-  expiresAt: number;
-  models: any[];
-};
-
-const modelsMarketplaceCache = new Map<'base' | 'pricing', ModelsMarketplaceCacheEntry>();
-
-function readModelsMarketplaceCache(includePricing: boolean): any[] | null {
-  const key = includePricing ? 'pricing' : 'base';
-  const cached = modelsMarketplaceCache.get(key);
-  if (!cached) return null;
-  if (Date.now() >= cached.expiresAt) {
-    modelsMarketplaceCache.delete(key);
-    return null;
-  }
-  return cached.models;
-}
-
-function writeModelsMarketplaceCache(includePricing: boolean, models: any[]): void {
-  const ttl = includePricing ? MODELS_MARKETPLACE_PRICING_TTL_MS : MODELS_MARKETPLACE_BASE_TTL_MS;
-  const key = includePricing ? 'pricing' : 'base';
-  modelsMarketplaceCache.set(key, {
-    expiresAt: Date.now() + ttl,
-    models,
-  });
-}
 
 function proxyCostSqlExpression() {
   return sql<number>`
@@ -939,7 +915,7 @@ export async function statsRoutes(app: FastifyInstance) {
     let refreshJobId: string | null = null;
 
     if (refreshRequested) {
-      modelsMarketplaceCache.clear();
+      invalidateModelsMarketplaceCache();
       invalidateModelTokenCandidatesCache();
       const { task, reused } = startBackgroundTask(
         {

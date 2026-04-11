@@ -35,6 +35,8 @@ import { parseCodexQuotaResetHint } from './oauth/quota.js';
 import { extractRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { isSiteReachableForRouting } from './siteLifecycleService.js';
+import { invalidateModelTokenCandidatesCache } from './modelTokenCandidatesCache.js';
+import { invalidateModelsMarketplaceCache } from './modelsMarketplaceCache.js';
 import {
   clearRoutingGovernanceState,
   listActiveRoutingGovernanceStates,
@@ -3537,6 +3539,8 @@ async function markPersistedModelUnavailableForChannel(
   accountId: number,
   modelName?: string | null,
 ): Promise<void> {
+  invalidateModelTokenCandidatesCache();
+  invalidateModelsMarketplaceCache();
   const normalizedModelName = (modelName || '').trim();
   if (!normalizedModelName) return;
   const checkedAt = new Date().toISOString();
@@ -3631,6 +3635,8 @@ async function restorePersistedModelAvailabilityForChannel(
   accountId: number,
   modelName?: string | null,
 ): Promise<void> {
+  invalidateModelTokenCandidatesCache();
+  invalidateModelsMarketplaceCache();
   const normalizedModelName = (modelName || '').trim();
   if (!normalizedModelName) return;
   const checkedAt = new Date().toISOString();

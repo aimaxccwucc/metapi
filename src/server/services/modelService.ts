@@ -20,6 +20,7 @@ import {
 } from './accountExtraConfig.js';
 import { invalidateTokenRouterCache, matchesModelPattern } from './tokenRouter.js';
 import { invalidateModelTokenCandidatesCache } from './modelTokenCandidatesCache.js';
+import { invalidateModelsMarketplaceCache } from './modelsMarketplaceCache.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { clearAllRouteDecisionSnapshots } from './routeDecisionSnapshotStore.js';
 import { withAccountProxyOverride, withExplicitProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
@@ -608,6 +609,7 @@ export async function refreshModelsForAccount(
   options?: { allowInactive?: boolean },
 ): Promise<ModelRefreshResult> {
   invalidateModelTokenCandidatesCache();
+  invalidateModelsMarketplaceCache();
   const row = await db.select().from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(eq(schema.accounts.id, accountId))
@@ -1258,6 +1260,7 @@ function isRouteChannelWithinScope(
 
 export async function rebuildTokenRoutesFromAvailabilityScoped(scope: RebuildTokenRoutesScope = {}) {
   invalidateModelTokenCandidatesCache();
+  invalidateModelsMarketplaceCache();
   const scoped = buildScopedRouteSyncCandidateFilter(scope);
   const tokenRows = await db.select().from(schema.tokenModelAvailability)
     .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))

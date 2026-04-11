@@ -9,6 +9,8 @@ import {
 } from './accountExtraConfig.js';
 import { repairDefaultToken } from './accountTokenService.js';
 import { getOauthInfoFromExtraConfig } from './oauth/oauthAccount.js';
+import { invalidateModelTokenCandidatesCache } from './modelTokenCandidatesCache.js';
+import { invalidateModelsMarketplaceCache } from './modelsMarketplaceCache.js';
 
 const BACKUP_VERSION = '2.1';
 
@@ -1792,6 +1794,8 @@ function detectImportMetadata(data: RawBackupData): {
 }
 
 async function importAccountsSection(section: AccountsBackupSection): Promise<void> {
+  invalidateModelTokenCandidatesCache();
+  invalidateModelsMarketplaceCache();
   const runtimeState = await collectCurrentRuntimeStateSnapshot();
   const importedIndexes = buildRuntimeIdentityIndexesFromSection(section);
   const shouldReplaceSiteDisabledModels = Array.isArray(section.siteDisabledModels);

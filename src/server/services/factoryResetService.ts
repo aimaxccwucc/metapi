@@ -5,6 +5,8 @@ import { updateBalanceRefreshCron, updateCheckinCron, updateLogCleanupSettings }
 import { ensureDefaultSitesSeeded } from './defaultSiteSeedService.js';
 import { startProxyLogRetentionService } from './proxyLogRetentionService.js';
 import { invalidateSiteProxyCache } from './siteProxy.js';
+import { invalidateModelTokenCandidatesCache } from './modelTokenCandidatesCache.js';
+import { invalidateModelsMarketplaceCache } from './modelsMarketplaceCache.js';
 
 type FactoryResetDependencies = {
   switchRuntimeDatabase?: typeof switchRuntimeDatabase;
@@ -22,6 +24,8 @@ type PreservedInfrastructureState = {
 };
 
 async function clearAllBusinessData() {
+  invalidateModelTokenCandidatesCache();
+  invalidateModelsMarketplaceCache();
   await db.transaction(async (tx) => {
     await tx.delete(schema.routeChannels).run();
     await tx.delete(schema.tokenModelAvailability).run();
