@@ -129,4 +129,63 @@ describe('SearchModal results', () => {
       root?.unmount();
     }
   });
+
+  it('supports arrow navigation and enter to open the active result', async () => {
+    apiMock.search.mockResolvedValue({
+      models: [
+        {
+          name: 'gpt-4.1',
+          accountCount: 1,
+          tokenCount: 1,
+          siteCount: 1,
+        },
+      ],
+      sites: [
+        {
+          id: 23,
+          name: 'Focus Site',
+          url: 'https://focus.example.com',
+        },
+      ],
+      checkinLogs: [],
+      proxyLogs: [],
+      accounts: [],
+      accountTokens: [],
+    });
+
+    const onClose = vi.fn();
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/']}>
+            <LocationProbe />
+            <SearchModal open onClose={onClose} />
+          </MemoryRouter>,
+        );
+      });
+
+      const input = root.root.findByType('input');
+      await act(async () => {
+        input.props.onChange({ target: { value: 'focus' } });
+        vi.advanceTimersByTime(300);
+        await Promise.resolve();
+      });
+      await flushMicrotasks();
+
+      await act(async () => {
+        input.props.onKeyDown({ key: 'ArrowDown', preventDefault: vi.fn() });
+      });
+
+      await act(async () => {
+        input.props.onKeyDown({ key: 'Enter', preventDefault: vi.fn() });
+      });
+
+      const locationAfterKeyboardOpen = root.root.find((node) => node.props?.id === 'location-probe');
+      expect(collectText(locationAfterKeyboardOpen)).toBe('/sites?focusSiteId=23');
+      expect(onClose).toHaveBeenCalled();
+    } finally {
+      root?.unmount();
+    }
+  });
 });

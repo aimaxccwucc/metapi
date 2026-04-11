@@ -56,14 +56,20 @@ const routePreloaders = {
   '/tokens': () => import('./pages/Tokens.js'),
   '/checkin': () => import('./pages/CheckinLog.js'),
   '/routes': () => import('./pages/TokenRoutes.js'),
+  '/token-routes': () => import('./pages/TokenRoutes.js'),
   '/logs': () => import('./pages/ProxyLogs.js'),
   '/monitor': () => import('./pages/Monitors.js'),
+  '/monitors': () => import('./pages/Monitors.js'),
   '/diagnostics': () => import('./pages/CredentialDiagnostics.js'),
+  '/credential-diagnostics': () => import('./pages/CredentialDiagnostics.js'),
   '/settings': () => import('./pages/Settings.js'),
   '/downstream-keys': () => import('./pages/DownstreamKeys.js'),
   '/events': () => import('./pages/ProgramLogs.js'),
+  '/program-logs': () => import('./pages/ProgramLogs.js'),
   '/settings/import-export': () => import('./pages/ImportExport.js'),
+  '/import-export': () => import('./pages/ImportExport.js'),
   '/settings/notify': () => import('./pages/NotificationSettings.js'),
+  '/notifications': () => import('./pages/NotificationSettings.js'),
   '/models': () => import('./pages/Models.js'),
   '/playground': () => import('./pages/ModelTester.js'),
   '/about': () => import('./pages/About.js'),
@@ -560,13 +566,19 @@ const AppMainContent = memo(function AppMainContent({
               <Route path="/tokens" element={<Tokens />} />
               <Route path="/checkin" element={<CheckinLog />} />
               <Route path="/routes" element={<TokenRoutes />} />
+              <Route path="/token-routes" element={<Navigate to="/routes" replace />} />
               <Route path="/logs" element={<ProxyLogs />} />
               <Route path="/monitor" element={<Monitors />} />
+              <Route path="/monitors" element={<Navigate to="/monitor" replace />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/downstream-keys" element={<DownstreamKeys />} />
               <Route path="/events" element={<ProgramLogs />} />
+              <Route path="/program-logs" element={<Navigate to="/events" replace />} />
+              <Route path="/credential-diagnostics" element={<Navigate to="/diagnostics" replace />} />
               <Route path="/settings/import-export" element={<ImportExport />} />
+              <Route path="/import-export" element={<Navigate to="/settings/import-export" replace />} />
               <Route path="/settings/notify" element={<NotificationSettings />} />
+              <Route path="/notifications" element={<Navigate to="/settings/notify" replace />} />
               <Route path="/models" element={<Models />} />
               <Route path="/playground" element={<ModelTester />} />
               <Route path="/about" element={<About />} />

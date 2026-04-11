@@ -65,12 +65,18 @@ interface SearchResult {
   models: ModelSearchResult[];
 }
 
+type SearchActionItem = {
+  key: string;
+  onSelect: () => void;
+};
+
 export default function SearchModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { t } = useI18n();
   const presence = useAnimatedVisibility(open, 180);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
   const timerRef = useRef<number>();
@@ -79,6 +85,7 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
     if (open) {
       setQuery('');
       setResults(null);
+      setActiveIndex(0);
       setTimeout(() => inputRef.current?.focus(), 100);
     }
   }, [open]);
@@ -86,6 +93,7 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
   const doSearch = useCallback(async (q: string) => {
     if (!q.trim()) {
       setResults(null);
+      setActiveIndex(0);
       return;
     }
 
@@ -100,6 +108,7 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
         checkinLogs: Array.isArray(res?.checkinLogs) ? res.checkinLogs : [],
         proxyLogs: Array.isArray(res?.proxyLogs) ? res.proxyLogs : [],
       });
+      setActiveIndex(0);
     } catch {
       // ignore search errors in modal
     } finally {
@@ -117,6 +126,59 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
     onClose();
     navigate(path);
   };
+
+  const actionItems: SearchActionItem[] = [];
+  if (results?.models.length) {
+    for (const model of results.models) {
+      actionItems.push({
+        key: `model:${model.name}`,
+        onSelect: () => goTo(`/models?q=${encodeURIComponent(model.name)}`),
+      });
+    }
+  }
+  if (results?.sites.length) {
+    for (const site of results.sites) {
+      actionItems.push({
+        key: `site:${site.id}`,
+        onSelect: () => goTo(buildSiteFocusPath(site.id)),
+      });
+    }
+  }
+  if (results?.accounts.length) {
+    for (const account of results.accounts) {
+      actionItems.push({
+        key: `account:${account.id}`,
+        onSelect: () => goTo(buildAccountFocusPath(account.id, {
+          openRebind: account.status === 'expired',
+          segment: account.segment,
+        })),
+      });
+    }
+  }
+  if (results?.accountTokens.length) {
+    for (const token of results.accountTokens) {
+      actionItems.push({
+        key: `token:${token.id}`,
+        onSelect: () => goTo(buildTokenFocusPath(token.id)),
+      });
+    }
+  }
+  if (results?.checkinLogs.length) {
+    for (const log of results.checkinLogs) {
+      actionItems.push({
+        key: `checkin:${log.id}`,
+        onSelect: () => goTo('/checkin'),
+      });
+    }
+  }
+  if (results?.proxyLogs.length) {
+    for (const log of results.proxyLogs) {
+      actionItems.push({
+        key: `proxy:${log.id}`,
+        onSelect: () => goTo('/logs'),
+      });
+    }
+  }
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -137,6 +199,32 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
     || results.proxyLogs.length
   );
 
+  const normalizedActiveIndex = actionItems.length > 0
+    ? Math.min(activeIndex, actionItems.length - 1)
+    : 0;
+
+  const isActiveResult = (key: string) => (
+    actionItems.length > 0 && actionItems[normalizedActiveIndex]?.key === key
+  );
+
+  const handleInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (actionItems.length === 0) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setActiveIndex((current) => (current + 1) % actionItems.length);
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setActiveIndex((current) => (current - 1 + actionItems.length) % actionItems.length);
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      actionItems[normalizedActiveIndex]?.onSelect();
+    }
+  };
+
   return (
     <div className={`modal-backdrop ${presence.isVisible ? '' : 'is-closing'}`.trim()} onClick={onClose}>
       <div className={`modal-content ${presence.isVisible ? '' : 'is-closing'}`.trim()} style={{ maxWidth: 560, padding: 0 }} onClick={e => e.stopPropagation()}>
@@ -148,6 +236,7 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
             ref={inputRef}
             value={query}
             onChange={e => handleInput(e.target.value)}
+            onKeyDown={handleInputKeyDown}
             placeholder={t('搜索站点、账号、模型、日志...')}
             style={{ flex: 1, border: 'none', outline: 'none', fontSize: 14, background: 'transparent', color: 'var(--color-text-primary)' }}
           />
@@ -166,7 +255,12 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', padding: '8px 16px 4px', textTransform: 'uppercase' }}>{t('模型广场')}</div>
               {results.models.map((m) => (
-                <button key={m.name} className="search-result-item" onClick={() => goTo(`/models?q=${encodeURIComponent(m.name)}`)}>
+                <button
+                  key={m.name}
+                  className="search-result-item"
+                  onClick={() => goTo(`/models?q=${encodeURIComponent(m.name)}`)}
+                  style={isActiveResult(`model:${m.name}`) ? { background: 'var(--color-primary-light)' } : undefined}
+                >
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L4 12l5.75-5M14.25 7L20 12l-5.75 5M14 4l-4 16" />
                   </svg>
@@ -185,7 +279,12 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', padding: '8px 16px 4px', textTransform: 'uppercase' }}>{t('站点')}</div>
               {results.sites.map((s) => (
-                <button key={s.id} className="search-result-item" onClick={() => goTo(buildSiteFocusPath(s.id))}>
+                <button
+                  key={s.id}
+                  className="search-result-item"
+                  onClick={() => goTo(buildSiteFocusPath(s.id))}
+                  style={isActiveResult(`site:${s.id}`) ? { background: 'var(--color-primary-light)' } : undefined}
+                >
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9" />
                   </svg>
@@ -209,6 +308,7 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
                     openRebind: a.status === 'expired',
                     segment: a.segment,
                   }))}
+                  style={isActiveResult(`account:${a.id}`) ? { background: 'var(--color-primary-light)' } : undefined}
                 >
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
@@ -237,6 +337,7 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
                   key={token.id}
                   className="search-result-item"
                   onClick={() => goTo(buildTokenFocusPath(token.id))}
+                  style={isActiveResult(`token:${token.id}`) ? { background: 'var(--color-primary-light)' } : undefined}
                 >
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
@@ -259,7 +360,12 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', padding: '8px 16px 4px', textTransform: 'uppercase' }}>{t('签到记录')}</div>
               {results.checkinLogs.map((l) => (
-                <button key={l.id} className="search-result-item" onClick={() => goTo('/checkin')}>
+                <button
+                  key={l.id}
+                  className="search-result-item"
+                  onClick={() => goTo('/checkin')}
+                  style={isActiveResult(`checkin:${l.id}`) ? { background: 'var(--color-primary-light)' } : undefined}
+                >
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
@@ -278,7 +384,12 @@ export default function SearchModal({ open, onClose }: { open: boolean; onClose:
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', padding: '8px 16px 4px', textTransform: 'uppercase' }}>{t('使用日志')}</div>
               {results.proxyLogs.map((l) => (
-                <button key={l.id} className="search-result-item" onClick={() => goTo('/logs')}>
+                <button
+                  key={l.id}
+                  className="search-result-item"
+                  onClick={() => goTo('/logs')}
+                  style={isActiveResult(`proxy:${l.id}`) ? { background: 'var(--color-primary-light)' } : undefined}
+                >
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2" />
                   </svg>
