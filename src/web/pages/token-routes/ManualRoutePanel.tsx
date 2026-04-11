@@ -43,6 +43,8 @@ type ManualRoutePanelProps = {
   previewModelSamples: string[];
   sourceRouteOptions: SourceRouteOption[];
   sourceEndpointTypesBySourceKey: Record<string, string[]>;
+  routeCandidatesLoading: boolean;
+  routeCandidatesLoaded: boolean;
   modelCandidates: RouteModelCandidatesByModelName;
   missingTokenModelsByName: MissingTokenModelsByName;
   missingTokenGroupModelsByName: MissingTokenModelsByName;
@@ -170,6 +172,8 @@ export default function ManualRoutePanel({
   previewModelSamples,
   sourceRouteOptions,
   sourceEndpointTypesBySourceKey,
+  routeCandidatesLoading,
+  routeCandidatesLoaded,
   modelCandidates,
   missingTokenModelsByName,
   missingTokenGroupModelsByName,
@@ -274,6 +278,12 @@ export default function ManualRoutePanel({
   };
 
   const sourceBrandList = useMemo(() => {
+    if (!routeCandidatesLoaded) {
+      return {
+        list: [] as [string, { count: number; brand: BrandInfo }][],
+        otherCount: 0,
+      };
+    }
     const facetRoutes = filterSourceRoutes(sourceRouteOptions, { includeBrand: false });
     const grouped = new Map<string, { count: number; brand: BrandInfo }>();
     let otherCount = 0;
@@ -304,6 +314,7 @@ export default function ManualRoutePanel({
   }, [
     activeSourceEndpointType,
     activeSourceSite,
+    routeCandidatesLoaded,
     sourceRouteBrandByKey,
     sourceRouteOptions,
     sourceSearch,
@@ -311,6 +322,7 @@ export default function ManualRoutePanel({
   ]);
 
   const sourceSiteList = useMemo(() => {
+    if (!routeCandidatesLoaded) return [] as [string, number][];
     const facetRoutes = filterSourceRoutes(sourceRouteOptions, { includeSite: false });
     const grouped = new Map<string, number>();
 
@@ -333,6 +345,7 @@ export default function ManualRoutePanel({
   }, [
     activeSourceBrand,
     activeSourceEndpointType,
+    routeCandidatesLoaded,
     sourceRouteBrandByKey,
     sourceRouteOptions,
     sourceSearch,
@@ -340,6 +353,7 @@ export default function ManualRoutePanel({
   ]);
 
   const sourceEndpointTypeList = useMemo(() => {
+    if (!routeCandidatesLoaded) return [] as [string, number][];
     const facetRoutes = filterSourceRoutes(sourceRouteOptions, { includeEndpointType: false });
     const grouped = new Map<string, number>();
 
@@ -361,6 +375,7 @@ export default function ManualRoutePanel({
   }, [
     activeSourceBrand,
     activeSourceSite,
+    routeCandidatesLoaded,
     sourceRouteBrandByKey,
     sourceEndpointTypesBySourceKey,
     sourceRouteOptions,
@@ -368,6 +383,7 @@ export default function ManualRoutePanel({
   ]);
 
   const filteredSourceRoutes = useMemo(() => {
+    if (!routeCandidatesLoaded) return [] as SourceRouteOption[];
     let list = filterSourceRoutes(sourceRouteOptions);
 
     return list.sort((a, b) => {
@@ -386,6 +402,7 @@ export default function ManualRoutePanel({
     activeSourceBrand,
     activeSourceEndpointType,
     activeSourceSite,
+    routeCandidatesLoaded,
     sourceEndpointTypesBySourceKey,
     sourcePickerSelection,
     sourceProbeStateBySourceKey,
@@ -572,6 +589,8 @@ export default function ManualRoutePanel({
     maxWidth: '100%',
     paddingTop: 8,
   };
+  const sourceCandidatesReady = routeCandidatesLoaded && !routeCandidatesLoading;
+  const sourceCandidatesPending = !routeCandidatesLoaded || routeCandidatesLoading;
 
   return (
     <>
@@ -998,14 +1017,16 @@ export default function ManualRoutePanel({
                 {`已选择 ${sourcePickerSelection.length} 个来源模型`}
               </div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                {`候选 ${filteredSourceRoutes.length} / ${sourceRouteOptions.length}`}
+                {sourceCandidatesReady
+                  ? `候选 ${filteredSourceRoutes.length} / ${sourceRouteOptions.length}`
+                  : tr('正在同步来源模型候选...')}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => setSourcePickerSelection((current) => [...current].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })))}>
                 {tr('已选置顶')}
               </button>
-              <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => { void handleProbeVisibleRoutes(); }}>
+              <button type="button" className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }} onClick={() => { void handleProbeVisibleRoutes(); }} disabled={!sourceCandidatesReady || filteredSourceRoutes.length === 0}>
                 {`批量检测前 ${Math.min(filteredSourceRoutes.length, 10)} 个`}
               </button>
             </div>
@@ -1017,7 +1038,7 @@ export default function ManualRoutePanel({
             placeholder={tr('搜索来源模型')}
           />
 
-          <div className="route-filter-bar">
+          <div className="route-filter-bar" style={{ opacity: sourceCandidatesReady ? 1 : 0.62, pointerEvents: sourceCandidatesReady ? 'auto' : 'none' }}>
             <div className="route-filter-bar-expanded" style={{ opacity: 1, transform: 'none' }}>
               <FilterRow label={tr('品牌')}>
                 <FilterChip
@@ -1120,7 +1141,27 @@ export default function ManualRoutePanel({
               }
             }}
           >
-            {filteredSourceRoutes.length === 0 ? (
+            {sourceCandidatesPending ? (
+              <div
+                style={{
+                  border: '1px dashed var(--color-border)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '28px 18px',
+                  textAlign: 'center',
+                  background: 'color-mix(in srgb, var(--color-bg-card) 88%, var(--color-primary) 12%)',
+                  display: 'grid',
+                  gap: 10,
+                }}
+              >
+                <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--color-text-primary)', fontSize: 13, fontWeight: 600 }}>
+                  <span className="spinner spinner-sm" />
+                  <span>{tr('正在同步来源模型候选')}</span>
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
+                  {tr('首次打开或刚刷新模型后，系统需要汇总账号、令牌和模型分组信息。候选完整返回前，不展示不完整列表，避免误判品牌或模型缺失。')}
+                </div>
+              </div>
+            ) : filteredSourceRoutes.length === 0 ? (
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', padding: '12px 0', textAlign: 'center' }}>
                 {sourceRouteOptions.length === 0
                   ? tr('当前没有可选的来源模型。')

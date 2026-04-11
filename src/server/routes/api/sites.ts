@@ -5,6 +5,7 @@ import { detectSite } from '../../services/siteDetector.js';
 import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services/siteProxy.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
+import { invalidateModelTokenCandidatesCache } from '../../services/modelTokenCandidatesCache.js';
 import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
 import { getSub2ApiSubscriptionFromExtraConfig } from '../../services/accountExtraConfig.js';
 import {
@@ -162,6 +163,7 @@ export async function sitesRoutes(app: FastifyInstance) {
   function invalidateSiteCaches() {
     invalidateSiteProxyCache();
     invalidateTokenRouterCache();
+    invalidateModelTokenCandidatesCache();
   }
 
   async function applySiteStatusSideEffects(

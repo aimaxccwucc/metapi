@@ -3,6 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { eq } from 'drizzle-orm';
+import { invalidateModelTokenCandidatesCache } from '../../services/modelTokenCandidatesCache.js';
 const fetchModelPricingCatalogMock = vi.fn();
 
 vi.mock('../../services/modelPricingService.js', async () => {
@@ -36,6 +38,7 @@ describe('/api/models/token-candidates', () => {
   });
 
   beforeEach(async () => {
+    invalidateModelTokenCandidatesCache();
     fetchModelPricingCatalogMock.mockReset();
     fetchModelPricingCatalogMock.mockResolvedValue(null);
     await db.delete(schema.proxyLogs).run();
@@ -571,5 +574,80 @@ describe('/api/models/token-candidates', () => {
 
     expect(fetchModelPricingCatalogMock).not.toHaveBeenCalled();
     expect(body.modelsMissingTokenGroups['claude-opus-4-6']).toBeUndefined();
+  });
+
+  it('reuses cached payload for repeated reads within ttl', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'site-cache',
+      url: 'https://site-cache.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'cached-user',
+      accessToken: 'acc-token-cache',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-default-cache',
+      tokenGroup: 'default',
+      enabled: true,
+      isDefault: true,
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'claude-opus-4-6',
+      available: true,
+    }).run();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'claude-opus-4-6',
+      available: true,
+    }).run();
+
+    await db.update(schema.accountTokens)
+      .set({ tokenGroup: null, name: 'token-1' })
+      .where(eq(schema.accountTokens.id, token.id))
+      .run();
+
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      models: [
+        {
+          modelName: 'claude-opus-4-6',
+          quotaType: 0,
+          modelDescription: null,
+          tags: [],
+          supportedEndpointTypes: [],
+          ownerBy: null,
+          enableGroups: ['default', 'vip'],
+          groupPricing: {},
+        },
+      ],
+      groupRatio: { default: 1, vip: 2 },
+    });
+
+    const first = await app.inject({
+      method: 'GET',
+      url: '/api/models/token-candidates',
+    });
+    expect(first.statusCode).toBe(200);
+    expect(fetchModelPricingCatalogMock).toHaveBeenCalledTimes(1);
+
+    fetchModelPricingCatalogMock.mockClear();
+
+    const second = await app.inject({
+      method: 'GET',
+      url: '/api/models/token-candidates',
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual(first.json());
+    expect(fetchModelPricingCatalogMock).not.toHaveBeenCalled();
   });
 });

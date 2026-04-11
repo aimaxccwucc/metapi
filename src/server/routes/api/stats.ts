@@ -13,6 +13,12 @@ import { getRunningTaskByDedupeKey, startBackgroundTask } from '../../services/b
 import { parseCheckinRewardAmount } from '../../services/checkinRewardParser.js';
 import { estimateRewardWithTodayIncomeFallback } from '../../services/todayIncomeRewardService.js';
 import {
+  invalidateModelTokenCandidatesCache,
+  readModelTokenCandidatesCache,
+  writeModelTokenCandidatesCache,
+  type ModelTokenCandidatesPayload,
+} from '../../services/modelTokenCandidatesCache.js';
+import {
   getProxyLogBaseSelectFields,
   parseProxyLogBillingDetails,
   withProxyLogSelectFields,
@@ -934,6 +940,7 @@ export async function statsRoutes(app: FastifyInstance) {
 
     if (refreshRequested) {
       modelsMarketplaceCache.clear();
+      invalidateModelTokenCandidatesCache();
       const { task, reused } = startBackgroundTask(
         {
           type: 'model',
@@ -1230,6 +1237,11 @@ export async function statsRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/models/token-candidates', { preHandler: [limitModelTokenCandidatesRead] }, async () => {
+    const cached = readModelTokenCandidatesCache();
+    if (cached) {
+      return cached;
+    }
+
     const resolveTokenGroupLabel = (tokenGroup: string | null, tokenName: string | null): string | null => {
       const explicit = (tokenGroup || '').trim();
       if (explicit) return explicit;
@@ -1489,12 +1501,14 @@ export async function statsRoutes(app: FastifyInstance) {
       }
     }
 
-    return {
+    const payload: ModelTokenCandidatesPayload = {
       models: result,
       modelsWithoutToken,
       modelsMissingTokenGroups,
       endpointTypesByModel,
     };
+    writeModelTokenCandidatesCache(payload);
+    return payload;
   });
 
   // Refresh models for one account and rebuild routes.
@@ -1504,6 +1518,7 @@ export async function statsRoutes(app: FastifyInstance) {
       return { success: false, error: 'Invalid account id' };
     }
 
+    invalidateModelTokenCandidatesCache();
     const refresh = await refreshModelsForAccount(accountId);
     const rebuild = rebuildTokenRoutesFromAvailability();
     return { success: true, refresh, rebuild };

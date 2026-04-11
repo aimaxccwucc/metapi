@@ -2325,6 +2325,8 @@ export default function TokenRoutes() {
         previewModelSamples={previewModelSamples}
         sourceRouteOptions={sourceRouteOptions}
         sourceEndpointTypesBySourceKey={sourceEndpointTypesBySourceKey}
+        routeCandidatesLoading={routeCandidatesLoading}
+        routeCandidatesLoaded={routeCandidatesLoaded}
         modelCandidates={modelCandidates}
         missingTokenModelsByName={missingTokenModelsByName}
         missingTokenGroupModelsByName={missingTokenGroupModelsByName}
