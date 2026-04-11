@@ -1,5 +1,6 @@
 import React, { useEffect, useId, useMemo, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { acquireBodyScrollLock } from './bodyScrollLock.js';
 
 type MobileDrawerProps = {
   open: boolean;
@@ -44,11 +45,7 @@ function MobileDrawer({
 
   useEffect(() => {
     if (!open || typeof document === 'undefined') return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
+    return acquireBodyScrollLock();
   }, [open]);
 
   useEffect(() => {

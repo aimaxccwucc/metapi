@@ -203,6 +203,62 @@ describe('/api/models/token-candidates', () => {
     expect(body.modelsMissingTokenGroups['gpt-5.2-codex']).toBeUndefined();
   });
 
+  it('includes direct account connections in route token candidates so manual routes can select them', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'direct-site',
+      url: 'https://direct-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'direct-user',
+      accessToken: '',
+      apiToken: 'sk-direct-user',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+    }).run();
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/models/token-candidates',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      models: Record<string, Array<{
+        accountId: number;
+        tokenId: number | null;
+        tokenName: string | null;
+        isDefault: boolean;
+        username: string | null;
+        siteId: number;
+        siteName: string;
+      }>>;
+      modelsWithoutToken: Record<string, Array<{ accountId: number }>>;
+    };
+
+    expect(body.models['gpt-4.1']).toEqual([
+      {
+        accountId: account.id,
+        tokenId: null,
+        tokenName: null,
+        isDefault: false,
+        username: 'direct-user',
+        siteId: site.id,
+        siteName: 'direct-site',
+      },
+    ]);
+    expect(body.modelsWithoutToken['gpt-4.1']).toBeUndefined();
+  });
+
   it('returns modelsMissingTokenGroups when account has partial group token coverage', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-b',

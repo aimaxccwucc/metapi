@@ -1,8 +1,8 @@
 export type IndexedRouteModelCandidate = {
   modelName: string;
   accountId: number;
-  tokenId: number;
-  tokenName: string;
+  tokenId: number | null;
+  tokenName: string | null;
   isDefault: boolean;
   username: string | null;
   siteId: number;
@@ -63,7 +63,7 @@ export function buildRouteModelCandidatesIndex(
     for (const [modelName, candidates] of Object.entries(modelCandidates || {})) {
       if (!matchesModelPattern(modelName, modelPattern)) continue;
       for (const candidate of candidates || []) {
-        const key = `${candidate.tokenId}::${modelName}`;
+        const key = `${candidate.accountId}::${candidate.tokenId ?? 'account'}::${modelName}`;
         if (!deduped.has(key)) {
           deduped.set(key, {
             ...candidate,
@@ -84,12 +84,15 @@ export function buildRouteModelCandidatesIndex(
       if (!accountMap.has(candidate.accountId)) {
         accountMap.set(candidate.accountId, `${candidate.username || `account-${candidate.accountId}`} @ ${candidate.siteName}`);
       }
+      if (!(typeof candidate.tokenId === 'number' && Number.isFinite(candidate.tokenId) && candidate.tokenId > 0)) {
+        continue;
+      }
       if (!tokenOptionsByAccountId[candidate.accountId]) {
         tokenOptionsByAccountId[candidate.accountId] = [];
       }
       tokenOptionsByAccountId[candidate.accountId].push({
         id: candidate.tokenId,
-        name: candidate.tokenName,
+        name: candidate.tokenName || `token-${candidate.tokenId}`,
         isDefault: candidate.isDefault,
         sourceModel: candidate.modelName,
       });

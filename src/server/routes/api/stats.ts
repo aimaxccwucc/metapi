@@ -1282,8 +1282,8 @@ export async function statsRoutes(app: FastifyInstance) {
 
     const result: Record<string, Array<{
       accountId: number;
-      tokenId: number;
-      tokenName: string;
+      tokenId: number | null;
+      tokenName: string | null;
       isDefault: boolean;
       username: string | null;
       siteId: number;
@@ -1344,15 +1344,30 @@ export async function statsRoutes(app: FastifyInstance) {
     }
 
     for (const row of availableModelRows) {
-      if (!requiresManagedAccountTokens(row)) continue;
       const modelName = (row.modelName || '').trim();
       if (!modelName) continue;
       const coverageKey = `${row.accountId}::${modelName.toLowerCase()}`;
-      if (coveredAccountModelSet.has(coverageKey)) continue;
-      if (!modelsWithoutToken[modelName]) modelsWithoutToken[modelName] = [];
-      if (modelsWithoutToken[modelName].some((item) => item.accountId === row.accountId)) continue;
-      modelsWithoutToken[modelName].push({
+      const usesManagedTokens = requiresManagedAccountTokens(row);
+      if (usesManagedTokens) {
+        if (coveredAccountModelSet.has(coverageKey)) continue;
+        if (!modelsWithoutToken[modelName]) modelsWithoutToken[modelName] = [];
+        if (modelsWithoutToken[modelName].some((item) => item.accountId === row.accountId)) continue;
+        modelsWithoutToken[modelName].push({
+          accountId: row.accountId,
+          username: row.username,
+          siteId: row.siteId,
+          siteName: row.siteName,
+        });
+        continue;
+      }
+
+      if (!result[modelName]) result[modelName] = [];
+      if (result[modelName].some((item) => item.accountId === row.accountId && item.tokenId == null)) continue;
+      result[modelName].push({
         accountId: row.accountId,
+        tokenId: null,
+        tokenName: null,
+        isDefault: false,
         username: row.username,
         siteId: row.siteId,
         siteName: row.siteName,

@@ -429,4 +429,53 @@ describe('PUT /api/routes/:id route rebuild', () => {
     expect(stored?.tokenId).toBe(candidate.token.id);
     expect(stored?.manualOverride).toBe(true);
   });
+
+  it('creates account-direct automatic channels for exact routes backed by apikey model availability', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'direct-site',
+      url: 'https://direct.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'direct-user',
+      accessToken: '',
+      apiToken: 'sk-direct-user',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+    }).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/routes',
+      payload: {
+        modelPattern: 'gpt-4.1',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const createdRoute = response.json() as { id: number; modelPattern: string };
+    expect(createdRoute.modelPattern).toBe('gpt-4.1');
+
+    const routeChannels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, createdRoute.id))
+      .all();
+
+    expect(routeChannels).toHaveLength(1);
+    expect(routeChannels[0]).toMatchObject({
+      accountId: account.id,
+      tokenId: null,
+      sourceModel: 'gpt-4.1',
+      manualOverride: false,
+      enabled: true,
+    });
+  });
 });

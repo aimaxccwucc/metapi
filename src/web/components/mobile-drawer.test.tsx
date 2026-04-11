@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { act, create } from 'react-test-renderer';
 import MobileDrawer from './MobileDrawer.js';
+import CenteredModal from './CenteredModal.js';
+import { __resetBodyScrollLockForTest } from './bodyScrollLock.js';
 
 vi.mock('react-dom', () => ({
   createPortal: (node: unknown) => node,
@@ -58,7 +60,63 @@ describe('MobileDrawer', () => {
           root.unmount();
         });
       }
+      __resetBodyScrollLockForTest();
       expect(document.body.style.overflow).toBe('');
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('preserves body scroll lock while multiple overlays close independently', async () => {
+    let drawerRoot: ReturnType<typeof create> | null = null;
+    let modalRoot: ReturnType<typeof create> | null = null;
+    vi.stubGlobal('document', {
+      body: {
+        style: {
+          overflow: '',
+        },
+      },
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+
+    try {
+      await act(async () => {
+        drawerRoot = create(
+          <MobileDrawer open onClose={() => {}} title="导航菜单">
+            <div>DrawerContent</div>
+          </MobileDrawer>,
+        );
+        modalRoot = create(
+          <CenteredModal open onClose={() => {}} title="弹框">
+            <div>ModalContent</div>
+          </CenteredModal>,
+        );
+      });
+
+      expect(document.body.style.overflow).toBe('hidden');
+
+      await act(async () => {
+        modalRoot?.update(
+          <CenteredModal open={false} onClose={() => {}} title="弹框">
+            <div>ModalContent</div>
+          </CenteredModal>,
+        );
+      });
+
+      expect(document.body.style.overflow).toBe('hidden');
+
+      await act(async () => {
+        drawerRoot?.unmount();
+      });
+
+      expect(document.body.style.overflow).toBe('');
+    } finally {
+      if (modalRoot) {
+        await act(async () => {
+          modalRoot.unmount();
+        });
+      }
+      __resetBodyScrollLockForTest();
       vi.unstubAllGlobals();
     }
   });

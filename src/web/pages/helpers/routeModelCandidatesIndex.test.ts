@@ -113,4 +113,31 @@ describe('buildRouteModelCandidatesIndex', () => {
     expect(index[1].accountOptions).toEqual([]);
     expect(index[1].tokenOptionsByAccountId).toEqual({});
   });
+
+  it('keeps direct account candidates selectable without requiring token options', () => {
+    const routes = [{ id: 1, modelPattern: 'gpt-4.1' }];
+    const modelCandidates: RouteModelCandidatesByModelName = {
+      'gpt-4.1': [{
+        modelName: 'ignored',
+        accountId: 7,
+        tokenId: null,
+        tokenName: null,
+        isDefault: false,
+        username: 'direct-user',
+        siteId: 3,
+        siteName: 'direct-site',
+      }],
+    };
+
+    const index = buildRouteModelCandidatesIndex(routes, modelCandidates, matchesModelPattern);
+
+    expect(index[1].routeCandidates).toHaveLength(1);
+    expect(index[1].routeCandidates[0]).toMatchObject({
+      accountId: 7,
+      tokenId: null,
+      siteName: 'direct-site',
+    });
+    expect(index[1].accountOptions).toEqual([{ id: 7, label: 'direct-user @ direct-site' }]);
+    expect(index[1].tokenOptionsByAccountId).toEqual({});
+  });
 });

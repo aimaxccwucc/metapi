@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useAnimatedVisibility } from './useAnimatedVisibility.js';
+import { acquireBodyScrollLock } from './bodyScrollLock.js';
 
 type CenteredModalProps = {
   open: boolean;
@@ -31,11 +32,7 @@ export default function CenteredModal({
 
   useEffect(() => {
     if (!open || typeof document === 'undefined') return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
+    return acquireBodyScrollLock();
   }, [open]);
 
   useEffect(() => {

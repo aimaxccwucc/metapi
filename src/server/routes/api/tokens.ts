@@ -21,7 +21,12 @@ import {
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { autoProvisionTokenCoverage } from '../../services/tokenCoverageAutoProvisionService.js';
 import { getAdapter } from '../../services/platforms/index.js';
-import { extractCheckinSnapshot, requiresManagedAccountTokens, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
+import {
+  extractCheckinSnapshot,
+  requiresManagedAccountTokens,
+  resolvePlatformUserId,
+  supportsDirectAccountRoutingConnection,
+} from '../../services/accountExtraConfig.js';
 import {
   clearRouteDecisionSnapshot,
   clearRouteDecisionSnapshots,
@@ -671,6 +676,47 @@ async function getPatternTokenCandidates(modelPattern: string): Promise<Array<{ 
   return result;
 }
 
+async function getPatternDirectAccountCandidates(modelPattern: string): Promise<Array<{ tokenId: null; accountId: number; sourceModel: string }>> {
+  const rows = await db.select({
+    modelName: schema.modelAvailability.modelName,
+    accountId: schema.accounts.id,
+    siteId: schema.sites.id,
+    accessToken: schema.accounts.accessToken,
+    apiToken: schema.accounts.apiToken,
+    extraConfig: schema.accounts.extraConfig,
+  })
+    .from(schema.modelAvailability)
+    .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .where(
+      and(
+        eq(schema.modelAvailability.available, true),
+        eq(schema.accounts.status, 'active'),
+        eq(schema.sites.status, 'active'),
+      ),
+    )
+    .all();
+
+  const result: Array<{ tokenId: null; accountId: number; sourceModel: string }> = [];
+  for (const row of rows) {
+    if (!supportsDirectAccountRoutingConnection({
+      accessToken: row.accessToken,
+      apiToken: row.apiToken,
+      extraConfig: row.extraConfig,
+    })) continue;
+    const modelName = row.modelName?.trim();
+    if (!modelName) continue;
+    if (!matchesModelPattern(modelName, modelPattern)) continue;
+    result.push({
+      tokenId: null,
+      accountId: row.accountId,
+      sourceModel: modelName,
+    });
+  }
+
+  return result;
+}
+
 async function getMatchedExactRouteChannelCandidates(modelPattern: string): Promise<Array<{
   tokenId: number | null;
   accountId: number;
@@ -737,7 +783,16 @@ async function populateRouteChannelsByModelPattern(routeId: number, modelPattern
     enabled: true,
     manualOverride: false,
   }));
-  const candidates = [...routeCandidates, ...availabilityCandidates];
+  const directAccountCandidates = (await getPatternDirectAccountCandidates(modelPattern)).map((candidate) => ({
+    tokenId: candidate.tokenId,
+    accountId: candidate.accountId,
+    sourceModel: candidate.sourceModel,
+    priority: 0,
+    weight: 10,
+    enabled: true,
+    manualOverride: false,
+  }));
+  const candidates = [...routeCandidates, ...availabilityCandidates, ...directAccountCandidates];
   if (candidates.length === 0) return 0;
 
   const existingChannels: RouteChannelTableRow[] = await db.select().from(schema.routeChannels)
