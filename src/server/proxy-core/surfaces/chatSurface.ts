@@ -82,6 +82,39 @@ function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function summarizeToolContinuationMessages(messages: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .filter((message) => isRecord(message))
+    .map((message) => {
+      const role = asTrimmedString(message.role).toLowerCase();
+      if (role === 'assistant') {
+        const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+        return {
+          role,
+          toolCalls: toolCalls.map((toolCall) => ({
+            id: isRecord(toolCall) ? asTrimmedString(toolCall.id) : '',
+            name: isRecord(toolCall) && isRecord(toolCall.function)
+              ? asTrimmedString(toolCall.function.name)
+              : '',
+          })),
+        };
+      }
+      if (role === 'tool') {
+        return {
+          role,
+          tool_call_id: asTrimmedString(message.tool_call_id ?? message.id),
+          id: asTrimmedString(message.id),
+        };
+      }
+      return { role };
+    })
+    .filter((item) => (
+      item.role === 'tool'
+      || (item.role === 'assistant' && Array.isArray(item.toolCalls) && item.toolCalls.length > 0)
+    ));
+}
+
 function extractAssistantToolCallsFromChatPayload(payload: unknown): Array<Record<string, unknown>> {
   if (!payload || typeof payload !== 'object') return [];
   const choices = Array.isArray((payload as any).choices) ? (payload as any).choices : [];
@@ -424,8 +457,24 @@ export async function handleChatSurfaceRequest(
       const dispatchRequest = (
         compatibilityRequest: BuiltEndpointRequest,
         targetUrl?: string,
-      ) => (
-        dispatchRuntimeRequest({
+      ) => {
+        if (codexStandaloneToolContinuation) {
+          recordProxyDebugTrace({
+            clientContext,
+            kind: 'tool_continuation_dispatch',
+            requestedModel,
+            actualModel: modelName,
+            downstreamPath,
+            selected,
+            endpoint: compatibilityRequest.endpoint,
+            endpointPath: compatibilityRequest.path,
+            retryCount,
+            detail: {
+              messageSummary: summarizeToolContinuationMessages(compatibilityRequest.body?.messages),
+            },
+          });
+        }
+        return dispatchRuntimeRequest({
           siteUrl: selected.site.url,
           targetUrl,
           request: {
@@ -454,8 +503,8 @@ export async function handleChatSurfaceRequest(
             headers: requestForFetch.headers,
             body: JSON.stringify(requestForFetch.body),
           }, channelProxyUrl),
-        })
-      );
+        });
+      };
       const endpointStrategy = downstreamTransformer.compatibility.createEndpointStrategy({
         downstreamFormat,
         endpointCandidates,

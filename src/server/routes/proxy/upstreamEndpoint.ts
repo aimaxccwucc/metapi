@@ -705,6 +705,9 @@ function sanitizeDirectChatBody(
     codexStandaloneToolContinuationCacheKey?: string | null;
   } = {},
 ): Record<string, unknown> {
+  const rememberedAssistantToolCalls = getRememberedCodexStandaloneToolCalls(
+    options.codexStandaloneToolContinuationCacheKey,
+  );
   const preparedBody = injectRememberedAssistantToolCallsForCodexContinuation(
     body,
     options.codexStandaloneToolContinuationCacheKey,
@@ -712,11 +715,14 @@ function sanitizeDirectChatBody(
   );
   const next: Record<string, unknown> = {
     ...preparedBody,
-    messages: sanitizeChatMessages(preparedBody.messages, options),
+    messages: sanitizeChatMessages(preparedBody.messages, {
+      ...options,
+      rememberedAssistantToolCalls,
+    }),
   };
-  const rememberedAssistantToolCalls = collectAssistantToolCallsForCodexStandaloneContinuation(next.messages);
-  if (rememberedAssistantToolCalls.length > 0) {
-    rememberCodexStandaloneToolCalls(options.codexStandaloneToolContinuationCacheKey, rememberedAssistantToolCalls);
+  const latestAssistantToolCalls = collectAssistantToolCallsForCodexStandaloneContinuation(next.messages);
+  if (latestAssistantToolCalls.length > 0) {
+    rememberCodexStandaloneToolCalls(options.codexStandaloneToolContinuationCacheKey, latestAssistantToolCalls);
   }
   const forceObjectRequiredArray = shouldForceOpenAiChatToolObjectRequiredArray(siteUrl);
   const rawTools = Array.isArray(preparedBody.tools) ? preparedBody.tools : null;
@@ -835,16 +841,54 @@ function normalizeChatToolMessageContent(value: unknown): unknown {
   return value;
 }
 
+function looksLikeResponsesFunctionItemId(value: string): boolean {
+  return /^fc[_-]/i.test(value);
+}
+
+function ensureFunctionCallIdLikeValue(rawId: string): string {
+  const trimmed = rawId.trim();
+  if (!trimmed) return '';
+  return /^call[_-]/i.test(trimmed) ? trimmed : `call_${trimmed}`;
+}
+
+function normalizeStandaloneToolCallId(
+  rawToolCallId: unknown,
+  rememberedToolCalls: Array<Record<string, unknown>>,
+): string {
+  const directId = asTrimmedString(rawToolCallId);
+  if (!directId) return '';
+  if (!looksLikeResponsesFunctionItemId(directId)) return directId;
+
+  const normalizedSuffix = directId.replace(/^fc[_-]?/i, '');
+  if (!normalizedSuffix) return directId;
+
+  for (const toolCall of rememberedToolCalls) {
+    const rememberedId = asTrimmedString(toolCall.id);
+    if (!rememberedId) continue;
+    if (rememberedId === normalizedSuffix) return rememberedId;
+    const rememberedSuffix = rememberedId.replace(/^call[_-]?/i, '');
+    if (rememberedSuffix && rememberedSuffix === normalizedSuffix) {
+      return rememberedId;
+    }
+  }
+
+  return ensureFunctionCallIdLikeValue(normalizedSuffix);
+}
+
 function sanitizeChatMessages(
   messages: unknown,
   options: {
     preserveStandaloneToolMessages?: boolean;
+    rememberedAssistantToolCalls?: Array<Record<string, unknown>>;
   } = {},
 ): unknown {
   if (!Array.isArray(messages)) return messages;
 
   const seenToolCallIds = new Set<string>();
   const sanitizedMessages: unknown[] = [];
+  const rememberedToolCalls = Array.isArray(options.rememberedAssistantToolCalls)
+    ? options.rememberedAssistantToolCalls
+    : [];
 
   for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
     const message = messages[messageIndex];
@@ -892,7 +936,10 @@ function sanitizeChatMessages(
     }
 
     if (role === 'tool') {
-      const toolCallId = asTrimmedString(message.tool_call_id ?? message.id);
+      const toolCallId = normalizeStandaloneToolCallId(
+        message.tool_call_id ?? message.id,
+        rememberedToolCalls,
+      );
       const allowStandaloneToolMessage = options.preserveStandaloneToolMessages === true;
       if (!toolCallId || (!seenToolCallIds.has(toolCallId) && !allowStandaloneToolMessage)) {
         continue;

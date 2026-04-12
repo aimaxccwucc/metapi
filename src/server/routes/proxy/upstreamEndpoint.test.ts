@@ -3038,6 +3038,105 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
+  it('restores fc-style standalone tool ids back to remembered call ids for codex continuation requests', () => {
+    buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      preserveStandaloneToolMessages: true,
+      codexSessionCacheKey: 'gpt-5.4:session:codex-fc-1',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'run tool' },
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              {
+                id: 'call_mem_fc',
+                type: 'function',
+                function: {
+                  name: 'Glob',
+                  arguments: '{"pattern":"README*"}',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      preserveStandaloneToolMessages: true,
+      codexSessionCacheKey: 'gpt-5.4:session:codex-fc-1',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'run tool' },
+          { role: 'tool', id: 'fc_mem_fc', content: { ok: true } },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.messages).toEqual([
+      { role: 'user', content: 'run tool' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_mem_fc',
+            type: 'function',
+            function: {
+              name: 'Glob',
+              arguments: '{"pattern":"README*"}',
+            },
+          },
+        ],
+      },
+      { role: 'tool', id: 'fc_mem_fc', tool_call_id: 'call_mem_fc', content: '{"ok":true}' },
+    ]);
+  });
+
+  it('normalizes fc-style standalone tool ids to call ids even without remembered assistant tool calls', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      preserveStandaloneToolMessages: true,
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'run tool' },
+          { role: 'tool', id: 'fc_direct_1', content: { ok: true } },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.messages).toEqual([
+      { role: 'user', content: 'run tool' },
+      { role: 'tool', id: 'fc_direct_1', tool_call_id: 'call_direct_1', content: '{"ok":true}' },
+    ]);
+  });
+
   it('preserves later standalone tool outputs for codex-style direct /v1/chat/completions continuation requests', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',
