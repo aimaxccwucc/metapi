@@ -2410,6 +2410,63 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
+  it('sanitizes invalid function schemas for direct /v1/chat/completions requests', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          {
+            role: 'user',
+            content: 'list mcp resources',
+          },
+        ],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'list_mcp_resources',
+              parameters: {
+                type: 'object',
+                properties: null,
+                required: null,
+                items: {
+                  type: 'object',
+                  required: ['cursor', null],
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.tools).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'list_mcp_resources',
+          parameters: {
+            type: 'object',
+            properties: {},
+            items: {
+              type: 'object',
+              properties: {},
+              required: ['cursor'],
+            },
+          },
+        },
+      },
+    ]);
+  });
+
   it('preserves Anthropic image and tool_result blocks instead of flattening to plain text', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'messages',

@@ -629,6 +629,41 @@ function sanitizeResponsesFallbackChatBody(
   return next;
 }
 
+function sanitizeDirectChatBody(
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...body };
+  const rawTools = Array.isArray(body.tools) ? body.tools : null;
+  if (rawTools) {
+    next.tools = rawTools.map((tool) => {
+      if (!isRecord(tool)) return tool;
+      if (asTrimmedString(tool.type).toLowerCase() !== 'function') return tool;
+
+      if (isRecord(tool.function)) {
+        return {
+          ...tool,
+          function: {
+            ...tool.function,
+            ...(tool.function.parameters !== undefined
+              ? { parameters: sanitizeJsonSchemaForFunctionTool(tool.function.parameters) }
+              : {}),
+          },
+        };
+      }
+
+      if (tool.parameters !== undefined) {
+        return {
+          ...tool,
+          parameters: sanitizeJsonSchemaForFunctionTool(tool.parameters),
+        };
+      }
+
+      return tool;
+    });
+  }
+  return next;
+}
+
 function toFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -2024,11 +2059,11 @@ export function buildUpstreamEndpointRequest(input: {
   }
 
   const headers = ensureStreamAcceptHeader(commonHeaders, input.stream);
-  const chatBody = {
+  const chatBody = sanitizeDirectChatBody({
     ...openaiBody,
     model: input.modelName,
     stream: input.stream,
-  };
+  });
   const configuredChatBody = applyConfiguredPayloadRules(
     input.downstreamFormat === 'responses'
       ? sanitizeResponsesFallbackChatBody(chatBody)
