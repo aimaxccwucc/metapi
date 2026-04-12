@@ -831,10 +831,7 @@ function sanitizeChatMessages(
 
     if (role === 'tool') {
       const toolCallId = asTrimmedString(message.tool_call_id ?? message.id);
-      const allowStandaloneToolMessage = (
-        options.preserveStandaloneToolMessages === true
-        && seenToolCallIds.size === 0
-      );
+      const allowStandaloneToolMessage = options.preserveStandaloneToolMessages === true;
       if (!toolCallId || (!seenToolCallIds.has(toolCallId) && !allowStandaloneToolMessage)) {
         continue;
       }

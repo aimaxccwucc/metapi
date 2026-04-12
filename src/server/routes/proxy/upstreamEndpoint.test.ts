@@ -2908,6 +2908,60 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
+  it('preserves later standalone tool outputs for codex-style direct /v1/chat/completions continuation requests', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      preserveStandaloneToolMessages: true,
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'run tools' },
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              {
+                id: 'call_seen',
+                type: 'function',
+                function: {
+                  name: 'Glob',
+                  arguments: '{"pattern":"README*"}',
+                },
+              },
+            ],
+          },
+          { role: 'tool', tool_call_id: 'call_later', content: { ok: true, source: 'continuation' } },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.messages).toEqual([
+      { role: 'user', content: 'run tools' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_seen',
+            type: 'function',
+            function: {
+              name: 'Glob',
+              arguments: '{"pattern":"README*"}',
+            },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_later', content: '{"ok":true,"source":"continuation"}' },
+    ]);
+  });
+
   it('drops invalid assistant tool calls without function names for direct /v1/chat/completions requests', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',
