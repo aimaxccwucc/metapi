@@ -100,6 +100,15 @@ function renderCacheBadge(status?: string | null) {
   return <span className={className} style={{ fontSize: 10 }}>{label}</span>;
 }
 
+function resolveProxyLogSiteLabel(log: ProxyLogRenderItem): string | null {
+  const siteName = String(log.siteName || '').trim();
+  if (siteName) return siteName;
+  const cacheStatus = String(log.cacheStatus || '').trim().toLowerCase();
+  if (cacheStatus === 'hit') return '缓存命中';
+  if (cacheStatus === 'stale') return '旧缓存兜底';
+  return null;
+}
+
 function isNonGenerationSuccess(log: ProxyLogRenderItem) {
   if (log.status !== 'success') return false;
   if ((log.promptTokens || 0) > 0 || (log.completionTokens || 0) > 0 || (log.totalTokens || 0) > 0) return false;
@@ -1049,6 +1058,7 @@ export default function ProxyLogs() {
               const downstreamKeySummary = renderDownstreamKeySummary(detailLog);
               const isExpanded = expanded === log.id;
               const clientDisplay = resolveProxyLogClientDisplay(detailLog);
+              const siteLabel = resolveProxyLogSiteLabel(detailLog);
 
               return (
                 <MobileCard
@@ -1072,7 +1082,7 @@ export default function ProxyLogs() {
                   )}
                 >
                   <div className="mobile-inline-meta-row">
-                    <SiteBadgeLink siteId={siteIdByName.get(String(log.siteName || '').trim())} siteName={log.siteName} badgeStyle={{ fontSize: 11 }} />
+                    <SiteBadgeLink siteId={siteIdByName.get(String(siteLabel || '').trim())} siteName={siteLabel} badgeStyle={{ fontSize: 11 }} />
                     {renderCacheBadge(log.cacheStatus)}
                     {clientDisplay.primary ? (
                       <span className="badge badge-muted" style={{ fontSize: 10 }}>
@@ -1110,7 +1120,7 @@ export default function ProxyLogs() {
                   {isExpanded ? (
                     <div className="mobile-card-extra">
                       <MobileField label="时间" value={formatDateTimeLocal(log.createdAt)} />
-                      <MobileField label="站点" value={<SiteBadgeLink siteId={siteIdByName.get(String(log.siteName || '').trim())} siteName={log.siteName} badgeStyle={{ fontSize: 11 }} />} />
+                      <MobileField label="站点" value={<SiteBadgeLink siteId={siteIdByName.get(String(siteLabel || '').trim())} siteName={siteLabel} badgeStyle={{ fontSize: 11 }} />} />
                       <MobileField label="重试" value={log.retryCount > 0 ? log.retryCount : 0} />
                       {detailState?.loading && <div style={{ color: 'var(--color-text-muted)' }}>加载详情中...</div>}
                       {detailState?.error && <div style={{ color: 'var(--color-danger)' }}>{detailState.error}</div>}
@@ -1160,6 +1170,7 @@ export default function ProxyLogs() {
                 const billingDetailSummary = detail ? formatBillingDetailSummary(detailLog) : null;
                 const billingProcessLines = detail ? buildBillingProcessLines(detailLog) : [];
                 const downstreamKeySummary = renderDownstreamKeySummary(detailLog);
+                const siteLabel = resolveProxyLogSiteLabel(detailLog);
 
                 return (
                   <React.Fragment key={log.id}>
@@ -1196,7 +1207,7 @@ export default function ProxyLogs() {
                         </div>
                       </td>
                       <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                        <SiteBadgeLink siteId={siteIdByName.get(String(log.siteName || '').trim())} siteName={log.siteName} badgeStyle={{ fontSize: 11 }} />
+                        <SiteBadgeLink siteId={siteIdByName.get(String(siteLabel || '').trim())} siteName={siteLabel} badgeStyle={{ fontSize: 11 }} />
                       </td>
                       <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
                         {renderProxyLogClientCell(detailLog)}

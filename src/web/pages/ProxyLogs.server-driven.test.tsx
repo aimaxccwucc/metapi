@@ -249,6 +249,81 @@ describe('ProxyLogs server-driven page', () => {
     }
   });
 
+  it('shows cache source labels when a successful log has no upstream site name', async () => {
+    apiMock.getProxyLogs.mockResolvedValue(buildListResponse({
+      items: [
+        {
+          id: 202,
+          createdAt: '2026-03-09 16:05:00',
+          modelRequested: 'gpt-4o',
+          modelActual: 'gpt-4o',
+          status: 'success',
+          latencyMs: 0,
+          promptTokens: 10,
+          completionTokens: 5,
+          totalTokens: 15,
+          retryCount: 0,
+          estimatedCost: 0,
+          errorMessage: 'response cache hit',
+          username: 'cache',
+          siteName: null,
+          siteUrl: null,
+          cacheStatus: 'hit',
+          clientFamily: 'codex',
+        },
+        {
+          id: 203,
+          createdAt: '2026-03-09 16:06:00',
+          modelRequested: 'gpt-4o',
+          modelActual: 'gpt-4o',
+          status: 'success',
+          latencyMs: 0,
+          promptTokens: 10,
+          completionTokens: 5,
+          totalTokens: 15,
+          retryCount: 1,
+          estimatedCost: 0,
+          errorMessage: 'served stale cache after upstream failure',
+          username: 'cache',
+          siteName: '',
+          siteUrl: null,
+          cacheStatus: 'stale',
+          clientFamily: 'codex',
+        },
+      ],
+      total: 2,
+      summary: {
+        totalCount: 2,
+        successCount: 2,
+        failedCount: 0,
+        totalCost: 0,
+        totalTokensAll: 30,
+      },
+    }));
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root!.root);
+      expect(text).toContain('缓存命中');
+      expect(text).toContain('旧缓存兜底');
+      expect(text).not.toContain('>-<');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('renders explicit client self-reports before protocol-family fallback labels', async () => {
     apiMock.getProxyLogs.mockResolvedValue(buildListResponse({
       items: [
