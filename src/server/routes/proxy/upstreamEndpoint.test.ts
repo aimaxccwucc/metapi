@@ -2399,11 +2399,6 @@ describe('buildUpstreamEndpointRequest', () => {
           parameters: {
             type: 'object',
             properties: {},
-            items: {
-              type: 'object',
-              properties: {},
-              required: ['cursor'],
-            },
           },
         },
       },
@@ -2456,11 +2451,6 @@ describe('buildUpstreamEndpointRequest', () => {
           parameters: {
             type: 'object',
             properties: {},
-            items: {
-              type: 'object',
-              properties: {},
-              required: ['cursor'],
-            },
           },
         },
       },
@@ -2511,11 +2501,6 @@ describe('buildUpstreamEndpointRequest', () => {
           parameters: {
             type: 'object',
             properties: {},
-            items: {
-              type: 'object',
-              properties: {},
-              required: ['cursor'],
-            },
           },
         },
       },
@@ -2612,11 +2597,6 @@ describe('buildUpstreamEndpointRequest', () => {
         schema: {
           type: 'object',
           properties: {},
-          items: {
-            type: 'object',
-            properties: {},
-            required: ['cursor'],
-          },
         },
       },
     });
@@ -2665,11 +2645,6 @@ describe('buildUpstreamEndpointRequest', () => {
         schema: {
           type: 'object',
           properties: {},
-          items: {
-            type: 'object',
-            properties: {},
-            required: ['cursor'],
-          },
         },
       },
     });
