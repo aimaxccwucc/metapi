@@ -2629,6 +2629,70 @@ describe('buildUpstreamEndpointRequest', () => {
     });
   });
 
+  it('drops orphan tool output messages for direct /v1/chat/completions requests', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'run tool' },
+          { role: 'tool', tool_call_id: 'call_missing', content: { ok: true } },
+          { role: 'assistant', content: 'done' },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.messages).toEqual([
+      { role: 'user', content: 'run tool' },
+      { role: 'assistant', content: 'done' },
+    ]);
+  });
+
+  it('drops invalid assistant tool calls without function names for direct /v1/chat/completions requests', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'run tool' },
+          {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_bad',
+                type: 'function',
+                function: {
+                  arguments: { cursor: '1' },
+                },
+              },
+            ],
+          },
+          { role: 'tool', tool_call_id: 'call_bad', content: 'ignored' },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.messages).toEqual([
+      { role: 'user', content: 'run tool' },
+      { role: 'assistant', content: null },
+    ]);
+  });
+
   it('preserves Anthropic image and tool_result blocks instead of flattening to plain text', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'messages',

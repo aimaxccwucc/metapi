@@ -597,7 +597,10 @@ function normalizeResponsesFallbackChatToolChoice(
 function sanitizeResponsesFallbackChatBody(
   body: Record<string, unknown>,
 ): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...body };
+  const next: Record<string, unknown> = {
+    ...body,
+    messages: sanitizeChatMessages(body.messages),
+  };
   const normalizedTools = Array.isArray(body.tools)
     ? body.tools
       .map((tool) => normalizeResponsesFallbackChatFunctionTool(tool))
@@ -639,7 +642,10 @@ function sanitizeResponsesFallbackChatBody(
 function sanitizeDirectChatBody(
   body: Record<string, unknown>,
 ): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...body };
+  const next: Record<string, unknown> = {
+    ...body,
+    messages: sanitizeChatMessages(body.messages),
+  };
   const rawTools = Array.isArray(body.tools) ? body.tools : null;
   if (rawTools) {
     next.tools = rawTools.map((tool) => {
@@ -672,6 +678,100 @@ function sanitizeDirectChatBody(
     next.response_format = sanitizeOpenAiResponseFormat(next.response_format);
   }
   return next;
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '';
+  }
+}
+
+function normalizeChatToolArguments(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value) || isRecord(value)) return safeJsonStringify(value);
+  return '';
+}
+
+function normalizeChatToolMessageContent(value: unknown): unknown {
+  if (typeof value === 'string') return value;
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value) || isRecord(value)) return safeJsonStringify(value);
+  return value;
+}
+
+function sanitizeChatMessages(messages: unknown): unknown {
+  if (!Array.isArray(messages)) return messages;
+
+  const seenToolCallIds = new Set<string>();
+  const sanitizedMessages: unknown[] = [];
+
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
+    if (!isRecord(message)) {
+      sanitizedMessages.push(message);
+      continue;
+    }
+
+    const role = asTrimmedString(message.role).toLowerCase();
+    if (role === 'assistant' && Array.isArray(message.tool_calls)) {
+      const sanitizedToolCalls = message.tool_calls
+        .map((toolCall, toolIndex) => {
+          if (!isRecord(toolCall)) return null;
+          const functionPart = isRecord(toolCall.function) ? toolCall.function : null;
+          const name = asTrimmedString(functionPart?.name ?? toolCall.name);
+          if (!name) return null;
+
+          const id = asTrimmedString(toolCall.id) || `call_${messageIndex}_${toolIndex}`;
+          seenToolCallIds.add(id);
+
+          return {
+            ...toolCall,
+            id,
+            type: 'function',
+            function: {
+              ...(functionPart || {}),
+              name,
+              arguments: normalizeChatToolArguments(functionPart?.arguments ?? toolCall.arguments),
+            },
+          };
+        })
+        .filter((toolCall): toolCall is Record<string, unknown> => !!toolCall);
+
+      const nextMessage: Record<string, unknown> = { ...message };
+      if (sanitizedToolCalls.length > 0) {
+        nextMessage.tool_calls = sanitizedToolCalls;
+        if (nextMessage.content === undefined || nextMessage.content === null) {
+          nextMessage.content = '';
+        }
+      } else {
+        delete nextMessage.tool_calls;
+      }
+      sanitizedMessages.push(nextMessage);
+      continue;
+    }
+
+    if (role === 'tool') {
+      const toolCallId = asTrimmedString(message.tool_call_id ?? message.id);
+      if (!toolCallId || !seenToolCallIds.has(toolCallId)) {
+        continue;
+      }
+      sanitizedMessages.push({
+        ...message,
+        tool_call_id: toolCallId,
+        content: normalizeChatToolMessageContent(message.content),
+      });
+      continue;
+    }
+
+    sanitizedMessages.push(message);
+  }
+
+  return sanitizedMessages;
 }
 
 function toFiniteNumber(value: unknown): number | null {
