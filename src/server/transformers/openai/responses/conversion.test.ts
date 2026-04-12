@@ -403,6 +403,52 @@ describe('convertOpenAiBodyToResponsesBody', () => {
     });
   });
 
+  it('sanitizes invalid OpenAI response_format json_schema when converting to Responses text.format', () => {
+    const result = convertOpenAiBodyToResponsesBody(
+      {
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'return structured data' }],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'payload',
+            schema: {
+              type: 'object',
+              properties: null,
+              required: null,
+              items: {
+                type: 'object',
+                required: ['value', null],
+              },
+            },
+          },
+        },
+      },
+      'gpt-5',
+      false,
+    );
+
+    expect(result).toMatchObject({
+      text: {
+        format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'payload',
+            schema: {
+              type: 'object',
+              properties: {},
+              items: {
+                type: 'object',
+                properties: {},
+                required: ['value'],
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
   it('normalizes and preserves field parity when converting from OpenAI-compatible input', () => {
     const result = convertOpenAiBodyToResponsesBody(
       {
@@ -1080,6 +1126,52 @@ describe('convertResponsesBodyToOpenAiBody', () => {
         },
       },
       verbosity: 'medium',
+    });
+  });
+
+  it('sanitizes invalid Responses text.format json_schema when converting back to OpenAI response_format', () => {
+    const result = convertResponsesBodyToOpenAiBody(
+      {
+        model: 'gpt-5',
+        input: 'hello',
+        text: {
+          format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'payload',
+              schema: {
+                type: 'object',
+                properties: null,
+                required: null,
+                items: {
+                  type: 'object',
+                  required: ['value', null],
+                },
+              },
+            },
+          },
+        },
+      },
+      'gpt-5',
+      false,
+    );
+
+    expect(result).toMatchObject({
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'payload',
+          schema: {
+            type: 'object',
+            properties: {},
+            items: {
+              type: 'object',
+              properties: {},
+              required: ['value'],
+            },
+          },
+        },
+      },
     });
   });
 

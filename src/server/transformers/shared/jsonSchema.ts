@@ -103,3 +103,23 @@ export function sanitizeJsonSchemaForFunctionTool(value: unknown): Record<string
   }
   return sanitized;
 }
+
+export function sanitizeOpenAiResponseFormat(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+
+  const next: Record<string, unknown> = {
+    ...value,
+  };
+
+  if (typeof next.type === 'string' && next.type.trim().toLowerCase() === 'json_schema' && isRecord(next.json_schema)) {
+    const jsonSchema: Record<string, unknown> = {
+      ...next.json_schema,
+    };
+    if (jsonSchema.schema !== undefined) {
+      jsonSchema.schema = sanitizeJsonSchemaForFunctionTool(jsonSchema.schema);
+    }
+    next.json_schema = jsonSchema;
+  }
+
+  return next;
+}

@@ -37,7 +37,10 @@ import {
   shouldDowngradeMessagesEndpointAfterGenericBadResponseWrapper,
   shouldPreferResponsesAfterLegacyChatError,
 } from '../../transformers/shared/endpointCompatibility.js';
-import { sanitizeJsonSchemaForFunctionTool } from '../../transformers/shared/jsonSchema.js';
+import {
+  sanitizeJsonSchemaForFunctionTool,
+  sanitizeOpenAiResponseFormat,
+} from '../../transformers/shared/jsonSchema.js';
 export {
   buildMinimalJsonHeadersForCompatibility,
   hasExplicitEndpointCompatibilitySignal,
@@ -626,6 +629,10 @@ function sanitizeResponsesFallbackChatBody(
     delete next.tool_choice;
   }
 
+  if (next.response_format !== undefined) {
+    next.response_format = sanitizeOpenAiResponseFormat(next.response_format);
+  }
+
   return next;
 }
 
@@ -660,6 +667,9 @@ function sanitizeDirectChatBody(
 
       return tool;
     });
+  }
+  if (next.response_format !== undefined) {
+    next.response_format = sanitizeOpenAiResponseFormat(next.response_format);
   }
   return next;
 }

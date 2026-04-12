@@ -4,7 +4,10 @@ import {
 } from './compatibility.js';
 import { normalizeInputFileBlock, toOpenAiChatFileBlock } from '../../shared/inputFile.js';
 import { buildShortToolNameMap, getShortToolName } from '../../shared/toolNameShortener.js';
-import { sanitizeJsonSchemaForFunctionTool } from '../../shared/jsonSchema.js';
+import {
+  sanitizeJsonSchemaForFunctionTool,
+  sanitizeOpenAiResponseFormat,
+} from '../../shared/jsonSchema.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -102,6 +105,9 @@ function normalizeTextConfig(
   fallbackVerbosity?: unknown,
 ): Record<string, unknown> | undefined {
   const textConfig = cloneRecord(rawText) || {};
+  if (textConfig.format !== undefined) {
+    textConfig.format = sanitizeOpenAiResponseFormat(textConfig.format);
+  }
   const verbosity = (
     normalizeOptionalTrimmedString(textConfig.verbosity)
     ?? normalizeOptionalTrimmedString(fallbackVerbosity)
@@ -562,7 +568,7 @@ export function convertOpenAiBodyToResponsesBody(
   if (openaiBody.stream_options !== undefined) body.stream_options = openaiBody.stream_options;
   if (openaiBody.response_format !== undefined) {
     const existingTextConfig = cloneRecord(body.text) || {};
-    existingTextConfig.format = cloneJsonValue(openaiBody.response_format);
+    existingTextConfig.format = sanitizeOpenAiResponseFormat(cloneJsonValue(openaiBody.response_format));
     body.text = existingTextConfig;
   }
 
@@ -880,7 +886,7 @@ export function convertResponsesBodyToOpenAiBody(
   if (normalizedBody.top_logprobs !== undefined) payload.top_logprobs = normalizedBody.top_logprobs;
   if (normalizedBody.stream_options !== undefined) payload.stream_options = normalizedBody.stream_options;
   if (isRecord(normalizedBody.text) && normalizedBody.text.format !== undefined) {
-    payload.response_format = cloneJsonValue(normalizedBody.text.format);
+    payload.response_format = sanitizeOpenAiResponseFormat(cloneJsonValue(normalizedBody.text.format));
   }
   if (isRecord(normalizedBody.text) && asTrimmedString(normalizedBody.text.verbosity)) {
     payload.verbosity = asTrimmedString(normalizedBody.text.verbosity);

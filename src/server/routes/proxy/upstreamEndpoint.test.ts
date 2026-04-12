@@ -2467,6 +2467,168 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
+  it('sanitizes invalid response_format json_schema for direct /v1/chat/completions requests', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          {
+            role: 'user',
+            content: 'return structured data',
+          },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'payload',
+            schema: {
+              type: 'object',
+              properties: null,
+              required: null,
+              items: {
+                type: 'object',
+                required: ['cursor', null],
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.response_format).toEqual({
+      type: 'json_schema',
+      json_schema: {
+        name: 'payload',
+        schema: {
+          type: 'object',
+          properties: {},
+          items: {
+            type: 'object',
+            properties: {},
+            required: ['cursor'],
+          },
+        },
+      },
+    });
+  });
+
+  it('sanitizes invalid response_format json_schema when /v1/responses falls back to /v1/chat/completions', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'responses',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          {
+            role: 'user',
+            content: 'return structured data',
+          },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'payload',
+            schema: {
+              type: 'object',
+              properties: null,
+              required: null,
+              items: {
+                type: 'object',
+                required: ['cursor', null],
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.response_format).toEqual({
+      type: 'json_schema',
+      json_schema: {
+        name: 'payload',
+        schema: {
+          type: 'object',
+          properties: {},
+          items: {
+            type: 'object',
+            properties: {},
+            required: ['cursor'],
+          },
+        },
+      },
+    });
+  });
+
+  it('sanitizes invalid response_format json_schema for direct /v1/responses requests', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'responses',
+      responsesOriginalBody: {
+        model: 'gpt-5.4',
+        input: 'return structured data',
+        text: {
+          format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'payload',
+              schema: {
+                type: 'object',
+                properties: null,
+                required: null,
+                items: {
+                  type: 'object',
+                  required: ['cursor', null],
+                },
+              },
+            },
+          },
+        },
+      },
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'return structured data' }],
+      },
+    });
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.body.text).toMatchObject({
+      format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'payload',
+          schema: {
+            type: 'object',
+            properties: {},
+            items: {
+              type: 'object',
+              properties: {},
+              required: ['cursor'],
+            },
+          },
+        },
+      },
+    });
+  });
+
   it('preserves Anthropic image and tool_result blocks instead of flattening to plain text', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'messages',
