@@ -27,6 +27,9 @@ function shouldDelaySiteExclusion(
   if (/empty\s+content/i.test(text)) {
     return false;
   }
+  if (/upstream\s+timeout\s+after\s+4000ms/i.test(text)) {
+    return false;
+  }
   if (/cloudflare\s+502|bad\s+gateway|service\s+temporarily\s+unavailable|system\s+disk\s+overloaded/i.test(text)) {
     return false;
   }
