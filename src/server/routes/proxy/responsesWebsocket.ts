@@ -318,7 +318,6 @@ function synthesizePrewarmResponsePayloads(request: Record<string, unknown>) {
 
 function collectResponsesOutput(payloads: unknown[]): unknown[] {
   const outputByIndex = new Map<number, unknown>();
-  let completedOutput: unknown[] | null = null;
 
   for (const payload of payloads) {
     if (!isRecord(payload)) continue;
@@ -330,11 +329,12 @@ function collectResponsesOutput(payloads: unknown[]): unknown[] {
       continue;
     }
     if (type === 'response.completed' && isRecord(payload.response) && Array.isArray(payload.response.output)) {
-      completedOutput = cloneJsonObject(payload.response.output);
+      payload.response.output.forEach((item, index) => {
+        outputByIndex.set(index, cloneJsonObject(item));
+      });
     }
   }
 
-  if (completedOutput) return completedOutput;
   return [...outputByIndex.entries()]
     .sort((left, right) => left[0] - right[0])
     .map(([, value]) => value);
