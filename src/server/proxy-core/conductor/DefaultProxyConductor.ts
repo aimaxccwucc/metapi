@@ -21,6 +21,12 @@ function shouldDelaySiteExclusion(
   if (/no\s+available\s+channel\s+for\s+model|no\s+available\s+providers|under\s+group\s+.+\(distributor\)|分组\s*.+\s*无可用渠道|无可用渠道（distributor）|billing\s+service\s+temporarily\s+unavailable|偷偷倒闭/i.test(text)) {
     return false;
   }
+  if (/blocked_invalid_request/i.test(text)) {
+    return false;
+  }
+  if (/model_cooldown|cooling\s+down|all\s+credentials\s+for\s+model/i.test(text)) {
+    return false;
+  }
   const normalizedText = text.toLowerCase();
   if (status >= 500) return true;
   if (status === 408 || status === 409 || status === 425 || status === 429) return true;

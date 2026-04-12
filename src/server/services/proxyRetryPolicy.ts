@@ -46,6 +46,9 @@ const RATE_LIMIT_PATTERNS: RegExp[] = [
   /too\s+many\s+requests/i,
   /quota/i,
   /retry\s+after/i,
+  /model_cooldown/i,
+  /cooling\s+down/i,
+  /all\s+credentials\s+for\s+model/i,
 ];
 
 const RETRYABLE_CHANNEL_LOCAL_PATTERNS: RegExp[] = [
@@ -64,12 +67,15 @@ const RETRYABLE_CHANNEL_LOCAL_PATTERNS: RegExp[] = [
   /forbidden/i,
   /rate\s+limit/i,
   /quota/i,
+  /model_cooldown/i,
+  /cooling\s+down/i,
   /bad\s+gateway/i,
   /gateway\s+time-?out/i,
   /service\s+unavailable/i,
   /cpu\s+overloaded/i,
   /timeout/i,
   /no\s+tool\s+call\s+found\s+for\s+function\s+call\s+output/i,
+  /blocked_invalid_request/i,
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]\.name['"]?/i,
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]/i,
 ];
@@ -90,6 +96,7 @@ const NON_RETRYABLE_REQUEST_PATTERNS: RegExp[] = [
 const RETRYABLE_UPSTREAM_COMPATIBILITY_400_PATTERNS: RegExp[] = [
   /no\s+tool\s+call\s+found\s+for\s+function\s+call\s+output/i,
   /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
+  /blocked_invalid_request/i,
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]\.name['"]?/i,
 ];
 
@@ -112,12 +119,17 @@ const INVALID_CHANNEL_PATTERNS: RegExp[] = [
   /无权访问\s*.+\s*分组/i,
   /no\s+access\s+to\s+group/i,
   /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
+  /blocked_invalid_request/i,
 ];
 
 const SITE_AVOID_INVALID_CHANNEL_PATTERNS: RegExp[] = [
   /无权访问\s*.+\s*分组/i,
   /no\s+access\s+to\s+group/i,
   /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
+  /blocked_invalid_request/i,
+  /model_cooldown/i,
+  /cooling\s+down/i,
+  /all\s+credentials\s+for\s+model/i,
   /\bbad_response_status_code\b/i,
   /bad\s+response\s+status\s+code\s+400/i,
 ];
