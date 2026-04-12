@@ -12,6 +12,46 @@ const SUB2API_PLATFORM = 'sub2api';
 const SUB2API_REFRESH_SCHEDULER_INTERVAL_MS = 60_000;
 export const SUB2API_REFRESH_SCHEDULER_CONCURRENCY = 4;
 
+// Exponential backoff delays per consecutive failure: 2m, 5m, 15m, 1h, 6h
+const REFRESH_BACKOFF_DELAYS_MS = [
+  2 * 60 * 1000,
+  5 * 60 * 1000,
+  15 * 60 * 1000,
+  60 * 60 * 1000,
+  6 * 60 * 60 * 1000,
+];
+
+type RefreshFailureRecord = {
+  count: number;
+  nextRetryAt: number;
+};
+
+const accountRefreshFailureMap = new Map<number, RefreshFailureRecord>();
+
+function getRefreshBackoffDelayMs(failureCount: number): number {
+  const idx = Math.min(failureCount - 1, REFRESH_BACKOFF_DELAYS_MS.length - 1);
+  return REFRESH_BACKOFF_DELAYS_MS[Math.max(0, idx)];
+}
+
+function isAccountRefreshInBackoff(accountId: number, nowMs: number): boolean {
+  const record = accountRefreshFailureMap.get(accountId);
+  if (!record) return false;
+  return nowMs < record.nextRetryAt;
+}
+
+function recordAccountRefreshFailure(accountId: number, nowMs: number): void {
+  const existing = accountRefreshFailureMap.get(accountId);
+  const count = (existing?.count ?? 0) + 1;
+  accountRefreshFailureMap.set(accountId, {
+    count,
+    nextRetryAt: nowMs + getRefreshBackoffDelayMs(count),
+  });
+}
+
+function clearAccountRefreshFailure(accountId: number): void {
+  accountRefreshFailureMap.delete(accountId);
+}
+
 let sub2ApiRefreshSchedulerTimer: ReturnType<typeof setInterval> | null = null;
 let sub2ApiRefreshPassInFlight: Promise<void> | null = null;
 
@@ -66,11 +106,10 @@ export async function executeSub2ApiManagedRefreshPass(input: {
     ))
     .all();
 
-  const refreshCandidates = rows.filter((row) => shouldRefreshManagedSub2ApiAccount({
-    account: row.accounts,
-    site: row.sites,
-    nowMs,
-  }));
+  const refreshCandidates = rows.filter((row: (typeof rows)[number]) =>
+    shouldRefreshManagedSub2ApiAccount({ account: row.accounts, site: row.sites, nowMs }) &&
+    !isAccountRefreshInBackoff(row.accounts.id, nowMs),
+  );
   const refreshedAccountIds: number[] = [];
   const failedAccountIds: number[] = [];
   const skipped = rows.length - refreshCandidates.length;
@@ -90,11 +129,15 @@ export async function executeSub2ApiManagedRefreshPass(input: {
           currentAccessToken: row.accounts.accessToken || '',
           currentExtraConfig: row.accounts.extraConfig,
         });
+        clearAccountRefreshFailure(row.accounts.id);
         refreshedAccountIds.push(row.accounts.id);
       } catch (error) {
+        recordAccountRefreshFailure(row.accounts.id, nowMs);
         failedAccountIds.push(row.accounts.id);
+        const record = accountRefreshFailureMap.get(row.accounts.id);
+        const backoffMin = record ? Math.round((record.nextRetryAt - nowMs) / 60000) : 0;
         console.warn(
-          `[sub2api-refresh] failed to refresh account ${row.accounts.id}: ${(error as Error)?.message || 'unknown error'}`,
+          `[sub2api-refresh] failed to refresh account ${row.accounts.id}: ${(error as Error)?.message || 'unknown error'} (backoff ${backoffMin}m, attempt #${record?.count ?? 1})`,
         );
       }
     }
@@ -153,4 +196,5 @@ export async function stopSub2ApiManagedRefreshScheduler() {
 export async function __resetSub2ApiManagedRefreshSchedulerForTests() {
   await stopSub2ApiManagedRefreshScheduler();
   sub2ApiRefreshPassInFlight = null;
+  accountRefreshFailureMap.clear();
 }
