@@ -740,7 +740,7 @@ function sanitizeChatMessages(messages: unknown): unknown {
             },
           };
         })
-        .filter((toolCall): toolCall is Record<string, unknown> => !!toolCall);
+        .filter(Boolean);
 
       const nextMessage: Record<string, unknown> = { ...message };
       if (sanitizedToolCalls.length > 0) {
