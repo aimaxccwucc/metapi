@@ -36,6 +36,11 @@ type RuntimeOverviewResponse = {
   gatewayRouting: {
     retryBackoffMs: number;
     retryBackoffCount: number;
+    retryBackoffLastDelayMs: number;
+    retryBackoffRetryAfterHonoredCount: number;
+    retryBackoffBudgetExhaustedCount: number;
+    retryBackoffByKind: ReturnType<typeof getRetryBackoffMetrics>['byKind'];
+    retryBackoffByStatus: ReturnType<typeof getRetryBackoffMetrics>['byStatus'];
     onDemandRefreshTriggeredTotal: number;
     onDemandRefreshSkippedTotal: number;
   };
@@ -165,6 +170,11 @@ async function buildRuntimeOverview(startedAt: Date): Promise<RuntimeOverviewRes
     gatewayRouting: {
       retryBackoffMs: retryBackoffMetrics.totalMs,
       retryBackoffCount: retryBackoffMetrics.count,
+      retryBackoffLastDelayMs: retryBackoffMetrics.lastDelayMs,
+      retryBackoffRetryAfterHonoredCount: retryBackoffMetrics.retryAfterHonoredCount,
+      retryBackoffBudgetExhaustedCount: retryBackoffMetrics.budgetExhaustedCount,
+      retryBackoffByKind: retryBackoffMetrics.byKind,
+      retryBackoffByStatus: retryBackoffMetrics.byStatus,
       onDemandRefreshTriggeredTotal: onDemandRefreshMetrics.triggeredTotal,
       onDemandRefreshSkippedTotal: onDemandRefreshMetrics.skippedTotal,
     },
@@ -242,6 +252,27 @@ function buildMetricsPayload(overview: RuntimeOverviewResponse): string {
     '# HELP metapi_retry_backoff_count Total retry backoff events applied before retries.',
     '# TYPE metapi_retry_backoff_count gauge',
     `metapi_retry_backoff_count ${overview.gatewayRouting.retryBackoffCount}`,
+    '# HELP metapi_retry_backoff_last_delay_ms Last retry backoff delay applied before retries.',
+    '# TYPE metapi_retry_backoff_last_delay_ms gauge',
+    `metapi_retry_backoff_last_delay_ms ${overview.gatewayRouting.retryBackoffLastDelayMs}`,
+    '# HELP metapi_retry_backoff_retry_after_honored_total Total Retry-After headers honored before retries.',
+    '# TYPE metapi_retry_backoff_retry_after_honored_total gauge',
+    `metapi_retry_backoff_retry_after_honored_total ${overview.gatewayRouting.retryBackoffRetryAfterHonoredCount}`,
+    '# HELP metapi_retry_backoff_budget_exhausted_total Total retries skipped because remaining budget would be exhausted.',
+    '# TYPE metapi_retry_backoff_budget_exhausted_total gauge',
+    `metapi_retry_backoff_budget_exhausted_total ${overview.gatewayRouting.retryBackoffBudgetExhaustedCount}`,
+    '# HELP metapi_retry_backoff_kind_total Retry backoff totals grouped by failure kind.',
+    '# TYPE metapi_retry_backoff_kind_total gauge',
+    ...Object.entries(overview.gatewayRouting.retryBackoffByKind).flatMap(([kind, bucket]) => [
+      `metapi_retry_backoff_kind_total{kind="${kind}",metric="count"} ${bucket.count}`,
+      `metapi_retry_backoff_kind_total{kind="${kind}",metric="delay_ms"} ${bucket.totalMs}`,
+    ]),
+    '# HELP metapi_retry_backoff_status_total Retry backoff totals grouped by upstream status.',
+    '# TYPE metapi_retry_backoff_status_total gauge',
+    ...Object.entries(overview.gatewayRouting.retryBackoffByStatus).flatMap(([status, bucket]) => [
+      `metapi_retry_backoff_status_total{status="${status}",metric="count"} ${bucket.count}`,
+      `metapi_retry_backoff_status_total{status="${status}",metric="delay_ms"} ${bucket.totalMs}`,
+    ]),
     '# HELP metapi_refresh_triggered_total Total on-demand route refreshes actually triggered.',
     '# TYPE metapi_refresh_triggered_total gauge',
     `metapi_refresh_triggered_total ${overview.gatewayRouting.onDemandRefreshTriggeredTotal}`,

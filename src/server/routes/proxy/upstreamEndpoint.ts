@@ -64,16 +64,25 @@ type EndpointCapabilityProfile = {
 type EndpointRuntimeState = {
   preferredEndpoint: UpstreamEndpoint | null;
   preferredUpdatedAtMs: number;
+  preferredReason: 'success' | 'suggested' | null;
   blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpoint, number>>;
+  probeAfterMs: number | null;
+  lastProbeAtMs: number | null;
+  lastProbeStatus: 'success' | 'failed' | null;
 };
 
 export type UpstreamEndpointRuntimeMemoryEntry = {
   key: string;
   preferredEndpoint: UpstreamEndpoint | null;
   preferredUpdatedAtMs: number;
+  preferredReason: 'success' | 'suggested' | null;
   blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpoint, number>>;
   activeBlocks: UpstreamEndpoint[];
   hasFreshPreference: boolean;
+  probeAfterMs: number | null;
+  probeReady: boolean;
+  lastProbeAtMs: number | null;
+  lastProbeStatus: 'success' | 'failed' | null;
 };
 
 type ChannelContext = {
@@ -1060,7 +1069,11 @@ function getOrCreateEndpointRuntimeState(key: string, nowMs = Date.now()): Endpo
   const initial: EndpointRuntimeState = {
     preferredEndpoint: null,
     preferredUpdatedAtMs: nowMs,
+    preferredReason: null,
     blockedUntilMsByEndpoint: {},
+    probeAfterMs: null,
+    lastProbeAtMs: null,
+    lastProbeStatus: null,
   };
   endpointRuntimeStates.set(key, initial);
   return initial;
@@ -1077,9 +1090,24 @@ function maybeDeleteEndpointRuntimeState(key: string, nowMs = Date.now()): void 
     !!state.preferredEndpoint
     && (state.preferredUpdatedAtMs + ENDPOINT_RUNTIME_PREFERRED_TTL_MS) > nowMs
   );
-  if (!hasActiveBlock && !preferredFresh) {
+  const probeRelevant = (
+    (typeof state.probeAfterMs === 'number' && state.probeAfterMs > 0)
+    || state.lastProbeAtMs != null
+    || state.lastProbeStatus != null
+  );
+  if (!hasActiveBlock && !preferredFresh && !probeRelevant) {
     endpointRuntimeStates.delete(key);
   }
+}
+
+function resolveEndpointRecoveryProbeAfterMs(blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpoint, number>>, nowMs: number): number | null {
+  const activeBlocks = Object.values(blockedUntilMsByEndpoint).filter((untilMs): untilMs is number => (
+    typeof untilMs === 'number' && untilMs > nowMs
+  ));
+  if (activeBlocks.length === 0) return null;
+  const nearestBlockUntilMs = Math.min(...activeBlocks);
+  const remainingMs = Math.max(0, nearestBlockUntilMs - nowMs);
+  return nowMs + Math.min(remainingMs, Math.max(10_000, Math.trunc(remainingMs * 0.5)));
 }
 
 function selectHalfOpenRuntimeEndpoint(
@@ -1125,7 +1153,12 @@ function applyEndpointRuntimePreference(
   let next = candidates.filter((endpoint) => !blocked.has(endpoint));
   if (next.length === 0) {
     const halfOpenEndpoint = selectHalfOpenRuntimeEndpoint(candidates, state, nowMs);
-    next = halfOpenEndpoint ? [halfOpenEndpoint] : [...candidates];
+    if (halfOpenEndpoint) {
+      state.lastProbeAtMs = nowMs;
+      next = [halfOpenEndpoint];
+    } else {
+      next = [...candidates];
+    }
   }
 
   const preferredFresh = (
@@ -1221,9 +1254,14 @@ export function getUpstreamEndpointRuntimeMemorySnapshot(nowMs = Date.now()): Up
       key,
       preferredEndpoint: state.preferredEndpoint,
       preferredUpdatedAtMs: state.preferredUpdatedAtMs,
+      preferredReason: state.preferredReason,
       blockedUntilMsByEndpoint: { ...state.blockedUntilMsByEndpoint },
       activeBlocks,
       hasFreshPreference,
+      probeAfterMs: state.probeAfterMs,
+      probeReady: typeof state.probeAfterMs === 'number' && state.probeAfterMs <= nowMs,
+      lastProbeAtMs: state.lastProbeAtMs,
+      lastProbeStatus: state.lastProbeStatus,
     });
   }
 
@@ -1297,7 +1335,11 @@ export function recordUpstreamEndpointSuccess(input: {
   const state = getOrCreateEndpointRuntimeState(key, nowMs);
   state.preferredEndpoint = input.endpoint;
   state.preferredUpdatedAtMs = nowMs;
+  state.preferredReason = 'success';
   delete state.blockedUntilMsByEndpoint[input.endpoint];
+  state.probeAfterMs = null;
+  state.lastProbeAtMs = nowMs;
+  state.lastProbeStatus = 'success';
   recordPersistedUpstreamEndpointSuccess({
     key,
     endpoint: input.endpoint,
@@ -1366,8 +1408,12 @@ export function recordUpstreamEndpointFailure(input: {
   if (suggestedEndpoint && suggestedEndpoint !== input.endpoint) {
     state.preferredEndpoint = suggestedEndpoint;
     state.preferredUpdatedAtMs = nowMs;
+    state.preferredReason = 'suggested';
     delete state.blockedUntilMsByEndpoint[suggestedEndpoint];
   }
+  state.probeAfterMs = resolveEndpointRecoveryProbeAfterMs(state.blockedUntilMsByEndpoint, nowMs);
+  state.lastProbeAtMs = nowMs;
+  state.lastProbeStatus = 'failed';
   recordPersistedUpstreamEndpointFailure({
     key,
     endpoint: input.endpoint,

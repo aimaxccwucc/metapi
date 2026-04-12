@@ -28,6 +28,7 @@ type ResponseSink = {
 type ChatProxyStreamResult = {
   status: 'completed' | 'failed';
   errorMessage: string | null;
+  terminationReason: 'completed' | 'response_failed' | 'empty_content' | 'upstream_error' | 'truncated';
 };
 
 export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput) {
@@ -50,6 +51,7 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
   let terminalResult: ChatProxyStreamResult = {
     status: 'completed',
     errorMessage: null,
+    terminationReason: 'completed',
   };
 
   const markMeaningfulOutput = (event?: {
@@ -98,7 +100,8 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
   const markFailed = (payload: unknown, fallbackMessage?: string) => {
     terminalResult = {
       status: 'failed',
-      errorMessage: extractFailureMessage(payload, fallbackMessage),
+      errorMessage: `[stream:${fallbackMessage === 'Upstream returned empty content' ? 'empty_content' : 'response_failed'}] ${extractFailureMessage(payload, fallbackMessage)}`,
+      terminationReason: fallbackMessage === 'Upstream returned empty content' ? 'empty_content' : 'response_failed',
     };
   };
 
@@ -299,7 +302,22 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         handleEvent: handleEventBlock,
         onEof: finalize,
       });
-      await lifecycle.run();
+      const lifecycleSummary = await lifecycle.run();
+      if (lifecycleSummary.reason === 'reader_error') {
+        terminalResult = {
+          status: 'failed',
+          errorMessage: `[stream:upstream_error] ${lifecycleSummary.readerErrorMessage || 'upstream stream reader error'}`,
+          terminationReason: 'upstream_error',
+        };
+      } else if (lifecycleSummary.reason === 'eof_with_trailing_buffer') {
+        terminalResult = {
+          status: 'failed',
+          errorMessage: '[stream:truncated] upstream stream ended with trailing buffered data',
+          terminationReason: 'truncated',
+        };
+      } else if (terminalResult.errorMessage && !terminalResult.errorMessage.startsWith('[stream:')) {
+        terminalResult.errorMessage = `[stream:${terminalResult.terminationReason}] ${terminalResult.errorMessage}`;
+      }
       return terminalResult;
     },
   };

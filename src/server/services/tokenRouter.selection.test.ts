@@ -49,6 +49,7 @@ describe('TokenRouter selection scoring', () => {
   let TokenRouter: TokenRouterModule['TokenRouter'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
   let listAccountRoutingRuntimeSnapshots: TokenRouterModule['listAccountRoutingRuntimeSnapshots'];
+  let listSiteRuntimeHealthSnapshots: TokenRouterModule['listSiteRuntimeHealthSnapshots'];
   let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
   let resetAllModelCircuits: typeof import('./modelCircuitBreaker.js')['resetAllModelCircuits'];
   let flushSiteRuntimeHealthPersistence: TokenRouterModule['flushSiteRuntimeHealthPersistence'];
@@ -77,6 +78,7 @@ describe('TokenRouter selection scoring', () => {
     TokenRouter = tokenRouterModule.TokenRouter;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
     listAccountRoutingRuntimeSnapshots = tokenRouterModule.listAccountRoutingRuntimeSnapshots;
+    listSiteRuntimeHealthSnapshots = tokenRouterModule.listSiteRuntimeHealthSnapshots;
     resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
     resetAllModelCircuits = modelCircuitBreakerModule.resetAllModelCircuits;
     flushSiteRuntimeHealthPersistence = tokenRouterModule.flushSiteRuntimeHealthPersistence;
@@ -595,6 +597,90 @@ describe('TokenRouter selection scoring', () => {
     expect(recoveredCandidateA?.circuitStatus?.isOpen).toBe(false);
     expect((recoveredCandidateA?.probability || 0) + (recoveredCandidateB?.probability || 0)).toBeGreaterThan(0);
     expect(decision.summary.join(' ')).toContain('最终选择');
+  });
+
+  it('allows exactly one recovery probe candidate when runtime breaker reaches recovery window', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-01T00:00:00.000Z'));
+    try {
+      config.routingWeights = {
+        baseWeightFactor: 1,
+        valueScoreFactor: 0,
+        costWeight: 0,
+        balanceWeight: 0,
+        usageWeight: 0,
+      };
+
+      const route = await createRoute('gpt-recovery-probe');
+
+      const siteA = await createSite('recovery-a');
+      const accountA = await createAccount(siteA.id, 'recovery-user-a');
+      const tokenA = await createToken(accountA.id, 'recovery-token-a');
+      const channelA = await db.insert(schema.routeChannels).values({
+        routeId: route.id,
+        accountId: accountA.id,
+        tokenId: tokenA.id,
+        priority: 0,
+        weight: 10,
+        enabled: true,
+      }).returning().get();
+
+      const siteB = await createSite('recovery-b');
+      const accountB = await createAccount(siteB.id, 'recovery-user-b');
+      const tokenB = await createToken(accountB.id, 'recovery-token-b');
+      const channelB = await db.insert(schema.routeChannels).values({
+        routeId: route.id,
+        accountId: accountB.id,
+        tokenId: tokenB.id,
+        priority: 0,
+        weight: 10,
+        enabled: true,
+      }).returning().get();
+
+      const router = new TokenRouter();
+      for (const channelId of [channelA.id, channelB.id]) {
+        for (let index = 0; index < 3; index += 1) {
+          await router.recordFailure(channelId, {
+            status: 503,
+            errorText: 'service unavailable',
+            modelName: 'gpt-recovery-probe',
+          });
+        }
+      }
+
+      await db.update(schema.routeChannels).set({
+        cooldownUntil: null,
+        lastFailAt: null,
+        failCount: 0,
+        consecutiveFailCount: 0,
+        cooldownLevel: 0,
+      }).where(and(eq(schema.routeChannels.routeId, route.id), eq(schema.routeChannels.priority, 0))).run();
+      invalidateTokenRouterCache();
+
+      let decision = await router.explainSelection('gpt-recovery-probe');
+      expect(decision.selectedChannelId).toBeUndefined();
+      expect(decision.summary.join(' ')).toContain('没有可用通道');
+
+      await vi.advanceTimersByTimeAsync(30_001);
+      invalidateTokenRouterCache();
+
+      decision = await router.explainSelection('gpt-recovery-probe');
+      const eligibleCandidates = decision.candidates.filter((candidate) => candidate.eligible);
+      expect(eligibleCandidates).toHaveLength(1);
+      expect(eligibleCandidates[0]?.reason || '').toContain('恢复探测窗口');
+      expect(eligibleCandidates[0]?.circuitStatus?.state).toBe('half_open');
+      expect(eligibleCandidates[0]?.circuitStatus?.isHalfOpen).toBe(true);
+      const blockedCandidates = decision.candidates.filter((candidate) => !candidate.eligible);
+      expect(blockedCandidates).toHaveLength(1);
+      expect(blockedCandidates[0]?.reason || '').toContain('熔断');
+
+      const snapshots = await listSiteRuntimeHealthSnapshots();
+      const readySnapshots = snapshots.filter((item) => item.recoveryProbeReady);
+      expect(readySnapshots.length).toBeGreaterThan(0);
+      expect(readySnapshots.some((item) => item.lastRecoveryProbeAtMs != null)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('uses persisted site success and latency history to prefer historically healthier sites', async () => {

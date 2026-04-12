@@ -112,6 +112,9 @@ type SiteRuntimeHealthState = {
   lastTransientFailureAtMs: number | null;
   breakerLevel: number;
   breakerUntilMs: number | null;
+  recoveryProbeAfterMs: number | null;
+  lastRecoveryProbeAtMs: number | null;
+  lastRecoveryProbeResult: 'success' | 'failed' | null;
   lastUpdatedAtMs: number;
   lastFailureAtMs: number | null;
   lastSuccessAtMs: number | null;
@@ -258,6 +261,8 @@ type SiteRuntimeHealthDetails = {
   combinedMultiplier: number;
   globalBreakerOpen: boolean;
   modelBreakerOpen: boolean;
+  globalRecoveryProbeReady: boolean;
+  modelRecoveryProbeReady: boolean;
   modelKey: string;
 };
 
@@ -270,11 +275,15 @@ export type SiteRuntimeHealthSnapshotEntry = {
   transientFailureStreak: number;
   breakerLevel: number;
   breakerUntilMs: number | null;
+  recoveryProbeAfterMs: number | null;
+  lastRecoveryProbeAtMs: number | null;
+  lastRecoveryProbeResult: 'success' | 'failed' | null;
   lastUpdatedAtMs: number;
   lastFailureAtMs: number | null;
   lastSuccessAtMs: number | null;
   multiplier: number;
   breakerOpen: boolean;
+  recoveryProbeReady: boolean;
 };
 
 type WeightedSelectionMode = 'weighted' | 'stable_first';
@@ -1217,6 +1226,11 @@ function hydrateSiteRuntimeHealthState(raw: unknown): SiteRuntimeHealthState | n
     lastTransientFailureAtMs: readNullableTimestamp(raw.lastTransientFailureAtMs),
     breakerLevel: Math.max(0, readFiniteInteger(raw.breakerLevel) ?? 0),
     breakerUntilMs: readNullableTimestamp(raw.breakerUntilMs),
+    recoveryProbeAfterMs: readNullableTimestamp(raw.recoveryProbeAfterMs),
+    lastRecoveryProbeAtMs: readNullableTimestamp(raw.lastRecoveryProbeAtMs),
+    lastRecoveryProbeResult: raw.lastRecoveryProbeResult === 'success' || raw.lastRecoveryProbeResult === 'failed'
+      ? raw.lastRecoveryProbeResult
+      : null,
     lastUpdatedAtMs: Math.max(0, lastUpdatedAtMs),
     lastFailureAtMs: readNullableTimestamp(raw.lastFailureAtMs),
     lastSuccessAtMs: readNullableTimestamp(raw.lastSuccessAtMs),
@@ -1231,6 +1245,9 @@ function cloneSiteRuntimeHealthState(state: SiteRuntimeHealthState): SiteRuntime
     lastTransientFailureAtMs: state.lastTransientFailureAtMs,
     breakerLevel: state.breakerLevel,
     breakerUntilMs: state.breakerUntilMs,
+    recoveryProbeAfterMs: state.recoveryProbeAfterMs,
+    lastRecoveryProbeAtMs: state.lastRecoveryProbeAtMs,
+    lastRecoveryProbeResult: state.lastRecoveryProbeResult,
     lastUpdatedAtMs: state.lastUpdatedAtMs,
     lastFailureAtMs: state.lastFailureAtMs,
     lastSuccessAtMs: state.lastSuccessAtMs,
@@ -1314,6 +1331,9 @@ function getOrCreateRuntimeHealthState<K>(states: Map<K, SiteRuntimeHealthState>
       lastTransientFailureAtMs: null,
       breakerLevel: 0,
       breakerUntilMs: null,
+      recoveryProbeAfterMs: null,
+      lastRecoveryProbeAtMs: null,
+      lastRecoveryProbeResult: null,
       lastUpdatedAtMs: nowMs,
       lastFailureAtMs: null,
       lastSuccessAtMs: null,
@@ -1360,6 +1380,25 @@ function isRuntimeHealthBreakerOpen(state: SiteRuntimeHealthState | null | undef
   return typeof state.breakerUntilMs === 'number' && state.breakerUntilMs > nowMs;
 }
 
+function isRuntimeHealthRecoveryProbeReady(state: SiteRuntimeHealthState | null | undefined, nowMs = Date.now()): boolean {
+  if (!state) return false;
+  if (!isRuntimeHealthBreakerOpen(state, nowMs)) return false;
+  return typeof state.recoveryProbeAfterMs === 'number' && state.recoveryProbeAfterMs <= nowMs;
+}
+
+function resolveRuntimeHealthRecoveryProbeAfterMs(
+  breakerUntilMs: number | null,
+  breakerLevel: number,
+  nowMs = Date.now(),
+): number | null {
+  if (typeof breakerUntilMs !== 'number' || breakerUntilMs <= nowMs) return null;
+  const windowMs = Math.min(
+    60_000,
+    Math.max(10_000, Math.trunc(resolveSiteRuntimeBreakerMs(Math.max(1, breakerLevel)) * 0.5)),
+  );
+  return Math.min(breakerUntilMs, nowMs + windowMs);
+}
+
 function getRuntimeHealthMultiplier(state: SiteRuntimeHealthState | null | undefined, nowMs = Date.now()): number {
   if (!state) return 1;
   if (isRuntimeHealthBreakerOpen(state, nowMs)) {
@@ -1394,6 +1433,8 @@ function getSiteRuntimeHealthDetails(siteId: number, modelName?: string | null, 
     ),
     globalBreakerOpen: isRuntimeHealthBreakerOpen(globalState, nowMs),
     modelBreakerOpen: isRuntimeHealthBreakerOpen(modelState, nowMs),
+    globalRecoveryProbeReady: isRuntimeHealthRecoveryProbeReady(globalState, nowMs),
+    modelRecoveryProbeReady: isRuntimeHealthRecoveryProbeReady(modelState, nowMs),
     modelKey,
   };
 }
@@ -1411,6 +1452,7 @@ function shouldOpenImmediateRuntimeBreaker(context: SiteRuntimeFailureContext = 
 }
 
 function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
+  const recoveryProbeInFlight = isRuntimeHealthRecoveryProbeReady(state, nowMs);
   state.penaltyScore += resolveSiteRuntimeFailurePenalty(context);
   const immediateBreakerMs = Math.max(
     resolveImmediateModelBreakerDurationMs(context),
@@ -1423,6 +1465,9 @@ function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteR
       state.breakerLevel + 1,
     );
     state.breakerUntilMs = nowMs + Math.max(immediateBreakerMs, retryAfterMs ?? 0);
+    state.recoveryProbeAfterMs = resolveRuntimeHealthRecoveryProbeAfterMs(state.breakerUntilMs, state.breakerLevel, nowMs);
+    state.lastRecoveryProbeAtMs = recoveryProbeInFlight ? nowMs : state.lastRecoveryProbeAtMs;
+    state.lastRecoveryProbeResult = 'failed';
     state.transientFailureStreak = 0;
     state.lastTransientFailureAtMs = null;
     state.lastFailureAtMs = nowMs;
@@ -1444,6 +1489,9 @@ function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteR
       const breakerMs = resolveSiteRuntimeBreakerMs(state.breakerLevel);
       const effectiveBreakerMs = Math.max(breakerMs, retryAfterMs ?? 0);
       state.breakerUntilMs = effectiveBreakerMs > 0 ? nowMs + effectiveBreakerMs : null;
+      state.recoveryProbeAfterMs = resolveRuntimeHealthRecoveryProbeAfterMs(state.breakerUntilMs, state.breakerLevel, nowMs);
+      state.lastRecoveryProbeAtMs = recoveryProbeInFlight ? nowMs : state.lastRecoveryProbeAtMs;
+      state.lastRecoveryProbeResult = 'failed';
       state.transientFailureStreak = 0;
     }
   } else {
@@ -1452,6 +1500,11 @@ function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteR
   }
   if (retryAfterMs != null && retryAfterMs > 0) {
     state.breakerUntilMs = Math.max(state.breakerUntilMs ?? 0, nowMs + retryAfterMs);
+    state.recoveryProbeAfterMs = resolveRuntimeHealthRecoveryProbeAfterMs(state.breakerUntilMs, state.breakerLevel, nowMs);
+  }
+  if (recoveryProbeInFlight) {
+    state.lastRecoveryProbeAtMs = nowMs;
+    state.lastRecoveryProbeResult = 'failed';
   }
   state.lastFailureAtMs = nowMs;
 }
@@ -1462,6 +1515,9 @@ function applyRuntimeHealthSuccess(state: SiteRuntimeHealthState, latencyMs: num
   state.lastTransientFailureAtMs = null;
   state.breakerLevel = 0;
   state.breakerUntilMs = null;
+  state.recoveryProbeAfterMs = null;
+  state.lastRecoveryProbeAtMs = nowMs;
+  state.lastRecoveryProbeResult = 'success';
   state.lastSuccessAtMs = nowMs;
   const normalizedLatencyMs = Math.max(0, Math.trunc(latencyMs));
   state.latencyEmaMs = state.latencyEmaMs == null
@@ -2007,11 +2063,15 @@ export async function listSiteRuntimeHealthSnapshots(nowMs = Date.now()): Promis
       transientFailureStreak: state.transientFailureStreak,
       breakerLevel: state.breakerLevel,
       breakerUntilMs: state.breakerUntilMs,
+      recoveryProbeAfterMs: state.recoveryProbeAfterMs,
+      lastRecoveryProbeAtMs: state.lastRecoveryProbeAtMs,
+      lastRecoveryProbeResult: state.lastRecoveryProbeResult,
       lastUpdatedAtMs: state.lastUpdatedAtMs,
       lastFailureAtMs: state.lastFailureAtMs,
       lastSuccessAtMs: state.lastSuccessAtMs,
       multiplier: getRuntimeHealthMultiplier(state, nowMs),
       breakerOpen: isRuntimeHealthBreakerOpen(state, nowMs),
+      recoveryProbeReady: isRuntimeHealthRecoveryProbeReady(state, nowMs),
     });
   }
 
@@ -2026,11 +2086,15 @@ export async function listSiteRuntimeHealthSnapshots(nowMs = Date.now()): Promis
         transientFailureStreak: state.transientFailureStreak,
         breakerLevel: state.breakerLevel,
         breakerUntilMs: state.breakerUntilMs,
+        recoveryProbeAfterMs: state.recoveryProbeAfterMs,
+        lastRecoveryProbeAtMs: state.lastRecoveryProbeAtMs,
+        lastRecoveryProbeResult: state.lastRecoveryProbeResult,
         lastUpdatedAtMs: state.lastUpdatedAtMs,
         lastFailureAtMs: state.lastFailureAtMs,
         lastSuccessAtMs: state.lastSuccessAtMs,
         multiplier: getRuntimeHealthMultiplier(state, nowMs),
         breakerOpen: isRuntimeHealthBreakerOpen(state, nowMs),
+        recoveryProbeReady: isRuntimeHealthRecoveryProbeReady(state, nowMs),
       });
     }
   }
@@ -2133,6 +2197,15 @@ export function filterSiteRuntimeBrokenCandidates<T extends { site: { id: number
 }
 
 function buildRuntimeBreakerReason(details: SiteRuntimeHealthDetails): string {
+  if (details.globalRecoveryProbeReady && details.modelRecoveryProbeReady) {
+    return '站点/模型熔断恢复探测窗口';
+  }
+  if (details.globalRecoveryProbeReady) {
+    return '站点熔断恢复探测窗口';
+  }
+  if (details.modelRecoveryProbeReady) {
+    return '模型熔断恢复探测窗口';
+  }
   if (details.globalBreakerOpen && details.modelBreakerOpen) {
     return '站点熔断中，模型熔断中，优先避让';
   }
@@ -2146,14 +2219,17 @@ function buildRuntimeBreakerReason(details: SiteRuntimeHealthDetails): string {
 }
 
 function buildRuntimeCircuitStatus(details: SiteRuntimeHealthDetails): {
-  state: 'closed' | 'open';
+  state: 'closed' | 'open' | 'half_open';
   isOpen: boolean;
+  isHalfOpen: boolean;
   reason: string;
 } {
   const isOpen = details.globalBreakerOpen || details.modelBreakerOpen;
+  const isHalfOpen = details.globalRecoveryProbeReady || details.modelRecoveryProbeReady;
   return {
-    state: isOpen ? 'open' : 'closed',
+    state: isHalfOpen ? 'half_open' : (isOpen ? 'open' : 'closed'),
     isOpen,
+    isHalfOpen,
     reason: isOpen ? buildRuntimeBreakerReason(details) : '运行时熔断关闭',
   };
 }
@@ -2164,7 +2240,7 @@ function filterSiteRuntimeBrokenCandidatesByModel(
   nowMs = Date.now(),
 ): {
   candidates: RouteChannelCandidate[];
-  avoided: Array<{ candidate: RouteChannelCandidate; reason: string }>;
+  avoided: Array<{ candidate: RouteChannelCandidate; reason: string; recoveryProbe: boolean }>;
 } {
   if (candidates.length === 0) {
     return {
@@ -2176,18 +2252,48 @@ function filterSiteRuntimeBrokenCandidatesByModel(
   const resolveModelName = typeof modelName === 'function'
     ? modelName
     : (() => modelName);
-  const avoided: Array<{ candidate: RouteChannelCandidate; reason: string }> = [];
+  const avoided: Array<{ candidate: RouteChannelCandidate; reason: string; recoveryProbe: boolean }> = [];
+  const recoveryReadyCandidates: Array<{ candidate: RouteChannelCandidate; reason: string; recoveryProbe: boolean }> = [];
   const healthy = candidates.filter((candidate) => {
     const details = getSiteRuntimeHealthDetails(candidate.site.id, resolveModelName(candidate), nowMs);
     const blocked = details.globalBreakerOpen || details.modelBreakerOpen;
+    const recoveryProbe = details.globalRecoveryProbeReady || details.modelRecoveryProbeReady;
     if (blocked) {
-      avoided.push({
+      const item = {
         candidate,
         reason: buildRuntimeBreakerReason(details),
-      });
+        recoveryProbe,
+      };
+      avoided.push(item);
+      if (recoveryProbe) {
+        recoveryReadyCandidates.push(item);
+      }
     }
     return !blocked;
   });
+
+  if (healthy.length === 0 && recoveryReadyCandidates.length > 0) {
+    const [probeCandidate] = recoveryReadyCandidates
+      .slice()
+      .sort((left, right) => (
+        (left.candidate.channel.priority ?? 0) - (right.candidate.channel.priority ?? 0)
+        || left.candidate.channel.id - right.candidate.channel.id
+      ));
+    const siteState = getOrCreateSiteRuntimeHealthState(probeCandidate.candidate.site.id, nowMs);
+    siteState.lastRecoveryProbeAtMs = nowMs;
+    const modelState = getOrCreateSiteModelRuntimeHealthState(
+      probeCandidate.candidate.site.id,
+      resolveModelName(probeCandidate.candidate),
+      nowMs,
+    );
+    if (modelState) {
+      modelState.lastRecoveryProbeAtMs = nowMs;
+    }
+    return {
+      candidates: [probeCandidate.candidate],
+      avoided: avoided.filter((item) => item.candidate.channel.id !== probeCandidate.candidate.channel.id),
+    };
+  }
 
   return healthy.length > 0
     ? {
@@ -3769,8 +3875,9 @@ export interface RouteDecisionCandidate {
   probability: number;
   reason: string;
   circuitStatus?: {
-    state: 'closed' | 'open';
+    state: 'closed' | 'open' | 'half_open';
     isOpen: boolean;
+    isHalfOpen?: boolean;
     reason: string;
   };
   modelCircuitStatus?: {
@@ -4611,10 +4718,13 @@ export class TokenRouter {
         ? isChannelRecentlyFailed(row.channel, nowMs)
         : false;
       const modelCapabilityVerified = hasVerifiedModelCapability(row, requestedModel, nowMs);
-      const eligible = reasonParts.length === 0;
+      const eligible = reasonParts.length === 0 || runtimeCircuit.isHalfOpen;
       let reason = eligible ? '可用' : reasonParts.join('、');
       if (eligible && governanceBlock?.state === 'probing') {
         reason = formatGovernanceReason(governanceBlock);
+      }
+      if (eligible && runtimeCircuit.isHalfOpen) {
+        reason = `${reason}（${runtimeCircuit.reason}）`;
       }
       if (eligible && row.channel.sourceModelDerived && !modelCapabilityVerified) {
         reason = `${reason}（模型能力未验证，当前按低权重试探）`;
@@ -4737,6 +4847,7 @@ export class TokenRouter {
           target.circuitStatus = {
             state: 'open',
             isOpen: true,
+            isHalfOpen: false,
             reason: item.reason,
           };
         }
@@ -4897,6 +5008,7 @@ export class TokenRouter {
           target.circuitStatus = {
             state: 'open',
             isOpen: true,
+            isHalfOpen: false,
             reason: item.reason,
           };
         }
@@ -5999,12 +6111,20 @@ export class TokenRouter {
     }
 
     if (candidates.length === 1) {
+      const runtimeHealthDetails = getSiteRuntimeHealthDetails(
+        candidates[0]!.site.id,
+        typeof modelName === 'function' ? modelName(candidates[0]!) : modelName,
+        nowMs,
+      );
+      const runtimeCircuit = buildRuntimeCircuitStatus(runtimeHealthDetails);
       return {
         selected: candidates[0],
         details: [{
           candidate: candidates[0],
           probability: 1,
-          reason: selectionMode === 'stable_first' ? '稳定优先（唯一可用候选）' : '唯一可用候选',
+          reason: runtimeCircuit.isHalfOpen
+            ? `${selectionMode === 'stable_first' ? '稳定优先' : '唯一可用候选'}（${runtimeCircuit.reason}）`
+            : (selectionMode === 'stable_first' ? '稳定优先（唯一可用候选）' : '唯一可用候选'),
         }],
       };
     }

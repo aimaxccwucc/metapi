@@ -59,6 +59,7 @@ describe('createResponsesProxyStreamSession', () => {
     expect(result).toEqual({
       status: 'completed',
       errorMessage: null,
+      terminationReason: 'completed',
     });
     expect(ended).toBe(true);
 

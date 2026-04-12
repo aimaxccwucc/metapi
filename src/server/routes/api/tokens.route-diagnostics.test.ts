@@ -306,7 +306,13 @@ describe('GET /api/routes/diagnostics', () => {
     expect(body.routeSummary.routeCount).toBe(1);
     expect(body.routeSummary.channelCount).toBe(1);
     expect(body.endpointRuntimeMemory.total).toBeGreaterThanOrEqual(1);
+    expect(body.endpointRuntimeMemory.items?.[0]?.preferredReason).toBe('suggested');
+    expect(body.endpointRuntimeMemory.items?.[0]?.lastProbeStatus).toBe('failed');
+    expect(body.endpointRuntimeMemory.items?.[0]?.probeAfter).toBeTruthy();
     expect(body.persistedEndpointProfiles.total).toBeGreaterThanOrEqual(1);
+    expect(body.persistedEndpointProfiles.items?.[0]?.preferredReason).toBe('suggested');
+    expect(body.persistedEndpointProfiles.items?.[0]?.lastProbeStatus).toBe('failed');
+    expect(body.persistedEndpointProfiles.items?.[0]?.probeAfter).toBeTruthy();
     expect(body.modelCircuits.total).toBeGreaterThanOrEqual(1);
     expect(body.modelCircuits.openCount).toBeGreaterThanOrEqual(1);
     expect(body.siteRuntimeHealth.total).toBeGreaterThanOrEqual(1);

@@ -84,6 +84,7 @@ describe('requestBudget', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-03-31T09:30:00.000Z'));
     try {
+      vi.spyOn(Math, 'random').mockReturnValue(0.5);
       expect(resolveRetryBackoffMs(0, 429)).toBe(750);
       expect(resolveRetryBackoffMs(1, 503)).toBe(400);
       expect(resolveRetryBackoffMs(0, 429, '5')).toBe(5000);
@@ -99,9 +100,64 @@ describe('requestBudget', () => {
       expect(await Promise.race([retryPromise, Promise.resolve('pending')])).toBe('pending');
       await vi.advanceTimersByTimeAsync(1);
       await expect(retryPromise).resolves.toBe(true);
-      expect(getRetryBackoffMetrics()).toEqual({
+      expect(getRetryBackoffMetrics()).toMatchObject({
         totalMs: 750,
         count: 1,
+        lastDelayMs: 750,
+        retryAfterHonoredCount: 0,
+        budgetExhaustedCount: 0,
+        byKind: {
+          rate_limit: {
+            totalMs: 750,
+            count: 1,
+          },
+        },
+        byStatus: {
+          '429': {
+            totalMs: 750,
+            count: 1,
+          },
+        },
+      });
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  });
+
+  it('tracks retry-after and budget exhaustion metrics separately', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-31T09:35:00.000Z'));
+    try {
+      const budget = createRequestBudget(5000);
+      const retryPromise = waitForRetryWithinBudget({
+        retryCount: 0,
+        maxRetries: 2,
+        budget,
+        status: 503,
+        retryAfterHeader: '2',
+      });
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(retryPromise).resolves.toBe(true);
+
+      expect(getRetryBackoffMetrics()).toMatchObject({
+        totalMs: 2000,
+        count: 1,
+        lastDelayMs: 2000,
+        retryAfterHonoredCount: 1,
+        budgetExhaustedCount: 0,
+        byKind: {
+          retry_after: {
+            totalMs: 2000,
+            count: 1,
+          },
+        },
+        byStatus: {
+          '503': {
+            totalMs: 2000,
+            count: 1,
+          },
+        },
       });
     } finally {
       vi.useRealTimers();
@@ -120,6 +176,11 @@ describe('requestBudget', () => {
         budget,
         status: 429,
       })).resolves.toBe(false);
+      expect(getRetryBackoffMetrics()).toMatchObject({
+        totalMs: 0,
+        count: 0,
+        budgetExhaustedCount: 1,
+      });
     } finally {
       vi.useRealTimers();
     }

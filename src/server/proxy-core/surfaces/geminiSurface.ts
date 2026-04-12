@@ -733,6 +733,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             const decoder = new TextDecoder();
             let rest = '';
             const guardedReader = wrapReaderWithIdleTimeout(reader);
+            let streamFailureReason: string | null = null;
             try {
               while (true) {
                 const { done, value } = await guardedReader.read();
@@ -754,16 +755,42 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                   aggregateState,
                   rest + tail,
                 );
+                rest = consumed.rest;
                 for (const line of consumed.lines) {
                   reply.raw.write(line);
                 }
               }
+              if (rest.trim().length > 0) {
+                streamFailureReason = '[stream:truncated] gemini stream ended with trailing buffered data';
+              }
+            } catch (error) {
+              streamFailureReason = `[stream:upstream_error] ${error instanceof Error ? error.message : 'Gemini upstream stream failed'}`;
             } finally {
               guardedReader.releaseLock?.();
               reply.raw.end();
             }
             const parsedUsage = parseProxyUsage(aggregateState);
             const latency = Date.now() - startTime;
+            if (streamFailureReason) {
+              await tokenRouter.recordFailure?.(selected.channel.id, {
+                status: 502,
+                errorText: streamFailureReason,
+                modelName: actualModel,
+              });
+              await logProxy(
+                selected,
+                requestedModel,
+                'failed',
+                200,
+                latency,
+                streamFailureReason,
+                retryCount,
+                downstreamPath,
+                upstreamPath,
+                clientContext,
+              );
+              return;
+            }
             await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0, actualModel);
             recordProxyDebugTrace({
               clientContext,

@@ -18,6 +18,7 @@ type ResponseSink = {
 type ResponsesProxyStreamResult = {
   status: 'completed' | 'failed';
   errorMessage: string | null;
+  terminationReason: 'completed' | 'response_failed' | 'empty_content' | 'upstream_error' | 'truncated';
 };
 
 type ResponsesProxyStreamSessionInput = {
@@ -122,6 +123,7 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
   let terminalResult: ResponsesProxyStreamResult = {
     status: 'completed',
     errorMessage: null,
+    terminationReason: 'completed',
   };
 
   const finalize = () => {
@@ -130,6 +132,7 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
     terminalResult = {
       status: 'completed',
       errorMessage: null,
+      terminationReason: 'completed',
     };
     input.writeLines(completeResponsesStream(responsesState, streamContext, input.getUsage()));
   };
@@ -139,7 +142,10 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
     finalized = true;
     terminalResult = {
       status: 'failed',
-      errorMessage: getResponsesStreamFailureMessage(payload, fallbackMessage),
+      errorMessage: `[stream:${fallbackMessage === 'Upstream returned empty content' ? 'empty_content' : 'response_failed'}] ${getResponsesStreamFailureMessage(payload, fallbackMessage)}`,
+      terminationReason: fallbackMessage === 'Upstream returned empty content'
+        ? 'empty_content'
+        : 'response_failed',
     };
     input.writeLines(failResponsesStream(responsesState, streamContext, input.getUsage(), payload));
   };
@@ -150,6 +156,7 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
     terminalResult = {
       status: 'completed',
       errorMessage: null,
+      terminationReason: 'completed',
     };
   };
 
@@ -291,6 +298,7 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
       terminalResult = {
         status: 'completed',
         errorMessage: null,
+        terminationReason: 'completed',
       };
       input.writeLines([
         `event: response.created\ndata: ${JSON.stringify({ type: 'response.created', response: createdPayload })}\n\n`,
@@ -308,7 +316,24 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
         handleEvent: handleEventBlock,
         onEof: closeOut,
       });
-      await lifecycle.run();
+      const lifecycleSummary = await lifecycle.run();
+      if (terminalResult.status !== 'failed') {
+        if (lifecycleSummary.reason === 'reader_error') {
+          terminalResult = {
+            status: 'failed',
+            errorMessage: `[stream:upstream_error] ${lifecycleSummary.readerErrorMessage || 'upstream stream reader error'}`,
+            terminationReason: 'upstream_error',
+          };
+        } else if (lifecycleSummary.reason === 'eof_with_trailing_buffer') {
+          terminalResult = {
+            status: 'failed',
+            errorMessage: '[stream:truncated] stream closed before response.completed',
+            terminationReason: 'truncated',
+          };
+        }
+      } else if (terminalResult.errorMessage && !terminalResult.errorMessage.startsWith('[stream:')) {
+        terminalResult.errorMessage = `[stream:${terminalResult.terminationReason}] ${terminalResult.errorMessage}`;
+      }
       return terminalResult;
     },
   };

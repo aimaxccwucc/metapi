@@ -5,16 +5,25 @@ type UpstreamEndpoint = 'chat' | 'messages' | 'responses';
 type EndpointProfileState = {
   preferredEndpoint: UpstreamEndpoint | null;
   preferredUpdatedAtMs: number;
+  preferredReason: 'success' | 'suggested' | null;
   blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpoint, number>>;
+  probeAfterMs: number | null;
+  lastProbeAtMs: number | null;
+  lastProbeStatus: 'success' | 'failed' | null;
 };
 
 export type PersistedUpstreamProtocolProfileEntry = {
   key: string;
   preferredEndpoint: UpstreamEndpoint | null;
   preferredUpdatedAtMs: number;
+  preferredReason: 'success' | 'suggested' | null;
   blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpoint, number>>;
   activeBlocks: UpstreamEndpoint[];
   hasFreshPreference: boolean;
+  probeAfterMs: number | null;
+  probeReady: boolean;
+  lastProbeAtMs: number | null;
+  lastProbeStatus: 'success' | 'failed' | null;
 };
 
 type EndpointProfilePersistencePayload = {
@@ -64,7 +73,15 @@ function hydrateEndpointProfileState(raw: unknown): EndpointProfileState | null 
   return {
     preferredEndpoint,
     preferredUpdatedAtMs,
+    preferredReason: raw.preferredReason === 'success' || raw.preferredReason === 'suggested'
+      ? raw.preferredReason
+      : null,
     blockedUntilMsByEndpoint,
+    probeAfterMs: Math.max(0, readFiniteNumber(raw.probeAfterMs) ?? 0) || null,
+    lastProbeAtMs: Math.max(0, readFiniteNumber(raw.lastProbeAtMs) ?? 0) || null,
+    lastProbeStatus: raw.lastProbeStatus === 'success' || raw.lastProbeStatus === 'failed'
+      ? raw.lastProbeStatus
+      : null,
   };
 }
 
@@ -72,7 +89,11 @@ function cloneEndpointProfileState(state: EndpointProfileState): EndpointProfile
   return {
     preferredEndpoint: state.preferredEndpoint,
     preferredUpdatedAtMs: state.preferredUpdatedAtMs,
+    preferredReason: state.preferredReason,
     blockedUntilMsByEndpoint: { ...state.blockedUntilMsByEndpoint },
+    probeAfterMs: state.probeAfterMs,
+    lastProbeAtMs: state.lastProbeAtMs,
+    lastProbeStatus: state.lastProbeStatus,
   };
 }
 
@@ -83,7 +104,11 @@ function getOrCreateEndpointProfileState(key: string, nowMs = Date.now()): Endpo
   const initial: EndpointProfileState = {
     preferredEndpoint: null,
     preferredUpdatedAtMs: nowMs,
+    preferredReason: null,
     blockedUntilMsByEndpoint: {},
+    probeAfterMs: null,
+    lastProbeAtMs: null,
+    lastProbeStatus: null,
   };
   endpointProfiles.set(key, initial);
   return initial;
@@ -105,6 +130,7 @@ function mergeEndpointProfileState(key: string, incoming: EndpointProfileState):
   ) {
     existing.preferredEndpoint = incoming.preferredEndpoint;
     existing.preferredUpdatedAtMs = incoming.preferredUpdatedAtMs;
+    existing.preferredReason = incoming.preferredReason;
   }
 
   for (const endpoint of ['chat', 'messages', 'responses'] as const) {
@@ -113,6 +139,13 @@ function mergeEndpointProfileState(key: string, incoming: EndpointProfileState):
     if (incomingUntilMs > existingUntilMs) {
       existing.blockedUntilMsByEndpoint[endpoint] = incomingUntilMs;
     }
+  }
+  if ((incoming.probeAfterMs ?? 0) > (existing.probeAfterMs ?? 0)) {
+    existing.probeAfterMs = incoming.probeAfterMs;
+  }
+  if ((incoming.lastProbeAtMs ?? 0) >= (existing.lastProbeAtMs ?? 0)) {
+    existing.lastProbeAtMs = incoming.lastProbeAtMs;
+    existing.lastProbeStatus = incoming.lastProbeStatus;
   }
 }
 
@@ -124,7 +157,20 @@ function shouldPersistEndpointProfileState(state: EndpointProfileState, nowMs = 
     !!state.preferredEndpoint
     && (state.preferredUpdatedAtMs + PREFERRED_ENDPOINT_TTL_MS) > nowMs
   );
-  return hasActiveBlock || preferredFresh;
+  return hasActiveBlock || preferredFresh || state.probeAfterMs != null || state.lastProbeAtMs != null || state.lastProbeStatus != null;
+}
+
+function resolveEndpointProfileProbeAfterMs(
+  blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpoint, number>>,
+  nowMs: number,
+): number | null {
+  const activeBlocks = Object.values(blockedUntilMsByEndpoint).filter((untilMs): untilMs is number => (
+    typeof untilMs === 'number' && untilMs > nowMs
+  ));
+  if (activeBlocks.length === 0) return null;
+  const nearestBlockUntilMs = Math.min(...activeBlocks);
+  const remainingMs = Math.max(0, nearestBlockUntilMs - nowMs);
+  return nowMs + Math.min(remainingMs, Math.max(10_000, Math.trunc(remainingMs * 0.5)));
 }
 
 function maybeDeleteEndpointProfileState(key: string, nowMs = Date.now()): void {
@@ -281,7 +327,12 @@ export async function applyPersistedUpstreamEndpointPreference(
   let next = candidates.filter((endpoint) => !blocked.has(endpoint));
   if (next.length === 0) {
     const halfOpenEndpoint = selectHalfOpenEndpoint(candidates, state, nowMs);
-    next = halfOpenEndpoint ? [halfOpenEndpoint] : [...candidates];
+    if (halfOpenEndpoint) {
+      state.lastProbeAtMs = nowMs;
+      next = [halfOpenEndpoint];
+    } else {
+      next = [...candidates];
+    }
   }
 
   const preferredFresh = (
@@ -308,7 +359,11 @@ export function recordPersistedUpstreamEndpointSuccess(input: {
   const state = getOrCreateEndpointProfileState(input.key, nowMs);
   state.preferredEndpoint = input.endpoint;
   state.preferredUpdatedAtMs = nowMs;
+  state.preferredReason = 'success';
   delete state.blockedUntilMsByEndpoint[input.endpoint];
+  state.probeAfterMs = null;
+  state.lastProbeAtMs = nowMs;
+  state.lastProbeStatus = 'success';
   scheduleEndpointProfilePersistence();
 }
 
@@ -325,8 +380,12 @@ export function recordPersistedUpstreamEndpointFailure(input: {
   if (input.suggestedEndpoint && input.suggestedEndpoint !== input.endpoint) {
     state.preferredEndpoint = input.suggestedEndpoint;
     state.preferredUpdatedAtMs = nowMs;
+    state.preferredReason = 'suggested';
     delete state.blockedUntilMsByEndpoint[input.suggestedEndpoint];
   }
+  state.probeAfterMs = resolveEndpointProfileProbeAfterMs(state.blockedUntilMsByEndpoint, nowMs);
+  state.lastProbeAtMs = nowMs;
+  state.lastProbeStatus = 'failed';
 
   scheduleEndpointProfilePersistence();
 }
@@ -359,9 +418,14 @@ export async function listPersistedUpstreamProtocolProfiles(nowMs = Date.now()):
       key,
       preferredEndpoint: state.preferredEndpoint,
       preferredUpdatedAtMs: state.preferredUpdatedAtMs,
+      preferredReason: state.preferredReason,
       blockedUntilMsByEndpoint: { ...state.blockedUntilMsByEndpoint },
       activeBlocks,
       hasFreshPreference,
+      probeAfterMs: state.probeAfterMs,
+      probeReady: typeof state.probeAfterMs === 'number' && state.probeAfterMs <= nowMs,
+      lastProbeAtMs: state.lastProbeAtMs,
+      lastProbeStatus: state.lastProbeStatus,
     });
   }
 

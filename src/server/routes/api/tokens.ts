@@ -2018,6 +2018,8 @@ export async function tokensRoutes(app: FastifyInstance) {
         ...row,
         siteId: Number.isFinite(siteId) ? siteId : null,
         siteName: site?.name ?? null,
+        probeAfter: row.probeAfterMs ? new Date(row.probeAfterMs).toISOString() : null,
+        lastProbeAt: row.lastProbeAtMs ? new Date(row.lastProbeAtMs).toISOString() : null,
       };
     });
     const endpointCredentialScopeItems = endpointCredentialScopeRows.map((row) => {
@@ -2036,6 +2038,8 @@ export async function tokensRoutes(app: FastifyInstance) {
         ...row,
         siteId: Number.isFinite(siteId) ? siteId : null,
         siteName: site?.name ?? null,
+        probeAfter: row.probeAfterMs ? new Date(row.probeAfterMs).toISOString() : null,
+        lastProbeAt: row.lastProbeAtMs ? new Date(row.lastProbeAtMs).toISOString() : null,
       };
     });
 

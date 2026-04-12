@@ -84,6 +84,20 @@ describe('system routes', () => {
     getRetryBackoffMetricsMock.mockReturnValue({
       totalMs: 1200,
       count: 3,
+      lastDelayMs: 400,
+      retryAfterHonoredCount: 1,
+      budgetExhaustedCount: 2,
+      byKind: {
+        retry_after: { totalMs: 500, count: 1 },
+        rate_limit: { totalMs: 700, count: 2 },
+        timeout: { totalMs: 0, count: 0 },
+        transient: { totalMs: 0, count: 0 },
+        other: { totalMs: 0, count: 0 },
+      },
+      byStatus: {
+        '429': { totalMs: 700, count: 2 },
+        '503': { totalMs: 500, count: 1 },
+      },
     });
     getOnDemandRefreshMetricsMock.mockReturnValue({
       triggeredTotal: 2,
@@ -139,6 +153,11 @@ describe('system routes', () => {
     expect(metrics.body).toContain('metapi_downstream_auth_cache_total{kind="hit"}');
     expect(metrics.body).toContain('metapi_downstream_auth_cache_entries{kind="cached"}');
     expect(metrics.body).toContain('metapi_retry_backoff_ms_total 1200');
+    expect(metrics.body).toContain('metapi_retry_backoff_last_delay_ms 400');
+    expect(metrics.body).toContain('metapi_retry_backoff_retry_after_honored_total 1');
+    expect(metrics.body).toContain('metapi_retry_backoff_budget_exhausted_total 2');
+    expect(metrics.body).toContain('metapi_retry_backoff_kind_total{kind="rate_limit",metric="count"} 2');
+    expect(metrics.body).toContain('metapi_retry_backoff_status_total{status="503",metric="delay_ms"} 500');
     expect(metrics.body).toContain('metapi_refresh_triggered_total 2');
     expect(metrics.body).toContain('metapi_on_demand_refresh_skipped_total 5');
 
@@ -151,6 +170,17 @@ describe('system routes', () => {
     getRetryBackoffMetricsMock.mockReturnValue({
       totalMs: 0,
       count: 0,
+      lastDelayMs: 0,
+      retryAfterHonoredCount: 0,
+      budgetExhaustedCount: 0,
+      byKind: {
+        retry_after: { totalMs: 0, count: 0 },
+        rate_limit: { totalMs: 0, count: 0 },
+        timeout: { totalMs: 0, count: 0 },
+        transient: { totalMs: 0, count: 0 },
+        other: { totalMs: 0, count: 0 },
+      },
+      byStatus: {},
     });
     getOnDemandRefreshMetricsMock.mockReturnValue({
       triggeredTotal: 0,
@@ -182,6 +212,17 @@ describe('system routes', () => {
       gatewayRouting: {
         retryBackoffMs: 0,
         retryBackoffCount: 0,
+        retryBackoffLastDelayMs: 0,
+        retryBackoffRetryAfterHonoredCount: 0,
+        retryBackoffBudgetExhaustedCount: 0,
+        retryBackoffByKind: {
+          retry_after: { totalMs: 0, count: 0 },
+          rate_limit: { totalMs: 0, count: 0 },
+          timeout: { totalMs: 0, count: 0 },
+          transient: { totalMs: 0, count: 0 },
+          other: { totalMs: 0, count: 0 },
+        },
+        retryBackoffByStatus: {},
         onDemandRefreshTriggeredTotal: 0,
         onDemandRefreshSkippedTotal: 0,
       },
