@@ -91,6 +91,8 @@ describe('Settings factory reset', () => {
       theme: 'dark',
       user_profile: JSON.stringify({ name: '管理员', avatarSeed: 'seed', avatarStyle: 'bottts' }),
       metapi_first_use_docs_reminder_seen_v1: '1',
+      metapi_app_install_banner_dismissed_v1: '1',
+      metapi_app_install_ios_hint_dismissed_v1: '1',
     });
 
     Object.defineProperty(globalThis, 'localStorage', {

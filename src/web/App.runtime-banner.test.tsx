@@ -69,9 +69,9 @@ vi.mock('./pages/Dashboard.js', () => ({
 
 function createLocalStorage() {
   const store = new Map<string, string>([
-    ['metapi.theme.mode', 'light'],
-    ['metapi.firstUseDocReminder', '1'],
-    ['metapi.userProfile', JSON.stringify({
+    ['theme_mode', 'light'],
+    ['metapi_first_use_docs_reminder_seen_v1', '1'],
+    ['user_profile', JSON.stringify({
       name: '管理员',
       avatarSeed: 'seed-1',
       avatarStyle: 'identicon',
@@ -90,6 +90,7 @@ function createLocalStorage() {
 }
 
 function setupRuntime(width: number) {
+  const listeners = new Map<string, Set<(event?: Event) => void>>();
   const location = {
     href: 'https://metapi.test/accounts',
     pathname: '/accounts',
@@ -98,7 +99,7 @@ function setupRuntime(width: number) {
   const matchMedia = (query: string) => ({
     matches: query.includes('prefers-color-scheme')
       ? false
-      : width <= 768,
+      : (query.includes('display-mode: standalone') ? false : width <= 768),
     media: query,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
@@ -113,8 +114,24 @@ function setupRuntime(width: number) {
     innerWidth: width,
     location,
     matchMedia,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
+    addEventListener: vi.fn((name: string, handler: (event?: Event) => void) => {
+      const bucket = listeners.get(name) || new Set();
+      bucket.add(handler);
+      listeners.set(name, bucket);
+    }),
+    removeEventListener: vi.fn((name: string, handler: (event?: Event) => void) => {
+      listeners.get(name)?.delete(handler);
+    }),
+  });
+  Object.defineProperty(globalThis, 'navigator', {
+    value: {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36',
+      serviceWorker: {
+        register: vi.fn().mockResolvedValue(undefined),
+      },
+    },
+    configurable: true,
+    writable: true,
   });
   vi.stubGlobal('document', {
     body: { style: {} },
@@ -136,7 +153,16 @@ function setupRuntime(width: number) {
     }),
   });
 
-  return { location };
+  return {
+    location,
+    dispatchWindowEvent(name: string, event?: Event) {
+      const bucket = listeners.get(name);
+      if (!bucket) return;
+      for (const handler of bucket) {
+        handler(event);
+      }
+    },
+  };
 }
 
 function collectText(node: ReactTestInstance): string {
@@ -347,6 +373,54 @@ describe('App runtime banner', () => {
 
       expect(location.reload).toHaveBeenCalledTimes(1);
       expect(localStorage.getItem(APP_VERSION_RELOAD_STORAGE_KEY)).toBe('/assets/index-new.js');
+    } finally {
+      if (root) {
+        await act(async () => {
+          root.unmount();
+        });
+      }
+    }
+  });
+
+  it('still does not render the removed runtime banner when the install banner is visible', async () => {
+    const runtime = setupRuntime(1280);
+    apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({
+      databaseReady: false,
+      failedTasks: 2,
+      unreadEvents: 5,
+      proxyFailures24h: 32,
+      proxyRequests24h: 180,
+    }));
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/']}>
+            <App />
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const prompt = {
+        preventDefault: vi.fn(),
+        prompt: vi.fn().mockResolvedValue(undefined),
+        userChoice: Promise.resolve({ outcome: 'dismissed' as const, platform: 'web' }),
+      };
+
+      await act(async () => {
+        runtime.dispatchWindowEvent('beforeinstallprompt', prompt as unknown as Event);
+      });
+      await flushMicrotasks();
+
+      expect(root.root.findAll((node) => node.props['data-testid'] === 'app-install-banner')).toHaveLength(1);
+
+      const banners = root.root.findAll((node) => (
+        typeof node.props?.['data-testid'] === 'string'
+        && node.props['data-testid'] === 'app-runtime-banner'
+      ));
+      expect(banners).toHaveLength(0);
     } finally {
       if (root) {
         await act(async () => {

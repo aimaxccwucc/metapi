@@ -5,6 +5,8 @@ import { api } from './api.js';
 import type { RuntimeOverview } from './api.js';
 import { clearAuthSession, hasValidAuthSession, persistAuthSession } from './authSession.js';
 import {
+  APP_INSTALL_BANNER_DISMISSED_KEY,
+  APP_INSTALL_IOS_HINT_DISMISSED_KEY,
   FIRST_USE_DOC_REMINDER_KEY,
   LEGACY_THEME_STORAGE_KEY,
   THEME_MODE_STORAGE_KEY,
@@ -21,6 +23,11 @@ import {
   findCurrentEntryAssetPath,
   shouldAutoReloadForVersionMismatch,
 } from './appVersion.js';
+import {
+  isIosDevice,
+  isStandaloneDisplayMode,
+  type DeferredInstallPromptEvent,
+} from './pwa.js';
 import CenteredModal from './components/CenteredModal.js';
 import RouteErrorBoundary from './components/RouteErrorBoundary.js';
 const SearchModal = lazy(() => import('./components/SearchModal.js'));
@@ -121,6 +128,11 @@ function summarizeRecentProxyFailures(overview: RuntimeOverview): {
 function formatPercent(rate: number): string {
   return `${Math.round(rate * 100)}%`;
 }
+
+type InstallBannerState = {
+  mode: 'native' | 'ios_hint';
+  visible: boolean;
+};
 
 type ThemeMode = 'system' | 'light' | 'dark';
 
@@ -543,6 +555,59 @@ function OverlayFallback() {
   return null;
 }
 
+function AppInstallBanner({
+  state,
+  onInstall,
+  onDismiss,
+  t,
+}: {
+  state: InstallBannerState;
+  onInstall: () => void;
+  onDismiss: () => void;
+  t: (text: string) => string;
+}) {
+  const title = state.mode === 'native'
+    ? t('将 Metapi 安装到设备')
+    : t('添加到主屏后可像 App 一样使用');
+  const detail = state.mode === 'native'
+    ? t('支持在 PC 和手机上直接安装 Web 应用，保留独立窗口、快捷入口和离线壳层。')
+    : t('iPhone / iPad 可在浏览器分享菜单中选择“添加到主屏幕”，获得更接近原生应用的入口体验。');
+  const actionLabel = state.mode === 'native' ? t('立即安装') : t('知道了');
+
+  return (
+    <div className="app-install-banner-wrap" data-testid="app-install-banner">
+      <div className="app-install-banner">
+        <div className="app-install-banner-mark" aria-hidden="true" />
+        <div className="app-install-banner-copy">
+          <div className="app-install-banner-title">{title}</div>
+          <div className="app-install-banner-detail">{detail}</div>
+          <div className="app-install-banner-tags">
+            <span className="app-install-banner-tag">{t('PC 可安装')}</span>
+            <span className="app-install-banner-tag">{t('手机可加桌面')}</span>
+            <span className="app-install-banner-tag">{t('不依赖 Windows 安装包')}</span>
+          </div>
+        </div>
+        <div className="app-install-banner-actions">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={onInstall}
+          >
+            {actionLabel}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={onDismiss}
+          >
+            {t('稍后再说')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const AppMainContent = memo(function AppMainContent({
   displayName,
 }: {
@@ -630,6 +695,8 @@ function AppShell() {
   const resolvedThemeLabel = resolvedTheme === 'dark' ? t('深色') : t('浅色');
   const avatarUrl = buildDicebearAvatarUrl(userProfile.avatarStyle, userProfile.avatarSeed);
   const appVersionMismatchToastShownRef = useRef(false);
+  const installPromptRef = useRef<DeferredInstallPromptEvent | null>(null);
+  const [installBanner, setInstallBanner] = useState<InstallBannerState>({ mode: 'native', visible: false });
 
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -782,6 +849,51 @@ function AppShell() {
   }, [authed, t, toast]);
 
   useEffect(() => {
+    if (!authed) {
+      installPromptRef.current = null;
+      setInstallBanner((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+      return;
+    }
+
+    if (isStandaloneDisplayMode()) {
+      setInstallBanner((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+      return;
+    }
+
+    const nativeDismissed = localStorage.getItem(APP_INSTALL_BANNER_DISMISSED_KEY) === '1';
+    const iosDismissed = localStorage.getItem(APP_INSTALL_IOS_HINT_DISMISSED_KEY) === '1';
+    const iosDevice = isIosDevice();
+
+    if (iosDevice && !iosDismissed) {
+      setInstallBanner({ mode: 'ios_hint', visible: true });
+    }
+
+    const handleBeforeInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      installPromptRef.current = event as DeferredInstallPromptEvent;
+      if (!nativeDismissed) {
+        setInstallBanner({ mode: 'native', visible: true });
+      }
+    };
+
+    const handleInstalled = () => {
+      installPromptRef.current = null;
+      localStorage.removeItem(APP_INSTALL_BANNER_DISMISSED_KEY);
+      localStorage.removeItem(APP_INSTALL_IOS_HINT_DISMISSED_KEY);
+      setInstallBanner((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+      toast.success(t('Metapi 已添加到设备，可从桌面或应用列表直接打开。'));
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleInstalled);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', handleInstalled);
+    };
+  }, [authed, t, toast]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const checkAppVersion = async () => {
@@ -897,6 +1009,43 @@ function AppShell() {
     localStorage.setItem(USER_PROFILE_STORAGE_KEY, JSON.stringify(normalized));
     setShowProfileModal(false);
     toast.success(t('个人信息已保存'));
+  };
+
+  const handleDismissInstallBanner = () => {
+    if (installBanner.mode === 'ios_hint') {
+      localStorage.setItem(APP_INSTALL_IOS_HINT_DISMISSED_KEY, '1');
+    } else {
+      localStorage.setItem(APP_INSTALL_BANNER_DISMISSED_KEY, '1');
+    }
+    setInstallBanner((prev) => ({ ...prev, visible: false }));
+  };
+
+  const handleInstallApp = async () => {
+    if (installBanner.mode === 'ios_hint') {
+      localStorage.setItem(APP_INSTALL_IOS_HINT_DISMISSED_KEY, '1');
+      setInstallBanner((prev) => ({ ...prev, visible: false }));
+      toast.info(t('请在 Safari 或系统浏览器中打开分享菜单，然后选择“添加到主屏幕”。'));
+      return;
+    }
+
+    const promptEvent = installPromptRef.current;
+    if (!promptEvent) {
+      localStorage.setItem(APP_INSTALL_BANNER_DISMISSED_KEY, '1');
+      setInstallBanner((prev) => ({ ...prev, visible: false }));
+      toast.info(t('当前浏览器暂未提供安装入口，可在地址栏或浏览器菜单中查找“安装应用”或“添加到主屏幕”。'));
+      return;
+    }
+
+    await promptEvent.prompt();
+    const choice = await promptEvent.userChoice.catch(() => null);
+    installPromptRef.current = null;
+    if (choice?.outcome === 'accepted') {
+      setInstallBanner((prev) => ({ ...prev, visible: false }));
+      localStorage.removeItem(APP_INSTALL_BANNER_DISMISSED_KEY);
+      return;
+    }
+    localStorage.setItem(APP_INSTALL_BANNER_DISMISSED_KEY, '1');
+    setInstallBanner((prev) => ({ ...prev, visible: false }));
   };
 
   if (!authed) {
@@ -1047,6 +1196,15 @@ function AppShell() {
           </div>
         </div>
       </header>
+
+      {installBanner.visible ? (
+        <AppInstallBanner
+          state={installBanner}
+          onInstall={() => { void handleInstallApp(); }}
+          onDismiss={handleDismissInstallBanner}
+          t={t}
+        />
+      ) : null}
 
       <div className="app-layout">
         {isMobile ? (

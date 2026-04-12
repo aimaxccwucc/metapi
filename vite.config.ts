@@ -15,19 +15,32 @@ export default defineConfig(({ mode }) => {
   function resolveVChartChunk(id: string) {
     if (!id.includes('/node_modules/')) return undefined;
 
-    if (id.includes('/@visactor/vrender')) return 'vchart-render';
+    if (
+      id.includes('/@visactor/vrender')
+      || id.includes('/@visactor/vrender-core')
+      || id.includes('/@visactor/vrender-components')
+      || id.includes('/@visactor/vrender-kits')
+      || id.includes('/@visactor/vrender-animate')
+    ) {
+      return 'vchart-render';
+    }
 
     if (
       id.includes('/@visactor/vdataset')
       || id.includes('/@visactor/vgrammar')
       || id.includes('/@visactor/vscale')
       || id.includes('/@visactor/vutils')
+      || id.includes('/@visactor/vutils-extension')
     ) {
       return 'vchart-data';
     }
 
     if (
       id.includes('/@visactor/react-vchart/esm/charts/BaseChart')
+      || id.includes('/@visactor/react-vchart/esm/charts/AreaChart')
+      || id.includes('/@visactor/react-vchart/esm/charts/BarChart')
+      || id.includes('/@visactor/react-vchart/esm/charts/LineChart')
+      || id.includes('/@visactor/react-vchart/esm/charts/PieChart')
       || id.includes('/@visactor/react-vchart/esm/containers/')
       || id.includes('/@visactor/react-vchart/esm/context/')
       || id.includes('/@visactor/react-vchart/esm/eventsUtils')
@@ -44,6 +57,21 @@ export default defineConfig(({ mode }) => {
       || id.includes('/@visactor/vchart/esm/env/')
       || id.includes('/@visactor/vchart/esm/event/')
       || id.includes('/@visactor/vchart/esm/constant/')
+      || id.includes('/@visactor/vchart/esm/component/')
+      || id.includes('/@visactor/vchart/esm/layout/')
+      || id.includes('/@visactor/vchart/esm/interaction/')
+      || id.includes('/@visactor/vchart/esm/scale/')
+      || id.includes('/@visactor/vchart/esm/region/')
+      || id.includes('/@visactor/vchart/esm/model/')
+      || id.includes('/@visactor/vchart/esm/mark/')
+      || id.includes('/@visactor/vchart/esm/chart/area/')
+      || id.includes('/@visactor/vchart/esm/chart/bar/')
+      || id.includes('/@visactor/vchart/esm/chart/line/')
+      || id.includes('/@visactor/vchart/esm/chart/pie/')
+      || id.includes('/@visactor/vchart/esm/series/area/')
+      || id.includes('/@visactor/vchart/esm/series/bar/')
+      || id.includes('/@visactor/vchart/esm/series/line/')
+      || id.includes('/@visactor/vchart/esm/series/pie/')
       || id.includes('/@visactor/vchart/esm/data/transforms/')
     ) {
       return 'vchart-core';

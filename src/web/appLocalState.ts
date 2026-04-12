@@ -4,6 +4,8 @@ export const THEME_MODE_STORAGE_KEY = 'theme_mode';
 export const LEGACY_THEME_STORAGE_KEY = 'theme';
 export const USER_PROFILE_STORAGE_KEY = 'user_profile';
 export const FIRST_USE_DOC_REMINDER_KEY = 'metapi_first_use_docs_reminder_seen_v1';
+export const APP_INSTALL_BANNER_DISMISSED_KEY = 'metapi_app_install_banner_dismissed_v1';
+export const APP_INSTALL_IOS_HINT_DISMISSED_KEY = 'metapi_app_install_ios_hint_dismissed_v1';
 
 type StorageLike = {
   getItem?: (key: string) => string | null;
@@ -25,4 +27,6 @@ export function clearAppInstallationState(storage?: StorageLike | null): void {
   target.removeItem(LEGACY_THEME_STORAGE_KEY);
   target.removeItem(USER_PROFILE_STORAGE_KEY);
   target.removeItem(FIRST_USE_DOC_REMINDER_KEY);
+  target.removeItem(APP_INSTALL_BANNER_DISMISSED_KEY);
+  target.removeItem(APP_INSTALL_IOS_HINT_DISMISSED_KEY);
 }
