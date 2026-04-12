@@ -2467,6 +2467,108 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
+  it('normalizes function-like chat tools that use top-level input_schema', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          {
+            role: 'user',
+            content: 'show allowed directories',
+          },
+        ],
+        tools: [
+          {
+            name: 'mcp_filesystem_list_allowed_directories',
+            input_schema: {
+              type: 'object',
+              properties: null,
+              required: null,
+              anyOf: null,
+              items: {
+                type: 'object',
+                required: ['cursor', null],
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.tools).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'mcp_filesystem_list_allowed_directories',
+          parameters: {
+            type: 'object',
+            properties: {},
+            items: {
+              type: 'object',
+              properties: {},
+              required: ['cursor'],
+            },
+          },
+        },
+      },
+    ]);
+  });
+
+  it('normalizes top-level function tool definitions for direct /v1/chat/completions requests', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          {
+            role: 'user',
+            content: 'list files',
+          },
+        ],
+        tools: [
+          {
+            type: 'function',
+            name: 'mcp_filesystem_list_directory',
+            parameters: {
+              type: 'object',
+              properties: null,
+              required: [null, 'path'],
+            },
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.tools).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'mcp_filesystem_list_directory',
+          parameters: {
+            type: 'object',
+            properties: {},
+            required: ['path'],
+          },
+        },
+      },
+    ]);
+  });
+
   it('sanitizes invalid response_format json_schema for direct /v1/chat/completions requests', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',

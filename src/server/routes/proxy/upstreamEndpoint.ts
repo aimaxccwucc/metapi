@@ -564,6 +564,33 @@ function normalizeResponsesFallbackChatFunctionTool(rawTool: unknown): Record<st
   };
 }
 
+function normalizeChatFunctionTool(rawTool: unknown): Record<string, unknown> | null {
+  if (!isRecord(rawTool)) return null;
+
+  const type = asTrimmedString(rawTool.type).toLowerCase();
+  if (type === 'custom' || type === 'image_generation') return null;
+
+  const functionPart = isRecord(rawTool.function) ? rawTool.function : null;
+  const name = asTrimmedString(functionPart?.name ?? rawTool.name);
+  if (!name) return null;
+
+  const description = asTrimmedString(functionPart?.description ?? rawTool.description);
+  const parameters = functionPart?.parameters ?? rawTool.parameters ?? rawTool.input_schema;
+  const strict = functionPart?.strict ?? rawTool.strict;
+
+  const fn: Record<string, unknown> = { name };
+  if (description) fn.description = description;
+  if (parameters !== undefined) {
+    fn.parameters = sanitizeJsonSchemaForFunctionTool(parameters);
+  }
+  if (strict !== undefined) fn.strict = strict;
+
+  return {
+    type: 'function',
+    function: fn,
+  };
+}
+
 function normalizeResponsesFallbackChatToolChoice(
   rawToolChoice: unknown,
   allowedToolNames: Set<string>,
@@ -648,31 +675,7 @@ function sanitizeDirectChatBody(
   };
   const rawTools = Array.isArray(body.tools) ? body.tools : null;
   if (rawTools) {
-    next.tools = rawTools.map((tool) => {
-      if (!isRecord(tool)) return tool;
-      if (asTrimmedString(tool.type).toLowerCase() !== 'function') return tool;
-
-      if (isRecord(tool.function)) {
-        return {
-          ...tool,
-          function: {
-            ...tool.function,
-            ...(tool.function.parameters !== undefined
-              ? { parameters: sanitizeJsonSchemaForFunctionTool(tool.function.parameters) }
-              : {}),
-          },
-        };
-      }
-
-      if (tool.parameters !== undefined) {
-        return {
-          ...tool,
-          parameters: sanitizeJsonSchemaForFunctionTool(tool.parameters),
-        };
-      }
-
-      return tool;
-    });
+    next.tools = rawTools.map((tool) => normalizeChatFunctionTool(tool) ?? tool);
   }
   if (next.response_format !== undefined) {
     next.response_format = sanitizeOpenAiResponseFormat(next.response_format);
