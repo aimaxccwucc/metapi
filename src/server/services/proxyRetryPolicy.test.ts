@@ -92,6 +92,9 @@ describe('proxyRetryPolicy', () => {
       classifyProxyFailureCategory(403, '无权访问 cc2kpro 分组'),
     ).toBe('invalid_channel');
     expect(
+      classifyProxyFailureCategory(400, 'No tool call found for function call output with call_id call_123.'),
+    ).toBe('invalid_channel');
+    expect(
       classifyProxyFailureCategory(400, 'No tool output found for function call call_123.'),
     ).toBe('invalid_channel');
     expect(
@@ -122,6 +125,7 @@ describe('proxyRetryPolicy', () => {
     expect(shouldAvoidSiteForRequest(429, 'rate limit exceeded')).toBe(true);
     expect(shouldAvoidSiteForRequest(0, 'socket hang up')).toBe(true);
     expect(shouldAvoidSiteForRequest(403, '无权访问 cc2kpro 分组')).toBe(true);
+    expect(shouldAvoidSiteForRequest(400, 'No tool call found for function call output with call_id call_123.')).toBe(true);
     expect(shouldAvoidSiteForRequest(400, 'No tool output found for function call call_123.')).toBe(true);
     expect(shouldAvoidSiteForRequest(400, 'blocked_invalid_request: request body matches a previously blocked invalid request')).toBe(true);
     expect(shouldAvoidSiteForRequest(400, "Unknown parameter: 'tool_choice.function'.")).toBe(true);
