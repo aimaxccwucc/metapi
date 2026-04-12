@@ -30,6 +30,9 @@ function shouldDelaySiteExclusion(
   if (/upstream\s+timeout\s+after\s+4000ms/i.test(text)) {
     return false;
   }
+  if (/auth_unavailable|no\s+auth\s+available/i.test(text)) {
+    return false;
+  }
   if (/cloudflare\s+502|bad\s+gateway|service\s+temporarily\s+unavailable|system\s+disk\s+overloaded/i.test(text)) {
     return false;
   }
