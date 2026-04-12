@@ -2650,6 +2650,156 @@ describe('buildUpstreamEndpointRequest', () => {
     });
   });
 
+  it('adds required array for direct chat function schemas on DuckCoding-compatible hosts', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4-xhigh',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://duckcoding.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.4-xhigh',
+        messages: [
+          {
+            role: 'user',
+            content: 'list mcp resources',
+          },
+        ],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'list_mcp_resources',
+              parameters: {
+                type: 'object',
+                properties: null,
+                required: null,
+                items: {
+                  type: 'object',
+                  required: ['cursor', null],
+                },
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.tools).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'list_mcp_resources',
+          parameters: {
+            type: 'object',
+            properties: {},
+            required: [],
+          },
+        },
+      },
+    ]);
+  });
+
+  it('adds required array for top-level input_schema chat tools on DuckCoding-compatible hosts', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4-xhigh',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://duckcoding.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.4-xhigh',
+        messages: [
+          {
+            role: 'user',
+            content: 'show allowed directories',
+          },
+        ],
+        tools: [
+          {
+            name: 'mcp_filesystem_list_allowed_directories',
+            input_schema: {
+              type: 'object',
+              properties: null,
+              required: null,
+              items: {
+                type: 'string',
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.tools).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'mcp_filesystem_list_allowed_directories',
+          parameters: {
+            type: 'object',
+            properties: {},
+            required: [],
+          },
+        },
+      },
+    ]);
+  });
+
+  it('does not add required array for direct chat response_format on DuckCoding-compatible hosts', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4-xhigh',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'new-api',
+      siteUrl: 'https://duckcoding.com',
+      downstreamFormat: 'openai',
+      openaiBody: {
+        model: 'gpt-5.4-xhigh',
+        messages: [
+          {
+            role: 'user',
+            content: 'return structured data',
+          },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'payload',
+            schema: {
+              type: 'object',
+              properties: null,
+              required: null,
+              items: {
+                type: 'object',
+                required: ['cursor', null],
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.response_format).toEqual({
+      type: 'json_schema',
+      json_schema: {
+        name: 'payload',
+        schema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+    });
+  });
+
   it('sanitizes invalid response_format json_schema for direct /v1/responses requests', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'responses',
@@ -2729,6 +2879,32 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.body.messages).toEqual([
       { role: 'user', content: 'run tool' },
       { role: 'assistant', content: 'done' },
+    ]);
+  });
+
+  it('preserves standalone tool output messages for codex-style direct /v1/chat/completions continuation requests', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      preserveStandaloneToolMessages: true,
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'run tool' },
+          { role: 'tool', tool_call_id: 'call_standalone', content: { ok: true } },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.messages).toEqual([
+      { role: 'user', content: 'run tool' },
+      { role: 'tool', tool_call_id: 'call_standalone', content: '{"ok":true}' },
     ]);
   });
 

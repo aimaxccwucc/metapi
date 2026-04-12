@@ -473,6 +473,56 @@ describe('chat proxy stream behavior', () => {
     expect(response.json()?.choices?.[0]?.message?.content).toContain('ok from next channel');
   });
 
+  it('preserves standalone tool continuation messages for direct chat upstreams', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { id: 34, name: 'generic-new-api', url: 'https://generic.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'gpt-5.4',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'chatcmpl-tool-continuation-ok',
+      object: 'chat.completion',
+      model: 'gpt-5.4',
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: 'continued after tool output' },
+        finish_reason: 'stop',
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: {
+        Originator: 'codex_cli_rs',
+        Session_id: 'codex-session-tool-continue-1',
+      },
+      payload: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'run tool and continue' },
+          { role: 'tool', tool_call_id: 'call_abc', content: '{"ok":true}' },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [, options] = fetchMock.mock.calls[0] as [string, any];
+    const forwardedBody = JSON.parse(options.body);
+    expect(forwardedBody.messages).toEqual([
+      { role: 'user', content: 'run tool and continue' },
+      { role: 'tool', tool_call_id: 'call_abc', content: '{"ok":true}' },
+    ]);
+  });
+
   it('avoids the current site when chat returns upstream group empty', async () => {
     shouldRetryProxyRequestMock.mockReturnValue(true);
     shouldAvoidSiteForRequestMock.mockImplementation((_status?: unknown, message?: unknown) =>
@@ -3259,6 +3309,194 @@ describe('chat proxy stream behavior', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [targetUrl] = fetchMock.mock.calls[0] as [string, any];
     expect(targetUrl).toContain('/v1/messages');
+  });
+
+  it('sanitizes invalid function tool schemas before forwarding direct chat requests to openai-compatible chat endpoints', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'openai-site', url: 'https://api.openai.com', platform: 'openai' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-openai',
+      actualModel: 'gpt-5.4',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'chatcmpl-tool-sanitized',
+      object: 'chat.completion',
+      created: 1_706_000_888,
+      model: 'gpt-5.4',
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: 'ok' },
+        finish_reason: 'stop',
+      }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'hello' }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'list_mcp_resources',
+            parameters: {
+              type: 'object',
+              properties: null,
+              required: null,
+              items: { type: 'object', required: ['cursor', null] },
+            },
+          },
+        }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/chat/completions');
+    const forwardedBody = JSON.parse(String(options.body));
+    expect(forwardedBody.tools).toEqual([{
+      type: 'function',
+      function: {
+        name: 'list_mcp_resources',
+        parameters: {
+          type: 'object',
+          properties: {},
+        },
+      },
+    }]);
+  });
+
+  it('sanitizes input_schema-style tools before forwarding direct chat requests on new-api chat endpoints', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://generic.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-new-api',
+      actualModel: 'gpt-5.4',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'chatcmpl-input-schema-sanitized',
+      object: 'chat.completion',
+      created: 1_706_000_889,
+      model: 'gpt-5.4',
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: 'ok' },
+        finish_reason: 'stop',
+      }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'hello' }],
+        tools: [{
+          name: 'mcp_filesystem_list_allowed_directories',
+          description: 'List allowed directories',
+          input_schema: {
+            type: 'object',
+            properties: null,
+            required: null,
+            items: { type: 'string' },
+          },
+        }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/chat/completions');
+    const forwardedBody = JSON.parse(String(options.body));
+    expect(forwardedBody.tools).toEqual([{
+      type: 'function',
+      function: {
+        name: 'mcp_filesystem_list_allowed_directories',
+        description: 'List allowed directories',
+        parameters: {
+          type: 'object',
+          properties: {},
+        },
+      },
+    }]);
+  });
+
+  it('sanitizes direct chat response_format json schema before forwarding to openai-compatible chat endpoints', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'openai-site', url: 'https://api.openai.com', platform: 'openai' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-openai',
+      actualModel: 'gpt-5.4',
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'chatcmpl-response-format-sanitized',
+      object: 'chat.completion',
+      created: 1_706_000_890,
+      model: 'gpt-5.4',
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: 'ok' },
+        finish_reason: 'stop',
+      }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'hello' }],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'payload',
+            schema: {
+              type: 'object',
+              properties: null,
+              required: null,
+              items: { type: 'string' },
+            },
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/chat/completions');
+    const forwardedBody = JSON.parse(String(options.body));
+    expect(forwardedBody.response_format).toEqual({
+      type: 'json_schema',
+      json_schema: {
+        name: 'payload',
+        schema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+    });
   });
 
   it('falls back from /v1/messages to /v1/chat/completions on openai platform when messages endpoint is unavailable', async () => {

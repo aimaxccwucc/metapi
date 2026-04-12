@@ -353,6 +353,7 @@ export async function handleChatSurfaceRequest(
           downstreamHeaders: request.headers as Record<string, unknown>,
           providerHeaders: buildProviderHeaders(),
           codexSessionCacheKey,
+          preserveStandaloneToolMessages: clientContext?.clientKind === 'codex',
         });
         return {
           endpoint,

@@ -564,7 +564,12 @@ function normalizeResponsesFallbackChatFunctionTool(rawTool: unknown): Record<st
   };
 }
 
-function normalizeChatFunctionTool(rawTool: unknown): Record<string, unknown> | null {
+function normalizeChatFunctionTool(
+  rawTool: unknown,
+  options?: {
+    forceObjectRequiredArray?: boolean;
+  },
+): Record<string, unknown> | null {
   if (!isRecord(rawTool)) return null;
 
   const type = asTrimmedString(rawTool.type).toLowerCase();
@@ -581,7 +586,7 @@ function normalizeChatFunctionTool(rawTool: unknown): Record<string, unknown> | 
   const fn: Record<string, unknown> = { name };
   if (description) fn.description = description;
   if (parameters !== undefined) {
-    fn.parameters = sanitizeOpenAiCompatibleFunctionSchema(parameters);
+    fn.parameters = sanitizeOpenAiCompatibleFunctionSchema(parameters, options);
   }
   if (strict !== undefined) fn.strict = strict;
 
@@ -623,10 +628,13 @@ function normalizeResponsesFallbackChatToolChoice(
 
 function sanitizeResponsesFallbackChatBody(
   body: Record<string, unknown>,
+  options: {
+    preserveStandaloneToolMessages?: boolean;
+  } = {},
 ): Record<string, unknown> {
   const next: Record<string, unknown> = {
     ...body,
-    messages: sanitizeChatMessages(body.messages),
+    messages: sanitizeChatMessages(body.messages, options),
   };
   const normalizedTools = Array.isArray(body.tools)
     ? body.tools
@@ -666,16 +674,39 @@ function sanitizeResponsesFallbackChatBody(
   return next;
 }
 
+function getNormalizedSiteHostname(siteUrl: string | null | undefined): string {
+  const trimmed = asTrimmedString(siteUrl);
+  if (!trimmed) return '';
+  try {
+    return new URL(trimmed).hostname.trim().toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function shouldForceOpenAiChatToolObjectRequiredArray(siteUrl: string | null | undefined): boolean {
+  const hostname = getNormalizedSiteHostname(siteUrl);
+  return hostname === 'duckcoding.com' || hostname.endsWith('.duckcoding.com');
+}
+
 function sanitizeDirectChatBody(
   body: Record<string, unknown>,
+  siteUrl?: string,
+  options: {
+    preserveStandaloneToolMessages?: boolean;
+  } = {},
 ): Record<string, unknown> {
   const next: Record<string, unknown> = {
     ...body,
-    messages: sanitizeChatMessages(body.messages),
+    messages: sanitizeChatMessages(body.messages, options),
   };
+  const forceObjectRequiredArray = shouldForceOpenAiChatToolObjectRequiredArray(siteUrl);
   const rawTools = Array.isArray(body.tools) ? body.tools : null;
   if (rawTools) {
-    next.tools = rawTools.map((tool) => normalizeChatFunctionTool(tool) ?? tool);
+    next.tools = rawTools.map((tool) => normalizeChatFunctionTool(
+      tool,
+      { forceObjectRequiredArray },
+    ) ?? tool);
   }
   if (next.response_format !== undefined) {
     const responseFormat = sanitizeOpenAiResponseFormat(next.response_format);
@@ -702,7 +733,12 @@ function safeJsonStringify(value: unknown): string {
   }
 }
 
-function sanitizeOpenAiCompatibleFunctionSchema(value: unknown): Record<string, unknown> {
+function sanitizeOpenAiCompatibleFunctionSchema(
+  value: unknown,
+  options?: {
+    forceObjectRequiredArray?: boolean;
+  },
+): Record<string, unknown> {
   const sanitized = sanitizeJsonSchemaForFunctionTool(value);
   const next: Record<string, unknown> = { ...sanitized };
   const type = asTrimmedString(next.type).toLowerCase();
@@ -710,6 +746,9 @@ function sanitizeOpenAiCompatibleFunctionSchema(value: unknown): Record<string, 
   if (looksObjectLike) {
     next.type = 'object';
     if (!isRecord(next.properties)) next.properties = {};
+    if (options?.forceObjectRequiredArray === true && !Array.isArray(next.required)) {
+      next.required = [];
+    }
     delete next.contains;
     delete next.items;
     delete next.prefixItems;
@@ -734,7 +773,12 @@ function normalizeChatToolMessageContent(value: unknown): unknown {
   return value;
 }
 
-function sanitizeChatMessages(messages: unknown): unknown {
+function sanitizeChatMessages(
+  messages: unknown,
+  options: {
+    preserveStandaloneToolMessages?: boolean;
+  } = {},
+): unknown {
   if (!Array.isArray(messages)) return messages;
 
   const seenToolCallIds = new Set<string>();
@@ -787,7 +831,11 @@ function sanitizeChatMessages(messages: unknown): unknown {
 
     if (role === 'tool') {
       const toolCallId = asTrimmedString(message.tool_call_id ?? message.id);
-      if (!toolCallId || !seenToolCallIds.has(toolCallId)) {
+      const allowStandaloneToolMessage = (
+        options.preserveStandaloneToolMessages === true
+        && seenToolCallIds.size === 0
+      );
+      if (!toolCallId || (!seenToolCallIds.has(toolCallId) && !allowStandaloneToolMessage)) {
         continue;
       }
       sanitizedMessages.push({
@@ -1888,6 +1936,7 @@ export function buildUpstreamEndpointRequest(input: {
   providerHeaders?: Record<string, string>;
   codexSessionCacheKey?: string | null;
   codexExplicitSessionId?: string | null;
+  preserveStandaloneToolMessages?: boolean;
 }): {
   path: string;
   headers: Record<string, string>;
@@ -2203,10 +2252,14 @@ export function buildUpstreamEndpointRequest(input: {
     ...openaiBody,
     model: input.modelName,
     stream: input.stream,
+  }, input.siteUrl, {
+    preserveStandaloneToolMessages: input.preserveStandaloneToolMessages,
   });
   const configuredChatBody = applyConfiguredPayloadRules(
     input.downstreamFormat === 'responses'
-      ? sanitizeResponsesFallbackChatBody(chatBody)
+      ? sanitizeResponsesFallbackChatBody(chatBody, {
+        preserveStandaloneToolMessages: input.preserveStandaloneToolMessages,
+      })
       : chatBody,
   );
   return {
