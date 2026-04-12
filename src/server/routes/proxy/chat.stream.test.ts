@@ -699,6 +699,79 @@ describe('chat proxy stream behavior', () => {
     expect(response.json()?.choices?.[0]?.message?.content).toContain('ok from healthy site');
   });
 
+  it('fails over to the next site when non-stream chat returns empty content', async () => {
+    config.proxyEmptyContentFailEnabled = true;
+    shouldRetryProxyRequestMock.mockImplementation((status?: unknown, message?: unknown) =>
+      Number(status) === 502 && typeof message === 'string' && /empty content/i.test(message));
+    shouldAvoidSiteForRequestMock.mockImplementation((status?: unknown, message?: unknown) =>
+      Number(status) === 502 && typeof message === 'string' && /empty content/i.test(message));
+
+    selectChannelMock.mockReturnValue({
+      channel: { id: 31, routeId: 22 },
+      site: { id: 64, name: 'empty-content-site', url: 'https://empty-content.example.com', platform: 'new-api' },
+      account: { id: 53, username: 'demo-user-empty-content' },
+      tokenName: 'default',
+      tokenValue: 'sk-empty-content',
+      actualModel: 'gpt-5.4',
+    });
+    selectNextChannelMock.mockReturnValue({
+      channel: { id: 32, routeId: 22 },
+      site: { id: 65, name: 'healthy-site', url: 'https://healthy.example.com', platform: 'new-api' },
+      account: { id: 54, username: 'demo-user-healthy' },
+      tokenName: 'default-2',
+      tokenValue: 'sk-healthy',
+      actualModel: 'gpt-5.4',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl-empty-first',
+        object: 'chat.completion',
+        created: 1_706_000_000,
+        model: 'gpt-5.4',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: '' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 6, completion_tokens: 0, total_tokens: 6 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl-empty-retried-ok',
+        object: 'chat.completion',
+        model: 'gpt-5.4',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok from healthy site' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+    const [selectedModel, excludedChannelIds, _policy, excludedSiteIds] = selectNextChannelMock.mock.calls[0] as [string, number[], unknown, Set<number>];
+    expect(selectedModel).toBe('gpt-5.4');
+    expect(excludedChannelIds).toEqual([31]);
+    expect(excludedSiteIds).toEqual(new Set([64]));
+    expect(response.json()?.choices?.[0]?.message?.content).toContain('ok from healthy site');
+  });
+
 
   it('sets anti-buffering SSE headers for streamed chat responses', async () => {
     const encoder = new TextEncoder();

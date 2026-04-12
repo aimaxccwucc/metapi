@@ -24,6 +24,9 @@ function shouldDelaySiteExclusion(
   if (/blocked_invalid_request/i.test(text)) {
     return false;
   }
+  if (/empty\s+content/i.test(text)) {
+    return false;
+  }
   if (/model_cooldown|cooling\s+down|all\s+credentials\s+for\s+model/i.test(text)) {
     return false;
   }

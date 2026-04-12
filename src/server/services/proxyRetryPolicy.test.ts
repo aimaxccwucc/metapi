@@ -64,6 +64,9 @@ describe('proxyRetryPolicy', () => {
     expect(
       shouldRetryProxyRequest(400, 'blocked_invalid_request: request body matches a previously blocked invalid request'),
     ).toBe(true);
+    expect(
+      shouldRetryProxyRequest(400, "Unknown parameter: 'tool_choice.function'."),
+    ).toBe(true);
   });
 
   it('classifies auth-like 400 responses as auth failures for stronger channel避让', () => {
@@ -95,6 +98,9 @@ describe('proxyRetryPolicy', () => {
       classifyProxyFailureCategory(400, 'blocked_invalid_request: request body matches a previously blocked invalid request'),
     ).toBe('invalid_channel');
     expect(
+      classifyProxyFailureCategory(400, "Unknown parameter: 'tool_choice.function'."),
+    ).toBe('invalid_channel');
+    expect(
       classifyProxyFailureCategory(503, 'No available channel for model gpt-5.4 under group default (distributor)'),
     ).toBe('upstream_group_empty');
     expect(
@@ -118,6 +124,7 @@ describe('proxyRetryPolicy', () => {
     expect(shouldAvoidSiteForRequest(403, '无权访问 cc2kpro 分组')).toBe(true);
     expect(shouldAvoidSiteForRequest(400, 'No tool output found for function call call_123.')).toBe(true);
     expect(shouldAvoidSiteForRequest(400, 'blocked_invalid_request: request body matches a previously blocked invalid request')).toBe(true);
+    expect(shouldAvoidSiteForRequest(400, "Unknown parameter: 'tool_choice.function'.")).toBe(true);
     expect(shouldAvoidSiteForRequest(429, 'All credentials for model gpt-5.4 are cooling down via provider codex')).toBe(true);
     expect(shouldAvoidSiteForRequest(400, '{"error":{"message":"openai_error","type":"bad_response_status_code","code":"bad_response_status_code"}}')).toBe(true);
     expect(shouldAvoidSiteForRequest(503, 'No available channel for model gpt-5.4 under group default (distributor)')).toBe(true);

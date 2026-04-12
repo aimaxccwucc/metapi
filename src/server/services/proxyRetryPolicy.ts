@@ -76,6 +76,7 @@ const RETRYABLE_CHANNEL_LOCAL_PATTERNS: RegExp[] = [
   /timeout/i,
   /no\s+tool\s+call\s+found\s+for\s+function\s+call\s+output/i,
   /blocked_invalid_request/i,
+  /unknown\s+parameter:\s*['"]tool_choice\.function['"]?/i,
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]\.name['"]?/i,
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]/i,
 ];
@@ -97,6 +98,7 @@ const RETRYABLE_UPSTREAM_COMPATIBILITY_400_PATTERNS: RegExp[] = [
   /no\s+tool\s+call\s+found\s+for\s+function\s+call\s+output/i,
   /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
   /blocked_invalid_request/i,
+  /unknown\s+parameter:\s*['"]tool_choice\.function['"]?/i,
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]\.name['"]?/i,
 ];
 
@@ -120,6 +122,7 @@ const INVALID_CHANNEL_PATTERNS: RegExp[] = [
   /no\s+access\s+to\s+group/i,
   /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
   /blocked_invalid_request/i,
+  /unknown\s+parameter:\s*['"]tool_choice\.function['"]?/i,
 ];
 
 const SITE_AVOID_INVALID_CHANNEL_PATTERNS: RegExp[] = [
@@ -127,6 +130,7 @@ const SITE_AVOID_INVALID_CHANNEL_PATTERNS: RegExp[] = [
   /no\s+access\s+to\s+group/i,
   /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
   /blocked_invalid_request/i,
+  /unknown\s+parameter:\s*['"]tool_choice\.function['"]?/i,
   /model_cooldown/i,
   /cooling\s+down/i,
   /all\s+credentials\s+for\s+model/i,

@@ -245,6 +245,90 @@ describe('DefaultProxyConductor', () => {
     expect(selectNextChannel).toHaveBeenCalledWith('gpt-5.4', [11], undefined, new Set([44]));
   });
 
+  it('excludes site immediately after tool_choice compatibility failover', async () => {
+    const otherSiteChannel = {
+      ...baseSelectedChannel,
+      channel: { id: 13, routeId: 22 },
+      site: { id: 45, name: 'other-site', url: 'https://other-upstream.example.com', platform: 'openai' },
+      tokenValue: 'sk-other-site',
+    };
+    const selectChannel = vi.fn().mockResolvedValue(baseSelectedChannel);
+    const selectNextChannel = vi.fn().mockResolvedValue(otherSiteChannel);
+    const conductor = new DefaultProxyConductor({
+      selectChannel,
+      selectNextChannel,
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+      recordFailure: vi.fn().mockResolvedValue(undefined),
+    });
+    const attempt = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        action: 'failover',
+        status: 400,
+        rawErrorText: "Unknown parameter: 'tool_choice.function'.",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        response: new Response('ok', { status: 200 }),
+      });
+
+    const result = await conductor.execute({
+      requestedModel: 'gpt-5.4',
+      attempt,
+      maxAttempts: 3,
+      getFailoverSiteId: (selected) => Number(selected.site.id),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      selected: otherSiteChannel,
+      attempts: 2,
+    });
+    expect(selectNextChannel).toHaveBeenCalledWith('gpt-5.4', [11], undefined, new Set([44]));
+  });
+
+  it('excludes site immediately after empty-content failover', async () => {
+    const otherSiteChannel = {
+      ...baseSelectedChannel,
+      channel: { id: 13, routeId: 22 },
+      site: { id: 45, name: 'other-site', url: 'https://other-upstream.example.com', platform: 'openai' },
+      tokenValue: 'sk-other-site',
+    };
+    const selectChannel = vi.fn().mockResolvedValue(baseSelectedChannel);
+    const selectNextChannel = vi.fn().mockResolvedValue(otherSiteChannel);
+    const conductor = new DefaultProxyConductor({
+      selectChannel,
+      selectNextChannel,
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+      recordFailure: vi.fn().mockResolvedValue(undefined),
+    });
+    const attempt = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        action: 'failover',
+        status: 502,
+        rawErrorText: '[upstream:/v1/chat/completions] Upstream returned empty content',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        response: new Response('ok', { status: 200 }),
+      });
+
+    const result = await conductor.execute({
+      requestedModel: 'gpt-5.4',
+      attempt,
+      maxAttempts: 3,
+      getFailoverSiteId: (selected) => Number(selected.site.id),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      selected: otherSiteChannel,
+      attempts: 2,
+    });
+    expect(selectNextChannel).toHaveBeenCalledWith('gpt-5.4', [11], undefined, new Set([44]));
+  });
+
   it('refreshes auth on 401 and retries the same channel with the refreshed selection', async () => {
     const refreshedChannel = {
       ...baseSelectedChannel,
