@@ -2965,6 +2965,79 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
+  it('rehydrates remembered assistant tool_calls for codex-style standalone tool continuation requests', () => {
+    buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      preserveStandaloneToolMessages: true,
+      codexSessionCacheKey: 'gpt-5.4:session:codex-1',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'run tool' },
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              {
+                id: 'call_mem',
+                type: 'function',
+                function: {
+                  name: 'Glob',
+                  arguments: '{"pattern":"README*"}',
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'openai',
+      preserveStandaloneToolMessages: true,
+      codexSessionCacheKey: 'gpt-5.4:session:codex-1',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'run tool' },
+          { role: 'tool', tool_call_id: 'call_mem', content: { ok: true } },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.messages).toEqual([
+      { role: 'user', content: 'run tool' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_mem',
+            type: 'function',
+            function: {
+              name: 'Glob',
+              arguments: '{"pattern":"README*"}',
+            },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_mem', content: '{"ok":true}' },
+    ]);
+  });
+
   it('preserves later standalone tool outputs for codex-style direct /v1/chat/completions continuation requests', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',

@@ -142,6 +142,7 @@ export async function handleChatSurfaceRequest(
     body: downstreamFormat === 'claude' ? claudeOriginalBody : request.body,
     requestedModel,
     proxyToken: getProxyAuthContext(request)?.token || null,
+    sessionId: clientContext?.sessionId || null,
   });
   const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
 
@@ -1174,7 +1175,12 @@ function deriveCodexSessionCacheKey(input: {
   body: unknown;
   requestedModel: string;
   proxyToken: string | null;
+  sessionId?: string | null;
 }): string | null {
+  const sessionId = asTrimmedString(input.sessionId);
+  if (sessionId) {
+    return `${input.requestedModel}:session:${sessionId}`;
+  }
   if (isRecord(input.body)) {
     if (input.downstreamFormat === 'claude' && isRecord(input.body.metadata)) {
       const userId = asTrimmedString(input.body.metadata.user_id);

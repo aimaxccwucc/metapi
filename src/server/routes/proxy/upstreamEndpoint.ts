@@ -114,12 +114,19 @@ export type EndpointMemoryCredentialScopeEntry = EndpointMemoryCredentialScope &
   cacheKey: string;
 };
 
+type CodexStandaloneToolContinuationState = {
+  assistantToolCalls: Array<Record<string, unknown>>;
+  updatedAtMs: number;
+};
+
 const ENDPOINT_RUNTIME_PREFERRED_TTL_MS = 24 * 60 * 60 * 1000;
 const ENDPOINT_RUNTIME_BLOCK_TTL_MS = 6 * 60 * 60 * 1000;
+const CODEX_STANDALONE_TOOL_CONTINUATION_TTL_MS = 6 * 60 * 60 * 1000;
 const ENDPOINT_MEMORY_SCOPE_MAX_ENTRIES = 2048;
 const endpointRuntimeStates = new Map<string, EndpointRuntimeState>();
 const endpointMemoryScopeStorage = new AsyncLocalStorage<EndpointMemoryCredentialScope>();
 const endpointMemoryScopeBySiteAndToken = new Map<string, EndpointMemoryCredentialScope>();
+const codexStandaloneToolContinuationStates = new Map<string, CodexStandaloneToolContinuationState>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
@@ -695,14 +702,24 @@ function sanitizeDirectChatBody(
   siteUrl?: string,
   options: {
     preserveStandaloneToolMessages?: boolean;
+    codexStandaloneToolContinuationCacheKey?: string | null;
   } = {},
 ): Record<string, unknown> {
+  const preparedBody = injectRememberedAssistantToolCallsForCodexContinuation(
+    body,
+    options.codexStandaloneToolContinuationCacheKey,
+    options.preserveStandaloneToolMessages === true,
+  );
   const next: Record<string, unknown> = {
-    ...body,
-    messages: sanitizeChatMessages(body.messages, options),
+    ...preparedBody,
+    messages: sanitizeChatMessages(preparedBody.messages, options),
   };
+  const rememberedAssistantToolCalls = collectAssistantToolCallsForCodexStandaloneContinuation(next.messages);
+  if (rememberedAssistantToolCalls.length > 0) {
+    rememberCodexStandaloneToolCalls(options.codexStandaloneToolContinuationCacheKey, rememberedAssistantToolCalls);
+  }
   const forceObjectRequiredArray = shouldForceOpenAiChatToolObjectRequiredArray(siteUrl);
-  const rawTools = Array.isArray(body.tools) ? body.tools : null;
+  const rawTools = Array.isArray(preparedBody.tools) ? preparedBody.tools : null;
   if (rawTools) {
     next.tools = rawTools.map((tool) => normalizeChatFunctionTool(
       tool,
@@ -732,6 +749,50 @@ function safeJsonStringify(value: unknown): string {
   } catch {
     return '';
   }
+}
+
+function pruneCodexStandaloneToolContinuationStates(nowMs = Date.now()): void {
+  for (const [key, state] of codexStandaloneToolContinuationStates.entries()) {
+    if ((state.updatedAtMs + CODEX_STANDALONE_TOOL_CONTINUATION_TTL_MS) <= nowMs) {
+      codexStandaloneToolContinuationStates.delete(key);
+    }
+  }
+}
+
+function cloneToolCallRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...value,
+    ...(isRecord(value.function)
+      ? {
+        function: {
+          ...value.function,
+        },
+      }
+      : {}),
+  };
+}
+
+function getRememberedCodexStandaloneToolCalls(cacheKey: string | null | undefined): Array<Record<string, unknown>> {
+  const normalizedKey = asTrimmedString(cacheKey);
+  if (!normalizedKey) return [];
+  pruneCodexStandaloneToolContinuationStates();
+  const state = codexStandaloneToolContinuationStates.get(normalizedKey);
+  if (!state || state.assistantToolCalls.length === 0) return [];
+  return state.assistantToolCalls.map((toolCall) => cloneToolCallRecord(toolCall));
+}
+
+function rememberCodexStandaloneToolCalls(
+  cacheKey: string | null | undefined,
+  toolCalls: Array<Record<string, unknown>>,
+  nowMs = Date.now(),
+): void {
+  const normalizedKey = asTrimmedString(cacheKey);
+  if (!normalizedKey || toolCalls.length === 0) return;
+  pruneCodexStandaloneToolContinuationStates(nowMs);
+  codexStandaloneToolContinuationStates.set(normalizedKey, {
+    assistantToolCalls: toolCalls.map((toolCall) => cloneToolCallRecord(toolCall)),
+    updatedAtMs: nowMs,
+  });
 }
 
 function sanitizeOpenAiCompatibleFunctionSchema(
@@ -848,6 +909,70 @@ function sanitizeChatMessages(
   }
 
   return sanitizedMessages;
+}
+
+function collectAssistantToolCallsForCodexStandaloneContinuation(messages: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(messages)) return [];
+  const collected: Array<Record<string, unknown>> = [];
+  for (const message of messages) {
+    if (!isRecord(message) || asTrimmedString(message.role).toLowerCase() !== 'assistant') continue;
+    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    for (const toolCall of toolCalls) {
+      if (!isRecord(toolCall)) continue;
+      const functionPart = isRecord(toolCall.function) ? toolCall.function : null;
+      const name = asTrimmedString(functionPart?.name ?? toolCall.name);
+      const id = asTrimmedString(toolCall.id);
+      if (!id || !name) continue;
+      collected.push({
+        ...toolCall,
+        id,
+        type: 'function',
+        function: {
+          ...(functionPart || {}),
+          name,
+          arguments: normalizeChatToolArguments(functionPart?.arguments ?? toolCall.arguments),
+        },
+      });
+    }
+  }
+  return collected;
+}
+
+function injectRememberedAssistantToolCallsForCodexContinuation(
+  body: Record<string, unknown>,
+  cacheKey: string | null | undefined,
+  enabled: boolean,
+): Record<string, unknown> {
+  if (!enabled || !Array.isArray(body.messages)) return body;
+  const messages = body.messages;
+  const hasAssistantToolCalls = messages.some((message) => (
+    isRecord(message)
+    && asTrimmedString(message.role).toLowerCase() === 'assistant'
+    && Array.isArray(message.tool_calls)
+    && message.tool_calls.length > 0
+  ));
+  if (hasAssistantToolCalls) return body;
+
+  const firstStandaloneToolIndex = messages.findIndex((message) => (
+    isRecord(message)
+    && asTrimmedString(message.role).toLowerCase() === 'tool'
+    && asTrimmedString(message.tool_call_id ?? message.id).length > 0
+  ));
+  if (firstStandaloneToolIndex < 0) return body;
+
+  const rememberedToolCalls = getRememberedCodexStandaloneToolCalls(cacheKey);
+  if (rememberedToolCalls.length === 0) return body;
+
+  const nextMessages = [...messages];
+  nextMessages.splice(firstStandaloneToolIndex, 0, {
+    role: 'assistant',
+    content: '',
+    tool_calls: rememberedToolCalls,
+  });
+  return {
+    ...body,
+    messages: nextMessages,
+  };
 }
 
 function toFiniteNumber(value: unknown): number | null {
@@ -1456,6 +1581,7 @@ function shouldPersistFailureRuntimeMemory(input: {
 export function resetUpstreamEndpointRuntimeState(): void {
   endpointRuntimeStates.clear();
   endpointMemoryScopeBySiteAndToken.clear();
+  codexStandaloneToolContinuationStates.clear();
   resetUpstreamProtocolProfileState();
 }
 
@@ -2259,6 +2385,7 @@ export function buildUpstreamEndpointRequest(input: {
     stream: input.stream,
   }, input.siteUrl, {
     preserveStandaloneToolMessages: resolvedPreserveStandaloneToolMessages,
+    codexStandaloneToolContinuationCacheKey: input.codexSessionCacheKey,
   });
   const configuredChatBody = applyConfiguredPayloadRules(
     input.downstreamFormat === 'responses'
