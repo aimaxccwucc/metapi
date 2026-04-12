@@ -1,6 +1,6 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { fetch } from 'undici';
-import { db, schema } from '../db/index.js';
+import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { config } from '../config.js';
 import { getAdapter } from './platforms/index.js';
 import {
@@ -240,6 +240,30 @@ function buildAntigravityDiscoveryBaseUrls(siteUrl: string): string[] {
     seen.add(normalized);
     return [normalized];
   });
+}
+
+async function upsertModelAvailabilityBatch(
+  rows: Array<{ accountId: number; modelName: string; available: boolean; latencyMs?: number | null; checkedAt: string }>,
+): Promise<void> {
+  if (rows.length === 0) return;
+  if (runtimeDbDialect === 'mysql') {
+    await (db.insert(schema.modelAvailability).values(rows) as any).onDuplicateKeyUpdate({
+      set: {
+        available: sql`VALUES(available)`,
+        latencyMs: sql`VALUES(latency_ms)`,
+        checkedAt: sql`VALUES(checked_at)`,
+      },
+    }).run();
+  } else {
+    await (db.insert(schema.modelAvailability).values(rows) as any).onConflictDoUpdate({
+      target: [schema.modelAvailability.accountId, schema.modelAvailability.modelName],
+      set: {
+        available: sql`excluded.available`,
+        latencyMs: sql`excluded.latency_ms`,
+        checkedAt: sql`excluded.checked_at`,
+      },
+    }).run();
+  }
 }
 
 async function updateOauthModelDiscoveryState(input: {
@@ -666,9 +690,9 @@ export async function refreshModelsForAccount(
     if (!restoreAvailabilityOnFailure) return;
     await clearExistingAvailability();
     if (previousModelAvailability.length > 0) {
-      await db.insert(schema.modelAvailability).values(
+      await upsertModelAvailabilityBatch(
         previousModelAvailability.map(({ id: _id, ...row }) => row),
-      ).run();
+      );
     }
     if (previousTokenModelAvailability.length > 0) {
       await db.insert(schema.tokenModelAvailability).values(
@@ -701,7 +725,7 @@ export async function refreshModelsForAccount(
         throw new Error('未获取到可用模型');
       }
 
-      await db.insert(schema.modelAvailability).values(
+      await upsertModelAvailabilityBatch(
         codexModels.map((modelName) => ({
           accountId,
           modelName,
@@ -709,7 +733,7 @@ export async function refreshModelsForAccount(
           latencyMs: Date.now() - startedAt,
           checkedAt,
         })),
-      ).run();
+      );
       await updateOauthModelDiscoveryState({
         account,
         checkedAt,
@@ -772,7 +796,7 @@ export async function refreshModelsForAccount(
       if (claudeModels.length === 0) {
         throw new Error('未获取到可用模型');
       }
-      await db.insert(schema.modelAvailability).values(
+      await upsertModelAvailabilityBatch(
         claudeModels.map((modelName) => ({
           accountId,
           modelName,
@@ -780,7 +804,7 @@ export async function refreshModelsForAccount(
           latencyMs: Date.now() - startedAt,
           checkedAt,
         })),
-      ).run();
+      );
       await updateOauthModelDiscoveryState({
         account,
         checkedAt,
@@ -862,7 +886,7 @@ export async function refreshModelsForAccount(
           `gemini cli oauth validation timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
         );
       }
-      await db.insert(schema.modelAvailability).values(
+      await upsertModelAvailabilityBatch(
         GEMINI_CLI_STATIC_MODELS.map((modelName) => ({
           accountId,
           modelName,
@@ -870,7 +894,7 @@ export async function refreshModelsForAccount(
           latencyMs: Date.now() - startedAt,
           checkedAt,
         })),
-      ).run();
+      );
       await updateOauthModelDiscoveryState({
         account: discoveryAccount,
         checkedAt,
@@ -934,7 +958,7 @@ export async function refreshModelsForAccount(
         throw new Error('未获取到可用模型');
       }
 
-      await db.insert(schema.modelAvailability).values(
+      await upsertModelAvailabilityBatch(
         antigravityModels.map((modelName) => ({
           accountId,
           modelName,
@@ -942,7 +966,7 @@ export async function refreshModelsForAccount(
           latencyMs: Date.now() - startedAt,
           checkedAt,
         })),
-      ).run();
+      );
       await updateOauthModelDiscoveryState({
         account,
         checkedAt,
@@ -1165,7 +1189,7 @@ export async function refreshModelsForAccount(
   }
 
   const checkedAt = new Date().toISOString();
-  await db.insert(schema.modelAvailability).values(
+  await upsertModelAvailabilityBatch(
     Array.from(accountModels).map((modelName) => ({
       accountId: account.id,
       modelName,
@@ -1173,7 +1197,7 @@ export async function refreshModelsForAccount(
       latencyMs: modelLatency.get(modelName) ?? null,
       checkedAt,
     })),
-  ).run();
+  );
 
   await setAccountRuntimeHealth(account.id, {
     state: 'healthy',

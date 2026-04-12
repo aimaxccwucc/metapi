@@ -3695,28 +3695,14 @@ async function markPersistedModelUnavailableForChannel(
   }
 
   if (runtimeDbDialect === 'mysql') {
-    const existing = await db.select({ id: schema.modelAvailability.id })
-      .from(schema.modelAvailability)
-      .where(
-        and(
-          eq(schema.modelAvailability.accountId, accountId),
-          eq(schema.modelAvailability.modelName, normalizedModelName),
-        ),
-      )
-      .get();
-    if (existing) {
-      await db.update(schema.modelAvailability).set({
-        available: false,
-        checkedAt,
-      }).where(eq(schema.modelAvailability.id, existing.id)).run();
-    } else {
-      await db.insert(schema.modelAvailability).values({
-        accountId,
-        modelName: normalizedModelName,
-        available: false,
-        checkedAt,
-      }).run();
-    }
+    await db.insert(schema.modelAvailability).values({
+      accountId,
+      modelName: normalizedModelName,
+      available: false,
+      checkedAt,
+    }).onDuplicateKeyUpdate({
+      set: { available: false, checkedAt },
+    }).run();
     return;
   }
 
