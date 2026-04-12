@@ -2353,6 +2353,63 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.body.tool_choice).toBeUndefined();
   });
 
+  it('auto-preserves codex standalone tool continuation when /v1/responses falls back to /v1/chat/completions', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'openai',
+      siteUrl: 'https://example.com',
+      downstreamFormat: 'responses',
+      downstreamHeaders: {
+        Originator: 'codex_cli_rs',
+        Session_id: 'codex-session-1',
+      },
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'continue after tool' },
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              {
+                id: 'call_seen',
+                type: 'function',
+                function: {
+                  name: 'Glob',
+                  arguments: '{"pattern":"README*"}',
+                },
+              },
+            ],
+          },
+          { role: 'tool', tool_call_id: 'call_later', content: { ok: true, source: 'continuation' } },
+        ],
+      },
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.messages).toEqual([
+      { role: 'user', content: 'continue after tool' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_seen',
+            type: 'function',
+            function: {
+              name: 'Glob',
+              arguments: '{"pattern":"README*"}',
+            },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_later', content: '{"ok":true,"source":"continuation"}' },
+    ]);
+  });
+
   it('sanitizes invalid function schemas when /v1/responses falls back to /v1/chat/completions', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',

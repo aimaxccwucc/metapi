@@ -5,6 +5,7 @@ import {
   type ConversationFileInputSummary,
 } from '../../proxy-core/capabilities/conversationFileCapabilities.js';
 import { resolveProviderProfile } from '../../proxy-core/providers/registry.js';
+import { isCodexRequest } from '../../proxy-core/cliProfiles/codexProfile.js';
 import { config } from '../../config.js';
 import { fetchModelPricingCatalog } from '../../services/modelPricingService.js';
 import { applyPayloadRules } from '../../services/payloadRules.js';
@@ -2043,6 +2044,13 @@ export function buildUpstreamEndpointRequest(input: {
     stream: input.stream,
     oauthProjectId: asTrimmedString(input.oauthProjectId) || null,
   };
+  const resolvedPreserveStandaloneToolMessages = input.preserveStandaloneToolMessages === true
+    || isCodexRequest({
+      downstreamPath: input.downstreamFormat === 'responses'
+        ? '/v1/responses'
+        : (input.downstreamFormat === 'claude' ? '/v1/messages' : '/v1/chat/completions'),
+      headers: input.downstreamHeaders,
+    });
   const requestedModelForPayloadRules = resolveRequestedModelForPayloadRules(input);
   const applyConfiguredPayloadRules = <T extends Record<string, unknown>>(body: T): T => (
     applyPayloadRules({
@@ -2250,12 +2258,12 @@ export function buildUpstreamEndpointRequest(input: {
     model: input.modelName,
     stream: input.stream,
   }, input.siteUrl, {
-    preserveStandaloneToolMessages: input.preserveStandaloneToolMessages,
+    preserveStandaloneToolMessages: resolvedPreserveStandaloneToolMessages,
   });
   const configuredChatBody = applyConfiguredPayloadRules(
     input.downstreamFormat === 'responses'
       ? sanitizeResponsesFallbackChatBody(chatBody, {
-        preserveStandaloneToolMessages: input.preserveStandaloneToolMessages,
+        preserveStandaloneToolMessages: resolvedPreserveStandaloneToolMessages,
       })
       : chatBody,
   );
