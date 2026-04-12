@@ -634,6 +634,116 @@ describe('chat proxy stream behavior', () => {
     ]);
   });
 
+  it('keeps codex standalone tool continuation working with fast-fail routing enabled', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl-tool-timeout-1',
+        object: 'chat.completion',
+        created: 1_706_000_000,
+        model: 'upstream-gpt',
+        choices: [{
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{
+              id: 'call_fast_fail_1',
+              type: 'function',
+              function: {
+                name: 'get_weather',
+                arguments: '{"city":"Shanghai"}',
+              },
+            }],
+          },
+          finish_reason: 'tool_calls',
+        }],
+        usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl-tool-timeout-2',
+        object: 'chat.completion',
+        created: 1_706_000_001,
+        model: 'upstream-gpt',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'done' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const headers = {
+      Originator: 'codex_cli_rs',
+      Session_id: 'codex-session-timeout-1',
+    };
+    const tools = [{
+      type: 'function',
+      function: {
+        name: 'get_weather',
+        description: 'Get weather',
+        parameters: {
+          type: 'object',
+          properties: { city: { type: 'string' } },
+          required: ['city'],
+        },
+      },
+    }];
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers,
+      payload: {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'call tool' }],
+        tools,
+        tool_choice: { type: 'function', function: { name: 'get_weather' } },
+      },
+    });
+    expect(firstResponse.statusCode).toBe(200);
+
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers,
+      payload: {
+        model: 'gpt-5.4',
+        messages: [
+          { role: 'user', content: 'call tool' },
+          { role: 'tool', tool_call_id: 'call_fast_fail_1', content: '{"temp":"22C"}' },
+        ],
+        tools,
+      },
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, secondOptions] = fetchMock.mock.calls[1] as [string, any];
+    const forwardedBody = JSON.parse(secondOptions.body);
+    expect(forwardedBody.messages).toEqual([
+      { role: 'user', content: 'call tool' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{
+          id: 'call_fast_fail_1',
+          type: 'function',
+          function: {
+            name: 'get_weather',
+            arguments: '{"city":"Shanghai"}',
+          },
+        }],
+      },
+      { role: 'tool', tool_call_id: 'call_fast_fail_1', content: '{"temp":"22C"}' },
+    ]);
+  });
+
   it('avoids the current site when chat returns upstream group empty', async () => {
     shouldRetryProxyRequestMock.mockReturnValue(true);
     shouldAvoidSiteForRequestMock.mockImplementation((_status?: unknown, message?: unknown) =>

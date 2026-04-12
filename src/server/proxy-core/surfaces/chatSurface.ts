@@ -112,6 +112,27 @@ function extractAssistantToolCallsFromChatPayload(payload: unknown): Array<Recor
   return collected;
 }
 
+function isCodexStandaloneToolContinuationRequest(
+  clientContext: DownstreamClientContext | null,
+  body: unknown,
+): boolean {
+  if (clientContext?.clientKind !== 'codex') return false;
+  if (!isRecord(body) || !Array.isArray(body.messages)) return false;
+  const messages = body.messages;
+  const hasAssistantToolCalls = messages.some((message) => (
+    isRecord(message)
+    && asTrimmedString(message.role).toLowerCase() === 'assistant'
+    && Array.isArray(message.tool_calls)
+    && message.tool_calls.length > 0
+  ));
+  if (hasAssistantToolCalls) return false;
+  return messages.some((message) => (
+    isRecord(message)
+    && asTrimmedString(message.role).toLowerCase() === 'tool'
+    && asTrimmedString(message.tool_call_id ?? message.id).length > 0
+  ));
+}
+
 export async function handleChatSurfaceRequest(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -269,6 +290,10 @@ export async function handleChatSurfaceRequest(
   }
 
   const requestBudget = createRequestBudget();
+  const codexStandaloneToolContinuation = isCodexStandaloneToolContinuationRequest(
+    clientContext,
+    request.body,
+  );
   let reportedNoChannel = false;
 
   const execution = await conductor.execute({
@@ -409,11 +434,17 @@ export async function handleChatSurfaceRequest(
                 ? {
                   ...compatibilityRequest.runtime,
                   ...(compatibilityRequest.runtime.stream
-                    ? {
-                      firstByteTimeoutMs: requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: true }),
+                ? {
+                      firstByteTimeoutMs: requestBudget.getStreamFirstByteTimeoutMs({
+                        preferFastFail: true,
+                        ...(codexStandaloneToolContinuation ? { hardCapMs: 4_000 } : {}),
+                      }),
                     }
                     : {
-                      timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                      timeoutMs: requestBudget.getPerAttemptTimeoutMs({
+                        preferFastFail: true,
+                        ...(codexStandaloneToolContinuation ? { hardCapMs: 4_000 } : {}),
+                      }),
                     }),
                 }
                 : undefined,
