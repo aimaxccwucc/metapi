@@ -33,6 +33,47 @@ describe('detectProxyFailure (empty content)', () => {
     expect(failure).toMatchObject({ status: 502 });
   });
 
+  it('flags terminal chat completions with null assistant content even when completion tokens are non-zero', () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    const rawText = JSON.stringify({
+      id: 'chatcmpl_null_empty',
+      object: 'chat.completion',
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: null },
+        finish_reason: 'stop',
+      }],
+      usage: { prompt_tokens: 21, completion_tokens: 5, total_tokens: 26 },
+    });
+
+    const failure = detectProxyFailure({
+      rawText,
+      usage: { promptTokens: 21, completionTokens: 5, totalTokens: 26 },
+    });
+
+    expect(failure).toMatchObject({ status: 502, reason: 'Upstream returned empty content' });
+  });
+
+  it('flags completed responses payloads with no output content even when completion tokens are non-zero', () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    const rawText = JSON.stringify({
+      id: 'resp_completed_empty',
+      object: 'response',
+      status: 'completed',
+      model: 'gpt-5.4',
+      usage: { input_tokens: 21, output_tokens: 5, total_tokens: 26 },
+    });
+
+    const failure = detectProxyFailure({
+      rawText,
+      usage: { promptTokens: 21, completionTokens: 5, totalTokens: 26 },
+    });
+
+    expect(failure).toMatchObject({ status: 502, reason: 'Upstream returned empty content' });
+  });
+
   it('does not flag when output exists even if usage is missing', () => {
     config.proxyEmptyContentFailEnabled = true;
 

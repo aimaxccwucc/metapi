@@ -23,7 +23,9 @@ function buildStickySessionKey(request: FastifyRequest): string | null {
   });
 
   const stickyIdentity = normalizeStickyPart(
-    clientContext.sessionId
+    clientContext.previousResponseId
+    || clientContext.promptCacheKey
+    || clientContext.sessionId
     || clientContext.traceHint
     || clientContext.clientAppId
     || clientContext.clientKind,

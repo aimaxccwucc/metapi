@@ -12,6 +12,8 @@ export type DownstreamClientContext = {
   clientKind: DownstreamClientKind;
   sessionId?: string;
   traceHint?: string;
+  previousResponseId?: string;
+  promptCacheKey?: string;
   clientAppId?: string;
   clientAppName?: string;
   clientConfidence?: DownstreamClientConfidence;
@@ -151,6 +153,13 @@ function normalizeClientDisplayName(value: string): string | null {
 function normalizeClientAppId(value: string): string | null {
   const normalized = value.trim().toLowerCase();
   return normalized || null;
+}
+
+function normalizeOptionalTrimmedString(value: unknown, maxLength = 200): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.length <= maxLength ? trimmed : trimmed.slice(0, maxLength).trim() || null;
 }
 
 function parseExplicitClientSelfReportValue(value: string): string | null {
@@ -346,10 +355,15 @@ export function detectDownstreamClientContext(input: {
     clientKind: detected.id,
     headers: input.headers,
   });
+  const bodyRecord = isRecord(input.body) ? input.body : null;
+  const previousResponseId = normalizeOptionalTrimmedString(bodyRecord?.previous_response_id);
+  const promptCacheKey = normalizeOptionalTrimmedString(bodyRecord?.prompt_cache_key);
   return {
     clientKind: detected.id,
     ...(detected.sessionId ? { sessionId: detected.sessionId } : {}),
     ...(detected.traceHint ? { traceHint: detected.traceHint } : {}),
+    ...(previousResponseId ? { previousResponseId } : {}),
+    ...(promptCacheKey ? { promptCacheKey } : {}),
     ...(explicitSelfReport || fingerprint || protocolClientApp || {}),
   };
 }

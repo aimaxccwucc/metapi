@@ -82,6 +82,27 @@ describe('detectDownstreamClientContext', () => {
     });
   });
 
+  it('extracts continuation identifiers from responses requests', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/responses',
+      headers: {
+        originator: 'codex_cli_rs',
+      },
+      body: {
+        model: 'gpt-5.4',
+        previous_response_id: ' resp_prev_123 ',
+        prompt_cache_key: ' cache_abc ',
+      },
+    })).toEqual({
+      clientKind: 'codex',
+      clientAppId: 'codex_cli_rs',
+      clientAppName: 'Codex CLI',
+      clientConfidence: 'exact',
+      previousResponseId: 'resp_prev_123',
+      promptCacheKey: 'cache_abc',
+    });
+  });
+
   it('recognizes broader Codex official-client user-agent families without requiring stainless headers', () => {
     expect(detectDownstreamClientContext({
       downstreamPath: '/v1/responses',
