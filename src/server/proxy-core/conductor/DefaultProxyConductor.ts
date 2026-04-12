@@ -8,6 +8,26 @@ import {
 import type { ExecuteInput, ExecuteResult, ProxyConductorDependencies, SelectedChannelLike } from './types.js';
 import { recordFailedAttempt, recordSuccessfulAttempt } from './usageHooks.js';
 
+function shouldDelaySiteExclusion(
+  failure: {
+    status?: number;
+    rawErrorText?: string;
+  },
+): boolean {
+  const status = typeof failure.status === 'number' && Number.isFinite(failure.status)
+    ? Math.trunc(failure.status)
+    : 0;
+  const text = (failure.rawErrorText || '').trim();
+  if (/no\s+available\s+channel\s+for\s+model|no\s+available\s+providers|under\s+group\s+.+\(distributor\)|分组\s*.+\s*无可用渠道|无可用渠道（distributor）|billing\s+service\s+temporarily\s+unavailable|偷偷倒闭/i.test(text)) {
+    return false;
+  }
+  const normalizedText = text.toLowerCase();
+  if (status >= 500) return true;
+  if (status === 408 || status === 409 || status === 425 || status === 429) return true;
+  return /timeout|timed?\s*out|connection\s+reset|connection\s+refused|econnreset|econnrefused|rate\s+limit|too\s+many\s+requests|quota/i
+    .test(normalizedText);
+}
+
 export class DefaultProxyConductor {
   constructor(private readonly deps: ProxyConductorDependencies) {}
 
@@ -21,6 +41,7 @@ export class DefaultProxyConductor {
   async execute(input: ExecuteInput): Promise<ExecuteResult> {
     const excludeChannelIds: number[] = [];
     const excludeSiteIds = new Set<number>();
+    const failoverSiteAttempts = new Map<number, number>();
     const maxAttempts = Math.max(1, Math.trunc(input.maxAttempts ?? 1));
     let attempts = 0;
     let lastFailure: {
@@ -114,16 +135,22 @@ export class DefaultProxyConductor {
           ...lastFailure,
         });
         if (typeof failoverSiteId === 'number' && Number.isFinite(failoverSiteId)) {
-          excludeSiteIds.add(Math.trunc(failoverSiteId));
+          const normalizedSiteId = Math.trunc(failoverSiteId);
+          const nextSiteAttempts = (failoverSiteAttempts.get(normalizedSiteId) ?? 0) + 1;
+          failoverSiteAttempts.set(normalizedSiteId, nextSiteAttempts);
+          const delaySiteExclusion = shouldDelaySiteExclusion(lastFailure);
+          if (!delaySiteExclusion || nextSiteAttempts >= 2) {
+            excludeSiteIds.add(normalizedSiteId);
+          }
         }
         if (attempts >= maxAttempts) {
           break;
         }
         const next = await this.deps.selectNextChannel(
           input.requestedModel,
-          excludeChannelIds,
+          [...excludeChannelIds],
           input.downstreamPolicy,
-          excludeSiteIds,
+          new Set(excludeSiteIds),
         );
         if (!next) {
           await input.onNoChannel?.({ attempts });

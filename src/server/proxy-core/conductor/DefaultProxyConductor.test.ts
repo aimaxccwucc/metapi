@@ -134,7 +134,7 @@ describe('DefaultProxyConductor', () => {
       selected: nextSelectedChannel,
       attempts: 2,
     });
-    expect(selectNextChannel).toHaveBeenCalledWith('gpt-5.4', [11], undefined, new Set([44]));
+    expect(selectNextChannel).toHaveBeenCalledWith('gpt-5.4', [11], undefined, new Set());
     expect(recordFailure).toHaveBeenCalledWith(11, {
       status: 503,
       rawErrorText: 'upstream unavailable',
@@ -145,6 +145,62 @@ describe('DefaultProxyConductor', () => {
       latencyMs: null,
       cost: null,
     });
+  });
+
+  it('allows one same-site fallback before excluding the whole site', async () => {
+    const sameSiteChannel = {
+      ...baseSelectedChannel,
+      channel: { id: 12, routeId: 22 },
+      tokenValue: 'sk-same-site',
+    };
+    const otherSiteChannel = {
+      ...baseSelectedChannel,
+      channel: { id: 13, routeId: 22 },
+      site: { id: 45, name: 'other-site', url: 'https://other-upstream.example.com', platform: 'openai' },
+      tokenValue: 'sk-other-site',
+    };
+    const selectChannel = vi.fn().mockResolvedValue(baseSelectedChannel);
+    const selectNextChannel = vi.fn()
+      .mockResolvedValueOnce(sameSiteChannel)
+      .mockResolvedValueOnce(otherSiteChannel);
+    const conductor = new DefaultProxyConductor({
+      selectChannel,
+      selectNextChannel,
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+      recordFailure: vi.fn().mockResolvedValue(undefined),
+    });
+    const attempt = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        action: 'failover',
+        status: 503,
+        rawErrorText: 'upstream unavailable',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        action: 'failover',
+        status: 503,
+        rawErrorText: 'upstream still unavailable',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        response: new Response('ok', { status: 200 }),
+      });
+
+    const result = await conductor.execute({
+      requestedModel: 'gpt-5.4',
+      attempt,
+      maxAttempts: 4,
+      getFailoverSiteId: (selected) => Number(selected.site.id),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      selected: otherSiteChannel,
+      attempts: 3,
+    });
+    expect(selectNextChannel).toHaveBeenNthCalledWith(1, 'gpt-5.4', [11], undefined, new Set());
+    expect(selectNextChannel).toHaveBeenNthCalledWith(2, 'gpt-5.4', [11, 12], undefined, new Set([44]));
   });
 
   it('refreshes auth on 401 and retries the same channel with the refreshed selection', async () => {
