@@ -195,6 +195,7 @@ export async function upsertRoutingGovernanceState(input: UpsertGovernanceInput)
         ...nextValues,
         createdAt: timestamp,
       })
+      .onDuplicateKeyUpdate({ set: nextValues })
       .run();
     return;
   }
