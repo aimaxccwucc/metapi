@@ -2278,6 +2278,75 @@ describe('chat proxy stream behavior', () => {
     expect(forwarded.tool_choice?.function?.name).toBe('Glob');
   });
 
+  it('preserves codex standalone tool continuation when /v1/responses falls back to /v1/chat/completions', async () => {
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      models: [
+        {
+          modelName: 'upstream-gpt',
+          supportedEndpointTypes: ['/v1/chat/completions'],
+        },
+      ],
+      groupRatio: {},
+    });
+
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'chatcmpl_responses_codex_tool_continue',
+      object: 'chat.completion',
+      created: 1_706_000_222,
+      model: 'upstream-gpt',
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: 'continued' },
+        finish_reason: 'stop',
+      }],
+      usage: { prompt_tokens: 9, completion_tokens: 3, total_tokens: 12 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: {
+        Originator: 'codex_cli_rs',
+        Session_id: 'codex-responses-tool-continue-1',
+      },
+      payload: {
+        model: 'gpt-5.2',
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text: 'continue after tool' }],
+          },
+          {
+            type: 'function_call',
+            call_id: 'call_seen',
+            name: 'Glob',
+            arguments: '{"pattern":"README*"}',
+          },
+          {
+            type: 'function_call_output',
+            call_id: 'call_later',
+            output: '{"ok":true,"source":"continuation"}',
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const [targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/chat/completions');
+
+    const forwarded = JSON.parse(options.body);
+    const toolMessage = forwarded.messages.find((item: any) => item?.role === 'tool');
+    expect(toolMessage).toBeTruthy();
+    expect(toolMessage.tool_call_id).toBe('call_later');
+    expect(toolMessage.content).toContain('continuation');
+  });
+
   it('preserves function_call/function_call_output when /v1/responses falls back to /v1/messages', async () => {
     fetchModelPricingCatalogMock.mockResolvedValue({
       models: [
