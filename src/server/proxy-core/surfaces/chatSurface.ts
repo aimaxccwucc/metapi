@@ -12,6 +12,7 @@ import { type DownstreamFormat } from '../../transformers/shared/normalized.js';
 import {
   buildClaudeCountTokensUpstreamRequest,
   buildUpstreamEndpointRequest,
+  rememberCodexStandaloneToolCalls,
   recordUpstreamEndpointFailure,
   recordUpstreamEndpointSuccess,
   resolveUpstreamEndpointCandidates,
@@ -79,6 +80,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function extractAssistantToolCallsFromChatPayload(payload: unknown): Array<Record<string, unknown>> {
+  if (!payload || typeof payload !== 'object') return [];
+  const choices = Array.isArray((payload as any).choices) ? (payload as any).choices : [];
+  const collected: Array<Record<string, unknown>> = [];
+  for (const choice of choices) {
+    const message = choice && typeof choice === 'object' ? (choice as any).message : null;
+    const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+    for (const toolCall of toolCalls) {
+      if (!toolCall || typeof toolCall !== 'object') continue;
+      const functionPart = toolCall.function && typeof toolCall.function === 'object' ? toolCall.function : null;
+      const id = asTrimmedString(toolCall.id);
+      const name = asTrimmedString(functionPart?.name ?? toolCall.name);
+      if (!id || !name) continue;
+      collected.push({
+        ...toolCall,
+        id,
+        type: 'function',
+        function: {
+          ...(functionPart || {}),
+          name,
+          arguments: typeof functionPart?.arguments === 'string'
+            ? functionPart.arguments
+            : JSON.stringify(functionPart?.arguments ?? toolCall.arguments ?? ''),
+        },
+      });
+    }
+  }
+  return collected;
 }
 
 export async function handleChatSurfaceRequest(
@@ -861,6 +892,13 @@ export async function handleChatSurfaceRequest(
         }
         if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
           upstreamData = unwrapGeminiCliPayload(upstreamData);
+        }
+
+        if (clientContext?.clientKind === 'codex') {
+          const assistantToolCalls = extractAssistantToolCallsFromChatPayload(upstreamData);
+          if (assistantToolCalls.length > 0) {
+            rememberCodexStandaloneToolCalls(codexSessionCacheKey, assistantToolCalls);
+          }
         }
 
         const latency = Date.now() - startTime;

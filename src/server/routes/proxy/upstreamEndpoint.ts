@@ -781,7 +781,7 @@ function getRememberedCodexStandaloneToolCalls(cacheKey: string | null | undefin
   return state.assistantToolCalls.map((toolCall) => cloneToolCallRecord(toolCall));
 }
 
-function rememberCodexStandaloneToolCalls(
+export function rememberCodexStandaloneToolCalls(
   cacheKey: string | null | undefined,
   toolCalls: Array<Record<string, unknown>>,
   nowMs = Date.now(),
