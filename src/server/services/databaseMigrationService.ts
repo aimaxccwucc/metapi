@@ -279,7 +279,7 @@ function buildStatements(snapshot: BackupSnapshot): InsertStatement[] {
   for (const row of snapshot.accounts.sites) {
     statements.push({
       table: 'sites',
-      columns: ['id', 'name', 'url', 'external_checkin_url', 'platform', 'proxy_url', 'use_system_proxy', 'custom_headers', 'status', 'is_pinned', 'sort_order', 'global_weight', 'api_key', 'created_at', 'updated_at'],
+      columns: ['id', 'name', 'url', 'external_checkin_url', 'platform', 'proxy_url', 'flaresolverr_url', 'use_system_proxy', 'custom_headers', 'status', 'is_pinned', 'sort_order', 'global_weight', 'api_key', 'created_at', 'updated_at'],
       values: [
         asNumber(row.id, 0),
         asNullableString(row.name),
@@ -287,6 +287,7 @@ function buildStatements(snapshot: BackupSnapshot): InsertStatement[] {
         asNullableString(row.externalCheckinUrl),
         asNullableString(row.platform),
         asNullableString(row.proxyUrl),
+        asNullableString(row.flaresolverrUrl),
         asBoolean(row.useSystemProxy, false),
         asNullableString(row.customHeaders),
         asNullableString(row.status) ?? 'active',

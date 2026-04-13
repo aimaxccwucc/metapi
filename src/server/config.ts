@@ -84,6 +84,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     geminiCliClientId: parseOptionalSecret(env.GEMINI_CLI_CLIENT_ID) || DEFAULT_GEMINI_CLI_CLIENT_ID,
     geminiCliClientSecret: parseOptionalSecret(env.GEMINI_CLI_CLIENT_SECRET),
     systemProxyUrl: env.SYSTEM_PROXY_URL || '',
+    flaresolverrUrl: env.FLARESOLVERR_URL || '',
     accountCredentialSecret,
     checkinCron: env.CHECKIN_CRON || '0 8 * * *',
     checkinScheduleMode: (env.CHECKIN_SCHEDULE_MODE || 'cron').trim().toLowerCase() === 'interval'

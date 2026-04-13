@@ -1338,6 +1338,12 @@
           "defaultValue": null,
           "primaryKey": false
         },
+        "flaresolverr_url": {
+          "logicalType": "TEXT",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
         "use_system_proxy": {
           "logicalType": "boolean",
           "notNull": false,

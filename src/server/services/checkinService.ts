@@ -18,6 +18,8 @@ import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { classifyFailureReason, resolveCheckinExecution } from './failureReasonService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
+import { ensureCfCookie } from './cfChallengeBypass.js';
+import { withCfCookieOverride } from './cfChallengeCookieStore.js';
 import {
   getCheckinSiteBackoffDecision,
   recordCheckinSiteResolution,
@@ -233,8 +235,29 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
 
   const accountProxyUrl = getProxyUrlFromExtraConfig(account.extraConfig);
   let activeAccessToken = account.accessToken;
+
+  // Proactively refresh CF cookie before checkin attempt
+  const flaresolverrUrl = (site as any).flaresolverrUrl as string | undefined;
+  const cfCtx = { siteId: site.id, siteUrl: site.url, proxyUrl: accountProxyUrl, flaresolverrUrl };
+  const cfCookie = await ensureCfCookie(cfCtx);
+  const cfCookies = cfCookie ? { cf_clearance: cfCookie.cfClearance } : null;
+  const cfUserAgent = cfCookie?.userAgent || undefined;
+
   let result = await withAccountProxyOverride(accountProxyUrl,
-    () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+    () => withCfCookieOverride(cfCookies,
+      () => adapter.checkin(site.url, activeAccessToken, platformUserId),
+      cfUserAgent));
+
+  // If CF challenge detected, try bypass refresh and retry
+  if (!result.success && isCloudflareChallenge(result.message)) {
+    const refreshedCookie = await ensureCfCookie({ ...cfCtx, flaresolverrUrl });
+    if (refreshedCookie) {
+      result = await withAccountProxyOverride(accountProxyUrl,
+        () => withCfCookieOverride({ cf_clearance: refreshedCookie.cfClearance },
+          () => adapter.checkin(site.url, activeAccessToken, platformUserId),
+          refreshedCookie.userAgent));
+    }
+  }
 
   if (!result.success && (account.status === 'expired' || shouldAttemptAutoRelogin({
     message: result.message,
@@ -246,7 +269,9 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     if (refreshedAccessToken) {
       activeAccessToken = refreshedAccessToken;
       result = await withAccountProxyOverride(accountProxyUrl,
-        () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+        () => withCfCookieOverride(cfCookies,
+          () => adapter.checkin(site.url, activeAccessToken, platformUserId),
+          cfUserAgent));
     }
   }
 

@@ -53,6 +53,7 @@ type SiteRow = {
   autoCheckinReason?: string | null;
   autoCheckinUpdatedAt?: string | null;
   proxyUrl?: string | null;
+  flaresolverrUrl?: string | null;
   useSystemProxy?: boolean;
   customHeaders?: string | null;
   globalWeight?: number;
@@ -716,6 +717,7 @@ export default function Sites() {
       externalCheckinUrl: form.externalCheckinUrl.trim(),
       platform: form.platform.trim(),
       proxyUrl: form.proxyUrl.trim(),
+      flaresolverrUrl: form.flaresolverrUrl.trim(),
       useSystemProxy: !!form.useSystemProxy,
       customHeaders: serializedCustomHeaders.customHeaders,
       globalWeight: Number(parsedGlobalWeight.toFixed(3)),
@@ -1538,6 +1540,15 @@ export default function Sites() {
               />
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                 填写后优先使用站点代理；留空则使用系统代理或直连(取决于设置开关状态)。
+              </div>
+              <input
+                placeholder="FlareSolverr URL（可选，如 http://flaresolverr:8191）"
+                value={form.flaresolverrUrl}
+                onChange={(e) => setForm((prev) => ({ ...prev, flaresolverrUrl: e.target.value }))}
+                style={formInputStyle}
+              />
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                配置后自动解决 Cloudflare 验证，支持签到和令牌验证。留空则不启用。
               </div>
             </div>
             <label style={{

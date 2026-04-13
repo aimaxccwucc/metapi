@@ -34,6 +34,9 @@ import {
 } from '../../services/accountHealthService.js';
 import { appendSessionTokenRebindHint } from '../../services/alertRules.js';
 import { parseSiteProxyUrlInput, withAccountProxyOverride, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import { ensureCfCookie } from '../../services/cfChallengeBypass.js';
+import { withCfCookieOverride } from '../../services/cfChallengeCookieStore.js';
+import { config } from '../../config.js';
 import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import { parseApiKeyBatch } from '../../services/apiKeyBatch.js';
 import { invalidateModelTokenCandidatesCache } from '../../services/modelTokenCandidatesCache.js';
@@ -437,7 +440,7 @@ type LoginFailureInfo = {
   shieldBlocked: boolean;
 };
 
-const ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS = 10_000;
+const ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS = 150_000;
 const ACCOUNT_VERIFY_TIMEOUT_MS = 30_000;
 const ACCOUNT_VERIFY_DIAG_TIMEOUT_MS = 2_500;
 
@@ -572,11 +575,17 @@ async function refreshRuntimeHealthForRow(row: AccountWithSiteRow): Promise<Acco
   }
 
   try {
+    // Pre-warm CF cookie for Cloudflare-protected sites (outside the timeout window)
+    const fsUrl = (row.sites as any).flaresolverrUrl as string | undefined;
+    if (fsUrl || config.flaresolverrUrl) {
+      const accountProxyUrl = getProxyUrlFromExtraConfig(row.accounts.extraConfig);
+      await ensureCfCookie({ siteId: row.sites.id, siteUrl: row.sites.url, proxyUrl: accountProxyUrl, flaresolverrUrl: fsUrl });
+    }
+
     await withTimeout(
       () => refreshBalance(accountId),
       ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS,
-      `站点健康检查超时（${Math.max(1, Math.round(ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS / 1000))}s）`,
-    );
+      `站点健康检查超时（${Math.max(1, Math.round(ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS / 1000))}s）`,    );
     const refreshedAccount = await db.select().from(schema.accounts)
       .where(eq(schema.accounts.id, accountId))
       .get();
@@ -1008,21 +1017,58 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     let result: any;
+    // Prepare CF bypass cookie if site has FlareSolverr configured
+    const flaresolverrUrl = (site as any).flaresolverrUrl as string | undefined;
+    const cfCookie = flaresolverrUrl || config.flaresolverrUrl
+      ? await ensureCfCookie({ siteId: site.id, siteUrl: site.url, proxyUrl: null, flaresolverrUrl })
+      : null;
+    const cfCookies = cfCookie ? { cf_clearance: cfCookie.cfClearance } : null;
+    const cfUserAgent = cfCookie?.userAgent || undefined;
+
     try {
       result = await withTimeout(
-        () => adapter.verifyToken(site.url, accessToken, parsedPlatformUserId),
+        () => withCfCookieOverride(cfCookies,
+          () => adapter.verifyToken(site.url, accessToken, parsedPlatformUserId),
+          cfUserAgent),
         ACCOUNT_VERIFY_TIMEOUT_MS,
         `Token verification timed out (${Math.max(1, Math.round(ACCOUNT_VERIFY_TIMEOUT_MS / 1000))}s)`,
       );
     } catch (err: any) {
-      if (isVerificationTimeoutError(err)) {
-        const failure = buildVerificationFailureResponse(await diagnoseVerificationFailure());
-        if (failure) return failure;
+      // On timeout, try CF bypass refresh
+      if (isVerificationTimeoutError(err) && (flaresolverrUrl || config.flaresolverrUrl)) {
+        const refreshedCookie = await ensureCfCookie({ siteId: site.id, siteUrl: site.url, proxyUrl: null, flaresolverrUrl });
+        if (refreshedCookie) {
+          try {
+            result = await withTimeout(
+              () => withCfCookieOverride({ cf_clearance: refreshedCookie.cfClearance },
+                () => adapter.verifyToken(site.url, accessToken, parsedPlatformUserId),
+                refreshedCookie.userAgent),
+              ACCOUNT_VERIFY_TIMEOUT_MS,
+              `Token verification timed out after CF bypass`,
+            );
+          } catch {
+            const failure = buildVerificationFailureResponse(await diagnoseVerificationFailure());
+            if (failure) return failure;
+            return {
+              success: false,
+              message: appendSessionTokenRebindHint(err?.message || 'Token 验证失败（CF bypass 后仍超时）'),
+            };
+          }
+          // CF bypass succeeded
+        } else {
+          const failure = buildVerificationFailureResponse(await diagnoseVerificationFailure());
+          if (failure) return failure;
+        }
+      } else {
+        if (isVerificationTimeoutError(err)) {
+          const failure = buildVerificationFailureResponse(await diagnoseVerificationFailure());
+          if (failure) return failure;
+        }
+        return {
+          success: false,
+          message: appendSessionTokenRebindHint(err?.message || 'Token 验证失败'),
+        };
       }
-      return {
-        success: false,
-        message: appendSessionTokenRebindHint(err?.message || 'Token 验证失败'),
-      };
     }
 
     if (result.tokenType === 'session') {
@@ -1189,10 +1235,17 @@ export async function accountsRoutes(app: FastifyInstance) {
         : resolvePlatformUserId(account.extraConfig, account.username);
 
       let verifyResult: any;
+      const rebindFlaresolverrUrl = (site as any).flaresolverrUrl as string | undefined;
+      const rebindCfCookie = rebindFlaresolverrUrl || config.flaresolverrUrl
+        ? await ensureCfCookie({ siteId: site.id, siteUrl: site.url, proxyUrl: null, flaresolverrUrl: rebindFlaresolverrUrl })
+        : null;
+      const rebindCfCookies = rebindCfCookie ? { cf_clearance: rebindCfCookie.cfClearance } : null;
       try {
         verifyResult = await withAccountProxyOverride(
           getProxyUrlFromExtraConfig(account.extraConfig),
-          () => adapter.verifyToken(site.url, nextAccessToken, candidatePlatformUserId),
+          () => withCfCookieOverride(rebindCfCookies,
+            () => adapter.verifyToken(site.url, nextAccessToken, candidatePlatformUserId),
+            rebindCfCookie?.userAgent),
         );
       } catch (err: any) {
         return reply.code(400).send({

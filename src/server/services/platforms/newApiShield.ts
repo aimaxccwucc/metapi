@@ -1,6 +1,7 @@
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
+import { getCfCookieOverride } from '../cfChallengeCookieStore.js';
 
 const SHIELD_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36';
 const SHIELD_CHALLENGE_MAX_ATTEMPTS = 2;
@@ -217,6 +218,17 @@ export async function fetchJsonWithShieldCookieRetry<T>(
   };
 
   let cookieHeader = headers.Cookie || headers.cookie || '';
+  // Merge CF cookie override from AsyncLocalStorage (set by cfChallengeBypass)
+  const cfOverride = getCfCookieOverride();
+  if (cfOverride) {
+    for (const [name, value] of Object.entries(cfOverride.cookies)) {
+      cookieHeader = upsertCookie(cookieHeader, name, value as string);
+    }
+    // CF cf_clearance is bound to User-Agent — must use the same UA that solved the challenge
+    if (cfOverride.userAgent) {
+      headers['User-Agent'] = cfOverride.userAgent;
+    }
+  }
   if (cookieHeader) {
     headers.Cookie = cookieHeader;
     delete headers.cookie;

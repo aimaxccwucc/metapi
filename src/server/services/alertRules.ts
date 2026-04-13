@@ -1,7 +1,16 @@
 export function isCloudflareChallenge(message?: string | null): boolean {
   if (!message) return false;
   const text = message.toLowerCase();
-  return text.includes('cloudflare') || text.includes('cf challenge') || text.includes('challenge required');
+  return text.includes('cloudflare')
+    || text.includes('cf challenge')
+    || text.includes('challenge required')
+    || text.includes('just a moment')
+    || text.includes('challenge-platform')
+    || text.includes('cf-browser-verification')
+    || text.includes('checking your browser')
+    || text.includes('enable javascript')
+    || text.includes('cf_chl_opt')
+    || text.includes('__cf_bm');
 }
 
 const SESSION_TOKEN_REBIND_HINT = '请在中转站重新生成系统访问令牌后重新绑定账号';

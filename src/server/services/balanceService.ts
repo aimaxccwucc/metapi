@@ -26,6 +26,9 @@ import {
   isSub2ApiPlatform,
 } from './sub2apiManagedAuth.js';
 import { refreshSub2ApiManagedSessionSingleflight } from './sub2apiRefreshSingleflight.js';
+import { config } from '../config.js';
+import { ensureCfCookie, isCloudflareChallenge } from './cfChallengeBypass.js';
+import { withCfCookieOverride } from './cfChallengeCookieStore.js';
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
@@ -303,8 +306,19 @@ export async function refreshBalance(accountId: number) {
       } catch {}
     }
   }
+  // Proactively refresh CF cookie before balance read
+  const flaresolverrUrl = (site as any).flaresolverrUrl as string | undefined;
+  const cfCtx = { siteId: site.id, siteUrl: site.url, proxyUrl: accountProxyUrl, flaresolverrUrl };
+  const cfCookie = (flaresolverrUrl || config.flaresolverrUrl)
+    ? await ensureCfCookie(cfCtx)
+    : null;
+  const cfCookies = cfCookie ? { cf_clearance: cfCookie.cfClearance } : null;
+  const cfUserAgent = cfCookie?.userAgent || undefined;
+
   const readBalance = async (token: string) => withAccountProxyOverride(accountProxyUrl,
-    () => adapter.getBalance(site.url, token, platformUserId));
+    () => withCfCookieOverride(cfCookies,
+      () => adapter.getBalance(site.url, token, platformUserId),
+      cfUserAgent));
   const handleBalanceError = async (err: any) => {
     const message = appendSessionTokenRebindHint(err?.message || 'unknown error');
     setAccountRuntimeHealth(account.id, {

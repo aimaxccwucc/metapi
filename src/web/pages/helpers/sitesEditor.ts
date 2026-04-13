@@ -9,6 +9,7 @@ export type SiteForm = {
   externalCheckinUrl: string;
   platform: string;
   proxyUrl: string;
+  flaresolverrUrl: string;
   useSystemProxy: boolean;
   customHeaders: SiteCustomHeaderField[];
   globalWeight: string;
@@ -27,6 +28,7 @@ export type SiteSavePayload = {
   externalCheckinUrl: string;
   platform: string;
   proxyUrl: string;
+  flaresolverrUrl: string;
   useSystemProxy: boolean;
   customHeaders: string;
   globalWeight: number;
@@ -72,6 +74,7 @@ export function emptySiteForm(): SiteForm {
     externalCheckinUrl: '',
     platform: '',
     proxyUrl: '',
+    flaresolverrUrl: '',
     useSystemProxy: false,
     customHeaders: [emptySiteCustomHeader()],
     globalWeight: '1',
@@ -106,9 +109,10 @@ function parseCustomHeadersForEditor(raw: unknown): SiteCustomHeaderField[] {
   }
 }
 
-export function siteFormFromSite(site: Partial<Omit<SiteForm, 'customHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'useSystemProxy'>> & {
+export function siteFormFromSite(site: Partial<Omit<SiteForm, 'customHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'flaresolverrUrl' | 'useSystemProxy'>> & {
   externalCheckinUrl?: string | null;
   proxyUrl?: string | null;
+  flaresolverrUrl?: string | null;
   useSystemProxy?: boolean | null;
   customHeaders?: string | null;
   globalWeight?: number | string | null;
@@ -140,6 +144,7 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'customHeaders' | 
     externalCheckinUrl: site.externalCheckinUrl ?? '',
     platform: site.platform ?? '',
     proxyUrl: site.proxyUrl ?? '',
+    flaresolverrUrl: site.flaresolverrUrl ?? '',
     useSystemProxy: !!site.useSystemProxy,
     customHeaders: parseCustomHeadersForEditor(site.customHeaders),
     globalWeight,

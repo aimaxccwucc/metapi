@@ -99,6 +99,14 @@ const SITE_COLUMN_COMPATIBILITY_SPECS: SiteColumnCompatibilitySpec[] = [
       postgres: 'ALTER TABLE "sites" ADD COLUMN "health_checked_at" TIMESTAMP',
     },
   },
+  {
+    column: 'flaresolverr_url',
+    addSql: {
+      sqlite: 'ALTER TABLE sites ADD COLUMN flaresolverr_url text;',
+      mysql: 'ALTER TABLE `sites` ADD COLUMN `flaresolverr_url` TEXT NULL',
+      postgres: 'ALTER TABLE "sites" ADD COLUMN "flaresolverr_url" TEXT',
+    },
+  },
 ];
 
 const SITE_TABLE_COMPATIBILITY_SPECS: SiteTableCompatibilitySpec[] = [

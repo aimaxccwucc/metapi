@@ -257,6 +257,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     url: string;
     platform?: string;
     proxyUrl?: string | null;
+    flaresolverrUrl?: string | null;
     useSystemProxy?: boolean;
     customHeaders?: string | null;
     externalCheckinUrl?: string | null;
@@ -266,7 +267,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     sortOrder?: number;
     globalWeight?: number;
   } }>('/api/sites', async (request, reply) => {
-    const { name, url, platform, proxyUrl, useSystemProxy, customHeaders, externalCheckinUrl, protocolConfig, status, isPinned, sortOrder, globalWeight } = request.body;
+    const { name, url, platform, proxyUrl, flaresolverrUrl, useSystemProxy, customHeaders, externalCheckinUrl, protocolConfig, status, isPinned, sortOrder, globalWeight } = request.body;
     const normalizedStatus = normalizeSiteStatus(status);
     if (status !== undefined && !normalizedStatus) {
       return reply.code(400).send({ error: 'Invalid site status. Expected active or disabled.' });
@@ -320,6 +321,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       url: normalizeSiteUrl(url),
       platform: detectedPlatform,
       proxyUrl: normalizedProxyUrl.proxyUrl,
+      flaresolverrUrl: flaresolverrUrl?.trim() || null,
       useSystemProxy: normalizedUseSystemProxy ?? false,
       customHeaders: normalizedCustomHeaders.customHeaders,
       externalCheckinUrl: normalizedExternalCheckinUrl.url,
@@ -361,6 +363,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     url?: string;
     platform?: string;
     proxyUrl?: string | null;
+    flaresolverrUrl?: string | null;
     useSystemProxy?: boolean;
     customHeaders?: string | null;
     externalCheckinUrl?: string | null;
@@ -424,6 +427,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.url !== undefined) updates.url = normalizeSiteUrl(body.url);
     if (body.platform !== undefined) updates.platform = body.platform;
     if (normalizedProxyUrl.present) updates.proxyUrl = normalizedProxyUrl.proxyUrl;
+    if (body.flaresolverrUrl !== undefined) updates.flaresolverrUrl = body.flaresolverrUrl?.trim() || null;
     if (body.useSystemProxy !== undefined) updates.useSystemProxy = normalizedUseSystemProxy;
     if (normalizedCustomHeaders.present) updates.customHeaders = normalizedCustomHeaders.customHeaders;
     if (normalizedExternalCheckinUrl.present) updates.externalCheckinUrl = normalizedExternalCheckinUrl.url;

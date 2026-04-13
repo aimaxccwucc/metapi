@@ -55,6 +55,7 @@ const LEGACY_COMPAT_COLUMNS = new Set([
   'sites.health_status',
   'sites.health_reason',
   'sites.health_checked_at',
+  'sites.flaresolverr_url',
   'account_tokens.token_group',
   'account_tokens.value_status',
   'token_routes.display_name',

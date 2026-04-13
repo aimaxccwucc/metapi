@@ -70,6 +70,8 @@ const VERIFIED_SCHEMA_MARKERS: SchemaMarker[] = [
   { table: 'downstream_api_keys', column: 'tags' },
   // 0012: value_status column on account_tokens
   { table: 'account_tokens', column: 'value_status' },
+  // 0023: flaresolverr_url column on sites
+  { table: 'sites', column: 'flaresolverr_url' },
 ];
 
 

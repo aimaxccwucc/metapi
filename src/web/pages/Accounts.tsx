@@ -420,6 +420,9 @@ export default function Accounts() {
   const loadMoreAccounts = useCallback(() => {
     setVisibleAccountCount((current) => getNextVisibleCount(current, visibleAccounts.length, 60));
   }, [visibleAccounts.length]);
+  const loadAllAccounts = useCallback(() => {
+    setVisibleAccountCount(visibleAccounts.length);
+  }, [visibleAccounts.length]);
   const allVisibleAccountsSelected = visibleAccounts.length > 0 && visibleAccounts.every((account) => selectedAccountIds.includes(account.id));
   const verifyFailureHint = buildVerifyFailureHint(verifyResult);
   const addAccountPrereqHint = buildAddAccountPrereqHint(verifyResult);
@@ -2772,9 +2775,12 @@ export default function Accounts() {
               </div>
             )}
             {renderedAccounts.length < visibleAccounts.length ? (
-              <div style={{ display: 'flex', justifyContent: 'center', padding: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: 8, padding: 12 }}>
                 <button type="button" className="btn btn-secondary" onClick={loadMoreAccounts}>
                   {`加载更多连接 (${renderedAccounts.length}/${visibleAccounts.length})`}
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={loadAllAccounts}>
+                  加载全部
                 </button>
               </div>
             ) : null}

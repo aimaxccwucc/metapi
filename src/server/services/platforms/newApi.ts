@@ -2,6 +2,7 @@ import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
+import { getCfCookieOverride } from '../cfChallengeCookieStore.js';
 
 function isMaskedTokenValue(value: unknown): boolean {
   if (typeof value !== 'string') return false;
@@ -901,6 +902,17 @@ export class NewApiAdapter extends BasePlatformAdapter {
     };
 
     let cookieHeader = headers['Cookie'] || headers['cookie'] || '';
+    // Merge CF cookie override from AsyncLocalStorage (set by cfChallengeBypass)
+    const cfOverride = getCfCookieOverride();
+    if (cfOverride) {
+      for (const [name, value] of Object.entries(cfOverride.cookies)) {
+        cookieHeader = this.upsertCookie(cookieHeader, name, value);
+      }
+      // CF cf_clearance is bound to User-Agent — must use the same UA that solved the challenge
+      if (cfOverride.userAgent) {
+        headers['User-Agent'] = cfOverride.userAgent;
+      }
+    }
     if (cookieHeader) {
       headers['Cookie'] = cookieHeader;
       delete headers['cookie'];
@@ -943,6 +955,43 @@ export class NewApiAdapter extends BasePlatformAdapter {
   private async fetchJsonRaw<T>(url: string, options?: UndiciRequestInit): Promise<T | null> {
     const result = await this.fetchJsonRawWithCookie<T>(url, options);
     return result.data;
+  }
+
+  protected override async fetchJson<T>(url: string, options?: UndiciRequestInit): Promise<T> {
+    const { fetch } = await import('undici');
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+      ...this.normalizeHeaders(options?.headers),
+    };
+
+    // Merge CF cookie + UA override
+    let cookieHeader = headers['Cookie'] || headers['cookie'] || '';
+    const cfOverride = getCfCookieOverride();
+    if (cfOverride) {
+      for (const [name, value] of Object.entries(cfOverride.cookies)) {
+        cookieHeader = this.upsertCookie(cookieHeader, name, value);
+      }
+      if (cfOverride.userAgent) {
+        headers['User-Agent'] = cfOverride.userAgent;
+      }
+    }
+    if (cookieHeader) {
+      headers['Cookie'] = cookieHeader;
+      delete headers['cookie'];
+    }
+
+    const requestOptions: UndiciRequestInit = {
+      ...options,
+      body: options?.body ?? undefined,
+      headers,
+    };
+    const proxiedRequestOptions = await withSiteProxyRequestInit(url, requestOptions);
+    const res = await fetch(url, proxiedRequestOptions);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    }
+    return res.json() as Promise<T>;
   }
 
   private async fetchUserSelfByCookie(

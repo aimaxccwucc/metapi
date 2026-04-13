@@ -1,6 +1,8 @@
 import { eq, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { invalidateSiteProxyCache, withExplicitProxyRequestInit } from './siteProxy.js';
+import { config } from '../config.js';
+import { ensureCfCookie } from './cfChallengeBypass.js';
 
 const SITE_HEALTH_TIMEOUT_MS = 6_000;
 // Default to loose reachability: treat site as alive when web entry pages are reachable.
@@ -43,7 +45,7 @@ function normalizeSiteBaseUrl(input: unknown): string {
   }
 }
 
-async function probeSiteReachability(baseUrl: string, proxyUrl?: string | null): Promise<SiteReachabilityProbeResult> {
+async function probeSiteReachability(baseUrl: string, proxyUrl?: string | null, siteId?: number): Promise<SiteReachabilityProbeResult> {
   const { fetch } = await import('undici');
   const normalizedBaseUrl = normalizeSiteBaseUrl(baseUrl);
   const errors: string[] = [];
@@ -51,14 +53,58 @@ async function probeSiteReachability(baseUrl: string, proxyUrl?: string | null):
   for (const path of SITE_HEALTH_PATHS) {
     const url = `${normalizedBaseUrl}${path}`;
     try {
-      const response = await fetch(url, withExplicitProxyRequestInit(proxyUrl, {
+      const requestInit = withExplicitProxyRequestInit(proxyUrl, {
         method: 'GET',
         signal: AbortSignal.timeout(SITE_HEALTH_TIMEOUT_MS),
         headers: {
           Accept: 'application/json,text/plain,text/html,*/*',
         },
-      }));
+      });
+      const response = await fetch(url, requestInit);
       // Any HTTP response means endpoint is reachable; keep cleanup conservative.
+      // But for CF-protected sites, 403/503 with HTML body is a challenge, not real reachability.
+      if ((response.status === 403 || response.status === 503) && siteId && (config.flaresolverrUrl)) {
+        const contentType = response.headers.get('content-type') || '';
+        const body = await response.text();
+        if (contentType.includes('text/html') && (body.includes('Just a moment') || body.includes('challenge-platform'))) {
+          // CF challenge detected — try to solve it and re-probe
+          try {
+            const cookie = await ensureCfCookie({ siteId, siteUrl: normalizedBaseUrl, proxyUrl: null, flaresolverrUrl: null });
+            if (cookie) {
+              const retryHeaders: Record<string, string> = {
+                Accept: 'application/json,text/html,*/*',
+                Cookie: `cf_clearance=${cookie.cfClearance}`,
+                'User-Agent': cookie.userAgent || '',
+              };
+              const retryResp = await fetch(url, withExplicitProxyRequestInit(proxyUrl, {
+                method: 'GET',
+                signal: AbortSignal.timeout(SITE_HEALTH_TIMEOUT_MS),
+                headers: retryHeaders,
+              }));
+              return {
+                alive: true,
+                reason: `HTTP ${retryResp.status} (CF bypass)`,
+                checkedUrl: url,
+                statusCode: retryResp.status,
+              };
+            }
+          } catch {
+            // CF bypass failed, return original 403/503 as reachable (conservative)
+          }
+          return {
+            alive: true,
+            reason: `HTTP ${response.status} (Cloudflare challenge)`,
+            checkedUrl: url,
+            statusCode: response.status,
+          };
+        }
+        return {
+          alive: true,
+          reason: `HTTP ${response.status}`,
+          checkedUrl: url,
+          statusCode: response.status,
+        };
+      }
       return {
         alive: true,
         reason: `HTTP ${response.status}`,
