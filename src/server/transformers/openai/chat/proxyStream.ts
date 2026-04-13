@@ -29,6 +29,7 @@ type ChatProxyStreamResult = {
   status: 'completed' | 'failed';
   errorMessage: string | null;
   terminationReason: 'completed' | 'response_failed' | 'empty_content' | 'upstream_error' | 'truncated';
+  collectedToolCalls?: Array<Record<string, unknown>>;
 };
 
 export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput) {
@@ -279,6 +280,18 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
             .buildSyntheticChunks(normalizedFinal)
             .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`),
         );
+        if (terminalResult.status !== 'failed' && Array.isArray(normalizedFinal.toolCalls) && normalizedFinal.toolCalls.length > 0) {
+          terminalResult = {
+            ...terminalResult,
+            collectedToolCalls: normalizedFinal.toolCalls
+              .filter((tc) => tc.id && tc.name)
+              .map((tc) => ({
+                id: tc.id,
+                type: 'function' as const,
+                function: { name: tc.name, arguments: tc.arguments },
+              })),
+          };
+        }
       } else {
         input.writeLines(
           anthropicMessagesTransformer.serializeUpstreamFinalAsStream(
@@ -317,6 +330,22 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         };
       } else if (terminalResult.errorMessage && !terminalResult.errorMessage.startsWith('[stream:')) {
         terminalResult.errorMessage = `[stream:${terminalResult.terminationReason}] ${terminalResult.errorMessage}`;
+      }
+      if (chatAggregateState && terminalResult.status !== 'failed') {
+        const primaryChoice = Array.from(chatAggregateState.choices.values())
+          .sort((a, b) => a.index - b.index)[0];
+        if (primaryChoice?.toolCalls.length > 0) {
+          terminalResult = {
+            ...terminalResult,
+            collectedToolCalls: primaryChoice.toolCalls
+              .filter((tc) => tc.id && tc.name)
+              .map((tc) => ({
+                id: tc.id,
+                type: 'function' as const,
+                function: { name: tc.name, arguments: tc.arguments },
+              })),
+          };
+        }
       }
       return terminalResult;
     },

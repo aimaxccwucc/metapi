@@ -149,7 +149,7 @@ function isCodexStandaloneToolContinuationRequest(
   clientContext: DownstreamClientContext | null,
   body: unknown,
 ): boolean {
-  if (clientContext?.clientKind !== 'codex') return false;
+  if (clientContext?.clientKind !== 'codex' && clientContext?.clientKind !== 'claude_code') return false;
   if (!isRecord(body) || !Array.isArray(body.messages)) return false;
   const messages = body.messages;
   const hasAssistantToolCalls = messages.some((message) => (
@@ -443,7 +443,7 @@ export async function handleChatSurfaceRequest(
           downstreamHeaders: request.headers as Record<string, unknown>,
           providerHeaders: buildProviderHeaders(),
           codexSessionCacheKey,
-          preserveStandaloneToolMessages: clientContext?.clientKind === 'codex',
+          preserveStandaloneToolMessages: clientContext?.clientKind === 'codex' || clientContext?.clientKind === 'claude_code',
         });
         return {
           endpoint,
@@ -713,6 +713,7 @@ export async function handleChatSurfaceRequest(
             },
           });
           let rawText = '';
+          let lastStreamResultToolCalls: Array<Record<string, unknown>> | undefined;
           if (!upstreamContentType.includes('text/event-stream')) {
             const fallbackText = await upstream.text();
             rawText = fallbackText;
@@ -722,6 +723,9 @@ export async function handleChatSurfaceRequest(
                 createSingleChunkStreamReader(fallbackText),
                 reply.raw,
               );
+              if (streamResult.collectedToolCalls && streamResult.collectedToolCalls.length > 0) {
+                lastStreamResultToolCalls = streamResult.collectedToolCalls;
+              }
               if (streamResult.status === 'failed') {
                 const latency = Date.now() - startTime;
                 await tokenRouter.recordFailure(selected.channel.id, {
@@ -869,6 +873,9 @@ export async function handleChatSurfaceRequest(
               : baseReader;
             const streamResult = await streamSession.run(reader ? wrapReaderWithIdleTimeout(reader) : reader, reply.raw);
             rawText += decoder.decode();
+            if (streamResult.collectedToolCalls && streamResult.collectedToolCalls.length > 0) {
+              lastStreamResultToolCalls = streamResult.collectedToolCalls;
+            }
             if (streamResult.status === 'failed') {
               const latency = Date.now() - startTime;
               await tokenRouter.recordFailure(selected.channel.id, {
@@ -899,6 +906,9 @@ export async function handleChatSurfaceRequest(
           }
 
           const latency = Date.now() - startTime;
+          if (lastStreamResultToolCalls && lastStreamResultToolCalls.length > 0 && clientContext?.clientKind) {
+            rememberCodexStandaloneToolCalls(codexSessionCacheKey, lastStreamResultToolCalls);
+          }
           const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
             site: selected.site,
             account: selected.account,
@@ -974,7 +984,7 @@ export async function handleChatSurfaceRequest(
           upstreamData = unwrapGeminiCliPayload(upstreamData);
         }
 
-        if (clientContext?.clientKind === 'codex') {
+        if (clientContext?.clientKind === 'codex' || clientContext?.clientKind === 'claude_code') {
           const assistantToolCalls = extractAssistantToolCallsFromChatPayload(upstreamData);
           if (assistantToolCalls.length > 0) {
             rememberCodexStandaloneToolCalls(codexSessionCacheKey, assistantToolCalls);

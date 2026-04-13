@@ -458,7 +458,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           responsesOriginalBody: normalizedResponsesBody,
           downstreamHeaders: request.headers as Record<string, unknown>,
           providerHeaders: buildProviderHeaders(),
-          preserveStandaloneToolMessages: clientContext?.clientKind === 'codex',
+          preserveStandaloneToolMessages: clientContext?.clientKind === 'codex' || clientContext?.clientKind === 'claude_code',
         });
         const upstreamPath = (
           isCompactRequest && endpoint === 'responses'
