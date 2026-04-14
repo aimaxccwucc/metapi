@@ -5,8 +5,8 @@ import { config } from '../config.js';
 import { ensureCfCookie } from './cfChallengeBypass.js';
 
 const SITE_HEALTH_TIMEOUT_MS = 6_000;
-// Default to loose reachability: treat site as alive when web entry pages are reachable.
-const SITE_HEALTH_PATHS = ['/', '/login'];
+// Check both web entry pages and API endpoint for more accurate health assessment
+const SITE_HEALTH_PATHS = ['/', '/login', '/v1/models'];
 const SITE_HEALTH_CONCURRENCY = 8;
 
 type SiteReachabilityProbeResult = {

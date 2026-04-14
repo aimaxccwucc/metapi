@@ -776,6 +776,30 @@ function resolveGovernanceSuppression(
         reasonCode: 'slow_site',
       };
     }
+    // 非 timeout 的 network/server 错误（502/connection reset/ECONNREFUSED 等）
+    // 也标记站点级治理，使用较短的抑制时间
+    const isGenericServerError = normalizedStatus >= 500
+      || /connection\s+reset|econnreset|econnrefused|connection\s+refused|bad\s+gateway|cloudflare\s+502|service\s+unavailable|reset\s+by\s+peer/i.test(errorTextLower);
+    if (isGenericServerError) {
+      return {
+        subjectType: 'site',
+        subjectId: input.account.siteId,
+        modelName: normalizedModelName,
+        reasonCode: 'slow_site',
+      };
+    }
+  }
+  // bad_request 中已知上游 API 兼容性问题（如 unknown parameter）标记 channel 级治理
+  if (input.failureCategory === 'bad_request' && normalizedModelName) {
+    const isUpstreamCompatIssue = /unknown\s+parameter|unsupported\s+media\s+type|unsupported\s+value/i.test(errorText);
+    if (isUpstreamCompatIssue) {
+      return {
+        subjectType: 'channel',
+        subjectId: input.channel.id,
+        modelName: normalizedModelName,
+        reasonCode: 'invalid_channel',
+      };
+    }
   }
   return null;
 }
@@ -1042,15 +1066,13 @@ function isDefinitiveTokenCredentialFailure(context: SiteRuntimeFailureContext =
 function shouldOpenImmediateModelCircuitForFailure(
   context: SiteRuntimeFailureContext = {},
 ): ModelCircuitFailureCategory | null {
-  const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
 
   if (matchesAnyPattern(SITE_PROTOCOL_FAILURE_PATTERNS, errorText)) {
     return null;
   }
-  if (status === 401 || status === 403 || isDefinitiveTokenCredentialFailure(context)) {
-    return 'auth';
-  }
+  // auth 改为普通累积路径（阈值 2），不再立即开熔断
+  // 仅 model_unsupported 保持立即开熔断（确定性错误）
   if (matchesAnyPattern(SITE_MODEL_FAILURE_PATTERNS, errorText)) {
     return 'model_unsupported';
   }
@@ -4399,7 +4421,20 @@ function shouldSoftParkUnknownCapabilityCandidate(
 }
 
 export class TokenRouter {
-  private lastSelectChannelMatch: { match: RouteMatch; requestedModel: string; downstreamPolicy: DownstreamRoutingPolicy } | null = null;
+  private readonly channelMatchCache = new Map<string, { match: RouteMatch; downstreamPolicy: DownstreamRoutingPolicy }>();
+  private static readonly CHANNEL_MATCH_CACHE_SIZE = 8;
+
+  private cacheChannelMatch(requestedModel: string, match: RouteMatch, downstreamPolicy: DownstreamRoutingPolicy): void {
+    this.channelMatchCache.set(requestedModel, { match, downstreamPolicy });
+    while (this.channelMatchCache.size > TokenRouter.CHANNEL_MATCH_CACHE_SIZE) {
+      const firstKey = this.channelMatchCache.keys().next().value;
+      if (firstKey !== undefined) this.channelMatchCache.delete(firstKey);
+    }
+  }
+
+  private getCachedChannelMatch(requestedModel: string): { match: RouteMatch; downstreamPolicy: DownstreamRoutingPolicy } | null {
+    return this.channelMatchCache.get(requestedModel) ?? null;
+  }
 
   async getVisiblePublicModels(): Promise<string[]> {
     const routes = await loadEnabledRoutes();
@@ -4420,12 +4455,12 @@ export class TokenRouter {
 
     let match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
-    this.lastSelectChannelMatch = { match, requestedModel, downstreamPolicy };
+    this.cacheChannelMatch(requestedModel, match, downstreamPolicy);
     let selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy);
     if (selected) return selected;
     match = await this.tryAutoHealRouteMatch(requestedModel, match, downstreamPolicy);
     if (!match) return null;
-    this.lastSelectChannelMatch = { match, requestedModel, downstreamPolicy };
+    this.cacheChannelMatch(requestedModel, match, downstreamPolicy);
     selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy);
     return selected;
   }
@@ -4460,9 +4495,9 @@ export class TokenRouter {
     await ensureRoutingRuntimeStateLoaded();
 
     // Reuse cached match from the initial selectChannel to avoid redundant DB queries.
-    const cachedMatch = this.lastSelectChannelMatch;
+    const cachedMatch = this.getCachedChannelMatch(requestedModel);
     let match: RouteMatch | null = null;
-    if (cachedMatch && cachedMatch.requestedModel === requestedModel) {
+    if (cachedMatch && cachedMatch.downstreamPolicy === downstreamPolicy) {
       match = cachedMatch.match;
     } else {
       match = await this.findRoute(requestedModel, downstreamPolicy);
@@ -5355,11 +5390,11 @@ export class TokenRouter {
     clearStickyBindingForChannel(channelId);
 
     if (failureCategory === 'model_unsupported') {
-      await markPersistedModelUnavailableForChannel(ch, account.id, normalizedContext.modelName);
+      markPersistedModelUnavailableForChannel(ch, account.id, normalizedContext.modelName).catch(() => {});
     }
 
     if (failureCategory === 'auth' && isDefinitiveTokenCredentialFailure(normalizedContext)) {
-      await disableDefinitivelyBrokenTokenForChannel(ch);
+      disableDefinitivelyBrokenTokenForChannel(ch).catch(() => {});
     }
 
     const normalizedRuntimeModelName = normalizeModelAlias(normalizedContext.modelName || '');
@@ -5444,7 +5479,8 @@ export class TokenRouter {
 
       const governanceModelName = normalizeModelAlias(normalizedContext.modelName || '') || normalizedContext.modelName || null;
       const suppressUntil = cooldownUntil ?? retryAfterUntil ?? null;
-      await db.insert(schema.events).values({
+      // 事件写入异步化，不阻塞请求
+      db.insert(schema.events).values({
         type: 'proxy',
         title: '路由治理抑制生效',
         message: [
@@ -5461,7 +5497,7 @@ export class TokenRouter {
         relatedId: governanceSuppression.subjectId,
         relatedType: governanceSuppression.subjectType,
         createdAt: formatUtcSqlDateTime(new Date(nowMs)),
-      }).run();
+      }).run().catch(() => {});
     }
   }
 

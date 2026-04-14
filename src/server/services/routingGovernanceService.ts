@@ -255,15 +255,19 @@ export async function clearRoutingGovernanceStatesBySubject(
 }
 
 export async function listActiveRoutingGovernanceStates(query: ActiveGovernanceQuery = {}): Promise<RoutingGovernanceEntry[]> {
-  const where = buildFilterWhere({
-    subjectIds: undefined,
-    subjectType: undefined,
-    modelName: undefined,
-    ...(Array.isArray(query.subjectTypes) && query.subjectTypes.length > 0 ? { subjectType: undefined } : {}),
-    reasonCodes: query.reasonCodes,
-    states: query.states,
-  });
   const limit = Math.max(1, Math.min(500, Math.trunc(query.limit ?? 200)));
+
+  const conditions: SQL<unknown>[] = [];
+  if (Array.isArray(query.subjectTypes) && query.subjectTypes.length > 0) {
+    conditions.push(inArray(schema.routingGovernanceStates.subjectType, query.subjectTypes));
+  }
+  if (Array.isArray(query.reasonCodes) && query.reasonCodes.length > 0) {
+    conditions.push(inArray(schema.routingGovernanceStates.reasonCode, query.reasonCodes));
+  }
+  if (Array.isArray(query.states) && query.states.length > 0) {
+    conditions.push(inArray(schema.routingGovernanceStates.state, query.states));
+  }
+  const where = conditions.length > 0 ? (conditions.length === 1 ? conditions[0]! : and(...conditions)) : undefined;
 
   const builder = db.select()
     .from(schema.routingGovernanceStates)
@@ -274,16 +278,9 @@ export async function listActiveRoutingGovernanceStates(query: ActiveGovernanceQ
       asc(schema.routingGovernanceStates.updatedAt),
     );
 
-  let rows = where
+  return where
     ? await builder.where(where).limit(limit).all()
     : await builder.limit(limit).all();
-
-  if (Array.isArray(query.subjectTypes) && query.subjectTypes.length > 0) {
-    const allowed = new Set(query.subjectTypes);
-    rows = rows.filter((item: RoutingGovernanceEntry) => allowed.has(item.subjectType as RoutingGovernanceSubjectType));
-  }
-
-  return rows;
 }
 
 export async function listDueRoutingGovernanceProbeStates(now = nowIso(), limit = DEFAULT_RECOVERY_PASS_LIMIT): Promise<RoutingGovernanceEntry[]> {

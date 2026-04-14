@@ -254,6 +254,44 @@ async function resolveProbeContext(entry: RoutingGovernanceEntry): Promise<{
 }
 
 async function handleRateLimitRecovery(entry: RoutingGovernanceEntry): Promise<boolean> {
+  // 尝试轻量级探测验证限流是否真正解除
+  const context = await resolveProbeContext(entry);
+  if (context?.candidate && context.modelName) {
+    try {
+      const result = await testMarketplaceModelAvailabilityForCandidate({
+        modelName: context.modelName,
+        candidate: context.candidate,
+        preferredTokenId: context.preferredTokenId,
+        allowAutoCreateKey: false,
+      });
+      if (result.success && result.available) {
+        await completeRoutingGovernanceProbe(entry.id, {
+          restored: true,
+          reasonCode: 'rate_limit',
+          lastProbeStatus: 'available',
+          lastProbeMessage: '限流避让窗口已过，探测确认可用，自动解除治理',
+          lastSuccessAt: new Date().toISOString(),
+          successCountDelta: 1,
+        });
+        return true;
+      }
+      // 探测到不可用，延长等待时间
+      await completeRoutingGovernanceProbe(entry.id, {
+        restored: false,
+        reasonCode: 'rate_limit',
+        lastProbeStatus: result.success ? 'unavailable' : 'probe_failed',
+        lastProbeMessage: result.success ? result.reason : (result as any).message || '限流探测失败',
+        suppressUntil: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
+        probeAfter: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
+        lastFailureAt: new Date().toISOString(),
+        failureCountDelta: 1,
+      });
+      return false;
+    } catch {
+      // 探测异常，降级为被动释放
+    }
+  }
+  // 无探测上下文或探测异常，被动释放
   await completeRoutingGovernanceProbe(entry.id, {
     restored: true,
     reasonCode: 'rate_limit',
@@ -278,8 +316,9 @@ async function handleBalanceRecovery(entry: RoutingGovernanceEntry): Promise<boo
     return false;
   }
 
+  let refreshResult: { balance?: number | null; used?: number | null; quota?: number | null; skipped?: boolean; reason?: string } | null = null;
   try {
-    await refreshBalance(entry.subjectId);
+    refreshResult = await refreshBalance(entry.subjectId);
   } catch (error: any) {
     await completeRoutingGovernanceProbe(entry.id, {
       restored: false,
@@ -294,6 +333,31 @@ async function handleBalanceRecovery(entry: RoutingGovernanceEntry): Promise<boo
     return false;
   }
 
+  // 检查刷新后的余额/配额是否仍然为 0
+  if (refreshResult && !refreshResult.skipped) {
+    const balance = typeof refreshResult.balance === 'number' ? refreshResult.balance : null;
+    const quota = typeof refreshResult.quota === 'number' ? refreshResult.quota : null;
+    const used = typeof refreshResult.used === 'number' ? refreshResult.used : 0;
+    // 如果有配额信息且配额已用完，或者余额 <= 0，则不恢复
+    const hasQuotaInfo = quota !== null && quota > 0;
+    const quotaExhausted = hasQuotaInfo && used >= (quota ?? 0);
+    const balanceExhausted = balance !== null && balance <= 0;
+    if (quotaExhausted || balanceExhausted) {
+      await completeRoutingGovernanceProbe(entry.id, {
+        restored: false,
+        reasonCode: entry.reasonCode as RoutingGovernanceReasonCode,
+        lastProbeStatus: 'balance_still_zero',
+        lastProbeMessage: `余额刷新后仍不可用：balance=${balance ?? '?'}, quota=${quota ?? '?'}, used=${used}`,
+        suppressUntil: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
+        probeAfter: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
+        lastFailureAt: new Date().toISOString(),
+        failureCountDelta: 1,
+      });
+      return false;
+    }
+  }
+
+  // 余额正常或无法确认（被动释放）
   const remaining = await getGovernanceEntryById(entry.id);
   return !remaining;
 }
@@ -429,11 +493,19 @@ async function processProbingEntry(entry: RoutingGovernanceEntry): Promise<boole
     return await handlePassiveExpiryRelease(entry);
   }
 
-  if (!isManualRouteProbeGovernance(entry) || !await isRouteEligibleForManualGovernance(entry)) {
-    return await handlePassiveExpiryRelease(entry);
+  // auth 和 model_unsupported: 尝试主动探测恢复
+  // 如果属于 manual 路由则走完整的 handleProbeBasedRecovery
+  // 否则也尝试轻量级探测（而非盲目被动释放）
+  if (isManualRouteProbeGovernance(entry) && await isRouteEligibleForManualGovernance(entry)) {
+    return await handleProbeBasedRecovery(entry);
   }
 
-  return await handleProbeBasedRecovery(entry);
+  // 非 manual 路由的 auth/model_unsupported: 尝试轻量级探测
+  if (reasonCode === 'auth' || reasonCode === 'model_unsupported') {
+    return await handleProbeBasedRecovery(entry);
+  }
+
+  return await handlePassiveExpiryRelease(entry);
 }
 
 export async function executeRoutingGovernanceAutoRecoveryPass(options: {
@@ -463,8 +535,10 @@ export async function executeRoutingGovernanceAutoRecoveryPass(options: {
       || reasonCode === 'balance_exhausted'
       || reasonCode === 'quota_exhausted';
     const allowActiveReprobe = isManualRouteProbeGovernance(state);
+    // auth/model_unsupported 也走主动探测恢复，避免恢复后首次请求失败
+    const supportsProbeRecovery = reasonCode === 'auth' || reasonCode === 'model_unsupported';
 
-    if (supportsZeroCostRecovery || allowActiveReprobe) {
+    if (supportsZeroCostRecovery || allowActiveReprobe || supportsProbeRecovery) {
       await markRoutingGovernanceProbeInFlight(state.id, now, probingLeaseMs);
       promotedToProbing += 1;
       items.push({

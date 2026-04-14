@@ -1303,7 +1303,7 @@ export const api = {
       body: JSON.stringify(data || {}),
       timeoutMs: 60_000,
     }) as Promise<RouteProbeResponse>,
-  probeBatchRoutes: (data: { routeIds?: number[]; allExactModelRoutes?: boolean; limit?: number; autoGovernance?: boolean }) =>
+  probeBatchRoutes: (data: { routeIds?: number[]; allExactModelRoutes?: boolean; limit?: number; autoGovernance?: boolean; earlyStopOnAvailable?: boolean }) =>
     request('/api/routes/probe-batch', {
       method: 'POST',
       body: JSON.stringify(data),

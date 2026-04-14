@@ -543,41 +543,77 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
 
   const startedAt = Date.now();
   try {
-    const discoveredModels = await withTimeout(
-      () => adapter.getModels(site.url, modelCredential, platformUserId),
-      MARKETPLACE_MODEL_TEST_TIMEOUT_MS,
-      `model test timeout (${Math.round(MARKETPLACE_MODEL_TEST_TIMEOUT_MS / 1000)}s)`,
-    );
-    const normalizedSet = new Set(
-      (Array.isArray(discoveredModels) ? discoveredModels : [])
-        .map((item) => String(item || '').trim())
-        .filter((item) => item.length > 0),
-    );
-    let available = normalizedSet.has(modelName)
-      || Array.from(normalizedSet).some((item) => isModelAliasEquivalent(item, modelName));
-    const listHit = available;
-    let reason = available ? formatProbeReason({ listHit: true, probe: null }) : formatProbeReason({ listHit: false, probe: null });
+    // Always probe with a real request to verify actual availability.
+    // Model list check alone is insufficient — it only proves the model exists,
+    // not that the credential has permission or the endpoint works correctly.
     let probeCheckedUrl: string | null = null;
     let probeStatusCode: number | null = null;
     let probeEndpoint: string | null = null;
     let probeClassification: MarketplaceProbeClassification | null = null;
+    let available = false;
+    let reason = '';
+    let detectionMethod: MarketplaceModelAvailabilitySuccess['detectionMethod'] = 'unknown';
 
-    if (!available) {
-      const probe = await probeModelAvailabilityViaRealtimeCall({
-        baseUrl: site.url,
-        platform: site.platform,
-        credential: modelCredential,
-        modelName,
-      });
-      probeCheckedUrl = probe.checkedUrl;
-      probeStatusCode = probe.statusCode;
-      probeEndpoint = probe.endpoint;
-      probeClassification = probe.classification;
-      if (probe.available === true) {
-        available = true;
+    // First, quickly check the model list for a cheaper pre-filter
+    let listHit = false;
+    try {
+      const discoveredModels = await withTimeout(
+        () => adapter.getModels(site.url, modelCredential, platformUserId),
+        MARKETPLACE_MODEL_TEST_TIMEOUT_MS,
+        `model list timeout`,
+      );
+      const normalizedSet = new Set(
+        (Array.isArray(discoveredModels) ? discoveredModels : [])
+          .map((item) => String(item || '').trim())
+          .filter((item) => item.length > 0),
+      );
+      listHit = normalizedSet.has(modelName)
+        || Array.from(normalizedSet).some((item) => isModelAliasEquivalent(item, modelName));
+      // If model is not in the list at all, it's definitively unavailable — skip the real probe
+      if (!listHit) {
+        return {
+          success: true,
+          available: false,
+          modelName,
+          accountId: account.id,
+          accountName: account.username || null,
+          siteId: site.id,
+          siteName: site.name,
+          latencyMs: Date.now() - startedAt,
+          reason: `模型 ${modelName} 不在站点可用模型列表中`,
+          detectionMethod: 'model_list',
+          probeCheckedUrl: null,
+          probeStatusCode: null,
+          probeEndpoint: null,
+          probeClassification: 'model_unavailable',
+          autoKeyCreated,
+          autoKeyName,
+          autoKeyGroup,
+          autoKeyTokenId,
+          usedTokenId: typeof preferredToken?.id === 'number' ? preferredToken.id : null,
+          usedTokenName: preferredToken?.name || null,
+        };
       }
-      reason = formatProbeReason({ listHit: false, probe });
+    } catch {
+      // Model list fetch failed — fall through to real probe
     }
+
+    // Model is in the list — verify with a real request
+    const probe = await probeModelAvailabilityViaRealtimeCall({
+      baseUrl: site.url,
+      platform: site.platform,
+      credential: modelCredential,
+      modelName,
+    });
+    probeCheckedUrl = probe.checkedUrl;
+    probeStatusCode = probe.statusCode;
+    probeEndpoint = probe.endpoint;
+    probeClassification = probe.classification;
+    available = probe.available === true;
+    reason = available
+      ? `已通过真实验证确认可用 (list=${listHit}, probe=${probe.endpoint || 'ok'})`
+      : formatProbeReason({ listHit, probe });
+    detectionMethod = 'realtime_probe';
 
     return {
       success: true,
@@ -589,7 +625,7 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
       siteName: site.name,
       latencyMs: Date.now() - startedAt,
       reason,
-      detectionMethod: listHit ? 'model_list' : (probeEndpoint ? 'realtime_probe' : 'unknown'),
+      detectionMethod,
       probeCheckedUrl,
       probeStatusCode,
       probeEndpoint,

@@ -229,5 +229,6 @@ export function shouldAvoidSiteForRequest(status?: number | null, upstreamErrorT
   return category === 'network'
     || category === 'server'
     || category === 'rate_limit'
-    || category === 'upstream_group_empty';
+    || category === 'upstream_group_empty'
+    || category === 'auth';
 }

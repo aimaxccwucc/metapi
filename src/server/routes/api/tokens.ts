@@ -48,14 +48,7 @@ import {
   probeBatchRoutes,
 } from '../../services/routeProbeService.js';
 import {
-  probeMarketplaceModelAvailability,
-  type MarketplaceProbeClassification,
-  type MarketplaceModelAvailabilityResult,
-} from '../../services/marketplaceModelProbeService.js';
-import {
   listActiveRoutingGovernanceStates,
-  clearRoutingGovernanceStates,
-  upsertRoutingGovernanceState,
   type RoutingGovernanceEntry,
   type RoutingGovernanceReasonCode,
   type RoutingGovernanceState,
@@ -67,7 +60,6 @@ import {
 } from '../../services/routingGovernanceAutoRecoveryService.js';
 
 const ROUTE_AUTOCREATE_SOFT_TIMEOUT_MS = 4_000;
-const ROUTE_PROBE_CONCURRENCY = 6;
 
 type CheckinLogSnapshot = {
   accountId: number;
@@ -117,38 +109,6 @@ type RouteGovernanceSubjectsResponse = {
     countsBySubjectType: Record<string, number>;
   };
   items: Array<ReturnType<typeof serializeGovernanceEntry>>;
-};
-
-type RouteProbeChannelResult = {
-  channelId: number;
-  accountId: number;
-  accountName: string | null;
-  siteId: number;
-  siteName: string;
-  tokenId: number | null;
-  tokenName: string | null;
-  sourceModel: string | null;
-  available: boolean;
-  reason: string;
-  probeClassification: MarketplaceProbeClassification | null;
-  probeEndpoint: string | null;
-  latencyMs: number | null;
-  detectionMethod: MarketplaceModelAvailabilityResult['detectionMethod'] | 'probe_failed';
-  governanceAction: 'suppressed' | 'cleared' | 'none';
-  governanceReasonCode: RoutingGovernanceReasonCode | null;
-};
-
-type RouteProbeResponse = {
-  success: true;
-  routeId: number;
-  routeModelPattern: string;
-  probedModel: string;
-  autoGovernance: boolean;
-  total: number;
-  availableCount: number;
-  unavailableCount: number;
-  failedCount: number;
-  items: RouteProbeChannelResult[];
 };
 
 function isExactModelPattern(modelPattern: string): boolean {
@@ -1372,172 +1332,6 @@ function resolveRouteDiagnosticsLimit(rawLimit: unknown): number {
   return Math.max(20, Math.min(500, parsed));
 }
 
-function resolveRouteProbeLimit(rawLimit: unknown): number {
-  if (rawLimit === undefined || rawLimit === null || rawLimit === '') return 50;
-  const parsed = Number.parseInt(String(rawLimit), 10);
-  if (!Number.isFinite(parsed)) return 50;
-  return Math.max(1, Math.min(200, parsed));
-}
-
-function nowPlusMs(ms: number): string {
-  return new Date(Date.now() + Math.max(0, ms)).toISOString();
-}
-
-function mapProbeClassificationToGovernanceReason(
-  classification: MarketplaceProbeClassification | null,
-): RoutingGovernanceReasonCode | null {
-  if (classification === 'model_unavailable') return 'model_unsupported';
-  if (classification === 'credential') return 'auth';
-  return null;
-}
-
-function classifyProbeClassificationFromError(errorText: string): MarketplaceProbeClassification | null {
-  const text = String(errorText || '').toLowerCase();
-  if (!text) return null;
-  if (/site_missing_api_key|api key|token|unauthorized|forbidden|鉴权|未授权/.test(text)) return 'credential';
-  if (/model.*(not found|unsupported|invalid)|模型.*(不存在|不支持|不可用)/.test(text)) return 'model_unavailable';
-  if (/\/v1\/responses|\/v1\/messages|generatecontent|x-goog-api-key/.test(text)) return 'protocol_mismatch';
-  return 'inconclusive';
-}
-
-const MANUAL_ROUTE_PROBE_MARKER = '[manual_route_probe]';
-
-async function applyRouteProbeGovernance(input: {
-  channel: RouteChannelView;
-  route: RouteRow;
-  probeModel: string;
-  result: RouteProbeChannelResult;
-  autoGovernance: boolean;
-}): Promise<RouteProbeChannelResult> {
-  if (!input.autoGovernance) {
-    return {
-      ...input.result,
-      governanceAction: 'none',
-      governanceReasonCode: null,
-    };
-  }
-
-  const governanceReasonCode = mapProbeClassificationToGovernanceReason(input.result.probeClassification);
-  if (input.result.available) {
-    let cleared = 0;
-    if (typeof input.channel.tokenId === 'number' && input.channel.tokenId > 0) {
-      cleared += await clearRoutingGovernanceStates({
-        subjectType: 'token',
-        subjectId: input.channel.tokenId,
-        reasonCodes: ['auth', 'manual_recheck_needed'],
-      });
-      cleared += await clearRoutingGovernanceStates({
-        subjectType: 'token',
-        subjectId: input.channel.tokenId,
-        modelName: input.probeModel,
-        reasonCodes: ['model_unsupported'],
-      });
-    }
-    cleared += await clearRoutingGovernanceStates({
-      subjectType: 'account',
-      subjectId: input.channel.accountId,
-      reasonCodes: ['auth', 'manual_recheck_needed'],
-    });
-    cleared += await clearRoutingGovernanceStates({
-      subjectType: 'account',
-      subjectId: input.channel.accountId,
-      modelName: input.probeModel,
-      reasonCodes: ['model_unsupported'],
-    });
-    return {
-      ...input.result,
-      governanceAction: cleared > 0 ? 'cleared' : 'none',
-      governanceReasonCode: null,
-    };
-  }
-
-  if (!governanceReasonCode) {
-    return {
-      ...input.result,
-      governanceAction: 'none',
-      governanceReasonCode: null,
-    };
-  }
-
-  const routeAllowsManualGovernance = (input.route.probePolicy || 'system') === 'manual';
-  const governanceMarkerPrefix = routeAllowsManualGovernance ? `${MANUAL_ROUTE_PROBE_MARKER} ` : '';
-  const reasonDetail = `${governanceMarkerPrefix}${input.result.reason}`.slice(0, 500)
-    || (routeAllowsManualGovernance ? MANUAL_ROUTE_PROBE_MARKER : input.result.reason.slice(0, 500));
-  const suppressUntil = governanceReasonCode === 'model_unsupported'
-    ? nowPlusMs(12 * 60 * 60 * 1000)
-    : nowPlusMs(30 * 60 * 1000);
-
-  if (typeof input.channel.tokenId === 'number' && input.channel.tokenId > 0) {
-    await upsertRoutingGovernanceState({
-      subjectType: 'token',
-      subjectId: input.channel.tokenId,
-      modelName: governanceReasonCode === 'model_unsupported' ? input.probeModel : null,
-      state: 'suppressed',
-      reasonCode: governanceReasonCode,
-      reasonDetail,
-      probeModelName: input.probeModel,
-      suppressUntil,
-      probeAfter: suppressUntil,
-      lastProbeAt: new Date().toISOString(),
-      lastProbeStatus: input.result.available ? 'available' : 'unavailable',
-      lastProbeMessage: input.result.reason,
-      lastSuccessAt: input.result.available ? new Date().toISOString() : null,
-      lastFailureAt: input.result.available ? null : new Date().toISOString(),
-      failureCountDelta: input.result.available ? 0 : 1,
-      successCountDelta: input.result.available ? 1 : 0,
-    });
-    return {
-      ...input.result,
-      governanceAction: 'suppressed',
-      governanceReasonCode,
-    };
-  }
-
-  await upsertRoutingGovernanceState({
-    subjectType: 'account',
-    subjectId: input.channel.accountId,
-    modelName: governanceReasonCode === 'model_unsupported' ? input.probeModel : null,
-    state: 'suppressed',
-    reasonCode: governanceReasonCode,
-    reasonDetail,
-    probeModelName: input.probeModel,
-    suppressUntil,
-    probeAfter: suppressUntil,
-    lastProbeAt: new Date().toISOString(),
-    lastProbeStatus: input.result.available ? 'available' : 'unavailable',
-    lastProbeMessage: input.result.reason,
-    lastSuccessAt: input.result.available ? new Date().toISOString() : null,
-    lastFailureAt: input.result.available ? null : new Date().toISOString(),
-    failureCountDelta: input.result.available ? 0 : 1,
-    successCountDelta: input.result.available ? 1 : 0,
-  });
-  return {
-    ...input.result,
-    governanceAction: 'suppressed',
-    governanceReasonCode,
-  };
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const normalizedConcurrency = Math.max(1, Math.min(items.length || 1, Math.trunc(concurrency) || 1));
-  const results = new Array<R>(items.length);
-  let cursor = 0;
-
-  await Promise.all(Array.from({ length: normalizedConcurrency }, async () => {
-    while (true) {
-      const index = cursor;
-      cursor += 1;
-      if (index >= items.length) return;
-      results[index] = await worker(items[index]!, index);
-    }
-  }));
-
-  return results;
-}
 
 export async function tokensRoutes(app: FastifyInstance) {
   // List routes with basic info only (lightweight for selectors)
@@ -2332,7 +2126,7 @@ export async function tokensRoutes(app: FastifyInstance) {
   });
 
   // Batch probe multiple routes
-  app.post<{ Body?: { routeIds?: number[]; allExactModelRoutes?: boolean; limit?: number; autoGovernance?: boolean } }>('/api/routes/probe-batch', async (request, reply) => {
+  app.post<{ Body?: { routeIds?: number[]; allExactModelRoutes?: boolean; limit?: number; autoGovernance?: boolean; earlyStopOnAvailable?: boolean } }>('/api/routes/probe-batch', async (request, reply) => {
     const body = request.body || {};
     let targetRouteIds = body.routeIds;
 
@@ -2364,6 +2158,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     const result = await probeBatchRoutes(routeChannelPairs, {
       limit: body.limit,
       autoGovernance: body.autoGovernance,
+      earlyStopOnAvailable: body.earlyStopOnAvailable,
     });
 
     return {

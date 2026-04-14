@@ -66,5 +66,7 @@ export async function reportProxyAllFailed(params: { model: string; reason: stri
   );
 
   // Trigger background probe for the failed model (fire-and-forget)
-  triggerRouteProbeForFailedModel(params.model).catch(() => {});
+  triggerRouteProbeForFailedModel(params.model).catch((err) => {
+    console.warn('[alertService] route auto-probe failed:', err instanceof Error ? err.message : String(err));
+  });
 }

@@ -36,6 +36,8 @@ export type RouteProbeItem = {
   detectionMethod: 'model_list' | 'realtime_probe' | 'unknown' | 'probe_failed';
   governanceAction: 'suppressed' | 'cleared' | 'none';
   governanceReasonCode: string | null;
+  autoKeyCreated?: boolean;
+  autoKeyName?: string | null;
 };
 
 export type RouteProbeResponse = {
@@ -254,7 +256,7 @@ async function applyRouteProbeGovernance(input: {
 export async function probeRouteChannelsForRoute(
   route: RouteLike,
   enabledChannels: RouteChannelLike[],
-  options?: { limit?: number; autoGovernance?: boolean },
+  options?: { limit?: number; autoGovernance?: boolean; earlyStopOnAvailable?: boolean },
 ): Promise<RouteProbeResponse> {
   const slicedChannels = enabledChannels.slice(0, resolveRouteProbeLimit(options?.limit));
 
@@ -274,13 +276,37 @@ export async function probeRouteChannelsForRoute(
   }
 
   const autoGovernance = options?.autoGovernance === true;
+  const earlyStop = options?.earlyStopOnAvailable === true;
+  let foundAvailable = false;
   const items = await mapWithConcurrency(slicedChannels, ROUTE_PROBE_CONCURRENCY, async (channel) => {
+    // Early stop: skip remaining channels once we found one available
+    if (earlyStop && foundAvailable) {
+      return {
+        channelId: channel.id,
+        accountId: channel.accountId,
+        accountName: channel.account.username || null,
+        siteId: channel.site.id,
+        siteName: channel.site.name || `site-${channel.site.id}`,
+        tokenId: channel.token?.id ?? null,
+        tokenName: channel.token?.name ?? null,
+        sourceModel: channel.sourceModel ?? null,
+        available: false,
+        reason: '已找到可用通道，跳过探测',
+        probeClassification: null,
+        probeEndpoint: null,
+        latencyMs: null,
+        detectionMethod: 'unknown' as const,
+        governanceAction: 'none' as const,
+        governanceReasonCode: null,
+      };
+    }
+
     const probe = await probeMarketplaceModelAvailability({
       modelName: route.modelPattern,
       accountId: channel.accountId,
       siteName: channel.site.name || undefined,
       preferredTokenId: channel.token?.id ?? null,
-      skipAutoCreate: true,
+      skipAutoCreate: false,
     });
 
     const baseResult: RouteProbeItem = probe.success
@@ -290,8 +316,8 @@ export async function probeRouteChannelsForRoute(
         accountName: channel.account.username || null,
         siteId: channel.site.id,
         siteName: channel.site.name || `site-${channel.site.id}`,
-        tokenId: channel.token?.id ?? null,
-        tokenName: channel.token?.name ?? null,
+        tokenId: probe.usedTokenId ?? channel.token?.id ?? null,
+        tokenName: probe.usedTokenName ?? channel.token?.name ?? null,
         sourceModel: channel.sourceModel ?? null,
         available: probe.available === true,
         reason: probe.reason,
@@ -301,6 +327,8 @@ export async function probeRouteChannelsForRoute(
         detectionMethod: probe.detectionMethod,
         governanceAction: 'none',
         governanceReasonCode: null,
+        autoKeyCreated: probe.autoKeyCreated || undefined,
+        autoKeyName: probe.autoKeyName,
       }
       : {
         channelId: channel.id,
@@ -319,7 +347,11 @@ export async function probeRouteChannelsForRoute(
         detectionMethod: 'probe_failed',
         governanceAction: 'none',
         governanceReasonCode: null,
+        autoKeyCreated: probe.autoKeyCreated || undefined,
+        autoKeyName: probe.autoKeyName,
       };
+
+    if (baseResult.available) foundAvailable = true;
 
     return await applyRouteProbeGovernance({
       channel,
@@ -351,6 +383,7 @@ export async function probeRouteChannelsForRoute(
 // ── batch probe ──────────────────────────────────────────────────────
 
 const BATCH_PROBE_ROUTE_CONCURRENCY = 3;
+const BATCH_PROBE_TOTAL_TIMEOUT_MS = 60_000;
 
 export type BatchProbeResult = {
   results: RouteProbeResponse[];
@@ -359,16 +392,40 @@ export type BatchProbeResult = {
 
 /**
  * Probe multiple routes in parallel (up to 3 routes concurrently).
+ * Total execution time is capped at 60 seconds.
  */
 export async function probeBatchRoutes(
   routeChannelPairs: Array<{ route: RouteLike; channels: RouteChannelLike[] }>,
-  options?: { limit?: number; autoGovernance?: boolean },
+  options?: { limit?: number; autoGovernance?: boolean; earlyStopOnAvailable?: boolean },
 ): Promise<BatchProbeResult> {
-  const results = await mapWithConcurrency(
-    routeChannelPairs,
+  const deadline = Date.now() + BATCH_PROBE_TOTAL_TIMEOUT_MS;
+  const results: RouteProbeResponse[] = [];
+
+  // Use mapWithConcurrency but check deadline before each route
+  const pairsToProbe = routeChannelPairs.filter(() => Date.now() < deadline);
+  const probedResults = await mapWithConcurrency(
+    pairsToProbe,
     BATCH_PROBE_ROUTE_CONCURRENCY,
-    async (pair) => probeRouteChannelsForRoute(pair.route, pair.channels, options),
+    async (pair) => {
+      if (Date.now() >= deadline) {
+        return {
+          success: true as const,
+          routeId: pair.route.id,
+          routeModelPattern: pair.route.modelPattern,
+          probedModel: pair.route.modelPattern,
+          autoGovernance: options?.autoGovernance === true,
+          total: 0,
+          availableCount: 0,
+          unavailableCount: 0,
+          failedCount: 0,
+          items: [],
+        };
+      }
+      return probeRouteChannelsForRoute(pair.route, pair.channels, options);
+    },
   );
+
+  results.push(...probedResults);
 
   return {
     results,
@@ -391,7 +448,14 @@ export async function triggerRouteProbeForFailedModel(modelName: string): Promis
   if (now - lastProbe < AUTO_PROBE_THROTTLE_MS) return;
   autoProbeThrottle.set(modelName, now);
 
-  // Find exact-model routes that are enabled and manual
+  // Periodically prune stale throttle entries to prevent unbounded growth
+  if (autoProbeThrottle.size > 200) {
+    for (const [key, ts] of autoProbeThrottle) {
+      if (now - ts >= AUTO_PROBE_THROTTLE_MS) autoProbeThrottle.delete(key);
+    }
+  }
+
+  // Find exact-model routes that are enabled (both manual and system)
   const routes = await db.select().from(schema.tokenRoutes)
     .where(and(
       eq(schema.tokenRoutes.modelPattern, modelName),
@@ -399,18 +463,14 @@ export async function triggerRouteProbeForFailedModel(modelName: string): Promis
     ))
     .all();
 
-  // Filter to manual probe-policy routes
-  const manualRoutes = routes.filter(
-    (r: typeof routes[number]) => (r.probePolicy || 'system') === 'manual',
-  );
-  if (manualRoutes.length === 0) return;
+  if (routes.length === 0) return;
 
   // Load channels for each route — this reuses the same query pattern
   // as fetchChannelsForRouteRows but we keep it self-contained to avoid
   // circular imports with tokens.ts
   const routeChannelPairs: Array<{ route: RouteLike; channels: RouteChannelLike[] }> = [];
 
-  for (const route of manualRoutes) {
+  for (const route of routes) {
     const channels = await db.select({
       channel: schema.routeChannels,
       account: schema.accounts,
@@ -425,8 +485,8 @@ export async function triggerRouteProbeForFailedModel(modelName: string): Promis
       .all();
 
     const enabledChannels: RouteChannelLike[] = channels
-      .filter((row) => row.channel.enabled !== false)
-      .map((row) => ({
+      .filter((row: { channel: { enabled: boolean | null } }) => row.channel.enabled !== false)
+      .map((row: { channel: Record<string, unknown>; account: Record<string, unknown>; site: Record<string, unknown> & { id: number }; token: { id: number; name: string | null } | null }) => ({
         id: row.channel.id as number,
         accountId: row.account.id as number,
         tokenId: (row.token?.id ?? row.channel.tokenId ?? null) as number | null,

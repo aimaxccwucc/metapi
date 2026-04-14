@@ -901,6 +901,17 @@ export async function handleChatSurfaceRequest(
                 clientContext,
                 downstreamApiKeyId,
               );
+              // If no completion tokens were sent and headers haven't been flushed yet,
+              // we can still failover to another channel.
+              if (!parsedUsage.completionTokens && !reply.raw.headersSent) {
+                return {
+                  ok: false,
+                  action: 'failover' as const,
+                  status: 502,
+                  rawErrorText: streamResult.errorMessage || undefined,
+                  hasStreamedCompletionTokens: false,
+                };
+              }
               return { ok: true, response: upstream };
             }
           }

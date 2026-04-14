@@ -17,36 +17,20 @@ function shouldDelaySiteExclusion(
     rawErrorText?: string;
   },
 ): boolean {
-  const status = typeof failure.status === 'number' && Number.isFinite(failure.status)
-    ? Math.trunc(failure.status)
-    : 0;
+  const category = classifyProxyFailureCategory(failure.status, failure.rawErrorText);
   const text = (failure.rawErrorText || '').trim();
+  // 特定错误模式不延迟排除
   if (/no\s+available\s+channel\s+for\s+model|no\s+available\s+providers|under\s+group\s+.+\(distributor\)|分组\s*.+\s*无可用渠道|无可用渠道（distributor）|billing\s+service\s+temporarily\s+unavailable|偷偷倒闭/i.test(text)) {
     return false;
   }
-  if (/blocked_invalid_request/i.test(text)) {
-    return false;
-  }
-  if (/empty\s+content/i.test(text)) {
-    return false;
-  }
-  if (/upstream\s+timeout\s+after\s+4000ms/i.test(text)) {
-    return false;
-  }
-  if (/auth_unavailable|no\s+auth\s+available/i.test(text)) {
-    return false;
-  }
-  if (/cloudflare\s+502|bad\s+gateway|service\s+temporarily\s+unavailable|system\s+disk\s+overloaded/i.test(text)) {
-    return false;
-  }
-  if (/model_cooldown|cooling\s+down|all\s+credentials\s+for\s+model/i.test(text)) {
-    return false;
-  }
-  const normalizedText = text.toLowerCase();
-  if (status >= 500) return true;
-  if (status === 408 || status === 409 || status === 425 || status === 429) return true;
-  return /timeout|timed?\s*out|connection\s+reset|connection\s+refused|econnreset|econnrefused|rate\s+limit|too\s+many\s+requests|quota/i
-    .test(normalizedText);
+  if (/blocked_invalid_request/i.test(text)) return false;
+  if (/empty\s+content/i.test(text)) return false;
+  if (/upstream\s+timeout\s+after\s+4000ms/i.test(text)) return false;
+  if (/auth_unavailable|no\s+auth\s+available/i.test(text)) return false;
+  if (/cloudflare\s+502|bad\s+gateway|service\s+temporarily\s+unavailable|system\s+disk\s+overloaded/i.test(text)) return false;
+  if (/model_cooldown|cooling\s+down|all\s+credentials\s+for\s+model/i.test(text)) return false;
+  // 使用统一的分类结果：network/server/rate_limit 允许延迟排除
+  return category === 'network' || category === 'server' || category === 'rate_limit';
 }
 
 export class DefaultProxyConductor {

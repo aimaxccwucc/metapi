@@ -39,7 +39,7 @@ export type ModelCircuitSnapshotView = ModelCircuitSnapshot & {
 const circuitEntries = new Map<string, CircuitEntry>();
 
 const FAILURE_THRESHOLDS = {
-  auth: 1,
+  auth: 2,
   model_unsupported: 1,
   payload_too_large: 2,
   rate_limit: 2,
@@ -50,7 +50,7 @@ const FAILURE_THRESHOLDS = {
 } as const;
 
 const OPEN_DURATIONS_MS = {
-  auth: 30 * 60 * 1000,
+  auth: 10 * 60 * 1000,
   model_unsupported: 20 * 60 * 1000,
   payload_too_large: 10 * 60 * 1000,
   rate_limit: 4 * 60 * 1000,
