@@ -22,24 +22,40 @@ export function wrapReaderWithIdleTimeout<T>(
   timeoutMs = config.upstreamStreamIdleTimeoutMs,
 ): StrictReaderLike<T> {
   const normalizedTimeoutMs = Math.max(1_000, timeoutMs);
+  let activeTimer: ReturnType<typeof setTimeout> | undefined;
+  let activeReject: ((reason: unknown) => void) | undefined;
+
+  function clearActiveTimer(): void {
+    if (activeTimer !== undefined) {
+      clearTimeout(activeTimer);
+      activeTimer = undefined;
+      activeReject = undefined;
+    }
+  }
+
   return {
     async read() {
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      clearActiveTimer();
       return await Promise.race([
         reader.read(),
         new Promise<ReaderReadResult<T>>((_, reject) => {
-          timeoutHandle = setTimeout(() => {
+          activeReject = reject;
+          activeTimer = setTimeout(() => {
+            activeReject = undefined;
+            activeTimer = undefined;
             reject(new Error(`upstream stream idle timeout after ${normalizedTimeoutMs}ms`));
           }, normalizedTimeoutMs);
         }),
       ]).finally(() => {
-        if (timeoutHandle) clearTimeout(timeoutHandle);
+        clearActiveTimer();
       });
     },
     cancel(reason?: unknown) {
+      clearActiveTimer();
       return Promise.resolve(reader.cancel?.(reason));
     },
     releaseLock() {
+      clearActiveTimer();
       reader.releaseLock?.();
     },
   };

@@ -207,6 +207,7 @@ export function classifyProxyFailureCategory(status?: number | null, upstreamErr
 
 export function shouldRetryProxyRequest(status: number, upstreamErrorText?: string | null): boolean {
   const category = classifyProxyFailureCategory(status, upstreamErrorText);
+  if (category === 'payload_too_large') return false;
   if (category === 'upstream_group_empty' || category === 'invalid_channel') return true;
   if (status >= 500) return true;
   if (status === 408 || status === 409 || status === 425 || status === 429) return true;

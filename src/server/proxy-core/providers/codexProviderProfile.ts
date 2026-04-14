@@ -1,40 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { PreparedProviderRequest, PrepareProviderRequestInput, ProviderProfile } from './types.js';
+import { asTrimmedString, getInputHeader } from '../executors/types.js';
 import { config } from '../../config.js';
 
 const CODEX_CLIENT_VERSION = '0.101.0';
 const CODEX_DEFAULT_USER_AGENT = 'codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464';
-
-function asTrimmedString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function headerValueToString(value: unknown): string | null {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    return trimmed || null;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (typeof item !== 'string') continue;
-      const trimmed = item.trim();
-      if (trimmed) return trimmed;
-    }
-  }
-  return null;
-}
-
-function getInputHeader(
-  headers: Record<string, unknown> | Record<string, string> | undefined,
-  key: string,
-): string | null {
-  if (!headers) return null;
-  for (const [candidateKey, candidateValue] of Object.entries(headers)) {
-    if (candidateKey.toLowerCase() !== key.toLowerCase()) continue;
-    return headerValueToString(candidateValue);
-  }
-  return null;
-}
 
 function uuidFromSeed(seed: string): string {
   const hash = createHash('sha1').update(seed).digest();

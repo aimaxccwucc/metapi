@@ -8,6 +8,7 @@ import {
   extractInlineThinkTags,
   type ThinkTagParserState,
 } from './thinkTagParser.js';
+export { pullSseEventsWithDone } from './sseParser.js';
 
 export type DownstreamFormat = 'openai' | 'claude';
 
@@ -1858,43 +1859,4 @@ export function buildSyntheticOpenAiChunks(normalized: NormalizedFinalResponse):
   };
 
   return [startChunk, endChunk];
-}
-
-export function pullSseEventsWithDone(buffer: string): { events: ParsedSseEvent[]; rest: string } {
-  const normalized = buffer.replace(/\r\n/g, '\n');
-  const events: ParsedSseEvent[] = [];
-  let rest = normalized;
-
-  while (true) {
-    const boundary = rest.indexOf('\n\n');
-    if (boundary < 0) break;
-
-    const block = rest.slice(0, boundary);
-    rest = rest.slice(boundary + 2);
-
-    if (!block.trim()) continue;
-
-    const lines = block.split('\n');
-    let eventName = '';
-    const dataLines: string[] = [];
-
-    for (const line of lines) {
-      if (line.startsWith('event:')) {
-        eventName = line.slice(6).trim();
-        continue;
-      }
-      if (line.startsWith('data:')) {
-        dataLines.push(line.slice(5).trimStart());
-      }
-    }
-
-    if (dataLines.length <= 0) continue;
-
-    events.push({
-      event: eventName,
-      data: dataLines.join('\n').trim(),
-    });
-  }
-
-  return { events, rest };
 }

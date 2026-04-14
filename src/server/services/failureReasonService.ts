@@ -16,6 +16,8 @@ type FailureReasonCode =
   | 'cloudflare_tunnel_unavailable'
   | 'cloudflare_challenge'
   | 'token_expired'
+  | 'account_banned'
+  | 'rate_limited'
   | 'already_checked_in'
   | 'network_timeout'
   | 'upstream_error'
@@ -165,6 +167,26 @@ export function classifyFailureReason(
     };
   }
 
+  if (includesAny(text, ['account has been disabled', 'account is disabled', '账号已被禁用', '账号已被封禁', 'account banned', 'user banned', '账户已被冻结', 'account suspended', '账号已被停用'])) {
+    return {
+      code: 'account_banned',
+      category: 'auth',
+      title: '账号已被禁用',
+      actionHint: '联系站点方或更换账号',
+      detailHint: '该账号已被站点禁用或封禁，自动签到无法成功。',
+    };
+  }
+
+  if (httpStatus === 429 || includesAny(text, ['rate limit', 'too many requests', '频率限制', '请求过于频繁', 'rate_limit'])) {
+    return {
+      code: 'rate_limited',
+      category: 'network',
+      title: '请求频率受限',
+      actionHint: '稍后自动重试',
+      detailHint: '站点返回频率限制，系统会自动退避后重试。',
+    };
+  }
+
   if (includesAny(text, ['already checked in', 'already signed', '今天已经签到', '今日已签到', '已经签到'])) {
     return {
       code: 'already_checked_in',
@@ -302,6 +324,36 @@ export function resolveCheckinExecution(input: {
       return {
         ...base,
         lifecycle: 'failed',
+        normalizedStatus: directSuccess ? 'success' : 'failed',
+        checkinSnapshotStatus: directSuccess ? 'success' : 'retryable_failed',
+        retryable: !directSuccess,
+        requiresManual: false,
+        unsupported: false,
+        advanceLastCheckinAt: directSuccess,
+        refreshBalance: directSuccess,
+        healthState: directSuccess ? 'healthy' : 'unhealthy',
+        logMessage: normalizedMessage,
+        eventLevel: directSuccess ? 'info' : 'error',
+      };
+    case 'account_banned':
+      return {
+        ...base,
+        lifecycle: 'failed',
+        normalizedStatus: 'failed',
+        checkinSnapshotStatus: 'terminal_failed',
+        retryable: false,
+        requiresManual: true,
+        unsupported: false,
+        advanceLastCheckinAt: false,
+        refreshBalance: false,
+        healthState: 'unhealthy',
+        logMessage: normalizedMessage,
+        eventLevel: 'error',
+      };
+    case 'rate_limited':
+      return {
+        ...base,
+        lifecycle: directSuccess ? 'completed' : 'failed',
         normalizedStatus: directSuccess ? 'success' : 'failed',
         checkinSnapshotStatus: directSuccess ? 'success' : 'retryable_failed',
         retryable: !directSuccess,

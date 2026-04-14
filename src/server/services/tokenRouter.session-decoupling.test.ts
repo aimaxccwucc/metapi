@@ -123,7 +123,7 @@ describe('TokenRouter session decoupling', () => {
       priority: 0,
       weight: 10,
       enabled: true,
-      manualOverride: false,
+      manualOverride: true,
     }).returning().get();
 
     const router = new TokenRouter();

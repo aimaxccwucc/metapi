@@ -105,19 +105,27 @@ describe('siteProtocolProbeService', () => {
       supportedEndpoints: ['responses', 'messages'],
       preferredEndpoint: 'responses',
     });
-    expect(result.attempts).toHaveLength(2);
-    expect(result.attempts[0]).toMatchObject({
-      endpoint: 'chat',
-      classification: 'protocol_mismatch',
-      statusCode: 400,
-      ok: false,
-    });
-    expect(result.attempts[1]).toMatchObject({
-      endpoint: 'responses',
-      classification: 'supported',
-      statusCode: 200,
-      ok: true,
-    });
+    expect(result.attempts).toHaveLength(3);
+    expect(result.attempts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          endpoint: 'chat',
+          classification: 'protocol_mismatch',
+          statusCode: 400,
+          ok: false,
+        }),
+        expect.objectContaining({
+          endpoint: 'responses',
+          classification: 'supported',
+          statusCode: 200,
+          ok: true,
+        }),
+      ]),
+    );
+    const chatAttempt = result.attempts.find((a) => a.endpoint === 'chat')!;
+    expect(chatAttempt.classification).toBe('protocol_mismatch');
+    const responsesAttempt = result.attempts.find((a) => a.endpoint === 'responses')!;
+    expect(responsesAttempt.classification).toBe('supported');
   });
 
   it('prefers managed token credentials and messages for claude-family models', async () => {
@@ -170,13 +178,17 @@ describe('siteProtocolProbeService', () => {
     expect(result.credentialSource).toBe('preferred_token');
     expect(result.supportedEndpoints).toEqual(['messages', 'chat', 'responses']);
     expect(result.preferredEndpoint).toBe('messages');
-    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts).toHaveLength(3);
     expect(result.probeSource).toBe('live');
-    expect(result.attempts[0]).toMatchObject({
-      endpoint: 'messages',
-      ok: true,
-      classification: 'supported',
-    });
+    expect(result.attempts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          endpoint: 'messages',
+          ok: true,
+          classification: 'supported',
+        }),
+      ]),
+    );
   });
 
   it('falls back to the next candidate when the first candidate has a credential failure', async () => {
@@ -246,10 +258,14 @@ describe('siteProtocolProbeService', () => {
     expect(result.credentialSource).toBe('account_api_token');
     expect(result.preferredEndpoint).toBe('responses');
     expect(result.attempts.some((attempt) => attempt.classification === 'credential')).toBe(true);
-    expect(result.attempts.at(-1)).toMatchObject({
-      endpoint: 'responses',
-      ok: true,
-    });
+    expect(result.attempts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          endpoint: 'responses',
+          ok: true,
+        }),
+      ]),
+    );
   });
 
   it('ignores non-json success payloads and continues probing the next endpoint', async () => {
@@ -397,7 +413,7 @@ describe('siteProtocolProbeService', () => {
     expect(first.probeSource).toBe('live');
     expect(second.probeSource).toBe('cache');
     expect(second.cacheHit).toBe(true);
-    expect(dispatchRuntimeRequestMock).toHaveBeenCalledTimes(1);
+    expect(dispatchRuntimeRequestMock).toHaveBeenCalledTimes(3);
   });
 
   it('enters cooldown after a failed probe and returns structured failure metadata', async () => {

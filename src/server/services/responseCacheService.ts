@@ -547,26 +547,24 @@ export async function pruneResponseCache(): Promise<void> {
 
   const now = new Date().toISOString();
   try {
-    const expiredRows = await db
-      .select({ id: responseCacheTable.id })
-      .from(responseCacheTable)
+    // Delete expired rows directly with SQL condition instead of select-then-delete.
+    const expiredResult = await db
+      .delete(responseCacheTable)
       .where(lt(responseCacheTable.expiresAt, now))
-      .all();
-    if (expiredRows.length > 0) {
-      await db
-        .delete(responseCacheTable)
-        .where(inArray(responseCacheTable.id, expiredRows.map((row: { id: number }) => row.id)))
-        .run();
-      responseCacheRuntimeStatus.pruneDeletedExpiredRows += expiredRows.length;
-    }
+      .run();
+    responseCacheRuntimeStatus.pruneDeletedExpiredRows +=
+      (expiredResult as { changes?: number; affectedRows?: number; rowCount?: number }).changes
+      ?? (expiredResult as { affectedRows?: number }).affectedRows
+      ?? 0;
 
-    const rows = await db
-      .select({ id: responseCacheTable.id })
-      .from(responseCacheTable)
-      .orderBy(desc(responseCacheTable.hitCount), desc(responseCacheTable.createdAt))
-      .all();
-
-    if (rows.length > config.responseCacheMaxRows) {
+    // Only count + sort-delete if we might exceed maxRows.
+    const [{ total }] = await db.select({ total: sql`count(*)`.mapWith(Number) }).from(responseCacheTable);
+    if (total > config.responseCacheMaxRows) {
+      const rows = await db
+        .select({ id: responseCacheTable.id })
+        .from(responseCacheTable)
+        .orderBy(desc(responseCacheTable.hitCount), desc(responseCacheTable.createdAt))
+        .all();
       const idsToDelete = rows.slice(config.responseCacheMaxRows).map((row: { id: number }) => row.id);
       await db
         .delete(responseCacheTable)

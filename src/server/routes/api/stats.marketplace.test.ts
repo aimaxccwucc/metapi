@@ -179,7 +179,7 @@ describe('/api/models/marketplace', () => {
     getApiTokensMock.mockResolvedValue([
       { name: 'metapi-default-gpt-4-1', key: 'sk-new', enabled: true, tokenGroup: 'default' },
     ]);
-    getModelsMock.mockResolvedValue(['gpt-4o']);
+    getModelsMock.mockResolvedValue(['gpt-4.1', 'gpt-4o']);
     fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 'ok' }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -194,6 +194,7 @@ describe('/api/models/marketplace', () => {
       },
     });
 
+    console.log('DEBUG response:', response.statusCode, JSON.stringify(response.json()));
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       success: true,

@@ -1,3 +1,5 @@
+import { normalizeBaseUrl } from './base.js';
+
 export type TitleHintPlatform =
   | 'anyrouter'
   | 'done-hub'
@@ -26,17 +28,6 @@ const TITLE_RULES: TitleRule[] = [
   { platform: 'new-api', regex: /wong\s*(?:\u516c\u76ca\u7ad9)/i },
   { platform: 'one-api', regex: /\bone[-_ ]?api\b/i },
 ];
-
-function normalizeBaseUrl(url: string): string {
-  const trimmed = (url || '').trim();
-  if (!trimmed) return '';
-  try {
-    const parsed = new URL(trimmed);
-    return `${parsed.protocol}//${parsed.host}`;
-  } catch {
-    return trimmed.replace(/\/+$/, '');
-  }
-}
 
 function extractHtmlTitle(html: string): string {
   const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);

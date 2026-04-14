@@ -22,7 +22,7 @@ type ProbeClassification =
 
 const MAX_PROBE_CANDIDATES = 6;
 const MAX_PROBE_CANDIDATES_PER_MODEL = 3;
-const PROBE_SUCCESS_CACHE_TTL_MS = 15 * 60 * 1000;
+const PROBE_SUCCESS_CACHE_TTL_MS = 60 * 60 * 1000;
 const PROBE_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
 type ProbeCredentialSource =
@@ -700,52 +700,52 @@ export async function probeSiteProtocol(input: {
 
   for (const candidate of orderedCandidates) {
     const endpointOrder = buildProbeEndpointOrder(candidate.site.platform, candidate.modelName);
-    for (const endpoint of endpointOrder) {
-      const attempt = await executeSingleEndpointProbe({
-        candidate,
-        endpoint,
+    const probePromises = endpointOrder.map((endpoint) => executeSingleEndpointProbe({ candidate, endpoint }));
+    const probeResults = await Promise.allSettled(probePromises);
+    const candidateAttempts: SiteProtocolProbeAttempt[] = probeResults
+      .map((result) => result.status === 'fulfilled' ? result.value : null)
+      .filter((attempt): attempt is SiteProtocolProbeAttempt => attempt !== null);
+    attempts.push(...candidateAttempts);
+
+    const successAttempt = candidateAttempts.find((attempt) => attempt.ok);
+    if (successAttempt) {
+      const protocolConfig = buildProtocolConfigForSuccess(
+        candidate.site.platform,
+        candidate.modelName,
+        successAttempt.endpoint,
+        attempts,
+      );
+      const result: SiteProtocolProbeResult = {
+        siteId: candidate.site.id,
+        siteName: candidate.site.name,
+        sitePlatform: candidate.site.platform,
+        modelName: candidate.modelName,
+        accountId: candidate.account.id,
+        accountName: candidate.account.username || null,
+        credentialSource: candidate.selection.source,
+        supportedEndpoints: protocolConfig.supportedEndpoints,
+        preferredEndpoint: successAttempt.endpoint,
+        protocolConfig,
+        attempts,
+        attemptSummary: buildAttemptSummary(attempts),
+        latencyMs: Date.now() - startedAt,
+        probeSource: 'live',
+        cacheHit: false,
+        cachedAtMs: null,
+        cooldownUntilMs: null,
+        cooldownRemainingMs: 0,
+      };
+      probeSuccessCache.set(buildProbeCacheKey(input.siteId, input.modelName), {
+        savedAtMs: Date.now(),
+        expiresAtMs: Date.now() + PROBE_SUCCESS_CACHE_TTL_MS,
+        result: cloneProbeResult(result),
       });
-      attempts.push(attempt);
+      probeFailureCooldowns.delete(buildProbeCacheKey(input.siteId, input.modelName));
+      return result;
+    }
 
-      if (attempt.ok) {
-        const protocolConfig = buildProtocolConfigForSuccess(
-          candidate.site.platform,
-          candidate.modelName,
-          endpoint,
-          attempts,
-        );
-        const result: SiteProtocolProbeResult = {
-          siteId: candidate.site.id,
-          siteName: candidate.site.name,
-          sitePlatform: candidate.site.platform,
-          modelName: candidate.modelName,
-          accountId: candidate.account.id,
-          accountName: candidate.account.username || null,
-          credentialSource: candidate.selection.source,
-          supportedEndpoints: protocolConfig.supportedEndpoints,
-          preferredEndpoint: endpoint,
-          protocolConfig,
-          attempts,
-          attemptSummary: buildAttemptSummary(attempts),
-          latencyMs: Date.now() - startedAt,
-          probeSource: 'live',
-          cacheHit: false,
-          cachedAtMs: null,
-          cooldownUntilMs: null,
-          cooldownRemainingMs: 0,
-        };
-        probeSuccessCache.set(buildProbeCacheKey(input.siteId, input.modelName), {
-          savedAtMs: Date.now(),
-          expiresAtMs: Date.now() + PROBE_SUCCESS_CACHE_TTL_MS,
-          result: cloneProbeResult(result),
-        });
-        probeFailureCooldowns.delete(buildProbeCacheKey(input.siteId, input.modelName));
-        return result;
-      }
-
-      if (attempt.classification === 'credential') {
-        break;
-      }
+    if (candidateAttempts.some((attempt) => attempt.classification === 'credential')) {
+      continue;
     }
   }
 

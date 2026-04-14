@@ -45,8 +45,7 @@ function parseSsePayloads(buffer: string): ParsedSsePayloads {
     if (!block.trim()) continue;
     lines.push(rawBlock);
 
-    const data = block
-      .replace(/\r\n/g, '\n')
+    const data = (block.includes('\r') ? block.replace(/\r\n/g, '\n') : block)
       .split('\n')
       .filter((line) => line.startsWith('data:'))
       .map((line) => line.slice(5).trimStart())

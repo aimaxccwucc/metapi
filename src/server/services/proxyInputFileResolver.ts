@@ -11,17 +11,6 @@ function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function cloneJsonValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneJsonValue(item)) as T;
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
-    ) as T;
-  }
-  return value;
-}
 
 function inferMimeTypeFromFilename(filename: string): string {
   const normalized = filename.toLowerCase();
@@ -222,9 +211,9 @@ function toResponsesResolvedBlock(file: { fileId?: string; filename: string; fil
 async function resolveOpenAiMessageContent(content: unknown, owner: ProxyResourceOwner): Promise<unknown> {
   if (!Array.isArray(content)) return content;
   return Promise.all(content.map(async (item) => {
-    if (!isRecord(item)) return cloneJsonValue(item);
+    if (!isRecord(item)) return structuredClone(item);
     const fileLike = normalizeInputFileLike(item);
-    if (!fileLike || !shouldResolveInlineFileLike(fileLike)) return cloneJsonValue(item);
+    if (!fileLike || !shouldResolveInlineFileLike(fileLike)) return structuredClone(item);
     return toOpenAiResolvedBlock(await resolveInputFileLike(fileLike, owner));
   }));
 }
@@ -232,9 +221,9 @@ async function resolveOpenAiMessageContent(content: unknown, owner: ProxyResourc
 async function resolveResponsesMessageContent(content: unknown, owner: ProxyResourceOwner): Promise<unknown> {
   if (!Array.isArray(content)) return content;
   return Promise.all(content.map(async (item) => {
-    if (!isRecord(item)) return cloneJsonValue(item);
+    if (!isRecord(item)) return structuredClone(item);
     const fileLike = normalizeInputFileLike(item);
-    if (!fileLike || !shouldResolveInlineFileLike(fileLike)) return cloneJsonValue(item);
+    if (!fileLike || !shouldResolveInlineFileLike(fileLike)) return structuredClone(item);
     return toResponsesResolvedBlock(await resolveInputFileLike(fileLike, owner));
   }));
 }
@@ -243,10 +232,10 @@ export async function resolveOpenAiBodyInputFiles(
   body: Record<string, unknown>,
   owner: ProxyResourceOwner,
 ): Promise<Record<string, unknown>> {
-  const next = cloneJsonValue(body);
+  const next = structuredClone(body);
   if (!Array.isArray(next.messages)) return next;
   next.messages = await Promise.all(next.messages.map(async (message) => {
-    if (!isRecord(message)) return cloneJsonValue(message);
+    if (!isRecord(message)) return structuredClone(message);
     if (Array.isArray(message.content)) {
       return {
         ...message,
@@ -255,13 +244,13 @@ export async function resolveOpenAiBodyInputFiles(
     }
     if (isRecord(message.content)) {
       const fileLike = normalizeInputFileLike(message.content);
-      if (!fileLike) return cloneJsonValue(message);
+      if (!fileLike) return structuredClone(message);
       return {
         ...message,
         content: [toOpenAiResolvedBlock(await resolveInputFileLike(fileLike, owner))],
       };
     }
-    return cloneJsonValue(message);
+    return structuredClone(message);
   }));
   return next;
 }
@@ -270,9 +259,9 @@ export async function resolveResponsesBodyInputFiles(
   body: Record<string, unknown>,
   owner: ProxyResourceOwner,
 ): Promise<Record<string, unknown>> {
-  const next = cloneJsonValue(body);
+  const next = structuredClone(body);
   const resolveResponsesInputItem = async (item: unknown): Promise<unknown> => {
-    if (!isRecord(item)) return cloneJsonValue(item);
+    if (!isRecord(item)) return structuredClone(item);
     const fileLike = normalizeInputFileLike(item);
     if (fileLike && shouldResolveInlineFileLike(fileLike)) {
       return toResponsesResolvedBlock(await resolveInputFileLike(fileLike, owner));
@@ -285,13 +274,13 @@ export async function resolveResponsesBodyInputFiles(
     }
     if (isRecord(item.content)) {
       const nestedFileLike = normalizeInputFileLike(item.content);
-      if (!nestedFileLike) return cloneJsonValue(item);
+      if (!nestedFileLike) return structuredClone(item);
       return {
         ...item,
         content: [toResponsesResolvedBlock(await resolveInputFileLike(nestedFileLike, owner))],
       };
     }
-    return cloneJsonValue(item);
+    return structuredClone(item);
   };
 
   if (Array.isArray(next.input)) {

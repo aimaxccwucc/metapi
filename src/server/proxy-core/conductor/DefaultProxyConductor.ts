@@ -5,8 +5,11 @@ import {
   shouldRefreshAuth,
   shouldRetrySameChannel,
 } from './retryPolicy.js';
+import { classifyProxyFailureCategory } from '../../services/proxyRetryPolicy.js';
 import type { ExecuteInput, ExecuteResult, ProxyConductorDependencies, SelectedChannelLike } from './types.js';
 import { recordFailedAttempt, recordSuccessfulAttempt } from './usageHooks.js';
+
+const STREAM_TERMINAL_CATEGORIES = new Set(['auth', 'model_unsupported', 'payload_too_large', 'bad_request']);
 
 function shouldDelaySiteExclusion(
   failure: {
@@ -131,6 +134,25 @@ export class DefaultProxyConductor {
           ...(result.retryAfterMs != null ? { retryAfterMs: result.retryAfterMs } : {}),
           attempts,
         };
+      }
+
+      if (result.hasStreamedCompletionTokens) {
+        const category = classifyProxyFailureCategory(result.status, result.rawErrorText);
+        if (STREAM_TERMINAL_CATEGORIES.has(category)) {
+          await input.onTerminalFailure?.(selected, {
+            ...lastFailure,
+          });
+          return {
+            ok: false,
+            reason: 'terminal',
+            selected,
+            status: result.status,
+            rawErrorText: result.rawErrorText,
+            ...(result.retryAfterHeader != null ? { retryAfterHeader: result.retryAfterHeader } : {}),
+            ...(result.retryAfterMs != null ? { retryAfterMs: result.retryAfterMs } : {}),
+            attempts,
+          };
+        }
       }
 
       if (shouldRetrySameChannel(action) && attempts < maxAttempts) {

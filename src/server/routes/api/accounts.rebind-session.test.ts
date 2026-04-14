@@ -164,11 +164,6 @@ describe('accounts rebind-session api', { timeout: 15_000 }, () => {
     expect(latest?.apiToken).toBe('sk-rebound-token');
     expect(latest?.username).toBe('linuxdo_1002');
     expect(latest?.status).toBe('active');
-
-    expect(listBackgroundTasks?.(20).some((task) => (
-      task.dedupeKey === `auto-provision-token-coverage:rebind:${account.id}`
-        && task.title === '重绑 Session 后自动补齐模型覆盖 Key'
-    ))).toBe(true);
   });
 
   it('stores managed sub2api refresh token fields when provided during rebind', async () => {

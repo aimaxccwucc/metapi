@@ -1604,6 +1604,16 @@ export default function Accounts() {
                         </div>
                       </div>
                     </div>
+                    {sites.length === 0 && (
+                      <div className="info-tip surface-card" style={{ background: 'color-mix(in srgb, var(--color-warning) 8%, var(--color-bg))' }}>
+                        还没有站点？请先
+                        <button
+                          type="button"
+                          onClick={() => navigate('/sites')}
+                          style={{ background: 'none', border: 'none', padding: 0, color: 'var(--color-primary)', textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}
+                        >创建站点</button>
+                      </div>
+                    )}
                     <ModernSelect
                       value={String(tokenForm.siteId || 0)}
                       onChange={(nextValue) => {
@@ -1731,6 +1741,16 @@ export default function Accounts() {
                     <div className="info-tip surface-card">
                       输入目标站点的账号密码，将自动登录并获取访问令牌和 API Key
                     </div>
+                    {sites.length === 0 && (
+                      <div className="info-tip surface-card" style={{ background: 'color-mix(in srgb, var(--color-warning) 8%, var(--color-bg))' }}>
+                        还没有站点？请先
+                        <button
+                          type="button"
+                          onClick={() => navigate('/sites')}
+                          style={{ background: 'none', border: 'none', padding: 0, color: 'var(--color-primary)', textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}
+                        >创建站点</button>
+                      </div>
+                    )}
                     <ModernSelect
                       value={String(loginForm.siteId || 0)}
                       onChange={(nextValue) => {
@@ -1755,18 +1775,28 @@ export default function Accounts() {
                 <div className="info-tip surface-card">
                   API Key 连接只用于代理转发，不会自动派生账号令牌。系统会按站点平台能力自动引导到 Session 或 API Key 创建流程。
                 </div>
-                <ModernSelect
-                  value={String(tokenForm.siteId || 0)}
-                  onChange={(nextValue) => {
-                    const nextSiteId = Number.parseInt(nextValue, 10) || 0;
-                    setTokenForm((f) => ({ ...f, siteId: nextSiteId, credentialMode: 'apikey' }));
-                    setVerifyResult(null);
-                  }}
-                  options={siteSelectOptions}
-                  placeholder="选择站点"
-                  searchable
-                  searchPlaceholder="搜索站点名、平台或地址"
-                />
+                    {sites.length === 0 && (
+                      <div className="info-tip surface-card" style={{ background: 'color-mix(in srgb, var(--color-warning) 8%, var(--color-bg))' }}>
+                        还没有站点？请先
+                        <button
+                          type="button"
+                          onClick={() => navigate('/sites')}
+                          style={{ background: 'none', border: 'none', padding: 0, color: 'var(--color-primary)', textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}
+                        >创建站点</button>
+                      </div>
+                    )}
+                    <ModernSelect
+                      value={String(tokenForm.siteId || 0)}
+                      onChange={(nextValue) => {
+                        const nextSiteId = Number.parseInt(nextValue, 10) || 0;
+                        setTokenForm((f) => ({ ...f, siteId: nextSiteId, credentialMode: 'apikey' }));
+                        setVerifyResult(null);
+                      }}
+                      options={siteSelectOptions}
+                      placeholder="选择站点"
+                      searchable
+                      searchPlaceholder="搜索站点名、平台或地址"
+                    />
                 <input
                   placeholder="连接名称（可选）"
                   value={tokenForm.username}

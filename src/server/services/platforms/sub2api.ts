@@ -8,11 +8,8 @@ import {
   SubscriptionSummary,
   type SiteAnnouncement,
   UserInfo,
+  normalizeBaseUrl,
 } from './base.js';
-
-function normalizeBaseUrl(baseUrl: string): string {
-  return (baseUrl || '').replace(/\/+$/, '');
-}
 
 /**
  * Sub2API adapter.

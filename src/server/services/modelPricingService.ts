@@ -634,7 +634,9 @@ function normalizeUsageBreakdownInput(usage: {
   const effectivePromptTokens = hasSplit ? promptTokens : totalTokens;
   const billablePromptTokens = promptTokensIncludeCache === false
     ? effectivePromptTokens
-    : Math.max(0, effectivePromptTokens - cacheReadTokens - cacheCreationTokens);
+    : promptTokensIncludeCache === true
+      ? Math.max(0, effectivePromptTokens - cacheReadTokens - cacheCreationTokens)
+      : effectivePromptTokens;
 
   return {
     promptTokens,

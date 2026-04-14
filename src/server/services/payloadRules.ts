@@ -31,17 +31,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function cloneJsonValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneJsonValue(item)) as T;
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
-    ) as T;
-  }
-  return value;
-}
 
 function toPathSegments(path: string): string[] {
   const normalized = asTrimmedString(path).replace(/^\.+/, '');
@@ -90,7 +79,7 @@ function setPath(target: Record<string, unknown>, path: string, value: unknown):
       if (!Array.isArray(current)) return;
       while (current.length <= segmentIndex) current.push(undefined);
       if (isLast) {
-        current[segmentIndex] = cloneJsonValue(value);
+        current[segmentIndex] = structuredClone(value);
         return;
       }
       if (!isRecord(current[segmentIndex]) && !Array.isArray(current[segmentIndex])) {
@@ -102,7 +91,7 @@ function setPath(target: Record<string, unknown>, path: string, value: unknown):
 
     if (!isRecord(current)) return;
     if (isLast) {
-      current[segment] = cloneJsonValue(value);
+      current[segment] = structuredClone(value);
       return;
     }
     if (!isRecord(current[segment]) && !Array.isArray(current[segment])) {
@@ -162,7 +151,7 @@ function normalizePayloadValueRules(value: unknown): PayloadValueRule[] {
     .map((item) => {
       if (!isRecord(item)) return null;
       const models = normalizePayloadRuleModels(item.models);
-      const params = isRecord(item.params) ? cloneJsonValue(item.params) : null;
+      const params = isRecord(item.params) ? structuredClone(item.params) : null;
       if (models.length <= 0 || !params) return null;
       return { models, params };
     })
@@ -199,7 +188,7 @@ function rulesMatch(models: PayloadRuleModel[], protocol: string, candidates: st
 }
 
 function parseRawRuleValue(value: unknown): unknown {
-  if (typeof value !== 'string') return cloneJsonValue(value);
+  if (typeof value !== 'string') return structuredClone(value);
   const trimmed = value.trim();
   if (!trimmed) return undefined;
   try {
@@ -253,8 +242,8 @@ export function applyPayloadRules(input: {
   if (!hasAnyRules) return input.payload;
 
   const protocol = asTrimmedString(input.protocol).toLowerCase();
-  const original = cloneJsonValue(input.payload);
-  const output = cloneJsonValue(input.payload);
+  const original = structuredClone(input.payload);
+  const output = structuredClone(input.payload);
   const appliedDefaults = new Set<string>();
 
   for (const rule of rules.default) {

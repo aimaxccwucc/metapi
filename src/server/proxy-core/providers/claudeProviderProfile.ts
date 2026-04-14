@@ -1,34 +1,8 @@
 import type { PreparedProviderRequest, PrepareProviderRequestInput, ProviderProfile } from './types.js';
+import { getInputHeader } from '../executors/types.js';
 
 const CLAUDE_DEFAULT_USER_AGENT = 'claude-cli/2.1.63 (external, cli)';
 const CLAUDE_DEFAULT_BETA_HEADER = 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05';
-
-function headerValueToString(value: unknown): string | null {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    return trimmed || null;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (typeof item !== 'string') continue;
-      const trimmed = item.trim();
-      if (trimmed) return trimmed;
-    }
-  }
-  return null;
-}
-
-function getInputHeader(
-  headers: Record<string, unknown> | Record<string, string> | undefined,
-  key: string,
-): string | null {
-  if (!headers) return null;
-  for (const [candidateKey, candidateValue] of Object.entries(headers)) {
-    if (candidateKey.toLowerCase() !== key.toLowerCase()) continue;
-    return headerValueToString(candidateValue);
-  }
-  return null;
-}
 
 function mergeClaudeBetaHeader(
   explicitValue: string | null,

@@ -57,17 +57,6 @@ function cloneRecord(value: unknown): Record<string, unknown> | null {
   return { ...value };
 }
 
-function cloneJsonValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneJsonValue(item)) as T;
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
-    ) as T;
-  }
-  return value;
-}
 
 function normalizeOptionalTrimmedString(value: unknown): string | undefined {
   const trimmed = asTrimmedString(value);
@@ -560,7 +549,7 @@ export function convertOpenAiBodyToResponsesBody(
   }
   if (openaiBody.background !== undefined) body.background = openaiBody.background;
   if (openaiBody.user !== undefined) body.user = openaiBody.user;
-  if (openaiBody.include !== undefined) body.include = cloneJsonValue(openaiBody.include);
+  if (openaiBody.include !== undefined) body.include = structuredClone(openaiBody.include);
   if (openaiBody.previous_response_id !== undefined) body.previous_response_id = openaiBody.previous_response_id;
   if (openaiBody.truncation !== undefined) body.truncation = openaiBody.truncation;
   if (openaiBody.service_tier !== undefined) body.service_tier = openaiBody.service_tier;
@@ -568,7 +557,7 @@ export function convertOpenAiBodyToResponsesBody(
   if (openaiBody.stream_options !== undefined) body.stream_options = openaiBody.stream_options;
   if (openaiBody.response_format !== undefined) {
     const existingTextConfig = cloneRecord(body.text) || {};
-    existingTextConfig.format = sanitizeOpenAiResponseFormat(cloneJsonValue(openaiBody.response_format));
+    existingTextConfig.format = sanitizeOpenAiResponseFormat(structuredClone(openaiBody.response_format));
     body.text = existingTextConfig;
   }
 
@@ -878,15 +867,15 @@ export function convertResponsesBodyToOpenAiBody(
   if (normalizedBody.prompt_cache_retention !== undefined) payload.prompt_cache_retention = normalizedBody.prompt_cache_retention;
   if (normalizedBody.background !== undefined) payload.background = normalizedBody.background;
   if (normalizedBody.user !== undefined) payload.user = normalizedBody.user;
-  if (normalizedBody.include !== undefined) payload.include = cloneJsonValue(normalizedBody.include);
+  if (normalizedBody.include !== undefined) payload.include = structuredClone(normalizedBody.include);
   if (normalizedBody.previous_response_id !== undefined) payload.previous_response_id = normalizedBody.previous_response_id;
   if (normalizedBody.truncation !== undefined) payload.truncation = normalizedBody.truncation;
-  if (normalizedBody.reasoning !== undefined) payload.reasoning = cloneJsonValue(normalizedBody.reasoning);
+  if (normalizedBody.reasoning !== undefined) payload.reasoning = structuredClone(normalizedBody.reasoning);
   if (normalizedBody.service_tier !== undefined) payload.service_tier = normalizedBody.service_tier;
   if (normalizedBody.top_logprobs !== undefined) payload.top_logprobs = normalizedBody.top_logprobs;
   if (normalizedBody.stream_options !== undefined) payload.stream_options = normalizedBody.stream_options;
   if (isRecord(normalizedBody.text) && normalizedBody.text.format !== undefined) {
-    payload.response_format = sanitizeOpenAiResponseFormat(cloneJsonValue(normalizedBody.text.format));
+    payload.response_format = sanitizeOpenAiResponseFormat(structuredClone(normalizedBody.text.format));
   }
   if (isRecord(normalizedBody.text) && asTrimmedString(normalizedBody.text.verbosity)) {
     payload.verbosity = asTrimmedString(normalizedBody.text.verbosity);

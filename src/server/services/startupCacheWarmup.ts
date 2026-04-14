@@ -37,7 +37,7 @@ export function queueStartupCacheWarmup(): void {
       failureMessage: (task) => `模型与路由候选缓存预热失败：${task.error || 'unknown error'}`,
     },
     async () => {
-      await warmEndpoint('/api/models/marketplace');
+      await warmEndpoint('/api/models/marketplace?includePricing=true');
       await warmEndpoint('/api/models/token-candidates');
       return { success: true };
     },

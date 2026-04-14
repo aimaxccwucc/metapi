@@ -53,17 +53,6 @@ function isRecord(value: unknown): value is GeminiRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function cloneJsonValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneJsonValue(item)) as T;
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
-    ) as T;
-  }
-  return value;
-}
 
 function isAggregateState(value: unknown): value is GeminiGenerateContentAggregateState {
   return isRecord(value) && Array.isArray(value.parts) && Array.isArray(value.groundingMetadata) && Array.isArray(value.citations);
@@ -138,11 +127,11 @@ function extractOrderedCandidateMetadata(
       .sort((left, right) => left.index - right.index)
       .map((candidate) => candidate[key])
       .filter((item): item is GeminiRecord => isRecord(item))
-      .map((item) => cloneJsonValue(item));
+      .map((item) => structuredClone(item));
   }
 
   const fallback = key === 'groundingMetadata' ? state.groundingMetadata : state.citations;
-  return fallback.map((item) => cloneJsonValue(item));
+  return fallback.map((item) => structuredClone(item));
 }
 
 function extractOrderedThoughtSignatures(
@@ -191,16 +180,16 @@ function extractRequestSemantics(requestPayload: unknown): TransformerMetadata {
   const metadata: TransformerMetadata = {};
   const passthrough = ensurePassthrough(metadata);
   if (requestPayload.systemInstruction !== undefined) {
-    passthrough.systemInstruction = cloneJsonValue(requestPayload.systemInstruction);
+    passthrough.systemInstruction = structuredClone(requestPayload.systemInstruction);
   }
   if (requestPayload.cachedContent !== undefined) {
-    passthrough.cachedContent = cloneJsonValue(requestPayload.cachedContent);
+    passthrough.cachedContent = structuredClone(requestPayload.cachedContent);
   }
   if (requestPayload.safetySettings !== undefined) {
-    metadata.geminiSafetySettings = cloneJsonValue(requestPayload.safetySettings);
+    metadata.geminiSafetySettings = structuredClone(requestPayload.safetySettings);
   }
   if (requestPayload.toolConfig !== undefined) {
-    passthrough.toolConfig = cloneJsonValue(requestPayload.toolConfig);
+    passthrough.toolConfig = structuredClone(requestPayload.toolConfig);
   }
 
   const generationConfig = isRecord(requestPayload.generationConfig) ? requestPayload.generationConfig : null;
@@ -226,9 +215,9 @@ function extractRequestSemantics(requestPayload: unknown): TransformerMetadata {
     for (const key of preservedKeys) {
       if (generationConfig[key] !== undefined) {
         if (key === 'imageConfig') {
-          metadata.geminiImageConfig = cloneJsonValue(generationConfig[key]);
+          metadata.geminiImageConfig = structuredClone(generationConfig[key]);
         } else {
-          passthrough[key] = cloneJsonValue(generationConfig[key]);
+          passthrough[key] = structuredClone(generationConfig[key]);
         }
       }
     }
@@ -239,10 +228,10 @@ function extractRequestSemantics(requestPayload: unknown): TransformerMetadata {
       .filter((item) => isRecord(item))
       .map((item) => {
         const next: GeminiRecord = {};
-        if (item.googleSearch !== undefined) next.googleSearch = cloneJsonValue(item.googleSearch);
-        if (item.urlContext !== undefined) next.urlContext = cloneJsonValue(item.urlContext);
-        if (item.codeExecution !== undefined) next.codeExecution = cloneJsonValue(item.codeExecution);
-        if (item.functionDeclarations !== undefined) next.functionDeclarations = cloneJsonValue(item.functionDeclarations);
+        if (item.googleSearch !== undefined) next.googleSearch = structuredClone(item.googleSearch);
+        if (item.urlContext !== undefined) next.urlContext = structuredClone(item.urlContext);
+        if (item.codeExecution !== undefined) next.codeExecution = structuredClone(item.codeExecution);
+        if (item.functionDeclarations !== undefined) next.functionDeclarations = structuredClone(item.functionDeclarations);
         return next;
       })
       .filter((item) => Object.keys(item).length > 0);

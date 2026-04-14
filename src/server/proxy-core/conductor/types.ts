@@ -30,6 +30,7 @@ export type AttemptFailure = {
   retryAfterHeader?: string | null;
   retryAfterMs?: number | null;
   error?: unknown;
+  hasStreamedCompletionTokens?: boolean;
 };
 
 export type AttemptResult = AttemptSuccess | AttemptFailure;

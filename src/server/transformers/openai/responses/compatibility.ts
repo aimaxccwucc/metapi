@@ -233,7 +233,7 @@ export function buildResponsesCompatibilityBodies(
     ] as const;
     for (const key of passthroughFields) {
       if (body[key] === undefined) continue;
-      richCandidate[key] = cloneJsonValue(body[key]);
+      richCandidate[key] = structuredClone(body[key]);
     }
     push(richCandidate);
   }
@@ -407,17 +407,6 @@ function toFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function cloneJsonValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneJsonValue(item)) as T;
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
-    ) as T;
-  }
-  return value;
-}
 
 function parseUpstreamErrorShape(rawText: string): {
   type: string;
@@ -491,7 +480,7 @@ function buildCoreResponsesBody(
   ] as const;
   for (const key of passthroughFields) {
     if (body[key] === undefined) continue;
-    core[key] = cloneJsonValue(body[key]);
+    core[key] = structuredClone(body[key]);
   }
 
   return core;

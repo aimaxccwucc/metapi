@@ -1,4 +1,4 @@
-import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type SiteAnnouncement } from './base.js';
+import { ApiTokenInfo, BasePlatformAdapter, CheckinResult, BalanceInfo, UserInfo, TokenVerifyResult, CreateApiTokenOptions, type SiteAnnouncement, normalizeBaseUrlToOrigin as normalizeBaseUrl } from './base.js';
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { createContext, runInContext } from 'node:vm';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
@@ -9,17 +9,6 @@ function isMaskedTokenValue(value: unknown): boolean {
   const token = value.trim();
   if (!token) return false;
   return token.includes('*') || token.includes('•');
-}
-
-function normalizeBaseUrl(baseUrl: string): string {
-  const trimmed = (baseUrl || '').trim();
-  if (!trimmed) return '';
-  try {
-    const parsed = new URL(trimmed);
-    return parsed.origin;
-  } catch {
-    return trimmed.replace(/\/+$/, '');
-  }
 }
 
 export class NewApiAdapter extends BasePlatformAdapter {

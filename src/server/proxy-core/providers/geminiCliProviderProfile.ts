@@ -1,35 +1,5 @@
 import type { PreparedProviderRequest, PrepareProviderRequestInput, ProviderAction, ProviderProfile } from './types.js';
-
-function asTrimmedString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function headerValueToString(value: unknown): string | null {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    return trimmed || null;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (typeof item !== 'string') continue;
-      const trimmed = item.trim();
-      if (trimmed) return trimmed;
-    }
-  }
-  return null;
-}
-
-function getInputHeader(
-  headers: Record<string, unknown> | Record<string, string> | undefined,
-  key: string,
-): string | null {
-  if (!headers) return null;
-  for (const [candidateKey, candidateValue] of Object.entries(headers)) {
-    if (candidateKey.toLowerCase() !== key.toLowerCase()) continue;
-    return headerValueToString(candidateValue);
-  }
-  return null;
-}
+import { asTrimmedString, getInputHeader } from '../executors/types.js';
 
 function parseGeminiCliUserAgentRuntime(userAgent: string | null): {
   version: string;

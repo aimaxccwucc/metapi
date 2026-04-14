@@ -154,7 +154,7 @@ describe('accounts health refresh runtime state', () => {
     throw new Error('expected a background task event to be recorded');
   });
 
-  it('fails a single-account health refresh after 10 seconds when the site never responds', async () => {
+  it('fails a single-account health refresh after 150 seconds when the site never responds', async () => {
     vi.useFakeTimers();
     try {
       const site = await db.insert(schema.sites).values({
@@ -178,7 +178,7 @@ describe('accounts health refresh runtime state', () => {
         payload: { accountId: account.id, wait: true },
       });
 
-      await vi.advanceTimersByTimeAsync(10_001);
+      await vi.advanceTimersByTimeAsync(150_001);
 
       const response = await responsePromise;
       expect(response.statusCode).toBe(200);
@@ -200,12 +200,12 @@ describe('accounts health refresh runtime state', () => {
       expect(body.results[0]).toMatchObject({
         status: 'failed',
         state: 'unhealthy',
-        message: '站点健康检查超时（10s）',
+        message: '站点健康检查超时（150s）',
       });
     } finally {
       vi.useRealTimers();
     }
-  }, 1000);
+  }, 5000);
 
   it('skips runtime refresh for proxy-only accounts', async () => {
     const site = await db.insert(schema.sites).values({
@@ -254,7 +254,7 @@ describe('accounts health refresh runtime state', () => {
     expect(refreshBalanceMock).not.toHaveBeenCalled();
   });
 
-  it('finishes the background refresh-all task after the 10 second site timeout instead of staying in progress', async () => {
+  it('finishes the background refresh-all task after the 150 second site timeout instead of staying in progress', async () => {
     vi.useFakeTimers();
     try {
       const site = await db.insert(schema.sites).values({
@@ -283,7 +283,7 @@ describe('accounts health refresh runtime state', () => {
       expect(response.statusCode).toBe(202);
       const body = response.json() as { jobId: string };
 
-      await vi.advanceTimersByTimeAsync(10_001);
+      await vi.advanceTimersByTimeAsync(150_001);
 
       const task = getBackgroundTask?.(body.jobId);
       expect(task).toMatchObject({
@@ -299,5 +299,5 @@ describe('accounts health refresh runtime state', () => {
     } finally {
       vi.useRealTimers();
     }
-  }, 3000);
+  }, 10000);
 });

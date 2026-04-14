@@ -8,17 +8,6 @@ function isRecord(value: unknown): value is GeminiRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function cloneJsonValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneJsonValue(item)) as T;
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
-    ) as T;
-  }
-  return value;
-}
 
 function cloneContents(value: unknown): unknown[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -27,7 +16,7 @@ function cloneContents(value: unknown): unknown[] | undefined {
     .map((item) => {
       const next: GeminiRecord = { ...item };
       if (Array.isArray(item.parts)) {
-        next.parts = item.parts.map((part) => (isRecord(part) ? cloneJsonValue(part) : part));
+        next.parts = item.parts.map((part) => (isRecord(part) ? structuredClone(part) : part));
       }
       return next;
     });
@@ -58,7 +47,7 @@ function cloneThinkingConfig(value: unknown): GeminiRecord | undefined {
       }
     }
 
-    next[key] = cloneJsonValue(item);
+    next[key] = structuredClone(item);
   }
 
   return Object.keys(next).length > 0 ? next : undefined;
@@ -88,10 +77,10 @@ function cloneGenerationConfig(value: unknown): GeminiRecord | undefined {
   for (const key of allowedKeys) {
     if (value[key] === undefined) continue;
     if (key === 'thinkingConfig') {
-      next[key] = cloneThinkingConfig(value[key]) ?? cloneJsonValue(value[key]);
+      next[key] = cloneThinkingConfig(value[key]) ?? structuredClone(value[key]);
       continue;
     }
-    next[key] = cloneJsonValue(value[key]);
+    next[key] = structuredClone(value[key]);
   }
   return Object.keys(next).length > 0 ? next : undefined;
 }
@@ -102,11 +91,11 @@ function cloneTools(value: unknown): unknown[] | undefined {
     .filter((item) => isRecord(item))
     .map((item) => {
       const next: GeminiRecord = {};
-      if (item.functionDeclarations !== undefined) next.functionDeclarations = cloneJsonValue(item.functionDeclarations);
-      if (item.googleSearch !== undefined) next.googleSearch = cloneJsonValue(item.googleSearch);
-      if (item.urlContext !== undefined) next.urlContext = cloneJsonValue(item.urlContext);
-      if (item.codeExecution !== undefined) next.codeExecution = cloneJsonValue(item.codeExecution);
-      return Object.keys(next).length > 0 ? next : cloneJsonValue(item);
+      if (item.functionDeclarations !== undefined) next.functionDeclarations = structuredClone(item.functionDeclarations);
+      if (item.googleSearch !== undefined) next.googleSearch = structuredClone(item.googleSearch);
+      if (item.urlContext !== undefined) next.urlContext = structuredClone(item.urlContext);
+      if (item.codeExecution !== undefined) next.codeExecution = structuredClone(item.codeExecution);
+      return Object.keys(next).length > 0 ? next : structuredClone(item);
     });
 }
 
@@ -117,7 +106,7 @@ function hasMeaningfulThinkingConfig(value: unknown): boolean {
 function sanitizeThinkingConfig(value: unknown): GeminiRecord | undefined {
   if (!isRecord(value)) return undefined;
 
-  const next = cloneJsonValue(value);
+  const next = structuredClone(value);
   const normalizedReasoning = geminiThinkingConfigToReasoning(next);
   if (normalizedReasoning) {
     return next;
@@ -152,7 +141,7 @@ function mergeThinkingConfig(
   if (!hasMeaningfulThinkingConfig(currentThinkingConfig)) {
     return {
       ...(currentThinkingConfig ?? {}),
-      ...cloneJsonValue(derivedThinkingConfig),
+      ...structuredClone(derivedThinkingConfig),
     };
   }
 
@@ -166,15 +155,15 @@ export const geminiGenerateContentInbound = {
     if (!isRecord(body)) return {};
 
     const next: GeminiGenerateContentRequest = {};
-    if (body.contents !== undefined) next.contents = cloneContents(body.contents) ?? cloneJsonValue(body.contents);
-    if (body.systemInstruction !== undefined) next.systemInstruction = cloneJsonValue(body.systemInstruction);
-    if (body.cachedContent !== undefined) next.cachedContent = cloneJsonValue(body.cachedContent);
-    if (body.safetySettings !== undefined) next.safetySettings = cloneJsonValue(body.safetySettings);
+    if (body.contents !== undefined) next.contents = cloneContents(body.contents) ?? structuredClone(body.contents);
+    if (body.systemInstruction !== undefined) next.systemInstruction = structuredClone(body.systemInstruction);
+    if (body.cachedContent !== undefined) next.cachedContent = structuredClone(body.cachedContent);
+    if (body.safetySettings !== undefined) next.safetySettings = structuredClone(body.safetySettings);
     if (body.generationConfig !== undefined) {
-      next.generationConfig = cloneGenerationConfig(body.generationConfig) ?? cloneJsonValue(body.generationConfig);
+      next.generationConfig = cloneGenerationConfig(body.generationConfig) ?? structuredClone(body.generationConfig);
     }
-    if (body.tools !== undefined) next.tools = cloneTools(body.tools) ?? cloneJsonValue(body.tools);
-    if (body.toolConfig !== undefined) next.toolConfig = cloneJsonValue(body.toolConfig);
+    if (body.tools !== undefined) next.tools = cloneTools(body.tools) ?? structuredClone(body.tools);
+    if (body.toolConfig !== undefined) next.toolConfig = structuredClone(body.toolConfig);
 
     const derivedThinkingConfig = resolveGeminiThinkingConfigFromRequest(
       modelName || (typeof body.model === 'string' ? body.model : ''),
@@ -211,7 +200,7 @@ export const geminiGenerateContentInbound = {
     for (const [key, value] of Object.entries(body)) {
       if (!allowedPassthroughKeys.has(key)) continue;
       if (next[key] !== undefined) continue;
-      next[key] = cloneJsonValue(value);
+      next[key] = structuredClone(value);
     }
 
     return next;

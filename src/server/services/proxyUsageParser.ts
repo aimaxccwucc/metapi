@@ -295,29 +295,4 @@ export function mergeProxyUsage(base: ParsedProxyUsage, incoming: ParsedProxyUsa
   });
 }
 
-export function pullSseDataEvents(buffer: string): { events: string[]; rest: string } {
-  const normalized = buffer.replace(/\r\n/g, '\n');
-  const events: string[] = [];
-  let rest = normalized;
-
-  while (true) {
-    const boundary = rest.indexOf('\n\n');
-    if (boundary < 0) break;
-    const block = rest.slice(0, boundary);
-    rest = rest.slice(boundary + 2);
-
-    if (!block.trim()) continue;
-
-    const dataLines = block
-      .split('\n')
-      .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice(5).trimStart());
-
-    if (dataLines.length <= 0) continue;
-    const payload = dataLines.join('\n').trim();
-    if (!payload || payload === '[DONE]') continue;
-    events.push(payload);
-  }
-
-  return { events, rest };
-}
+export { pullSseDataEvents } from '../transformers/shared/sseParser.js';

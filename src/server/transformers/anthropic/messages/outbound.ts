@@ -13,17 +13,6 @@ function isRecord(value: unknown): value is AnthropicRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function cloneJsonValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneJsonValue(item)) as T;
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
-    ) as T;
-  }
-  return value;
-}
 
 function parseJsonLike(raw: string): unknown {
   const trimmed = raw.trim();
@@ -44,7 +33,7 @@ function buildClaudeMessageId(sourceId: string): string {
 function buildAnthropicContent(normalized: NormalizedFinalResponse): Array<Record<string, unknown>> {
   const anthropicNormalized = normalized as AnthropicMessagesNormalizedFinalResponse;
   if (Array.isArray(anthropicNormalized.nativeContent) && anthropicNormalized.nativeContent.length > 0) {
-    return anthropicNormalized.nativeContent.map((block) => cloneJsonValue(block));
+    return anthropicNormalized.nativeContent.map((block) => structuredClone(block));
   }
 
   const contentBlocks: Array<Record<string, unknown>> = [];
@@ -79,7 +68,7 @@ function extractNativeAnthropicContent(payload: unknown): AnthropicRecord[] | un
   if (!isRecord(payload) || !Array.isArray(payload.content)) return undefined;
   const content = payload.content
     .filter((block): block is AnthropicRecord => isRecord(block))
-    .map((block) => cloneJsonValue(block));
+    .map((block) => structuredClone(block));
   return content.length > 0 ? content : undefined;
 }
 
@@ -90,7 +79,7 @@ function extractStopSequence(payload: unknown): string | null {
 
 function extractUsagePayload(payload: unknown): AnthropicRecord | undefined {
   if (!isRecord(payload) || !isRecord(payload.usage)) return undefined;
-  return cloneJsonValue(payload.usage);
+  return structuredClone(payload.usage);
 }
 
 function mergeUsagePayload(
@@ -105,13 +94,13 @@ function mergeUsagePayload(
     if (key === 'input_tokens' || key === 'output_tokens') continue;
     if (key === 'cache_creation' && isRecord(value) && isRecord(merged.cache_creation)) {
       merged.cache_creation = {
-        ...cloneJsonValue(value),
+        ...structuredClone(value),
         ...merged.cache_creation,
       };
       continue;
     }
     if (merged[key] === undefined) {
-      merged[key] = cloneJsonValue(value);
+      merged[key] = structuredClone(value);
     }
   }
 

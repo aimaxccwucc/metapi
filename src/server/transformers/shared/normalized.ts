@@ -154,17 +154,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function cloneJsonValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneJsonValue(item)) as T;
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
-    ) as T;
-  }
-  return value;
-}
 
 const TRANSFORMER_METADATA_PASSTHROUGH_KEYS = new Set([
   'systemInstruction',
@@ -194,37 +183,37 @@ export function toTransformerMetadataRecord(
   if (!metadata) return undefined;
 
   const record: Record<string, unknown> = {};
-  if (metadata.include !== undefined) record.include = cloneJsonValue(metadata.include);
+  if (metadata.include !== undefined) record.include = structuredClone(metadata.include);
   if (metadata.maxToolCalls !== undefined) record.maxToolCalls = metadata.maxToolCalls;
-  if (metadata.promptCacheKey !== undefined) record.promptCacheKey = cloneJsonValue(metadata.promptCacheKey);
+  if (metadata.promptCacheKey !== undefined) record.promptCacheKey = structuredClone(metadata.promptCacheKey);
   if (metadata.promptCacheRetention !== undefined) {
-    record.promptCacheRetention = cloneJsonValue(metadata.promptCacheRetention);
+    record.promptCacheRetention = structuredClone(metadata.promptCacheRetention);
   }
-  if (metadata.truncation !== undefined) record.truncation = cloneJsonValue(metadata.truncation);
-  if (metadata.serviceTier !== undefined) record.serviceTier = cloneJsonValue(metadata.serviceTier);
+  if (metadata.truncation !== undefined) record.truncation = structuredClone(metadata.truncation);
+  if (metadata.serviceTier !== undefined) record.serviceTier = structuredClone(metadata.serviceTier);
   if (metadata.includeObfuscation !== undefined) record.includeObfuscation = metadata.includeObfuscation;
-  if (metadata.citations !== undefined) record.citations = cloneJsonValue(metadata.citations);
-  if (metadata.annotations !== undefined) record.annotations = cloneJsonValue(metadata.annotations);
+  if (metadata.citations !== undefined) record.citations = structuredClone(metadata.citations);
+  if (metadata.annotations !== undefined) record.annotations = structuredClone(metadata.annotations);
   if (metadata.groundingMetadata !== undefined) {
-    record.groundingMetadata = cloneJsonValue(metadata.groundingMetadata);
+    record.groundingMetadata = structuredClone(metadata.groundingMetadata);
   }
   if (metadata.usageMetadata !== undefined) {
-    record.usageMetadata = cloneJsonValue(metadata.usageMetadata);
+    record.usageMetadata = structuredClone(metadata.usageMetadata);
   }
   if (metadata.geminiSafetySettings !== undefined) {
-    record.safetySettings = cloneJsonValue(metadata.geminiSafetySettings);
+    record.safetySettings = structuredClone(metadata.geminiSafetySettings);
   }
   if (metadata.geminiImageConfig !== undefined) {
-    record.imageConfig = cloneJsonValue(metadata.geminiImageConfig);
+    record.imageConfig = structuredClone(metadata.geminiImageConfig);
   }
   if (metadata.thoughtSignature !== undefined) record.thoughtSignature = metadata.thoughtSignature;
   if (metadata.thoughtSignatures !== undefined) {
-    record.thoughtSignatures = cloneJsonValue(metadata.thoughtSignatures);
+    record.thoughtSignatures = structuredClone(metadata.thoughtSignatures);
   }
   if (isRecord(metadata.passthrough)) {
     for (const [key, value] of Object.entries(metadata.passthrough)) {
       if (record[key] === undefined) {
-        record[key] = cloneJsonValue(value);
+        record[key] = structuredClone(value);
       }
     }
   }
@@ -238,30 +227,30 @@ export function fromTransformerMetadataRecord(
   if (!isRecord(value)) return undefined;
 
   const metadata: TransformerMetadata = {};
-  if (value.include !== undefined) metadata.include = cloneJsonValue(value.include);
+  if (value.include !== undefined) metadata.include = structuredClone(value.include);
   if (typeof value.maxToolCalls === 'number' && Number.isFinite(value.maxToolCalls)) {
     metadata.maxToolCalls = value.maxToolCalls;
   }
-  if (value.promptCacheKey !== undefined) metadata.promptCacheKey = cloneJsonValue(value.promptCacheKey);
+  if (value.promptCacheKey !== undefined) metadata.promptCacheKey = structuredClone(value.promptCacheKey);
   if (value.promptCacheRetention !== undefined) {
-    metadata.promptCacheRetention = cloneJsonValue(value.promptCacheRetention);
+    metadata.promptCacheRetention = structuredClone(value.promptCacheRetention);
   }
-  if (value.truncation !== undefined) metadata.truncation = cloneJsonValue(value.truncation);
-  if (value.serviceTier !== undefined) metadata.serviceTier = cloneJsonValue(value.serviceTier);
+  if (value.truncation !== undefined) metadata.truncation = structuredClone(value.truncation);
+  if (value.serviceTier !== undefined) metadata.serviceTier = structuredClone(value.serviceTier);
   if (typeof value.includeObfuscation === 'boolean') metadata.includeObfuscation = value.includeObfuscation;
-  if (value.citations !== undefined) metadata.citations = cloneJsonValue(value.citations);
-  if (value.annotations !== undefined) metadata.annotations = cloneJsonValue(value.annotations);
+  if (value.citations !== undefined) metadata.citations = structuredClone(value.citations);
+  if (value.annotations !== undefined) metadata.annotations = structuredClone(value.annotations);
   if (value.groundingMetadata !== undefined) {
-    metadata.groundingMetadata = cloneJsonValue(value.groundingMetadata);
+    metadata.groundingMetadata = structuredClone(value.groundingMetadata);
   }
   if (value.usageMetadata !== undefined) {
-    metadata.usageMetadata = cloneJsonValue(value.usageMetadata);
+    metadata.usageMetadata = structuredClone(value.usageMetadata);
   }
   if (value.safetySettings !== undefined) {
-    metadata.geminiSafetySettings = cloneJsonValue(value.safetySettings);
+    metadata.geminiSafetySettings = structuredClone(value.safetySettings);
   }
   if (value.imageConfig !== undefined) {
-    metadata.geminiImageConfig = cloneJsonValue(value.imageConfig);
+    metadata.geminiImageConfig = structuredClone(value.imageConfig);
   }
   if (typeof value.thoughtSignature === 'string') metadata.thoughtSignature = value.thoughtSignature;
   if (Array.isArray(value.thoughtSignatures)) {
@@ -273,7 +262,7 @@ export function fromTransformerMetadataRecord(
     .filter(([key]) => TRANSFORMER_METADATA_PASSTHROUGH_KEYS.has(key));
   if (passthroughEntries.length > 0) {
     metadata.passthrough = Object.fromEntries(
-      passthroughEntries.map(([key, entry]) => [key, cloneJsonValue(entry)]),
+      passthroughEntries.map(([key, entry]) => [key, structuredClone(entry)]),
     );
   }
 

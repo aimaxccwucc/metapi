@@ -1,8 +1,4 @@
-import { BasePlatformAdapter, type BalanceInfo, type CheckinResult, type UserInfo } from './base.js';
-
-function normalizeBaseUrl(baseUrl: string): string {
-  return (baseUrl || '').replace(/\/+$/, '');
-}
+import { OfficialApiBaseAdapter, normalizeBaseUrl } from './base.js';
 
 function stripModelPrefix(name: string): string {
   const trimmed = name.trim();
@@ -41,7 +37,7 @@ function resolveGeminiNativeModelsUrl(baseUrl: string, apiToken: string): string
   return `${listBase}${separator}key=${encodeURIComponent(apiToken)}`;
 }
 
-export class GeminiAdapter extends BasePlatformAdapter {
+export class GeminiAdapter extends OfficialApiBaseAdapter {
   readonly platformName: string = 'gemini';
 
   async detect(url: string): Promise<boolean> {
@@ -51,23 +47,6 @@ export class GeminiAdapter extends BasePlatformAdapter {
       || normalized.includes('googleapis.com/v1beta/openai')
       || normalized.includes('gemini.google.com')
     );
-  }
-
-  override async login(_baseUrl: string, _username: string, _password: string) {
-    return { success: false, message: 'login endpoint not supported' };
-  }
-
-  override async getUserInfo(_baseUrl: string, _accessToken: string): Promise<UserInfo | null> {
-    return null;
-  }
-
-  async checkin(_baseUrl: string, _accessToken: string): Promise<CheckinResult> {
-    return { success: false, message: 'checkin endpoint not supported' };
-  }
-
-  async getBalance(_baseUrl: string, _accessToken: string): Promise<BalanceInfo> {
-    // Gemini API keys generally do not expose account balance via API.
-    return { balance: 0, used: 0, quota: 0 };
   }
 
   async getModels(baseUrl: string, apiToken: string): Promise<string[]> {

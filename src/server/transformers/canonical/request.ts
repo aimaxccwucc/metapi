@@ -43,17 +43,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function cloneJsonValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneJsonValue(item)) as T;
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
-    ) as T;
-  }
-  return value;
-}
 
 function safeJsonStringify(value: unknown): string {
   try {
@@ -223,7 +212,7 @@ function parseTools(rawTools: unknown): CanonicalTool[] | undefined {
             ? { description: asTrimmedString(item.function.description) }
             : {}),
           ...(isRecord(item.function.parameters)
-            ? { inputSchema: sanitizeJsonSchemaForFunctionTool(cloneJsonValue(item.function.parameters)) }
+            ? { inputSchema: sanitizeJsonSchemaForFunctionTool(structuredClone(item.function.parameters)) }
             : {}),
         }];
       }
@@ -239,9 +228,9 @@ function parseTools(rawTools: unknown): CanonicalTool[] | undefined {
               ? { description: asTrimmedString(declaration.description) }
               : {}),
             ...(isRecord(declaration.parametersJsonSchema)
-              ? { inputSchema: sanitizeJsonSchemaForFunctionTool(cloneJsonValue(declaration.parametersJsonSchema)) }
+              ? { inputSchema: sanitizeJsonSchemaForFunctionTool(structuredClone(declaration.parametersJsonSchema)) }
               : (isRecord(declaration.parameters)
-                ? { inputSchema: sanitizeJsonSchemaForFunctionTool(cloneJsonValue(declaration.parameters)) }
+                ? { inputSchema: sanitizeJsonSchemaForFunctionTool(structuredClone(declaration.parameters)) }
                 : {})),
           }];
         });
@@ -491,7 +480,7 @@ export function canonicalRequestToOpenAiChatBody(
       function: {
         name: tool.name,
         ...(tool.description ? { description: tool.description } : {}),
-        parameters: sanitizeJsonSchemaForFunctionTool(cloneJsonValue(tool.inputSchema ?? { type: 'object' })),
+        parameters: sanitizeJsonSchemaForFunctionTool(structuredClone(tool.inputSchema ?? { type: 'object' })),
       },
     }));
   }
@@ -501,7 +490,7 @@ export function canonicalRequestToOpenAiChatBody(
   if (isRecord(request.passthrough)) {
     for (const [key, value] of Object.entries(request.passthrough)) {
       if (key === 'transformerMetadata' || body[key] !== undefined) continue;
-      body[key] = cloneJsonValue(value);
+      body[key] = structuredClone(value);
     }
   }
 

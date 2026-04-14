@@ -156,7 +156,6 @@ const CHANNEL_SELECTION_LEASE_MAX_MS = 90_000;
 const ACCOUNT_SUCCESS_EMA_ALPHA = 0.25;
 const ACCOUNT_LATENCY_EMA_ALPHA = 0.25;
 const ACCOUNT_ROUTING_STATE_TTL_MS = 6 * 60 * 60 * 1000;
-const ACCOUNT_SELECTION_LEASE_IDLE_TTL_MS = 2 * 60 * 1000;
 const ACCOUNT_STICKY_BINDING_TTL_MS = 5 * 60 * 1000;
 const ACCOUNT_STICKY_FAILURE_BREAK_MS = 90 * 1000;
 const ACCOUNT_STICKY_BUSY_BREAK_MS = 30 * 1000;
@@ -2312,19 +2311,7 @@ type RouteRow = typeof schema.tokenRoutes.$inferSelect & {
   sourceRouteIds: number[];
 };
 type ChannelRow = typeof schema.routeChannels.$inferSelect;
-type RouteChannelIdRow = { id: number };
-type CredentialScopedChannelRow = {
-  channelId: number;
-  accountId: number;
-  extraConfig: string | null;
-  tokenId: number | null;
-};
-type JoinedRouteMatchRow = {
-  route_channels: typeof schema.routeChannels.$inferSelect;
-  accounts: typeof schema.accounts.$inferSelect;
-  sites: typeof schema.sites.$inferSelect;
-  account_tokens: typeof schema.accountTokens.$inferSelect | null;
-};
+
 
 type RouteCacheSnapshot = {
   loadedAt: number;
@@ -2342,6 +2329,11 @@ let routeCacheSnapshot: RouteCacheSnapshot = {
 };
 
 const routeMatchCache = new Map<number, RouteMatchCacheSnapshot>();
+
+type TtlCache<T> = { data: T; expireAtMs: number };
+let unavailableModelsCacheData: TtlCache<PersistedUnavailableModelSnapshot> | null = null;
+let governanceSnapshotCacheData: TtlCache<GovernanceSnapshot> | null = null;
+const CANDIDATE_FILTER_CACHE_TTL_MS = 5_000;
 
 function pruneChannelSelectionLeases(nowMs = Date.now()): void {
   for (const [channelId, lease] of channelSelectionLeases.entries()) {
@@ -2985,6 +2977,8 @@ export function invalidateTokenRouterCache(): void {
   channelSelectionLeases.clear();
   accountSelectionLeases.clear();
   stickySessionKeyByChannel.clear();
+  unavailableModelsCacheData = null;
+  governanceSnapshotCacheData = null;
 }
 
 function isSiteDisabled(status?: string | null): boolean {
@@ -3070,66 +3064,6 @@ function getChannelPersistedSuccessAtMs(
   return parseIsoTimeMs(channel.lastUsedAt);
 }
 
-function partitionMostRecentSuccessfulSiteCandidates<
-  T extends {
-    site: { id: number };
-    channel: Pick<ChannelRow, 'lastUsedAt' | 'successCount' | 'lastFailAt'>;
-  },
->(
-  candidates: T[],
-): {
-  preferred: T[];
-  avoided: T[];
-  preferredSiteIds: Set<number>;
-} {
-  if (candidates.length <= 1) {
-    return {
-      preferred: candidates,
-      avoided: [],
-      preferredSiteIds: new Set(candidates.map((candidate) => candidate.site.id)),
-    };
-  }
-
-  const siteSuccessAtMs = new Map<number, number>();
-  for (const candidate of candidates) {
-    const successAtMs = getChannelPersistedSuccessAtMs(candidate.channel);
-    const failureAtMs = parseIsoTimeMs(candidate.channel.lastFailAt);
-    if (successAtMs == null || successAtMs <= (failureAtMs ?? 0)) continue;
-    siteSuccessAtMs.set(
-      candidate.site.id,
-      Math.max(siteSuccessAtMs.get(candidate.site.id) ?? 0, successAtMs),
-    );
-  }
-
-  let latestSuccessAtMs: number | null = null;
-  const preferredSiteIds = new Set<number>();
-  for (const [siteId, successAtMs] of siteSuccessAtMs.entries()) {
-    if (latestSuccessAtMs == null || successAtMs > latestSuccessAtMs) {
-      latestSuccessAtMs = successAtMs;
-      preferredSiteIds.clear();
-      preferredSiteIds.add(siteId);
-      continue;
-    }
-    if (successAtMs === latestSuccessAtMs) {
-      preferredSiteIds.add(siteId);
-    }
-  }
-
-  if (preferredSiteIds.size === 0) {
-    return {
-      preferred: candidates,
-      avoided: [],
-      preferredSiteIds,
-    };
-  }
-
-  return {
-    preferred: candidates.filter((candidate) => preferredSiteIds.has(candidate.site.id)),
-    avoided: candidates.filter((candidate) => !preferredSiteIds.has(candidate.site.id)),
-    preferredSiteIds,
-  };
-}
-
 function subtractCandidatesByChannelId<
   T extends {
     channel: { id: number };
@@ -3149,7 +3083,6 @@ function partitionPreferredSuccessfulAccountCandidates<
   },
 >(
   candidates: T[],
-  nowMs = Date.now(),
 ): {
   anchor: T[];
   preferred: T[];
@@ -3501,7 +3434,7 @@ function buildCandidateSelectionPools(
     pushPool(`${scopePrefix}_success_channel`, otherSuccessfulChannels);
 
     const remainingAfterChannelSuccess = subtractCandidatesByChannelId(scopedCandidates, channelPartition.preferred);
-    const accountPartition = partitionPreferredSuccessfulAccountCandidates(remainingAfterChannelSuccess, nowMs);
+    const accountPartition = partitionPreferredSuccessfulAccountCandidates(remainingAfterChannelSuccess);
     pushPool(`${scopePrefix}_success_account`, accountPartition.preferred);
 
     const remaining = subtractCandidatesByChannelId(remainingAfterChannelSuccess, accountPartition.preferred);
@@ -3628,16 +3561,6 @@ function partitionModelPreferredSiteCandidates<
     preferredSiteIds: effectivePreferredSiteIds,
     source: 'model_runtime_success',
   };
-}
-
-function sortCandidatesForRecoveryPreference<T extends { channel: FailureAwareChannel }>(candidates: T[]): T[] {
-  return [...candidates].sort((left, right) => {
-    const cooldownCompare = compareNullableTimeAsc(left.channel.cooldownUntil, right.channel.cooldownUntil);
-    if (cooldownCompare !== 0) return cooldownCompare;
-    const failCompare = compareNullableTimeAsc(left.channel.lastFailAt, right.channel.lastFailAt);
-    if (failCompare !== 0) return failCompare;
-    return Math.max(0, left.channel.failCount ?? 0) - Math.max(0, right.channel.failCount ?? 0);
-  });
 }
 
 async function markPersistedModelUnavailableForChannel(
@@ -4109,13 +4032,6 @@ function isRouteDisplayNameMatch(model: string, displayName: string | null | und
   return !!alias && alias === model;
 }
 
-function matchesRouteRequestModel(model: string, route: RouteRow): boolean {
-  if (isExplicitGroupRoute(route)) {
-    return isRouteDisplayNameMatch(model, route.displayName);
-  }
-  return matchesModelPattern(model, route.modelPattern) || isRouteDisplayNameMatch(model, route.displayName);
-}
-
 function findPreferredRouteForModel(routes: RouteRow[], model: string): RouteRow | undefined {
   // explicit_group 按显示名命中时优先（e9628ae：覆盖/重定向旧的精确路由）
   return routes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
@@ -4483,6 +4399,8 @@ function shouldSoftParkUnknownCapabilityCandidate(
 }
 
 export class TokenRouter {
+  private lastSelectChannelMatch: { match: RouteMatch; requestedModel: string; downstreamPolicy: DownstreamRoutingPolicy } | null = null;
+
   async getVisiblePublicModels(): Promise<string[]> {
     const routes = await loadEnabledRoutes();
     return Array.from(new Set(
@@ -4502,10 +4420,12 @@ export class TokenRouter {
 
     let match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
+    this.lastSelectChannelMatch = { match, requestedModel, downstreamPolicy };
     let selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy);
     if (selected) return selected;
     match = await this.tryAutoHealRouteMatch(requestedModel, match, downstreamPolicy);
     if (!match) return null;
+    this.lastSelectChannelMatch = { match, requestedModel, downstreamPolicy };
     selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy);
     return selected;
   }
@@ -4539,7 +4459,14 @@ export class TokenRouter {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     await ensureRoutingRuntimeStateLoaded();
 
-    let match = await this.findRoute(requestedModel, downstreamPolicy);
+    // Reuse cached match from the initial selectChannel to avoid redundant DB queries.
+    const cachedMatch = this.lastSelectChannelMatch;
+    let match: RouteMatch | null = null;
+    if (cachedMatch && cachedMatch.requestedModel === requestedModel) {
+      match = cachedMatch.match;
+    } else {
+      match = await this.findRoute(requestedModel, downstreamPolicy);
+    }
     if (!match) return null;
     let selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy, excludeChannelIds, true, excludeSiteIds);
     if (selected) return selected;
@@ -4642,8 +4569,21 @@ export class TokenRouter {
     const runtimeModelResolver = requestedByDisplayName
       ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
       : mappedModel;
-    const persistedUnavailableModels = await loadPersistedUnavailableModelsForCandidates(match.channels);
-    const governanceSnapshot = await loadGovernanceSnapshotForCandidates(match.channels);
+    const cachedNowMs = Date.now();
+    let persistedUnavailableModels: PersistedUnavailableModelSnapshot;
+    if (unavailableModelsCacheData && cachedNowMs < unavailableModelsCacheData.expireAtMs) {
+      persistedUnavailableModels = unavailableModelsCacheData.data;
+    } else {
+      persistedUnavailableModels = await loadPersistedUnavailableModelsForCandidates(match.channels);
+      unavailableModelsCacheData = { data: persistedUnavailableModels, expireAtMs: cachedNowMs + CANDIDATE_FILTER_CACHE_TTL_MS };
+    }
+    let governanceSnapshot: GovernanceSnapshot;
+    if (governanceSnapshotCacheData && cachedNowMs < governanceSnapshotCacheData.expireAtMs) {
+      governanceSnapshot = governanceSnapshotCacheData.data;
+    } else {
+      governanceSnapshot = await loadGovernanceSnapshotForCandidates(match.channels);
+      governanceSnapshotCacheData = { data: governanceSnapshot, expireAtMs: cachedNowMs + CANDIDATE_FILTER_CACHE_TTL_MS };
+    }
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
@@ -5572,8 +5512,21 @@ export class TokenRouter {
     const runtimeModelResolver = requestedByDisplayName
       ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
       : mappedModel;
-    const persistedUnavailableModels = await loadPersistedUnavailableModelsForCandidates(match.channels);
-    const governanceSnapshot = await loadGovernanceSnapshotForCandidates(match.channels);
+    const cachedNowMs = Date.now();
+    let persistedUnavailableModels: PersistedUnavailableModelSnapshot;
+    if (unavailableModelsCacheData && cachedNowMs < unavailableModelsCacheData.expireAtMs) {
+      persistedUnavailableModels = unavailableModelsCacheData.data;
+    } else {
+      persistedUnavailableModels = await loadPersistedUnavailableModelsForCandidates(match.channels);
+      unavailableModelsCacheData = { data: persistedUnavailableModels, expireAtMs: cachedNowMs + CANDIDATE_FILTER_CACHE_TTL_MS };
+    }
+    let governanceSnapshot: GovernanceSnapshot;
+    if (governanceSnapshotCacheData && cachedNowMs < governanceSnapshotCacheData.expireAtMs) {
+      governanceSnapshot = governanceSnapshotCacheData.data;
+    } else {
+      governanceSnapshot = await loadGovernanceSnapshotForCandidates(match.channels);
+      governanceSnapshotCacheData = { data: governanceSnapshot, expireAtMs: cachedNowMs + CANDIDATE_FILTER_CACHE_TTL_MS };
+    }
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();

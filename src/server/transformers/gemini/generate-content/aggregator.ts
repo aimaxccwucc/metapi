@@ -4,27 +4,16 @@ function isRecord(value: unknown): value is GeminiRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function cloneJsonValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneJsonValue(item)) as T;
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, cloneJsonValue(item)]),
-    ) as T;
-  }
-  return value;
-}
 
 function stableSerialize(value: unknown): string {
   return JSON.stringify(value);
 }
 
 function mergeJsonArrays(existing: unknown[], incoming: unknown[]): unknown[] {
-  const merged = existing.map((item) => cloneJsonValue(item));
+  const merged = existing.map((item) => structuredClone(item));
   const seen = new Set(merged.map((item) => stableSerialize(item)));
   for (const item of incoming) {
-    const cloned = cloneJsonValue(item);
+    const cloned = structuredClone(item);
     const serialized = stableSerialize(cloned);
     if (seen.has(serialized)) continue;
     seen.add(serialized);
@@ -34,20 +23,20 @@ function mergeJsonArrays(existing: unknown[], incoming: unknown[]): unknown[] {
 }
 
 function mergeJsonValues(existing: unknown, incoming: unknown): unknown {
-  if (incoming === undefined) return cloneJsonValue(existing);
-  if (existing === undefined) return cloneJsonValue(incoming);
+  if (incoming === undefined) return structuredClone(existing);
+  if (existing === undefined) return structuredClone(incoming);
   if (Array.isArray(existing) && Array.isArray(incoming)) {
     return mergeJsonArrays(existing, incoming);
   }
   if (isRecord(existing) && isRecord(incoming)) {
     return mergeJsonRecords(existing, incoming);
   }
-  return cloneJsonValue(incoming);
+  return structuredClone(incoming);
 }
 
 function mergeJsonRecords(existing: GeminiRecord, incoming: GeminiRecord): GeminiRecord {
   const merged: GeminiRecord = Object.fromEntries(
-    Object.entries(existing).map(([key, value]) => [key, cloneJsonValue(value)]),
+    Object.entries(existing).map(([key, value]) => [key, structuredClone(value)]),
   );
 
   for (const [key, value] of Object.entries(incoming)) {
@@ -61,7 +50,7 @@ function pushUniqueJson(target: GeminiRecord[], incoming: unknown): void {
   if (!isRecord(incoming)) return;
   const serialized = stableSerialize(incoming);
   if (target.some((item) => stableSerialize(item) === serialized)) return;
-  target.push(cloneJsonValue(incoming));
+  target.push(structuredClone(incoming));
 }
 
 function isTextPart(value: unknown): value is GeminiRecord & { text: string } {
@@ -75,7 +64,7 @@ function partComparableShape(value: GeminiRecord & { text: string }): string {
 
 function appendPart(target: GeminiRecord[], incoming: unknown): void {
   if (!isRecord(incoming)) return;
-  const next = cloneJsonValue(incoming);
+  const next = structuredClone(incoming);
   if (isTextPart(next)) {
     for (let index = target.length - 1; index >= 0; index -= 1) {
       const existing = target[index];
@@ -101,7 +90,7 @@ function collectPartsFromPayload(payload: unknown): GeminiRecord[] {
     const content = isRecord(candidate.content) ? candidate.content : null;
     if (!content || !Array.isArray(content.parts)) continue;
     for (const part of content.parts) {
-      if (isRecord(part)) parts.push(cloneJsonValue(part));
+      if (isRecord(part)) parts.push(structuredClone(part));
     }
   }
   return parts;
@@ -212,7 +201,7 @@ export function applyGeminiGenerateContentAggregate(
         if (isRecord(candidate.groundingMetadata)) {
           candidateAggregate.groundingMetadata = candidateAggregate.groundingMetadata
             ? mergeJsonRecords(candidateAggregate.groundingMetadata, candidate.groundingMetadata)
-            : cloneJsonValue(candidate.groundingMetadata);
+            : structuredClone(candidate.groundingMetadata);
         }
       }
       if (candidate.citationMetadata !== undefined) {
@@ -220,7 +209,7 @@ export function applyGeminiGenerateContentAggregate(
         if (isRecord(candidate.citationMetadata)) {
           candidateAggregate.citationMetadata = candidateAggregate.citationMetadata
             ? mergeJsonRecords(candidateAggregate.citationMetadata, candidate.citationMetadata)
-            : cloneJsonValue(candidate.citationMetadata);
+            : structuredClone(candidate.citationMetadata);
         }
       }
       if (typeof candidate.finishReason === 'string' && candidate.finishReason.trim()) {

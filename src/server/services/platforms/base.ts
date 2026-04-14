@@ -2,6 +2,25 @@ import { createHash } from 'node:crypto';
 import type { RequestInit as UndiciRequestInit } from 'undici';
 import { withSiteProxyRequestInit } from '../siteProxy.js';
 
+export function normalizeBaseUrl(baseUrl: string): string {
+  return (baseUrl || '').trim().replace(/\/+$/, '');
+}
+
+/**
+ * Normalize a URL to its origin (protocol + host), stripping path/query/fragment.
+ * Falls back to strip-trailing-slash behavior when the input is not a valid URL.
+ */
+export function normalizeBaseUrlToOrigin(baseUrl: string): string {
+  const trimmed = (baseUrl || '').trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.origin;
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
+}
+
 export interface CheckinResult {
   success: boolean;
   message: string;
@@ -243,5 +262,65 @@ export abstract class BasePlatformAdapter implements PlatformAdapter {
   protected buildNoticeSourceKey(content: string): string {
     const normalized = (content || '').trim();
     return `notice:${createHash('sha1').update(normalized).digest('hex')}`;
+  }
+}
+
+/**
+ * Base adapter for official API platforms (Claude, Codex/OpenAI, Gemini) that
+ * do not support management-oriented operations like login, checkin, balance, etc.
+ */
+export abstract class OfficialApiBaseAdapter extends BasePlatformAdapter {
+  override async login(_baseUrl: string, _username: string, _password: string) {
+    return { success: false as const, message: 'Official API does not support login' };
+  }
+
+  override async getUserInfo(_baseUrl: string, _accessToken: string): Promise<UserInfo | null> {
+    return null;
+  }
+
+  override async checkin(_baseUrl: string, _accessToken: string): Promise<CheckinResult> {
+    return { success: false, message: 'Official API does not support checkin' };
+  }
+
+  override async getBalance(_baseUrl: string, _accessToken: string): Promise<BalanceInfo> {
+    return { balance: 0, used: 0, quota: 0 };
+  }
+
+  override async getApiToken(_baseUrl: string, _accessToken: string, _platformUserId?: number): Promise<string | null> {
+    return null;
+  }
+
+  override async getSiteAnnouncements(
+    _baseUrl: string,
+    _accessToken: string,
+    _platformUserId?: number,
+  ): Promise<SiteAnnouncement[]> {
+    return [];
+  }
+
+  override async getUserGroups(
+    _baseUrl: string,
+    _accessToken: string,
+    _platformUserId?: number,
+  ): Promise<string[]> {
+    return [];
+  }
+
+  override async createApiToken(
+    _baseUrl: string,
+    _accessToken: string,
+    _platformUserId?: number,
+    _options?: CreateApiTokenOptions,
+  ): Promise<boolean> {
+    return false;
+  }
+
+  override async deleteApiToken(
+    _baseUrl: string,
+    _accessToken: string,
+    _tokenKey: string,
+    _platformUserId?: number,
+  ): Promise<boolean> {
+    return false;
   }
 }

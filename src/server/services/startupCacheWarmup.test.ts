@@ -52,7 +52,7 @@ describe('startupCacheWarmup', () => {
     expect(startBackgroundTaskMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      'http://127.0.0.1:4123/api/models/marketplace',
+      'http://127.0.0.1:4123/api/models/marketplace?includePricing=true',
       expect.objectContaining({
         method: 'GET',
         headers: expect.objectContaining({
