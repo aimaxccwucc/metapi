@@ -373,8 +373,10 @@ export default function TokenRoutes() {
   const [loadingRouteDiagnostics, setLoadingRouteDiagnostics] = useState(false);
   const [routeProbeSummaryByRouteId, setRouteProbeSummaryByRouteId] = useState<Record<number, RouteProbeSummary>>({});
   const [probingRouteId, setProbingRouteId] = useState<number | null>(null);
+  const [probingBatch, setProbingBatch] = useState(false);
   const [diagnosticsExpanded, setDiagnosticsExpanded] = useState(false);
   const [governanceExpanded, setGovernanceExpanded] = useState(false);
+  const [showRuntimeStatus, setShowRuntimeStatus] = useState(false);
   const [runningGovernanceRecovery, setRunningGovernanceRecovery] = useState(false);
   const [visibleRouteCount, setVisibleRouteCount] = useState(ROUTE_RENDER_CHUNK);
   const [expandedSourceGroupMap, setExpandedSourceGroupMap] = useState<Record<string, boolean>>({});
@@ -1860,127 +1862,182 @@ export default function TokenRoutes() {
           >
             {showZeroChannelRoutes ? tr('隐藏 0 通道路由') : tr('显示 0 通道路由')}
           </button>
+
+          <button
+            type="button"
+            disabled={probingBatch}
+            onClick={async () => {
+              setProbingBatch(true);
+              try {
+                const result = await api.probeBatchRoutes({ allExactModelRoutes: true, autoGovernance: true });
+                const totalAvailable = result.results.reduce((s, r) => s + r.availableCount, 0);
+                const totalUnavailable = result.results.reduce((s, r) => s + r.unavailableCount, 0);
+                await Promise.all([
+                  loadRouteOverview(),
+                  loadRouteDecisions(routeSummaries, { force: true }),
+                ]);
+                toast.success(`批量探测完成：${result.results.length} 条路由，${totalAvailable} 个通道可用`);
+              } catch (error: any) {
+                toast.error(error?.message || '批量探测失败');
+              } finally {
+                setProbingBatch(false);
+              }
+            }}
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
+          >
+            {probingBatch ? (
+              <><span className="spinner spinner-sm" /> {tr('探测中...')}</>
+            ) : (
+              tr('批量探测')
+            )}
+          </button>
         </div>
       </div>
 
       {showOnlyManualRoutes ? (
         <div className="info-tip surface-card" style={{ marginBottom: 12 }}>
-          {tr('当前仅显示手工治理路由；如需排查系统自动生成或系统治理路由，请到筛选面板切换为“显示全部路由”。')}
+          {tr('当前仅显示手工治理路由；如需排查系统自动生成或系统治理路由，请到筛选面板切换为"显示全部路由"。')}
         </div>
       ) : null}
 
-      <div className="info-tip surface-card" style={{ marginBottom: 12, display: 'grid', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span className="badge badge-info" style={{ fontSize: 11 }}>{tr('当前故障总览')}</span>
-          <span className="badge badge-warning" style={{ fontSize: 11 }}>{tr('冷却中')} {routeFaultOverview.cooldownChannels}</span>
-          <span className="badge badge-warning" style={{ fontSize: 11 }}>{tr('失败避让')} {routeFaultOverview.avoidedChannels}</span>
-          <span className={`badge ${routeFaultOverview.modelCircuitChannels > 0 ? 'badge-error' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('模型熔断')} {routeFaultOverview.modelCircuitChannels}</span>
-          <span className={`badge ${routeFaultOverview.siteRuntimeChannels > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('站点惩罚')} {routeFaultOverview.siteRuntimeChannels}</span>
-          <span className={`badge ${routeFaultOverview.zeroChannelRoutes > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('0 通道路由')} {routeFaultOverview.zeroChannelRoutes}</span>
-          <span className={`badge ${routeFaultOverview.sourceIssueRoutes > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('来源异常群组')} {routeFaultOverview.sourceIssueRoutes}</span>
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-          {routeFaultOverview.routesWithDecisions > 0
-            ? `已加载 ${routeFaultOverview.routesWithDecisions}/${routeFaultOverview.totalRoutes} 条路由的决策快照，可直接查看冷却、失败避让、模型熔断和站点运行时惩罚。`
-            : '当前筛选结果还没有可用的决策快照；点击“刷新路由决策”可拉取最新的路由故障解释。'}
-        </div>
-      </div>
+      <div style={{ marginBottom: 12 }}>
+        <button
+          type="button"
+          onClick={() => setShowRuntimeStatus((prev) => !prev)}
+          className="btn btn-ghost"
+          style={{ border: '1px solid var(--color-border)', padding: '6px 12px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, width: '100%', justifyContent: 'space-between' }}
+        >
+          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="badge badge-info" style={{ fontSize: 10 }}>运行时状态</span>
+            <span className={`badge ${governanceOverview.suppressed > 0 || routeFaultOverview.modelCircuitChannels > 0 ? 'badge-warning' : 'badge-success'}`} style={{ fontSize: 10 }}>
+              {governanceOverview.suppressed > 0 || routeFaultOverview.modelCircuitChannels > 0
+                ? `隔离 ${governanceOverview.suppressed} / 熔断 ${routeFaultOverview.modelCircuitChannels}`
+                : '正常'}
+            </span>
+            {routeFaultOverview.cooldownChannels > 0 ? <span className="badge badge-muted" style={{ fontSize: 10 }}>冷却 {routeFaultOverview.cooldownChannels}</span> : null}
+            {routeFaultOverview.avoidedChannels > 0 ? <span className="badge badge-muted" style={{ fontSize: 10 }}>避让 {routeFaultOverview.avoidedChannels}</span> : null}
+          </span>
+          <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{showRuntimeStatus ? '收起 ▲' : '展开 ▼'}</span>
+        </button>
 
-      <div className="info-tip surface-card" style={{ marginBottom: 12, display: 'grid', gap: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span className="badge badge-info" style={{ fontSize: 11 }}>系统隔离治理</span>
-          {loadingRouteOverview ? (
-            <span className="badge badge-muted" style={{ fontSize: 11 }}>加载中…</span>
-          ) : (
-            <span className="badge badge-muted" style={{ fontSize: 11 }}>治理总数 {governanceOverview.total}</span>
-          )}
-          <span className={`badge ${governanceOverview.suppressed > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>隔离中 {governanceOverview.suppressed}</span>
-          <span className={`badge ${governanceOverview.probing > 0 ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>复测中 {governanceOverview.probing}</span>
-          <span className={`badge ${(routeOverview?.runtime.modelCircuitOpen || 0) > 0 ? 'badge-error' : 'badge-muted'}`} style={{ fontSize: 11 }}>模型熔断中 {routeOverview?.runtime.modelCircuitOpen || 0}</span>
-          <span className={`badge ${(routeOverview?.runtime.siteRuntimeBreakerOpen || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>站点熔断中 {routeOverview?.runtime.siteRuntimeBreakerOpen || 0}</span>
-          <span className={`badge ${(routeOverview?.runtime.unavailableModelBlocking || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>持久不可用阻断 {routeOverview?.runtime.unavailableModelBlocking || 0}</span>
-          <span className={`badge ${(routeOverview?.runtime.checkinSiteBackoffBlocked || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到站点退避中 {routeOverview?.runtime.checkinSiteBackoffBlocked || 0}</span>
-          <span className={`badge ${(routeOverview?.runtime.checkinAttention || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到待处理 {routeOverview?.runtime.checkinAttention || 0}</span>
-          <button
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '6px 10px', fontSize: 12 }}
-            onClick={handleRunGovernanceRecoveryPass}
-            disabled={runningGovernanceRecovery}
-          >
-            {runningGovernanceRecovery ? '处理中…' : '处理到期治理'}
-          </button>
-          <button
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)', padding: '6px 10px', fontSize: 12 }}
-            onClick={() => setGovernanceExpanded((prev) => !prev)}
-          >
-            {governanceExpanded ? '收起隔离列表' : '展开隔离列表'}
-          </button>
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-          {routeOverview
-            ? `汇总：路由 ${routeOverview.routeSummary.enabledRouteCount}/${routeOverview.routeSummary.routeCount} 启用，通道 ${routeOverview.routeSummary.enabledChannelCount}/${routeOverview.routeSummary.channelCount} 启用；系统隔离 ${governanceOverview.total} 条，其中主动复测中 ${governanceOverview.probing} 条。到期治理处理不会全量扫站点或模型。`
-            : '正在加载轻量治理概览。'}
-        </div>
-
-        {governanceOverview.byReasonEntries.length > 0 ? (
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {governanceOverview.byReasonEntries.map((entry) => (
-              <span key={`governance-reason-${entry.code}`} className="badge badge-muted" style={{ fontSize: 11 }}>
-                {entry.label} {entry.count}
-              </span>
-            ))}
-          </div>
-        ) : null}
-
-        {governanceExpanded ? (
-          loadingGovernanceSubjects ? (
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>系统隔离列表加载中…</div>
-          ) : governanceSubjects.length > 0 ? (
-            <div style={{ overflowX: 'auto' }}>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>主体</th>
-                    <th>ID</th>
-                    <th>模型</th>
-                    <th>状态</th>
-                    <th>原因</th>
-                    <th>恢复时间</th>
-                    <th>最近失败</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {governanceSubjects.map((item) => (
-                    <tr key={`governance-subject-${item.id}`}>
-                      <td>{item.subjectType}</td>
-                      <td>#{item.subjectId}</td>
-                      <td>{item.modelName || '-'}</td>
-                      <td>{item.state === 'probing' ? '复测中' : '隔离中'}</td>
-                      <td>{governanceReasonLabels[item.reasonCode] || item.reasonCode}</td>
-                      <td>{formatIsoDateTime(item.probeAfter || item.suppressUntil)}</td>
-                      <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                          <span>{formatIsoDateTime(item.lastFailureAt)}</span>
-                          {item.diagnosticTargetType && item.diagnosticTargetId ? (
-                            <button
-                              type="button"
-                              className="btn btn-link"
-                              onClick={() => navigateToCredentialDiagnostics(item.diagnosticTargetType!, item.diagnosticTargetId!)}
-                            >
-                              诊断
-                            </button>
-                          ) : null}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+        {showRuntimeStatus ? (
+          <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+            <div className="info-tip surface-card" style={{ display: 'grid', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span className="badge badge-info" style={{ fontSize: 11 }}>{tr('当前故障总览')}</span>
+                <span className="badge badge-warning" style={{ fontSize: 11 }}>{tr('冷却中')} {routeFaultOverview.cooldownChannels}</span>
+                <span className="badge badge-warning" style={{ fontSize: 11 }}>{tr('失败避让')} {routeFaultOverview.avoidedChannels}</span>
+                <span className={`badge ${routeFaultOverview.modelCircuitChannels > 0 ? 'badge-error' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('模型熔断')} {routeFaultOverview.modelCircuitChannels}</span>
+                <span className={`badge ${routeFaultOverview.siteRuntimeChannels > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('站点惩罚')} {routeFaultOverview.siteRuntimeChannels}</span>
+                <span className={`badge ${routeFaultOverview.zeroChannelRoutes > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('0 通道路由')} {routeFaultOverview.zeroChannelRoutes}</span>
+                <span className={`badge ${routeFaultOverview.sourceIssueRoutes > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>{tr('来源异常群组')} {routeFaultOverview.sourceIssueRoutes}</span>
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                {routeFaultOverview.routesWithDecisions > 0
+                  ? `已加载 ${routeFaultOverview.routesWithDecisions}/${routeFaultOverview.totalRoutes} 条路由的决策快照，可直接查看冷却、失败避让、模型熔断和站点运行时惩罚。`
+                  : '当前筛选结果还没有可用的决策快照；点击"刷新路由决策"可拉取最新的路由故障解释。'}
+              </div>
             </div>
-          ) : (
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>当前没有活跃的系统隔离记录。</div>
-          )
+
+            <div className="info-tip surface-card" style={{ display: 'grid', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span className="badge badge-info" style={{ fontSize: 11 }}>系统隔离治理</span>
+                {loadingRouteOverview ? (
+                  <span className="badge badge-muted" style={{ fontSize: 11 }}>加载中…</span>
+                ) : (
+                  <span className="badge badge-muted" style={{ fontSize: 11 }}>治理总数 {governanceOverview.total}</span>
+                )}
+                <span className={`badge ${governanceOverview.suppressed > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>隔离中 {governanceOverview.suppressed}</span>
+                <span className={`badge ${governanceOverview.probing > 0 ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>复测中 {governanceOverview.probing}</span>
+                <span className={`badge ${(routeOverview?.runtime.modelCircuitOpen || 0) > 0 ? 'badge-error' : 'badge-muted'}`} style={{ fontSize: 11 }}>模型熔断中 {routeOverview?.runtime.modelCircuitOpen || 0}</span>
+                <span className={`badge ${(routeOverview?.runtime.siteRuntimeBreakerOpen || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>站点熔断中 {routeOverview?.runtime.siteRuntimeBreakerOpen || 0}</span>
+                <span className={`badge ${(routeOverview?.runtime.unavailableModelBlocking || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>持久不可用阻断 {routeOverview?.runtime.unavailableModelBlocking || 0}</span>
+                <span className={`badge ${(routeOverview?.runtime.checkinSiteBackoffBlocked || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到站点退避中 {routeOverview?.runtime.checkinSiteBackoffBlocked || 0}</span>
+                <span className={`badge ${(routeOverview?.runtime.checkinAttention || 0) > 0 ? 'badge-warning' : 'badge-muted'}`} style={{ fontSize: 11 }}>签到待处理 {routeOverview?.runtime.checkinAttention || 0}</span>
+                <button
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-border)', padding: '6px 10px', fontSize: 12 }}
+                  onClick={handleRunGovernanceRecoveryPass}
+                  disabled={runningGovernanceRecovery}
+                >
+                  {runningGovernanceRecovery ? '处理中…' : '处理到期治理'}
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-border)', padding: '6px 10px', fontSize: 12 }}
+                  onClick={() => setGovernanceExpanded((prev) => !prev)}
+                >
+                  {governanceExpanded ? '收起隔离列表' : '展开隔离列表'}
+                </button>
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                {routeOverview
+                  ? `汇总：路由 ${routeOverview.routeSummary.enabledRouteCount}/${routeOverview.routeSummary.routeCount} 启用，通道 ${routeOverview.routeSummary.enabledChannelCount}/${routeOverview.routeSummary.channelCount} 启用；系统隔离 ${governanceOverview.total} 条，其中主动复测中 ${governanceOverview.probing} 条。到期治理处理不会全量扫站点或模型。`
+                  : '正在加载轻量治理概览。'}
+              </div>
+
+              {governanceOverview.byReasonEntries.length > 0 ? (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {governanceOverview.byReasonEntries.map((entry) => (
+                    <span key={`governance-reason-${entry.code}`} className="badge badge-muted" style={{ fontSize: 11 }}>
+                      {entry.label} {entry.count}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+
+              {governanceExpanded ? (
+                loadingGovernanceSubjects ? (
+                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>系统隔离列表加载中…</div>
+                ) : governanceSubjects.length > 0 ? (
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>主体</th>
+                          <th>ID</th>
+                          <th>模型</th>
+                          <th>状态</th>
+                          <th>原因</th>
+                          <th>恢复时间</th>
+                          <th>最近失败</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {governanceSubjects.map((item) => (
+                          <tr key={`governance-subject-${item.id}`}>
+                            <td>{item.subjectType}</td>
+                            <td>#{item.subjectId}</td>
+                            <td>{item.modelName || '-'}</td>
+                            <td>{item.state === 'probing' ? '复测中' : '隔离中'}</td>
+                            <td>{governanceReasonLabels[item.reasonCode] || item.reasonCode}</td>
+                            <td>{formatIsoDateTime(item.probeAfter || item.suppressUntil)}</td>
+                            <td>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                <span>{formatIsoDateTime(item.lastFailureAt)}</span>
+                                {item.diagnosticTargetType && item.diagnosticTargetId ? (
+                                  <button
+                                    type="button"
+                                    className="btn btn-link"
+                                    onClick={() => navigateToCredentialDiagnostics(item.diagnosticTargetType!, item.diagnosticTargetId!)}
+                                  >
+                                    诊断
+                                  </button>
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>当前没有活跃的系统隔离记录。</div>
+                )
+              ) : null}
+            </div>
+          </div>
         ) : null}
       </div>
 
@@ -2310,7 +2367,7 @@ export default function TokenRoutes() {
       </div>
 
       <div className="info-tip surface-card" style={{ marginBottom: 12 }}>
-        {tr('如果某批通道因令牌失效、模型不支持或限流被持续避让，可先修正账号配置，再使用“清理运行时故障”快速清掉临时冷却、模型熔断和站点运行时惩罚。')}
+        {tr('如果某批通道因令牌失效、模型不支持或限流被持续避让，可先修正账号配置，再使用"清理运行时故障"快速清掉临时冷却、模型熔断和站点运行时惩罚。')}
       </div>
 
       {/* Manual route panel */}
@@ -2513,7 +2570,7 @@ export default function TokenRoutes() {
               {routeSummaries.length === 0
                 ? '请先同步模型或补齐连接配置；系统精确路由会按当前模型可用性自动生成。'
                 : (showOnlyManualRoutes
-                  ? '当前视图仅显示手工治理路由；切换到“显示全部路由”可查看系统自动生成或系统治理路由。'
+                  ? '当前视图仅显示手工治理路由；切换到"显示全部路由"可查看系统自动生成或系统治理路由。'
                   : '请调整品牌筛选、搜索词或排序条件。')}
             </div>
           </div>

@@ -1303,6 +1303,12 @@ export const api = {
       body: JSON.stringify(data || {}),
       timeoutMs: 60_000,
     }) as Promise<RouteProbeResponse>,
+  probeBatchRoutes: (data: { routeIds?: number[]; allExactModelRoutes?: boolean; limit?: number; autoGovernance?: boolean }) =>
+    request('/api/routes/probe-batch', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 120_000,
+    }) as Promise<{ success: boolean; results: RouteProbeResponse[]; totalProbed: number }>,
   batchAddChannels: (routeId: number, channels: Array<{ accountId: number; tokenId?: number; sourceModel?: string }>) =>
     request(`/api/routes/${routeId}/channels/batch`, { method: 'POST', body: JSON.stringify({ channels }) }),
   addRoute: (data: any) => request('/api/routes', { method: 'POST', body: JSON.stringify(data) }),

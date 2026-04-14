@@ -44,6 +44,10 @@ import { extractRuntimeHealth } from '../../services/accountHealthService.js';
 import { isSchedulableCheckinAccountStatus } from '../../services/checkinService.js';
 import { listCheckinSiteRuntimeSnapshots } from '../../services/checkinSiteRuntime.js';
 import {
+  probeRouteChannelsForRoute,
+  probeBatchRoutes,
+} from '../../services/routeProbeService.js';
+import {
   probeMarketplaceModelAvailability,
   type MarketplaceProbeClassification,
   type MarketplaceModelAvailabilityResult,
@@ -264,7 +268,7 @@ async function listRoutesWithSources(): Promise<RouteRow[]> {
   return decorateRoutesWithSources(routes, sourceRouteIdsByRouteId);
 }
 
-async function getRouteWithSources(routeId: number): Promise<RouteRow | null> {
+export async function getRouteWithSources(routeId: number): Promise<RouteRow | null> {
   const route = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, routeId)).get();
   if (!route) return null;
   const sourceRouteIdsByRouteId = await loadRouteSourceIdsMap([routeId]);
@@ -1046,7 +1050,7 @@ type RouteChannelSummary = {
   siteNames: Set<string>;
 };
 
-async function fetchChannelsForRouteRows(routes: RouteRow[]): Promise<Map<number, RouteChannelView[]>> {
+export async function fetchChannelsForRouteRows(routes: RouteRow[]): Promise<Map<number, RouteChannelView[]>> {
   if (routes.length === 0) return new Map();
 
   const explicitSourceRouteIds = Array.from(new Set(routes
@@ -2319,96 +2323,54 @@ export async function tokensRoutes(app: FastifyInstance) {
 
     const channelsByRoute = await fetchChannelsForRouteRows([route]);
     const enabledChannels = (channelsByRoute.get(routeId) || [])
-      .filter((channel) => channel.enabled !== false)
-      .slice(0, resolveRouteProbeLimit(request.body?.limit));
-    if (enabledChannels.length === 0) {
-      return {
-        success: true,
-        routeId: route.id,
-        routeModelPattern: route.modelPattern,
-        probedModel: route.modelPattern,
-        autoGovernance: request.body?.autoGovernance === true,
-        total: 0,
-        availableCount: 0,
-        unavailableCount: 0,
-        failedCount: 0,
-        items: [],
-      } satisfies RouteProbeResponse;
+      .filter((channel) => channel.enabled !== false);
+
+    return await probeRouteChannelsForRoute(route, enabledChannels, {
+      limit: request.body?.limit,
+      autoGovernance: request.body?.autoGovernance,
+    });
+  });
+
+  // Batch probe multiple routes
+  app.post<{ Body?: { routeIds?: number[]; allExactModelRoutes?: boolean; limit?: number; autoGovernance?: boolean } }>('/api/routes/probe-batch', async (request, reply) => {
+    const body = request.body || {};
+    let targetRouteIds = body.routeIds;
+
+    if ((!targetRouteIds || targetRouteIds.length === 0) && body.allExactModelRoutes) {
+      const allRoutes = await listRoutesWithSources();
+      targetRouteIds = allRoutes
+        .filter((r) => isExactModelPattern(r.modelPattern) && !isExplicitGroupRoute(r) && r.enabled !== false)
+        .map((r) => r.id);
     }
 
-    const autoGovernance = request.body?.autoGovernance === true;
-    const items = await mapWithConcurrency(enabledChannels, ROUTE_PROBE_CONCURRENCY, async (channel) => {
-      const probe = await probeMarketplaceModelAvailability({
-        modelName: route.modelPattern,
-        accountId: channel.accountId,
-        siteName: channel.site.name || undefined,
-        preferredTokenId: channel.token?.id ?? null,
-        skipAutoCreate: true,
-      });
+    if (!targetRouteIds || targetRouteIds.length === 0) {
+      return reply.code(400).send({ success: false, message: '请提供 routeIds 或设置 allExactModelRoutes=true' });
+    }
 
-      const baseResult: RouteProbeChannelResult = probe.success
-        ? {
-          channelId: channel.id,
-          accountId: channel.accountId,
-          accountName: channel.account.username || null,
-          siteId: channel.site.id,
-          siteName: channel.site.name || `site-${channel.site.id}`,
-          tokenId: channel.token?.id ?? null,
-          tokenName: channel.token?.name ?? null,
-          sourceModel: channel.sourceModel ?? null,
-          available: probe.available === true,
-          reason: probe.reason,
-          probeClassification: probe.probeClassification ?? null,
-          probeEndpoint: probe.probeEndpoint ?? null,
-          latencyMs: probe.latencyMs ?? null,
-          detectionMethod: probe.detectionMethod,
-          governanceAction: 'none',
-          governanceReasonCode: null,
-        }
-        : {
-          channelId: channel.id,
-          accountId: channel.accountId,
-          accountName: channel.account.username || null,
-          siteId: channel.site.id,
-          siteName: channel.site.name || `site-${channel.site.id}`,
-          tokenId: channel.token?.id ?? null,
-          tokenName: channel.token?.name ?? null,
-          sourceModel: channel.sourceModel ?? null,
-          available: false,
-          reason: probe.message || probe.error,
-          probeClassification: classifyProbeClassificationFromError(probe.error),
-          probeEndpoint: null,
-          latencyMs: probe.latencyMs ?? null,
-          detectionMethod: 'probe_failed',
-          governanceAction: 'none',
-          governanceReasonCode: null,
-        };
+    const routes = await Promise.all(targetRouteIds.map((id) => getRouteWithSources(id)));
+    const validRoutes = routes.filter((r): r is NonNullable<typeof r> => r !== null);
 
-      return await applyRouteProbeGovernance({
-        channel,
-        route,
-        probeModel: route.modelPattern,
-        result: baseResult,
-        autoGovernance,
-      });
+    if (validRoutes.length === 0) {
+      return reply.code(404).send({ success: false, message: '未找到有效路由' });
+    }
+
+    const channelsByRoute = await fetchChannelsForRouteRows(validRoutes);
+    const routeChannelPairs = validRoutes.map((route) => ({
+      route,
+      channels: (channelsByRoute.get(route.id) || [])
+        .filter((ch) => ch.enabled !== false),
+    }));
+
+    const result = await probeBatchRoutes(routeChannelPairs, {
+      limit: body.limit,
+      autoGovernance: body.autoGovernance,
     });
 
-    const response: RouteProbeResponse = {
+    return {
       success: true,
-      routeId: route.id,
-      routeModelPattern: route.modelPattern,
-      probedModel: route.modelPattern,
-      autoGovernance,
-      total: items.length,
-      availableCount: items.filter((item) => item.available).length,
-      unavailableCount: items.filter((item) => !item.available).length,
-      failedCount: items.filter((item) => item.detectionMethod === 'probe_failed').length,
-      items,
+      results: result.results,
+      totalProbed: result.totalProbed,
     };
-    if (items.some((item) => item.governanceAction !== 'none')) {
-      invalidateTokenRouterCache();
-    }
-    return response;
   });
 
   // Batch add channels to a route

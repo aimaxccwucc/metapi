@@ -5,6 +5,7 @@ import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { appendSessionTokenRebindHint } from './alertRules.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { invalidateTokenRouterCache } from './tokenRouter.js';
+import { triggerRouteProbeForFailedModel } from './routeProbeService.js';
 
 export async function reportTokenExpired(params: {
   accountId: number;
@@ -63,4 +64,7 @@ export async function reportProxyAllFailed(params: { model: string; reason: stri
     `模型=${params.model}, 原因=${params.reason}`,
     'error',
   );
+
+  // Trigger background probe for the failed model (fire-and-forget)
+  triggerRouteProbeForFailedModel(params.model).catch(() => {});
 }
