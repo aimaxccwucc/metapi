@@ -633,7 +633,7 @@ function RouteCardInner({
         </div>
       )}
 
-      {!readOnlyRoute && exactRoute ? (
+      {route.probePolicy === 'manual' && route.channelCount > 0 ? (
         <div
           style={{
             border: '1px solid var(--color-border)',
