@@ -675,7 +675,7 @@ function RouteCardInner({
               disabled={probingChannels}
               style={{ fontSize: 12, padding: '6px 10px', border: '1px solid var(--color-border)' }}
             >
-              {probingChannels ? tr('探测中...') : tr('探测通道')}
+              {probingChannels ? <><span className="spinner spinner-sm" /> {tr('探测中')} ({route.channelCount} {tr('通道')})</> : tr('探测通道')}
             </button>
           </div>
           {routeProbeSummary?.items?.length ? (

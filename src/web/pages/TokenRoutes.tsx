@@ -1544,7 +1544,7 @@ export default function TokenRoutes() {
   };
 
   const handleProbeRouteChannels = async (route: RouteSummaryRow) => {
-    if (!isRouteExactModel(route) || route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true) {
+    if (route.kind === 'zero_channel' || route.readOnly === true || route.isVirtual === true) {
       toast.error('当前路由不支持批量探测通道');
       return;
     }
