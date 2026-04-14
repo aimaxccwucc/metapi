@@ -314,7 +314,7 @@ function RouteCardInner({
         onClick={() => onToggleExpand(route.id)}
         style={{ cursor: 'pointer' }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, width: 20, height: 20 }}>
             {routeIcon.kind === 'brand' ? (
               <BrandGlyph icon={routeIcon.value} alt={title} size={18} fallbackText={title} />
@@ -327,7 +327,7 @@ function RouteCardInner({
             ) : null}
           </span>
 
-          <code style={{ fontWeight: 600, fontSize: 13, color: 'var(--color-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }}>
+          <code style={{ fontWeight: 600, fontSize: 13, color: 'var(--color-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 120, maxWidth: 360, flex: '1 1 auto' }}>
             {title}
           </code>
 
