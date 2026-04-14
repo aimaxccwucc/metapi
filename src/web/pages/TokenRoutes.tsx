@@ -1559,17 +1559,32 @@ export default function TokenRoutes() {
         loadRouteOverview(),
         refreshGovernanceSubjects(),
       ]);
-      const unavailablePreview = result.items
-        .filter((item) => !item.available)
-        .slice(0, 2)
+      const availableItems = result.items.filter((item) => item.available);
+      const reallyUnavailable = result.items.filter((item) => !item.available && item.detectionMethod !== 'unknown');
+      const skippedItems = result.items.filter((item) => !item.available && item.detectionMethod === 'unknown');
+      const suppressedCount = result.items.filter((item) => item.governanceAction === 'suppressed').length;
+      const availablePreview = availableItems.slice(0, 5)
+        .map((item) => item.siteName)
+        .join('、');
+      const unavailablePreview = reallyUnavailable.slice(0, 3)
         .map((item) => `${item.siteName}${item.tokenName ? `/${item.tokenName}` : ''}`)
         .join('、');
-      if (result.unavailableCount > 0) {
-        toast.error(
-          `探测完成：可用 ${result.availableCount}/${result.total}，已隔离 ${result.items.filter((item) => item.governanceAction === 'suppressed').length} 个${unavailablePreview ? `，异常通道 ${unavailablePreview}` : ''}`,
-        );
+      let msg = `探测完成：${availableItems.length} 可用`
+        + (skippedItems.length > 0 ? `，${reallyUnavailable.length} 不可用，${skippedItems.length} 跳过` : `，${reallyUnavailable.length} 不可用`);
+      msg += `（共 ${result.total} 个通道）`;
+      if (availablePreview) {
+        msg += `\n可用：${availablePreview}${availableItems.length > 5 ? ' ...' : ''}`;
+      }
+      if (unavailablePreview) {
+        msg += `\n不可用：${unavailablePreview}${reallyUnavailable.length > 3 ? ' ...' : ''}`;
+      }
+      if (suppressedCount > 0) {
+        msg += `\n已隔离 ${suppressedCount} 个`;
+      }
+      if (availableItems.length > 0) {
+        toast.success(msg);
       } else {
-        toast.success(`探测完成：${route.modelPattern} 的 ${result.total} 个通道均可用`);
+        toast.error(msg);
       }
     } catch (error: any) {
       toast.error(error?.message || '批量探测通道失败');
@@ -1881,11 +1896,29 @@ export default function TokenRoutes() {
                 const result = await api.probeBatchRoutes({ routeIds: manualRouteIds, autoGovernance: true, earlyStopOnAvailable: true });
                 const totalAvailable = result.results.reduce((s, r) => s + r.availableCount, 0);
                 const totalUnavailable = result.results.reduce((s, r) => s + r.unavailableCount, 0);
+                const totalSkipped = result.results.reduce((s, r) => s + (r.skippedCount ?? 0), 0);
+                const totalFailed = result.results.reduce((s, r) => s + r.failedCount, 0);
+                const availableSites = result.results
+                  .flatMap((r) => r.items.filter((i) => i.available).slice(0, 3).map((i) => `${r.routeModelPattern}@${i.siteName}`))
+                  .slice(0, 8)
+                  .join('、');
                 await Promise.all([
                   loadRouteOverview(),
                   loadRouteDecisions(routeSummaries, { force: true }),
                 ]);
-                toast.success(`批量探测完成：${result.results.length} 条路由，${totalAvailable} 个通道可用，${totalUnavailable} 个不可用`);
+                let batchMsg = `批量探测完成：${result.results.length} 条路由，${totalAvailable} 可用`;
+                if (totalSkipped > 0) {
+                  batchMsg += `，${totalUnavailable} 不可用，${totalSkipped} 跳过`;
+                } else {
+                  batchMsg += `，${totalUnavailable} 不可用`;
+                }
+                if (totalFailed > 0) batchMsg += `，${totalFailed} 探测失败`;
+                if (availableSites) batchMsg += `\n可用站点：${availableSites}`;
+                if (totalAvailable > 0) {
+                  toast.success(batchMsg);
+                } else {
+                  toast.error(batchMsg);
+                }
               } catch (error: any) {
                 toast.error(error?.message || '批量探测失败');
               } finally {

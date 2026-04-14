@@ -49,6 +49,7 @@ export type RouteProbeResponse = {
   total: number;
   availableCount: number;
   unavailableCount: number;
+  skippedCount: number;
   failedCount: number;
   items: RouteProbeItem[];
 };
@@ -270,6 +271,7 @@ export async function probeRouteChannelsForRoute(
       total: 0,
       availableCount: 0,
       unavailableCount: 0,
+      skippedCount: 0,
       failedCount: 0,
       items: [],
     };
@@ -374,7 +376,8 @@ export async function probeRouteChannelsForRoute(
     autoGovernance,
     total: items.length,
     availableCount: items.filter((item) => item.available).length,
-    unavailableCount: items.filter((item) => !item.available).length,
+    unavailableCount: items.filter((item) => !item.available && item.detectionMethod !== 'unknown').length,
+    skippedCount: items.filter((item) => !item.available && item.detectionMethod === 'unknown').length,
     failedCount: items.filter((item) => item.detectionMethod === 'probe_failed').length,
     items,
   };
@@ -417,6 +420,7 @@ export async function probeBatchRoutes(
           total: 0,
           availableCount: 0,
           unavailableCount: 0,
+          skippedCount: 0,
           failedCount: 0,
           items: [],
         };

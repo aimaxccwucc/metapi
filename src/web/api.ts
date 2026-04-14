@@ -771,6 +771,7 @@ export type RouteProbeResponse = {
   total: number;
   availableCount: number;
   unavailableCount: number;
+  skippedCount: number;
   failedCount: number;
   items: RouteProbeItem[];
 };
