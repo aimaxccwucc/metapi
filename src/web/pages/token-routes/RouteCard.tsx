@@ -683,43 +683,52 @@ function RouteCardInner({
               <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                 {tr('探测摘要仅保留在当前页面；隔离/恢复治理状态会持久化到数据库。')}
               </div>
-              {routeProbeSummary.items.slice(0, 4).map((item) => (
-                <div key={item.channelId} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
-                  <span className={`badge ${item.available ? 'badge-success' : 'badge-warning'}`} style={{ fontSize: 10 }}>
-                    {item.available ? tr('可用') : tr('不可用')}
-                  </span>
-                  <code style={{ fontSize: 11 }}>{item.siteName}</code>
-                  {item.tokenName ? (
-                    <span className="badge badge-muted" style={{ fontSize: 10 }}>{item.tokenName}</span>
-                  ) : null}
-                  {item.governanceAction === 'suppressed' ? (
-                    <span className="badge badge-error" style={{ fontSize: 10 }}>{tr('已隔离')}</span>
-                  ) : item.governanceAction === 'cleared' ? (
-                    <span className="badge badge-success" style={{ fontSize: 10 }}>{tr('已解除隔离')}</span>
-                  ) : null}
-                  <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{item.reason}</span>
-                  {item.tokenId ? (
-                    <button
-                      type="button"
-                      className="btn btn-link"
-                      onClick={() => onOpenDiagnostics('token', item.tokenId!)}
-                    >
-                      {tr('诊断令牌')}
-                    </button>
-                  ) : item.accountId ? (
-                    <button
-                      type="button"
-                      className="btn btn-link"
-                      onClick={() => onOpenDiagnostics('account', item.accountId)}
-                    >
-                      {tr('诊断账号')}
-                    </button>
-                  ) : null}
-                </div>
-              ))}
-              {routeProbeSummary.items.length > 4 ? (
+              {[...routeProbeSummary.items]
+                .sort((a, b) => {
+                  if (a.available && !b.available) return -1;
+                  if (!a.available && b.available) return 1;
+                  if (!a.inconclusive && b.inconclusive) return -1;
+                  if (a.inconclusive && !b.inconclusive) return 1;
+                  return 0;
+                })
+                .slice(0, 6)
+                .map((item) => (
+                  <div key={item.channelId} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                    <span className={`badge ${item.available ? 'badge-success' : item.inconclusive ? 'badge-info' : 'badge-warning'}`} style={{ fontSize: 10 }}>
+                      {item.available ? tr('可用') : item.inconclusive ? tr('待确认') : tr('不可用')}
+                    </span>
+                    <code style={{ fontSize: 11 }}>{item.siteName}</code>
+                    {item.tokenName ? (
+                      <span className="badge badge-muted" style={{ fontSize: 10 }}>{item.tokenName}</span>
+                    ) : null}
+                    {item.governanceAction === 'suppressed' ? (
+                      <span className="badge badge-error" style={{ fontSize: 10 }}>{tr('已隔离')}</span>
+                    ) : item.governanceAction === 'cleared' ? (
+                      <span className="badge badge-success" style={{ fontSize: 10 }}>{tr('已解除隔离')}</span>
+                    ) : null}
+                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{item.reason}</span>
+                    {item.tokenId ? (
+                      <button
+                        type="button"
+                        className="btn btn-link"
+                        onClick={() => onOpenDiagnostics('token', item.tokenId!)}
+                      >
+                        {tr('诊断令牌')}
+                      </button>
+                    ) : item.accountId ? (
+                      <button
+                        type="button"
+                        className="btn btn-link"
+                        onClick={() => onOpenDiagnostics('account', item.accountId)}
+                      >
+                        {tr('诊断账号')}
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+              {routeProbeSummary.items.length > 6 ? (
                 <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                  {`其余 ${routeProbeSummary.items.length - 4} 个通道结果已写入当前页状态，可再次点击探测刷新。`}
+                  {`其余 ${routeProbeSummary.items.length - 6} 个通道结果已写入当前页状态，可再次点击探测刷新。`}
                 </div>
               ) : null}
             </div>
