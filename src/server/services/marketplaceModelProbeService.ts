@@ -138,8 +138,10 @@ export function classifyProbeFailureMessage(message: string): MarketplaceProbeCl
     return 'model_unavailable';
   }
   if (
-    /unauthorized|forbidden|invalid api key|authentication|auth|token|apikey/i.test(text)
-    || /未授权|鉴权|权限|密钥|key 无效|token 无效/i.test(text)
+    /unauthorized|forbidden|invalid api key|authentication|auth|apikey/i.test(text)
+    || /no\s+(active|available|valid)\s+api\s*keys?/i.test(text)
+    || /未授权|鉴权|权限|密钥|key 无效|token 无效|令牌|无效的令牌|无效的?key|token.*无效|key.*无效/i.test(text)
+    || /无效的?token|令牌.*无效|token\s*(is\s*)?(invalid|expired|无效)/i.test(text)
   ) {
     return 'credential';
   }
@@ -147,8 +149,9 @@ export function classifyProbeFailureMessage(message: string): MarketplaceProbeCl
 }
 
 function formatProbeReason(input: { listHit: boolean; probe: MarketplaceProbeResult | null }): string {
-  if (input.listHit) return '模型已出现在上游列表中';
-  if (!input.probe) return '上游模型列表未包含该模型，且未完成实时探测';
+  if (!input.probe) {
+    return input.listHit ? '模型已出现在上游列表中，但未完成实时探测' : '上游模型列表未包含该模型，且未完成实时探测';
+  }
 
   const endpointLabel = input.probe.endpoint || 'auto';
   if (input.probe.available === true) {
@@ -163,7 +166,8 @@ function formatProbeReason(input: { listHit: boolean; probe: MarketplaceProbeRes
   if (input.probe.classification === 'protocol_mismatch') {
     return `该站点可能使用了不同的请求协议（${endpointLabel}）：${input.probe.reason}`;
   }
-  return `上游列表未命中，实时探测未得出确定结论：${input.probe.reason}`;
+  const listPrefix = input.listHit ? '模型已在列表中，' : '';
+  return `${listPrefix}实时探测未得出确定结论（${endpointLabel}）：${input.probe.reason}`;
 }
 
 function buildProbeEndpoints(platform: string): Array<'chat' | 'responses' | 'messages'> {

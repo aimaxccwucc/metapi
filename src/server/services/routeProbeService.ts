@@ -29,6 +29,7 @@ export type RouteProbeItem = {
   tokenName: string | null;
   sourceModel: string | null;
   available: boolean;
+  inconclusive?: boolean;
   reason: string;
   probeClassification: MarketplaceProbeClassification | null;
   probeEndpoint: string | null;
@@ -50,6 +51,7 @@ export type RouteProbeResponse = {
   availableCount: number;
   unavailableCount: number;
   skippedCount: number;
+  inconclusiveCount: number;
   failedCount: number;
   items: RouteProbeItem[];
 };
@@ -272,6 +274,7 @@ export async function probeRouteChannelsForRoute(
       availableCount: 0,
       unavailableCount: 0,
       skippedCount: 0,
+      inconclusiveCount: 0,
       failedCount: 0,
       items: [],
     };
@@ -280,7 +283,7 @@ export async function probeRouteChannelsForRoute(
   const autoGovernance = options?.autoGovernance === true;
   const earlyStop = options?.earlyStopOnAvailable === true;
   let foundAvailable = false;
-  const items = await mapWithConcurrency(slicedChannels, ROUTE_PROBE_CONCURRENCY, async (channel) => {
+  const items: RouteProbeItem[] = await mapWithConcurrency(slicedChannels, ROUTE_PROBE_CONCURRENCY, async (channel) => {
     // Early stop: skip remaining channels once we found one available
     if (earlyStop && foundAvailable) {
       return {
@@ -300,7 +303,7 @@ export async function probeRouteChannelsForRoute(
         detectionMethod: 'unknown' as const,
         governanceAction: 'none' as const,
         governanceReasonCode: null,
-      };
+      } satisfies RouteProbeItem;
     }
 
     const probe = await probeMarketplaceModelAvailability({
@@ -322,6 +325,7 @@ export async function probeRouteChannelsForRoute(
         tokenName: probe.usedTokenName ?? channel.token?.name ?? null,
         sourceModel: channel.sourceModel ?? null,
         available: probe.available === true,
+        inconclusive: probe.available !== true && (probe.probeClassification === 'inconclusive' || probe.probeClassification === 'protocol_mismatch') ? true : undefined,
         reason: probe.reason,
         probeClassification: probe.probeClassification ?? null,
         probeEndpoint: probe.probeEndpoint ?? null,
@@ -351,7 +355,7 @@ export async function probeRouteChannelsForRoute(
         governanceReasonCode: null,
         autoKeyCreated: probe.autoKeyCreated || undefined,
         autoKeyName: probe.autoKeyName,
-      };
+      } satisfies RouteProbeItem;
 
     if (baseResult.available) foundAvailable = true;
 
@@ -376,8 +380,9 @@ export async function probeRouteChannelsForRoute(
     autoGovernance,
     total: items.length,
     availableCount: items.filter((item) => item.available).length,
-    unavailableCount: items.filter((item) => !item.available && item.detectionMethod !== 'unknown').length,
+    unavailableCount: items.filter((item) => !item.available && !item.inconclusive && item.detectionMethod !== 'unknown').length,
     skippedCount: items.filter((item) => !item.available && item.detectionMethod === 'unknown').length,
+    inconclusiveCount: items.filter((item) => item.inconclusive === true).length,
     failedCount: items.filter((item) => item.detectionMethod === 'probe_failed').length,
     items,
   };
@@ -421,9 +426,10 @@ export async function probeBatchRoutes(
           availableCount: 0,
           unavailableCount: 0,
           skippedCount: 0,
+          inconclusiveCount: 0,
           failedCount: 0,
           items: [],
-        };
+        } satisfies RouteProbeResponse;
       }
       return probeRouteChannelsForRoute(pair.route, pair.channels, options);
     },

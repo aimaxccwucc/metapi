@@ -1560,7 +1560,8 @@ export default function TokenRoutes() {
         refreshGovernanceSubjects(),
       ]);
       const availableItems = result.items.filter((item) => item.available);
-      const reallyUnavailable = result.items.filter((item) => !item.available && item.detectionMethod !== 'unknown');
+      const inconclusiveItems = result.items.filter((item) => item.inconclusive === true);
+      const reallyUnavailable = result.items.filter((item) => !item.available && !item.inconclusive && item.detectionMethod !== 'unknown');
       const skippedItems = result.items.filter((item) => !item.available && item.detectionMethod === 'unknown');
       const suppressedCount = result.items.filter((item) => item.governanceAction === 'suppressed').length;
       const availablePreview = availableItems.slice(0, 5)
@@ -1569,8 +1570,13 @@ export default function TokenRoutes() {
       const unavailablePreview = reallyUnavailable.slice(0, 3)
         .map((item) => `${item.siteName}${item.tokenName ? `/${item.tokenName}` : ''}`)
         .join('、');
-      let msg = `探测完成：${availableItems.length} 可用`
-        + (skippedItems.length > 0 ? `，${reallyUnavailable.length} 不可用，${skippedItems.length} 跳过` : `，${reallyUnavailable.length} 不可用`);
+      let msg = `探测完成：${availableItems.length} 可用`;
+      if (inconclusiveItems.length > 0) {
+        msg += `，${reallyUnavailable.length} 不可用，${inconclusiveItems.length} 待确认`;
+      } else {
+        msg += `，${reallyUnavailable.length} 不可用`;
+      }
+      if (skippedItems.length > 0) msg += `，${skippedItems.length} 跳过`;
       msg += `（共 ${result.total} 个通道）`;
       if (availablePreview) {
         msg += `\n可用：${availablePreview}${availableItems.length > 5 ? ' ...' : ''}`;
@@ -1897,6 +1903,7 @@ export default function TokenRoutes() {
                 const totalAvailable = result.results.reduce((s, r) => s + r.availableCount, 0);
                 const totalUnavailable = result.results.reduce((s, r) => s + r.unavailableCount, 0);
                 const totalSkipped = result.results.reduce((s, r) => s + (r.skippedCount ?? 0), 0);
+                const totalInconclusive = result.results.reduce((s, r) => s + (r.inconclusiveCount ?? 0), 0);
                 const totalFailed = result.results.reduce((s, r) => s + r.failedCount, 0);
                 const availableSites = result.results
                   .flatMap((r) => r.items.filter((i) => i.available).slice(0, 3).map((i) => `${r.routeModelPattern}@${i.siteName}`))
@@ -1907,11 +1914,12 @@ export default function TokenRoutes() {
                   loadRouteDecisions(routeSummaries, { force: true }),
                 ]);
                 let batchMsg = `批量探测完成：${result.results.length} 条路由，${totalAvailable} 可用`;
-                if (totalSkipped > 0) {
-                  batchMsg += `，${totalUnavailable} 不可用，${totalSkipped} 跳过`;
+                if (totalInconclusive > 0) {
+                  batchMsg += `，${totalUnavailable} 不可用，${totalInconclusive} 待确认`;
                 } else {
                   batchMsg += `，${totalUnavailable} 不可用`;
                 }
+                if (totalSkipped > 0) batchMsg += `，${totalSkipped} 跳过`;
                 if (totalFailed > 0) batchMsg += `，${totalFailed} 探测失败`;
                 if (availableSites) batchMsg += `\n可用站点：${availableSites}`;
                 if (totalAvailable > 0) {

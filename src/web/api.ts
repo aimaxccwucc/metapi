@@ -753,6 +753,7 @@ export type RouteProbeItem = {
   tokenName: string | null;
   sourceModel: string | null;
   available: boolean;
+  inconclusive?: boolean;
   reason: string;
   probeClassification: 'supported' | 'model_unavailable' | 'credential' | 'protocol_mismatch' | 'inconclusive' | null;
   probeEndpoint: string | null;
@@ -772,6 +773,7 @@ export type RouteProbeResponse = {
   availableCount: number;
   unavailableCount: number;
   skippedCount: number;
+  inconclusiveCount: number;
   failedCount: number;
   items: RouteProbeItem[];
 };
