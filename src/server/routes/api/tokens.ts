@@ -2108,10 +2108,6 @@ export async function tokensRoutes(app: FastifyInstance) {
     if (!route) {
       return reply.code(404).send({ success: false, message: '路由不存在' });
     }
-    if (isExplicitGroupRoute(route)) {
-      return reply.code(400).send({ success: false, message: '显式群组暂不支持直接批量探测通道' });
-    }
-
     const channelsByRoute = await fetchChannelsForRouteRows([route]);
     const enabledChannels = (channelsByRoute.get(routeId) || [])
       .filter((channel) => channel.enabled !== false);
