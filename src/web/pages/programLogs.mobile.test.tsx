@@ -7,6 +7,7 @@ import ProgramLogs from './ProgramLogs.js';
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getEvents: vi.fn(),
+    getTasks: vi.fn(),
     markEventRead: vi.fn(),
     markAllEventsRead: vi.fn(),
     clearEvents: vi.fn(),
@@ -47,6 +48,7 @@ async function flushMicrotasks() {
 describe('ProgramLogs mobile layout', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    apiMock.getTasks.mockResolvedValue({ tasks: [] });
     apiMock.getEvents.mockResolvedValue([
       {
         id: 1,
@@ -79,6 +81,13 @@ describe('ProgramLogs mobile layout', () => {
             </ToastProvider>
           </MemoryRouter>,
         );
+      });
+      await flushMicrotasks();
+
+      // Switch to the events tab (default is 'tasks')
+      const eventsTab = findButtonByText(root!.root, '程序日志');
+      await act(async () => {
+        eventsTab.props.onClick();
       });
       await flushMicrotasks();
 

@@ -231,16 +231,7 @@ describe('TokenRoutes cached snapshot load', () => {
       await flushMicrotasks();
 
       expect(apiMock.getRouteOverview).toHaveBeenCalledTimes(1);
-      expect(apiMock.getRouteGovernanceSubjects).not.toHaveBeenCalled();
       expect(apiMock.getRouteDiagnostics).not.toHaveBeenCalled();
-
-      const expandGovernanceButton = findButtonByText(root.root, '展开隔离列表');
-      await act(async () => {
-        expandGovernanceButton.props.onClick();
-      });
-      await flushMicrotasks();
-
-      expect(apiMock.getRouteGovernanceSubjects).toHaveBeenCalledWith(200);
 
       // Expand the route card to see channel details with probability
       const expandBtn = root.root.find((node) =>

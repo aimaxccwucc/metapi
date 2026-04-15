@@ -158,7 +158,7 @@ describe('Dashboard site observability panel', () => {
       expect(String(logLink.props.href || logLink.props.to || '')).toContain('/logs?siteId=1');
       expect(collectText(root!.root)).toContain('运行时概览');
       expect(collectText(root!.root)).toContain('数据库未就绪，配置与统计可能异常。');
-      expect(collectText(root!.root)).toContain('后台任务失败 1 个，请尽快排查。');
+      expect(collectText(root!.root)).toContain('失败 1 · 统一在任务中心查看');
       expect(collectText(root!.root)).toContain('存在 5 条未读状态事件。');
       expect(collectText(root!.root)).toContain('状态事件');
       expect(collectText(root!.root)).toContain('路由策略');

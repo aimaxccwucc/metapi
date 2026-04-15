@@ -1723,6 +1723,7 @@ describe('TokenRoutes grouped source models', () => {
         modelMapping: null,
         enabled: true,
         routeMode: 'pattern',
+        probePolicy: 'manual',
         sourceRouteIds: [],
         channelCount: 2,
         enabledChannelCount: 2,
