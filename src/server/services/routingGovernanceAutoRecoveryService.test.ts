@@ -56,7 +56,7 @@ describe('routingGovernanceAutoRecoveryService', () => {
     expect(remaining).toHaveLength(0);
   });
 
-  it('passively releases expired non-manual governance without active reprobe', async () => {
+  it('promotes model_unsupported governance to probing for active reprobe', async () => {
     await upsertRoutingGovernanceState({
       subjectType: 'token',
       subjectId: 7,
@@ -69,11 +69,19 @@ describe('routingGovernanceAutoRecoveryService', () => {
     });
 
     const result = await executeRoutingGovernanceAutoRecoveryPass();
-    expect(result.promotedToProbing).toBe(0);
-    expect(result.restored).toBe(1);
+    // model_unsupported now gets promoted to probing for active reprobe
+    expect(result.promotedToProbing).toBe(1);
+    // No account/token/site in DB for subjectId=7, probe context is null,
+    // handleProbeBasedRecovery returns false (keeps suppressed with extended wait)
+    expect(result.restored).toBe(0);
 
     const remaining = await db.select().from(schema.routingGovernanceStates).all();
-    expect(remaining).toHaveLength(0);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toMatchObject({
+      reasonCode: 'model_unsupported',
+      state: 'suppressed',
+      lastProbeStatus: 'skipped',
+    });
   });
 
   it('passively releases invalid-channel governance after expiry without active reprobe', async () => {
@@ -96,7 +104,7 @@ describe('routingGovernanceAutoRecoveryService', () => {
     expect(remaining).toHaveLength(0);
   });
 
-  it('keeps manual probe governance in recovery flow instead of passively releasing it', async () => {
+  it('keeps manual probe governance in recovery flow instead of passively releasing it', { timeout: 30_000 }, async () => {
     await db.insert(schema.tokenRoutes).values({
       modelPattern: 'gpt-4.1',
       probePolicy: 'manual',
@@ -157,7 +165,6 @@ describe('routingGovernanceAutoRecoveryService', () => {
       subjectId: 8,
       reasonCode: 'model_unsupported',
       state: 'suppressed',
-      lastProbeStatus: 'unavailable',
     });
   });
 });

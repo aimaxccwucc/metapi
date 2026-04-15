@@ -77,6 +77,7 @@ function mapProbeClassificationToGovernanceReason(
 ): RoutingGovernanceReasonCode | null {
   if (classification === 'model_unavailable') return 'model_unsupported';
   if (classification === 'credential') return 'auth';
+  if (classification === 'inconclusive') return 'invalid_channel';
   return null;
 }
 

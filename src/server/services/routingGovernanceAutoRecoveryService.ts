@@ -483,6 +483,11 @@ async function processProbingEntry(entry: RoutingGovernanceEntry): Promise<boole
     return await handleBalanceRecovery(entry);
   }
 
+  // auth / model_unsupported: 主动探测恢复（探测不可用或无上下文时已自动延长等待）
+  if (reasonCode === 'auth' || reasonCode === 'model_unsupported') {
+    return await handleProbeBasedRecovery(entry);
+  }
+
   if (
     reasonCode === 'invalid_channel'
     || reasonCode === 'upstream_group_empty'
@@ -528,7 +533,7 @@ export async function executeRoutingGovernanceAutoRecoveryPass(options: {
       || reasonCode === 'balance_exhausted'
       || reasonCode === 'quota_exhausted';
     const allowActiveReprobe = isManualRouteProbeGovernance(state);
-    const supportsProbeRecovery = false;
+    const supportsProbeRecovery = reasonCode === 'auth' || reasonCode === 'model_unsupported';
 
     if (supportsZeroCostRecovery || allowActiveReprobe || supportsProbeRecovery) {
       await markRoutingGovernanceProbeInFlight(state.id, now, probingLeaseMs);
