@@ -68,9 +68,9 @@ const ROUTE_GROUPING_COLUMN_COMPATIBILITY_SPECS: RouteGroupingColumnCompatibilit
     table: 'token_routes',
     column: 'routing_strategy',
     addSql: {
-      sqlite: 'ALTER TABLE token_routes ADD COLUMN routing_strategy text DEFAULT \'weighted\';',
-      mysql: 'ALTER TABLE `token_routes` ADD COLUMN `routing_strategy` VARCHAR(32) NULL DEFAULT \'weighted\'',
-      postgres: 'ALTER TABLE "token_routes" ADD COLUMN "routing_strategy" TEXT DEFAULT \'weighted\'',
+      sqlite: 'ALTER TABLE token_routes ADD COLUMN routing_strategy text DEFAULT \'stable_first\';',
+      mysql: 'ALTER TABLE `token_routes` ADD COLUMN `routing_strategy` VARCHAR(32) NULL DEFAULT \'stable_first\'',
+      postgres: 'ALTER TABLE "token_routes" ADD COLUMN "routing_strategy" TEXT DEFAULT \'stable_first\'',
     },
   },
   {

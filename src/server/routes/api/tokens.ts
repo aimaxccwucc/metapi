@@ -9,7 +9,7 @@ import {
   syncTokensFromUpstream,
 } from '../../services/accountTokenService.js';
 import { fetchModelPricingCatalog } from '../../services/modelPricingService.js';
-import { normalizeRouteRoutingStrategy } from '../../services/routeRoutingStrategy.js';
+import { DEFAULT_ROUTE_ROUTING_STRATEGY, normalizeRouteRoutingStrategy } from '../../services/routeRoutingStrategy.js';
 import {
   invalidateTokenRouterCache,
   listAccountRoutingRuntimeSnapshots,
@@ -1202,7 +1202,7 @@ function mapRouteSummaryRow(route: RouteRow, summary: RouteChannelSummary | unde
     probePolicy: route.probePolicy,
     sourceRouteIds: route.sourceRouteIds,
     modelMapping: route.modelMapping ?? null,
-    routingStrategy: route.routingStrategy ?? 'weighted',
+    routingStrategy: route.routingStrategy ?? DEFAULT_ROUTE_ROUTING_STRATEGY,
     enabled: route.enabled,
     channelCount: summary?.channelCount ?? 0,
     enabledChannelCount: summary?.enabledChannelCount ?? 0,
@@ -1491,7 +1491,7 @@ export async function tokensRoutes(app: FastifyInstance) {
   app.post<{ Body?: { limit?: number; includeProbing?: boolean } }>('/api/routes/governance/recovery-pass', async (request) => {
     const result = await executeRoutingGovernanceAutoRecoveryPass({
       limit: typeof request.body?.limit === 'number' ? request.body.limit : undefined,
-      includeProbing: request.body?.includeProbing === true,
+      includeProbing: request.body?.includeProbing !== false,
     });
     if (result.scanned > 0 || result.promotedToProbing > 0 || result.restored > 0) {
       await recordRoutingGovernanceAutoRecoveryEvent(result);

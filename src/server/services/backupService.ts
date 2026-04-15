@@ -1896,7 +1896,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         probePolicy: row.probePolicy ?? 'system',
         decisionSnapshot: row.decisionSnapshot ?? null,
         decisionRefreshedAt: row.decisionRefreshedAt ?? null,
-        routingStrategy: row.routingStrategy ?? 'weighted',
+        routingStrategy: row.routingStrategy ?? 'stable_first',
         enabled: row.enabled,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,

@@ -226,6 +226,18 @@ export async function refreshOauthQuotaSnapshot(accountId: number): Promise<Oaut
   return persistQuotaSnapshot(accountId, snapshot);
 }
 
+/**
+ * Record a quota snapshot derived from response headers (e.g. Codex rate-limit headers).
+ * Stub implementation — the full upstream version parses x-ratelimit headers and persists
+ * a snapshot. Our codebase does not yet consume header-derived quota, so we return null.
+ */
+export async function recordOauthQuotaHeadersSnapshot(_input: {
+  accountId: number;
+  headers: { get(name: string): string | null };
+}): Promise<OauthQuotaSnapshot | null> {
+  return null;
+}
+
 export async function recordOauthQuotaResetHint(input: {
   accountId: number;
   statusCode: number;

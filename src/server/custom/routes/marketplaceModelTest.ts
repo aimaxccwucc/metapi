@@ -20,6 +20,7 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
         modelName,
         accountId,
         siteName,
+        forceRealtimeProbeOnListMiss: true,
       });
     } catch (error) {
       if (error instanceof MarketplaceModelProbeError) {

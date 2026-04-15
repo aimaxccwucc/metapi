@@ -1,6 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { getPreferredAccountToken, syncTokensFromUpstream } from './accountTokenService.js';
+import { ensureDefaultTokenForAccount, getPreferredAccountToken, syncTokensFromUpstream } from './accountTokenService.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
 import { fetchModelPricingCatalog } from './modelPricingService.js';
 import { getAdapter } from './platforms/index.js';
@@ -140,6 +140,8 @@ export function classifyProbeFailureMessage(message: string): MarketplaceProbeCl
   if (
     /unauthorized|forbidden|invalid api key|authentication|auth|apikey/i.test(text)
     || /no\s+(active|available|valid)\s+api\s*keys?/i.test(text)
+    || /no\s+access\s+to\s+model/i.test(text)
+    || /has\s+no\s+access\s+to\s+model/i.test(text)
     || /未授权|鉴权|权限|密钥|key 无效|token 无效|令牌|无效的令牌|无效的?key|token.*无效|key.*无效/i.test(text)
     || /无效的?token|令牌.*无效|token\s*(is\s*)?(invalid|expired|无效)/i.test(text)
   ) {
@@ -445,6 +447,8 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
   preferredTokenId?: number | null;
   preferredCredential?: string | null;
   allowAutoCreateKey?: boolean;
+  forceRealtimeProbeOnListMiss?: boolean;
+  allowListHitSuccess?: boolean;
 }): Promise<MarketplaceModelAvailabilityResult> {
   const modelName = String(input.modelName || '').trim();
   if (!modelName) {
@@ -498,7 +502,12 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
         MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
         `auto provision timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
       );
-      const createdItem = provision.results.find((item) => item.status === 'created' || item.status === 'reused') || null;
+      const createdItem = provision.results.find((item) => (
+        item.status === 'created'
+        || item.status === 'reused'
+        || typeof item.createdTokenId === 'number'
+        || !!item.createdTokenName
+      )) || null;
       if (createdItem) {
         preferredToken = createdItem.createdTokenId
           ? await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, createdItem.createdTokenId)).get()
@@ -524,6 +533,87 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
         autoKeyName = createdItem.createdTokenName || preferredToken?.name || null;
         autoKeyGroup = createdItem.createdTokenGroup || null;
         autoKeyTokenId = createdItem.createdTokenId || (typeof preferredToken?.id === 'number' ? preferredToken.id : null);
+
+        if (!modelCredential) {
+          try {
+            const upstreamTokens = await withTimeout(
+              () => adapter.getApiTokens(site.url, accountAccessToken, platformUserId),
+              MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
+              `token sync timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
+            );
+            await syncTokensFromUpstream(account.id, upstreamTokens);
+            preferredToken = await resolvePreferredTokenForCandidate(input.candidate, input.preferredTokenId);
+            if (!preferredToken) {
+              preferredToken = await getPreferredAccountToken(account.id);
+            }
+            modelCredential = (
+              (input.preferredCredential || '').trim()
+              || (preferredToken?.token || '').trim()
+              || (account.apiToken || '').trim()
+              || fallbackSiteApiKey
+            );
+            autoKeyCreated = !!modelCredential;
+            autoKeyName = autoKeyName || preferredToken?.name || null;
+            autoKeyTokenId = autoKeyTokenId || (typeof preferredToken?.id === 'number' ? preferredToken.id : null);
+          } catch {
+            // Keep probe behavior conservative: fall through to the explicit credential error below.
+          }
+        }
+
+        if (!modelCredential && createdItem.createdTokenName) {
+          const upstreamToken = await withTimeout(
+            () => adapter.getApiTokens(site.url, accountAccessToken, platformUserId),
+            MARKETPLACE_AUTO_KEY_TIMEOUT_MS,
+            `token lookup timeout (${Math.round(MARKETPLACE_AUTO_KEY_TIMEOUT_MS / 1000)}s)`,
+          ).then((items) => (
+            Array.isArray(items)
+              ? items.find((item) => String(item?.name || '').trim() === createdItem.createdTokenName)
+              : null
+          )).catch(() => null);
+
+          const upstreamTokenValue = String(upstreamToken?.key || '').trim();
+          if (upstreamTokenValue) {
+            const ensuredTokenId = await ensureDefaultTokenForAccount(account.id, upstreamTokenValue, {
+              name: createdItem.createdTokenName,
+              source: 'sync',
+              enabled: upstreamToken?.enabled ?? true,
+              tokenGroup: createdItem.createdTokenGroup || upstreamToken?.tokenGroup || null,
+            });
+            preferredToken = ensuredTokenId
+              ? await db.select().from(schema.accountTokens).where(eq(schema.accountTokens.id, ensuredTokenId)).get()
+              : preferredToken;
+            modelCredential = (
+              (input.preferredCredential || '').trim()
+              || upstreamTokenValue
+              || (preferredToken?.token || '').trim()
+              || (account.apiToken || '').trim()
+              || fallbackSiteApiKey
+            );
+            autoKeyCreated = !!modelCredential;
+            autoKeyName = autoKeyName || createdItem.createdTokenName || preferredToken?.name || null;
+            autoKeyTokenId = autoKeyTokenId || ensuredTokenId || (typeof preferredToken?.id === 'number' ? preferredToken.id : null);
+          }
+        }
+      }
+
+      if (!modelCredential) {
+        preferredToken = await resolvePreferredTokenForCandidate(input.candidate, input.preferredTokenId)
+          .catch(() => null);
+        if (!preferredToken) {
+          preferredToken = await getPreferredAccountToken(account.id);
+        }
+        modelCredential = (
+          (input.preferredCredential || '').trim()
+          || (preferredToken?.token || '').trim()
+          || (account.apiToken || '').trim()
+          || fallbackSiteApiKey
+        );
+        if (modelCredential) {
+          autoKeyCreated = true;
+          autoKeyName = autoKeyName || preferredToken?.name || null;
+          autoKeyGroup = autoKeyGroup || preferredToken?.tokenGroup || null;
+          autoKeyTokenId = autoKeyTokenId || (typeof preferredToken?.id === 'number' ? preferredToken.id : null);
+        }
       }
     } catch {
       // Keep probe behavior conservative: fall through to the explicit credential error below.
@@ -573,8 +663,31 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
       );
       listHit = normalizedSet.has(modelName)
         || Array.from(normalizedSet).some((item) => isModelAliasEquivalent(item, modelName));
-      // If model is not in the list at all, it's definitively unavailable — skip the real probe
-      if (!listHit) {
+      if (listHit && input.allowListHitSuccess === true) {
+        return {
+          success: true,
+          available: true,
+          modelName,
+          accountId: account.id,
+          accountName: account.username || null,
+          siteId: site.id,
+          siteName: site.name,
+          latencyMs: Date.now() - startedAt,
+          reason: '模型已命中站点列表，按轻量探测策略视为可用',
+          detectionMethod: 'model_list',
+          probeCheckedUrl: null,
+          probeStatusCode: null,
+          probeEndpoint: null,
+          probeClassification: 'supported',
+          autoKeyCreated,
+          autoKeyName,
+          autoKeyGroup,
+          autoKeyTokenId,
+          usedTokenId: typeof preferredToken?.id === 'number' ? preferredToken.id : null,
+          usedTokenName: preferredToken?.name || null,
+        };
+      }
+      if (!listHit && input.forceRealtimeProbeOnListMiss !== true) {
         return {
           success: true,
           available: false,
@@ -667,6 +780,8 @@ export async function testMarketplaceModelAvailability(input: {
   preferredTokenId?: number | null;
   preferredCredential?: string | null;
   allowAutoCreateKey?: boolean;
+  forceRealtimeProbeOnListMiss?: boolean;
+  allowListHitSuccess?: boolean;
 }): Promise<MarketplaceModelAvailabilityResult> {
   const candidate = await resolveMarketplaceProbeCandidate({
     modelName: input.modelName,
@@ -679,6 +794,8 @@ export async function testMarketplaceModelAvailability(input: {
     preferredTokenId: input.preferredTokenId,
     preferredCredential: input.preferredCredential,
     allowAutoCreateKey: input.allowAutoCreateKey,
+    forceRealtimeProbeOnListMiss: input.forceRealtimeProbeOnListMiss,
+    allowListHitSuccess: input.allowListHitSuccess,
   });
 }
 
@@ -689,6 +806,8 @@ export async function probeMarketplaceModelAvailability(input: {
   preferredTokenId?: number | null;
   preferredCredential?: string | null;
   skipAutoCreate?: boolean;
+  forceRealtimeProbeOnListMiss?: boolean;
+  allowListHitSuccess?: boolean;
 }): Promise<MarketplaceModelAvailabilitySuccess | MarketplaceModelAvailabilityFailure> {
   try {
     return await testMarketplaceModelAvailability({
@@ -698,6 +817,8 @@ export async function probeMarketplaceModelAvailability(input: {
       preferredTokenId: input.preferredTokenId,
       preferredCredential: input.preferredCredential,
       allowAutoCreateKey: input.skipAutoCreate !== true,
+      forceRealtimeProbeOnListMiss: input.forceRealtimeProbeOnListMiss,
+      allowListHitSuccess: input.allowListHitSuccess,
     });
   } catch (error) {
     if (error instanceof MarketplaceModelProbeError) {

@@ -74,6 +74,11 @@ import { DefaultProxyConductor } from '../conductor/DefaultProxyConductor.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
 
+function stripUpstreamFailurePrefix(rawErrorText?: string): string | undefined {
+  if (typeof rawErrorText !== 'string') return undefined;
+  return rawErrorText.replace(/^\[upstream:[^\]]+\]\s*/i, '');
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -356,9 +361,12 @@ export async function handleChatSurfaceRequest(
       }
     },
     getFailoverSiteId: (selected, failure) => {
+      const normalizedFailureText = stripUpstreamFailurePrefix(
+        typeof failure.rawErrorText === 'string' ? failure.rawErrorText : undefined,
+      );
       if (!shouldAvoidSiteForRequest(
         typeof failure.status === 'number' ? failure.status : 0,
-        typeof failure.rawErrorText === 'string' ? failure.rawErrorText : undefined,
+        normalizedFailureText,
       )) return null;
       const siteId = Number((selected.site as { id?: unknown }).id);
       return Number.isFinite(siteId) ? Math.trunc(siteId) : null;
@@ -1490,9 +1498,12 @@ export async function handleClaudeCountTokensSurfaceRequest(
       }
     },
     getFailoverSiteId: (selected, failure) => {
+      const normalizedFailureText = stripUpstreamFailurePrefix(
+        typeof failure.rawErrorText === 'string' ? failure.rawErrorText : undefined,
+      );
       if (!shouldAvoidSiteForRequest(
         typeof failure.status === 'number' ? failure.status : 0,
-        typeof failure.rawErrorText === 'string' ? failure.rawErrorText : undefined,
+        normalizedFailureText,
       )) return null;
       const siteId = Number((selected.site as { id?: unknown }).id);
       return Number.isFinite(siteId) ? Math.trunc(siteId) : null;

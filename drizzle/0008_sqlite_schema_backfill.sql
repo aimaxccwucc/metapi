@@ -25,7 +25,7 @@ ALTER TABLE `token_routes` ADD `decision_snapshot` text;
 --> statement-breakpoint
 ALTER TABLE `token_routes` ADD `decision_refreshed_at` text;
 --> statement-breakpoint
-ALTER TABLE `token_routes` ADD `routing_strategy` text DEFAULT 'weighted';
+ALTER TABLE `token_routes` ADD `routing_strategy` text DEFAULT 'stable_first';
 --> statement-breakpoint
 ALTER TABLE `route_channels` ADD `source_model` text;
 --> statement-breakpoint

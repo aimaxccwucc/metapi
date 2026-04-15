@@ -4482,6 +4482,37 @@ export class TokenRouter {
     return selected;
   }
 
+  async selectPreferredChannel(
+    requestedModel: string,
+    preferredChannelId: number,
+    downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
+  ): Promise<SelectedChannel | null> {
+    if (!Number.isSafeInteger(preferredChannelId) || preferredChannelId <= 0) return null;
+    if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
+    await ensureRoutingRuntimeStateLoaded();
+
+    let match = await this.findRoute(requestedModel, downstreamPolicy);
+    if (!match) return null;
+    this.cacheChannelMatch(requestedModel, match, downstreamPolicy);
+    let selected = await this.selectPreferredChannelFromMatch(
+      match,
+      requestedModel,
+      preferredChannelId,
+      downstreamPolicy,
+    );
+    if (selected) return selected;
+    match = await this.tryAutoHealRouteMatch(requestedModel, match, downstreamPolicy);
+    if (!match) return null;
+    this.cacheChannelMatch(requestedModel, match, downstreamPolicy);
+    selected = await this.selectPreferredChannelFromMatch(
+      match,
+      requestedModel,
+      preferredChannelId,
+      downstreamPolicy,
+    );
+    return selected;
+  }
+
   /**
    * Select next channel for failover (exclude already-tried channels).
    */
@@ -4642,6 +4673,15 @@ export class TokenRouter {
         ? '路由策略：轮询'
         : (routeStrategy === 'stable_first' ? '路由策略：稳定优先' : '路由策略：按权重随机'),
     ];
+    const appendBlockedCandidateExplainReason = (candidate: RouteDecisionCandidate, blockerReason: string) => {
+      const runtime = candidate.siteRuntimeState;
+      const runtimeHealthText = runtime
+        ? (runtime.modelMultiplier != null
+          ? `${runtime.combinedMultiplier.toFixed(2)}（站点=${runtime.globalMultiplier.toFixed(2)}，模型=${runtime.modelMultiplier.toFixed(2)}）`
+          : `${runtime.globalMultiplier.toFixed(2)}`)
+        : '—';
+      candidate.reason = `${blockerReason}；运行时健康=${runtimeHealthText}`;
+    };
     if (requestedByDisplayName) {
       summary.push(`按显示名命中：${normalizeRouteDisplayName(match.route.displayName)}`);
       summary.push('显示名仅用于聚合展示，实际转发模型按选中通道来源模型决定');
@@ -4699,6 +4739,40 @@ export class TokenRouter {
       ) {
         reason = `${reason}、${runtimeCircuit.reason}`;
       }
+      if (!eligible && runtimeCircuit.isOpen) {
+        const runtimeHealthText = runtimeHealthDetails.modelKey
+          ? `${runtimeHealthDetails.combinedMultiplier.toFixed(2)}（站点=${runtimeHealthDetails.globalMultiplier.toFixed(2)}，模型=${runtimeHealthDetails.modelMultiplier.toFixed(2)}）`
+          : `${runtimeHealthDetails.globalMultiplier.toFixed(2)}`;
+        reason = `${reason}；运行时健康=${runtimeHealthText}`;
+        if (recentlyFailed) {
+          const avoidWindowSec = Math.max(
+            60,
+            Math.trunc(resolveWeightedFailureCooldownMs(
+              Math.max(1, row.channel.consecutiveFailCount ?? row.channel.failCount ?? 1),
+              'server',
+            ) / 1000),
+          );
+          reason = `${reason}；最近失败，优先避让（${avoidWindowSec} 秒窗口）`;
+        }
+      }
+      if (governanceBlock?.state === 'suppressed') {
+        const runtimeHealthText = runtimeHealthDetails.modelKey
+          ? `${runtimeHealthDetails.combinedMultiplier.toFixed(2)}（站点=${runtimeHealthDetails.globalMultiplier.toFixed(2)}，模型=${runtimeHealthDetails.modelMultiplier.toFixed(2)}）`
+          : `${runtimeHealthDetails.globalMultiplier.toFixed(2)}`;
+        if (!reason.includes('运行时健康=')) {
+          reason = `${reason}；运行时健康=${runtimeHealthText}`;
+        }
+        if (recentlyFailed && !reason.includes('最近失败')) {
+          const avoidWindowSec = Math.max(
+            60,
+            Math.trunc(resolveWeightedFailureCooldownMs(
+              Math.max(1, row.channel.consecutiveFailCount ?? row.channel.failCount ?? 1),
+              'server',
+            ) / 1000),
+          );
+          reason = `${reason}；最近失败，优先避让（${avoidWindowSec} 秒窗口）`;
+        }
+      }
       const candidate: RouteDecisionCandidate = {
         channelId: row.channel.id,
         accountId: row.account.id,
@@ -4717,7 +4791,8 @@ export class TokenRouter {
         sourceModelDerived: !!row.channel.sourceModelDerived,
         modelCapabilityVerified,
         recentlyFailed,
-        avoidedByRecentFailure: false,
+        avoidedByRecentFailure: (!eligible && runtimeCircuit.isOpen && recentlyFailed)
+          || (!!governanceBlock && governanceBlock.state === 'suppressed' && recentlyFailed),
         avoidedByAttemptedSite: effectiveExcludeSiteIds.has(row.site.id),
         avoidedByInflightLease: false,
         avoidedByAccountLease: false,
@@ -4768,6 +4843,15 @@ export class TokenRouter {
     }
 
     if (availableByPriority.size === 0) {
+      if (candidates.some((candidate) => isChannelRecentlyFailed({
+        lastFailAt: candidate.lastFailAt,
+        failCount: candidate.consecutiveFailCount,
+        consecutiveFailCount: candidate.consecutiveFailCount,
+        cooldownUntil: candidate.cooldownUntil,
+      } as FailureAwareChannel, nowMs))) {
+        summary.push('当前避让中');
+        summary.push('本次未选出通道');
+      }
       summary.push('没有可用通道（全部被禁用、站点不可用、冷却或令牌不可用）');
       return {
         requestedModel,
@@ -4804,7 +4888,11 @@ export class TokenRouter {
           const target = candidateMap.get(item.candidate.channel.id);
           if (!target) continue;
           target.eligible = false;
-          target.reason = item.reason;
+          appendBlockedCandidateExplainReason(target, item.reason);
+          if (isChannelRecentlyFailed(item.candidate.channel, nowMs)) {
+            target.avoidedByRecentFailure = true;
+            target.reason = `${target.reason}；最近失败，优先避让（${resolveRecentFailureAvoidWindowSec(item.candidate.channel)} 秒窗口）`;
+          }
           target.circuitStatus = {
             state: 'open',
             isOpen: true,
@@ -4965,7 +5053,18 @@ export class TokenRouter {
           const target = candidateMap.get(item.candidate.channel.id);
           if (!target) continue;
           target.eligible = false;
-          target.reason = item.reason;
+          appendBlockedCandidateExplainReason(target, item.reason);
+          if (isChannelRecentlyFailed(item.candidate.channel, nowMs)) {
+            target.avoidedByRecentFailure = true;
+            const avoidWindowSec = Math.max(
+              60,
+              Math.trunc(resolveWeightedFailureCooldownMs(
+                Math.max(1, item.candidate.channel.consecutiveFailCount ?? item.candidate.channel.failCount ?? 1),
+                'server',
+              ) / 1000),
+            );
+            target.reason = `${target.reason}；最近失败，优先避让（${avoidWindowSec} 秒窗口）`;
+          }
           target.circuitStatus = {
             state: 'open',
             isOpen: true,
@@ -4975,6 +5074,9 @@ export class TokenRouter {
         }
       }
       if (fullyBlockedByRuntimeBreaker) {
+        if (breakerFiltered.avoided.some((item) => isChannelRecentlyFailed(item.candidate.channel, nowMs))) {
+          degradedAcrossPriorityByRecentFailure = true;
+        }
         const breakerSummaryLabel = breakerFiltered.avoided.some((item) => item.reason.includes('模型熔断'))
           ? '运行时熔断避让'
           : '站点熔断避让';
@@ -5098,7 +5200,10 @@ export class TokenRouter {
       if (stickyLayer.stickyReason === 'reused' && stickyLayer.stickyBinding) {
         layerSummaryParts.push(`账号粘性复用 ${stickyLayer.stickyBinding.accountId}`);
       }
-      if (degradedAcrossPriorityByRecentFailure) {
+      const hasHigherPriorityRecentFailureAvoidance = candidates.some((candidate) => (
+        candidate.priority < priority && candidate.avoidedByRecentFailure
+      ));
+      if (degradedAcrossPriorityByRecentFailure || hasHigherPriorityRecentFailureAvoidance) {
         layerSummaryParts.push('上层最近失败，已自动降级');
       }
       summary.push(layerSummaryParts.join('，'));
@@ -5423,44 +5528,65 @@ export class TokenRouter {
         }
       }
     }
-    recordSiteRuntimeFailure(account.siteId, normalizedContext, nowMs);
-    const accountState = getOrCreateAccountRoutingState(account.id, nowMs);
-    accountState.successEma = (
-      accountState.lastSuccessAtMs == null && accountState.lastFailureAtMs == null
-        ? 0
-        : (accountState.successEma * (1 - ACCOUNT_SUCCESS_EMA_ALPHA))
+    const shouldRecordSiteRuntime = !(
+      routeStrategy === 'round_robin'
+      && failureCategory === 'server'
+      && !isProtocolFailure
     );
-    accountState.lastFailureAtMs = nowMs;
-    accountState.consecutiveFailures += 1;
-    accountState.updatedAtMs = nowMs;
-    const budgetState = syncAccountRateBudgetConfig(account.id, nowMs);
-    budgetState.capacity = resolveAccountRateLimitCapacity(accountState);
-    budgetState.refillPerSec = resolveAccountRateLimitRefillPerSec(accountState);
-    budgetState.tokens = clampNumber(budgetState.tokens * 0.6, 0, budgetState.capacity);
-    if (retryAfterMs != null && retryAfterMs > 0) {
-      budgetState.denyUntilMs = Math.max(
-        budgetState.denyUntilMs ?? 0,
-        nowMs + retryAfterMs,
-      );
+    if (shouldRecordSiteRuntime) {
+      recordSiteRuntimeFailure(account.siteId, normalizedContext, nowMs);
     }
-    if (!isProtocolFailure && (failureCategory === 'auth' || failureCategory === 'rate_limit')) {
-      budgetState.denyUntilMs = Math.max(
-        budgetState.denyUntilMs ?? 0,
-        nowMs + Math.max(30_000, resolveWeightedFailureCooldownMs(Math.max(1, consecutiveFailCount), failureCategory)),
+    const shouldPenalizeAccountRuntime = !(
+      routeStrategy === 'round_robin'
+      && failureCategory === 'server'
+      && !isProtocolFailure
+    );
+    if (shouldPenalizeAccountRuntime) {
+      const accountState = getOrCreateAccountRoutingState(account.id, nowMs);
+      accountState.successEma = (
+        accountState.lastSuccessAtMs == null && accountState.lastFailureAtMs == null
+          ? 0
+          : (accountState.successEma * (1 - ACCOUNT_SUCCESS_EMA_ALPHA))
       );
+      accountState.lastFailureAtMs = nowMs;
+      accountState.consecutiveFailures += 1;
+      accountState.updatedAtMs = nowMs;
+      const budgetState = syncAccountRateBudgetConfig(account.id, nowMs);
+      budgetState.capacity = resolveAccountRateLimitCapacity(accountState);
+      budgetState.refillPerSec = resolveAccountRateLimitRefillPerSec(accountState);
+      budgetState.tokens = clampNumber(budgetState.tokens * 0.6, 0, budgetState.capacity);
+      if (retryAfterMs != null && retryAfterMs > 0) {
+        budgetState.denyUntilMs = Math.max(
+          budgetState.denyUntilMs ?? 0,
+          nowMs + retryAfterMs,
+        );
+      }
+      if (!isProtocolFailure && (failureCategory === 'auth' || failureCategory === 'rate_limit')) {
+        budgetState.denyUntilMs = Math.max(
+          budgetState.denyUntilMs ?? 0,
+          nowMs + Math.max(30_000, resolveWeightedFailureCooldownMs(Math.max(1, consecutiveFailCount), failureCategory)),
+        );
+      }
+      budgetState.updatedAtMs = nowMs;
+      scheduleAccountRuntimePersistence();
     }
-    budgetState.updatedAtMs = nowMs;
-    scheduleAccountRuntimePersistence();
 
-    const governanceSuppression = resolveGovernanceSuppression({
-      failureCategory,
-      channel: ch,
-      account,
-      status: normalizedContext.status,
-      modelName: normalizedContext.modelName,
-      errorText: normalizedContext.errorText,
-      cooldownUntil,
-    });
+    const shouldSuppressGovernance = !(
+      routeStrategy === 'round_robin'
+      && failureCategory === 'server'
+      && !isProtocolFailure
+    );
+    const governanceSuppression = shouldSuppressGovernance
+      ? resolveGovernanceSuppression({
+        failureCategory,
+        channel: ch,
+        account,
+        status: normalizedContext.status,
+        modelName: normalizedContext.modelName,
+        errorText: normalizedContext.errorText,
+        cooldownUntil,
+      })
+      : null;
     if (governanceSuppression) {
       await upsertRoutingGovernanceState({
         subjectType: governanceSuppression.subjectType,
@@ -5818,6 +5944,20 @@ export class TokenRouter {
     }
 
     return await this.loadRouteMatch(route);
+  }
+
+  private async selectPreferredChannelFromMatch(
+    match: RouteMatch,
+    requestedModel: string,
+    preferredChannelId: number,
+    downstreamPolicy: DownstreamRoutingPolicy,
+  ): Promise<SelectedChannel | null> {
+    const preferredMatch: RouteMatch = {
+      ...match,
+      channels: match.channels.filter((candidate) => candidate.channel.id === preferredChannelId),
+    };
+    if (preferredMatch.channels.length === 0) return null;
+    return await this.selectFromMatch(preferredMatch, requestedModel, downstreamPolicy);
   }
 
   private async tryAutoHealRouteMatch(

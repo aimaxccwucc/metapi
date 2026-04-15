@@ -9,6 +9,7 @@ const recordFailureMock = vi.fn();
 const refreshModelsAndRebuildRoutesMock = vi.fn();
 const reportProxyAllFailedMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
+const shouldAvoidSiteForRequestMock = vi.fn();
 const resolveProxyUsageWithSelfLogFallbackMock = vi.fn(async ({ usage }: any) => ({
   ...usage,
   estimatedCostFromQuota: 0,
@@ -55,7 +56,7 @@ vi.mock('../../services/modelPricingService.js', () => ({
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldRetryProxyRequest: (status: number) => status === 401 || status === 403 || status >= 500,
-  shouldAvoidSiteForRequest: () => false,
+  shouldAvoidSiteForRequest: (...args: unknown[]) => shouldAvoidSiteForRequestMock(...args),
 }));
 
 vi.mock('../../services/proxyUsageFallbackService.js', () => ({
@@ -97,8 +98,10 @@ describe('claude count_tokens proxy route', () => {
     refreshModelsAndRebuildRoutesMock.mockReset();
     reportProxyAllFailedMock.mockReset();
     reportTokenExpiredMock.mockReset();
+    shouldAvoidSiteForRequestMock.mockReset();
     resolveProxyUsageWithSelfLogFallbackMock.mockClear();
     dbInsertMock.mockClear();
+    shouldAvoidSiteForRequestMock.mockReturnValue(false);
 
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
@@ -201,6 +204,7 @@ describe('claude count_tokens proxy route', () => {
   });
 
   it('switches count_tokens to the next channel after auth failure on the first source', async () => {
+    shouldAvoidSiteForRequestMock.mockReturnValue(true);
     selectChannelMock.mockReturnValueOnce({
       channel: { id: 11, routeId: 22 },
       site: { name: 'bad-claude-site', url: 'https://bad-claude.example.com', platform: 'claude' },
@@ -251,6 +255,54 @@ describe('claude count_tokens proxy route', () => {
     expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
     expect(selectNextChannelMock.mock.calls[0]?.[0]).toBe('claude-opus-4-6');
     expect(selectNextChannelMock.mock.calls[0]?.[1]).toEqual(expect.arrayContaining([11]));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://good-claude.example.com/v1/messages/count_tokens?beta=true');
+  });
+
+  it('strips upstream failure prefix before deciding count_tokens site avoid/failover', async () => {
+    shouldAvoidSiteForRequestMock.mockImplementation((_status: number, errorText?: string) => (
+      errorText === 'invalid api key'
+    ));
+    selectChannelMock.mockReturnValueOnce({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'bad-claude-site', url: 'https://bad-claude.example.com', platform: 'claude' },
+      account: { id: 33, username: 'bad-claude-user@example.com' },
+      tokenName: 'default',
+      tokenValue: 'sk-bad-claude',
+      actualModel: 'claude-opus-4-6',
+    });
+    selectNextChannelMock.mockReturnValueOnce({
+      channel: { id: 12, routeId: 22 },
+      site: { name: 'good-claude-site', url: 'https://good-claude.example.com', platform: 'claude' },
+      account: { id: 34, username: 'good-claude-user@example.com' },
+      tokenName: 'default',
+      tokenValue: 'sk-good-claude',
+      actualModel: 'claude-opus-4-6',
+    });
+    fetchMock
+      .mockResolvedValueOnce(new Response('[upstream:/v1/messages/count_tokens?beta=true] invalid api key', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ input_tokens: 7 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/messages/count_tokens',
+      payload: {
+        model: 'claude-opus-4-6',
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: 'count prefixed failure' }],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(shouldAvoidSiteForRequestMock).toHaveBeenCalledWith(401, 'invalid api key');
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1]?.[0]).toBe('https://good-claude.example.com/v1/messages/count_tokens?beta=true');
   });

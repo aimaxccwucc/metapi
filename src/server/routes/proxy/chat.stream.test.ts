@@ -68,6 +68,13 @@ vi.mock('../../services/modelPricingService.js', () => ({
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
   shouldRetryProxyRequest: (status?: unknown, message?: unknown) => (shouldRetryProxyRequestMock as any)(status, message),
   shouldAvoidSiteForRequest: (status?: unknown, message?: unknown) => (shouldAvoidSiteForRequestMock as any)(status, message),
+  classifyProxyFailureCategory: (status?: unknown, message?: unknown) => {
+    const normalizedStatus = typeof status === 'number' ? status : Number(status);
+    if (Number(normalizedStatus) === 429) return 'rate_limit';
+    if (Number(normalizedStatus) >= 500) return 'server';
+    if (typeof message === 'string' && /empty content/i.test(message)) return 'server';
+    return 'other';
+  },
 }));
 
 vi.mock('../../services/proxyUsageFallbackService.js', () => ({

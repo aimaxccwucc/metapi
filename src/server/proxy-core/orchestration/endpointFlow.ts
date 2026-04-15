@@ -1,14 +1,12 @@
 import { fetch } from 'undici';
-import { config } from '../../config.js';
-import { readRuntimeResponseText } from '../../proxy-core/executors/types.js';
-import {
-  fetchWithObservedFirstByte,
-  isObservedFirstByteTimeoutResponse,
-} from '../../proxy-core/firstByteTimeout.js';
+import { readRuntimeResponseText } from '../executors/types.js';
+import { fetchWithObservedFirstByte, isObservedFirstByteTimeoutResponse } from '../firstByteTimeout.js';
 import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
-import { summarizeUpstreamError } from './upstreamError.js';
-import type { UpstreamEndpoint } from './upstreamEndpoint.js';
-import { buildUpstreamUrl } from './upstreamUrl.js';
+import {
+  buildUpstreamUrl,
+  summarizeUpstreamError,
+  type UpstreamEndpoint,
+} from './upstreamRequest.js';
 
 export type BuiltEndpointRequest = {
   endpoint: UpstreamEndpoint;
@@ -31,6 +29,7 @@ export type EndpointAttemptContext = {
   targetUrl: string;
   response: Awaited<ReturnType<typeof fetch>>;
   rawErrText: string;
+  recoverApplied?: boolean;
 };
 
 export type EndpointAttemptSuccessContext = {
@@ -39,17 +38,15 @@ export type EndpointAttemptSuccessContext = {
   request: BuiltEndpointRequest;
   targetUrl: string;
   response: Awaited<ReturnType<typeof fetch>>;
+  recoverApplied?: boolean;
 };
 
 export type EndpointRecoverResult = {
   upstream: Awaited<ReturnType<typeof fetch>>;
   upstreamPath: string;
+  request?: BuiltEndpointRequest;
+  targetUrl?: string;
 } | null;
-
-export type EndpointDowngradeDecision = {
-  allowDowngrade: boolean;
-  reason?: string | null;
-};
 
 export type EndpointFlowResult =
   | {
@@ -62,15 +59,12 @@ export type EndpointFlowResult =
     status: number;
     errText: string;
     rawErrText?: string;
-    retryAfterHeader?: string | null;
   };
 
-export function withUpstreamPath(path: string, message: string): string {
-  return `[upstream:${path}] ${message}`;
-}
-
-type ExecuteEndpointFlowInput = {
+export type ExecuteEndpointFlowInput = {
   siteUrl: string;
+  proxyUrl?: string | null;
+  disableCrossProtocolFallback?: boolean;
   endpointCandidates: UpstreamEndpoint[];
   buildRequest: (endpoint: UpstreamEndpoint, endpointIndex: number) => BuiltEndpointRequest;
   dispatchRequest?: (
@@ -80,39 +74,28 @@ type ExecuteEndpointFlowInput = {
   ) => Promise<Awaited<ReturnType<typeof fetch>>>;
   firstByteTimeoutMs?: number;
   tryRecover?: (ctx: EndpointAttemptContext) => Promise<EndpointRecoverResult>;
-  shouldDowngrade?: (ctx: EndpointAttemptContext) => boolean | EndpointDowngradeDecision;
+  shouldDowngrade?: (ctx: EndpointAttemptContext) => boolean;
+  shouldAbortRemainingEndpoints?: (ctx: EndpointAttemptContext & { errText: string }) => boolean;
   onDowngrade?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<void>;
   onAttemptFailure?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<void>;
   onAttemptSuccess?: (ctx: EndpointAttemptSuccessContext) => void | Promise<void>;
-  disableCrossProtocolFallback?: boolean;
 };
 
-function resolveEndpointDowngradeDecision(
-  decision: boolean | EndpointDowngradeDecision | undefined,
-): EndpointDowngradeDecision {
-  if (typeof decision === 'boolean') {
-    return {
-      allowDowngrade: decision,
-      reason: decision ? null : 'endpoint_strategy_denied',
-    };
-  }
-
-  if (decision && typeof decision === 'object') {
-    return {
-      allowDowngrade: decision.allowDowngrade === true,
-      reason: typeof decision.reason === 'string' ? decision.reason.trim() || null : null,
-    };
-  }
-
-  return {
-    allowDowngrade: false,
-    reason: 'endpoint_strategy_denied',
-  };
+export function withUpstreamPath(path: string, message: string): string {
+  return `[upstream:${path}] ${message}`;
 }
 
-function isCrossProtocolDowngrade(current: UpstreamEndpoint, next: UpstreamEndpoint | undefined): boolean {
-  if (!next) return false;
-  return (current === 'messages') !== (next === 'messages');
+async function runEndpointFlowHook<T>(
+  hook: ((ctx: T) => void | Promise<void>) | undefined,
+  ctx: T,
+  hookName: string,
+): Promise<void> {
+  if (!hook) return;
+  try {
+    await hook(ctx);
+  } catch (error) {
+    console.error(`endpointFlow ${hookName} hook failed`, error);
+  }
 }
 
 export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Promise<EndpointFlowResult> {
@@ -128,13 +111,16 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
   let finalStatus = 0;
   let finalErrText = 'unknown error';
   let finalRawErrText: string | undefined;
-  let finalRetryAfterHeader: string | null | undefined;
 
   for (let endpointIndex = 0; endpointIndex < endpointCount; endpointIndex += 1) {
     const endpoint = input.endpointCandidates[endpointIndex] as UpstreamEndpoint;
     const request = input.buildRequest(endpoint, endpointIndex);
-    const targetUrl = buildUpstreamUrl(input.siteUrl, request.path);
+    const defaultTarget = buildUpstreamUrl(input.siteUrl, request.path);
+    const targetUrl = input.proxyUrl
+      ? buildUpstreamUrl(input.proxyUrl, request.path)
+      : defaultTarget;
 
+    const attemptStartedAtMs = Date.now();
     let response = await fetchWithObservedFirstByte(
       async (signal) => (
         input.dispatchRequest
@@ -148,17 +134,19 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       ),
       {
         firstByteTimeoutMs: input.firstByteTimeoutMs,
+        startedAtMs: attemptStartedAtMs,
       },
     );
 
     if (response.ok) {
-      await input.onAttemptSuccess?.({
+      await runEndpointFlowHook(input.onAttemptSuccess, {
         endpointIndex,
         endpointCount,
         request,
         targetUrl,
         response,
-      });
+        recoverApplied: false,
+      }, 'onAttemptSuccess');
       return {
         ok: true,
         upstream: response,
@@ -174,31 +162,47 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       targetUrl,
       response,
       rawErrText,
+      recoverApplied: false,
     };
-
     const isLastEndpoint = endpointIndex >= endpointCount - 1;
+
     if (isObservedFirstByteTimeoutResponse(response) && !isLastEndpoint) {
-      const errText = withUpstreamPath(
-        baseContext.request.path,
-        rawErrText.trim() || 'first byte timeout',
-      );
-      await input.onAttemptFailure?.({
+      const errText = rawErrText.trim() || 'first byte timeout';
+      const timeoutContext = {
         ...baseContext,
         errText,
-      });
+      };
+      await runEndpointFlowHook(input.onAttemptFailure, timeoutContext, 'onAttemptFailure');
+      finalStatus = response.status || 408;
+      finalErrText = errText;
+      finalRawErrText = rawErrText;
+      if (input.disableCrossProtocolFallback) {
+        break;
+      }
       continue;
     }
 
     if (input.tryRecover) {
       const recovered = await input.tryRecover(baseContext);
+      baseContext.recoverApplied = recovered !== null
+        || baseContext.request !== request
+        || baseContext.response !== response
+        || baseContext.rawErrText !== rawErrText;
       if (recovered?.upstream?.ok) {
-        await input.onAttemptSuccess?.({
+        const recoveredRequest = recovered.request ?? baseContext.request;
+        const recoveredTargetUrl = recovered.targetUrl ?? (
+          input.proxyUrl
+            ? buildUpstreamUrl(input.proxyUrl, recovered.upstreamPath)
+            : buildUpstreamUrl(input.siteUrl, recovered.upstreamPath)
+        );
+        await runEndpointFlowHook(input.onAttemptSuccess, {
           endpointIndex,
           endpointCount,
-          request: baseContext.request,
-          targetUrl: baseContext.targetUrl,
+          request: recoveredRequest,
+          targetUrl: recoveredTargetUrl,
           response: recovered.upstream,
-        });
+          recoverApplied: true,
+        }, 'onAttemptSuccess');
         return {
           ok: true,
           upstream: recovered.upstream,
@@ -213,33 +217,39 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       baseContext.request.path,
       summarizeUpstreamError(response.status, rawErrText),
     );
-    await input.onAttemptFailure?.({
+    await runEndpointFlowHook(input.onAttemptFailure, {
+      ...baseContext,
+      errText,
+    }, 'onAttemptFailure');
+
+    if (input.disableCrossProtocolFallback && !isLastEndpoint) {
+      finalStatus = response.status;
+      finalErrText = errText;
+      finalRawErrText = rawErrText;
+      break;
+    }
+    const shouldAbortRemainingEndpoints = !isLastEndpoint && !!input.shouldAbortRemainingEndpoints?.({
       ...baseContext,
       errText,
     });
-
-    const downgradeDecision = resolveEndpointDowngradeDecision(input.shouldDowngrade?.(baseContext));
-    const nextEndpoint = !isLastEndpoint
-      ? input.endpointCandidates[endpointIndex + 1] as UpstreamEndpoint | undefined
-      : undefined;
-    const crossProtocolFallbackDisabled = (input.disableCrossProtocolFallback ?? config.disableCrossProtocolFallback) === true;
-    const blockedByCrossProtocolSetting = crossProtocolFallbackDisabled
-      && isCrossProtocolDowngrade(baseContext.request.endpoint, nextEndpoint);
-    const shouldDowngrade = !isLastEndpoint
-      && downgradeDecision.allowDowngrade
-      && !blockedByCrossProtocolSetting;
+    if (shouldAbortRemainingEndpoints) {
+      finalStatus = response.status;
+      finalErrText = errText;
+      finalRawErrText = rawErrText;
+      break;
+    }
+    const shouldDowngrade = !isLastEndpoint && !!input.shouldDowngrade?.(baseContext);
     if (shouldDowngrade) {
-      await input.onDowngrade?.({
+      await runEndpointFlowHook(input.onDowngrade, {
         ...baseContext,
         errText,
-      });
+      }, 'onDowngrade');
       continue;
     }
 
     finalStatus = response.status;
     finalErrText = errText;
     finalRawErrText = rawErrText;
-    finalRetryAfterHeader = response.headers.get('retry-after');
     break;
   }
 
@@ -248,6 +258,5 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
     status: finalStatus || 502,
     errText: finalErrText || 'unknown error',
     rawErrText: finalRawErrText,
-    retryAfterHeader: finalRetryAfterHeader ?? null,
   };
 }

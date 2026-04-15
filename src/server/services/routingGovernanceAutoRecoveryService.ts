@@ -493,15 +493,8 @@ async function processProbingEntry(entry: RoutingGovernanceEntry): Promise<boole
     return await handlePassiveExpiryRelease(entry);
   }
 
-  // auth 和 model_unsupported: 尝试主动探测恢复
-  // 如果属于 manual 路由则走完整的 handleProbeBasedRecovery
-  // 否则也尝试轻量级探测（而非盲目被动释放）
+  // 如果属于 manual 路由则走完整的主动探测恢复。
   if (isManualRouteProbeGovernance(entry) && await isRouteEligibleForManualGovernance(entry)) {
-    return await handleProbeBasedRecovery(entry);
-  }
-
-  // 非 manual 路由的 auth/model_unsupported: 尝试轻量级探测
-  if (reasonCode === 'auth' || reasonCode === 'model_unsupported') {
     return await handleProbeBasedRecovery(entry);
   }
 
@@ -535,8 +528,7 @@ export async function executeRoutingGovernanceAutoRecoveryPass(options: {
       || reasonCode === 'balance_exhausted'
       || reasonCode === 'quota_exhausted';
     const allowActiveReprobe = isManualRouteProbeGovernance(state);
-    // auth/model_unsupported 也走主动探测恢复，避免恢复后首次请求失败
-    const supportsProbeRecovery = reasonCode === 'auth' || reasonCode === 'model_unsupported';
+    const supportsProbeRecovery = false;
 
     if (supportsZeroCostRecovery || allowActiveReprobe || supportsProbeRecovery) {
       await markRoutingGovernanceProbeInFlight(state.id, now, probingLeaseMs);

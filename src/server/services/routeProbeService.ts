@@ -148,7 +148,8 @@ async function applyRouteProbeGovernance(input: {
   }
 
   const governanceReasonCode = mapProbeClassificationToGovernanceReason(input.result.probeClassification);
-  if (input.result.available) {
+  const canClearGovernance = input.result.available && input.result.detectionMethod === 'realtime_probe';
+  if (canClearGovernance) {
     let cleared = 0;
     if (typeof input.channel.tokenId === 'number' && input.channel.tokenId > 0) {
       cleared += await clearRoutingGovernanceStates({
@@ -177,6 +178,14 @@ async function applyRouteProbeGovernance(input: {
     return {
       ...input.result,
       governanceAction: cleared > 0 ? 'cleared' : 'none',
+      governanceReasonCode: null,
+    };
+  }
+
+  if (input.result.available) {
+    return {
+      ...input.result,
+      governanceAction: 'none',
       governanceReasonCode: null,
     };
   }
@@ -312,6 +321,8 @@ export async function probeRouteChannelsForRoute(
       siteName: channel.site.name || undefined,
       preferredTokenId: channel.token?.id ?? null,
       skipAutoCreate: false,
+      forceRealtimeProbeOnListMiss: true,
+      allowListHitSuccess: false,
     });
 
     const baseResult: RouteProbeItem = probe.success

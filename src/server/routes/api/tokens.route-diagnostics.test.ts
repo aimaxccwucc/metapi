@@ -801,6 +801,18 @@ describe('GET /api/routes/diagnostics', () => {
     });
 
     getModelsMock.mockResolvedValue(['gpt-4.1']);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'chatcmpl-probe',
+      object: 'chat.completion',
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: 'ok' },
+        finish_reason: 'stop',
+      }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
 
     const response = await app.inject({
       method: 'POST',
@@ -821,8 +833,102 @@ describe('GET /api/routes/diagnostics', () => {
       available: true,
       governanceAction: 'cleared',
     });
+    expect(body.items[0]?.detectionMethod).toBe('realtime_probe');
 
     const governance = await db.select().from(schema.routingGovernanceStates).all();
     expect(governance).toHaveLength(0);
+  });
+
+  it('does not clear governance when route probe only hits model list without realtime success', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'restore-site',
+      url: 'https://restore-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+      apiKey: 'sk-site',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'restore-user',
+      accessToken: 'restore-access',
+      apiToken: 'sk-restore-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'restore-token',
+      token: 'sk-restore-token',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4.1',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gpt-4.1',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    await upsertRoutingGovernanceState({
+      subjectType: 'token',
+      subjectId: token.id,
+      modelName: 'gpt-4.1',
+      state: 'suppressed',
+      reasonCode: 'model_unsupported',
+      reasonDetail: 'old failure',
+      suppressUntil: new Date(Date.now() + 60_000).toISOString(),
+      probeAfter: new Date(Date.now() + 60_000).toISOString(),
+      lastFailureAt: new Date().toISOString(),
+    });
+
+    getModelsMock.mockResolvedValue(['gpt-4.1']);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'The model `gpt-4.1` does not exist or you do not have access to it.' },
+    }), {
+      status: 404,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/probe`,
+      payload: { limit: 20, autoGovernance: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      availableCount: number;
+      items: Array<{
+        available: boolean;
+        governanceAction: string;
+        detectionMethod: string;
+      }>;
+    };
+    expect(body.availableCount).toBe(0);
+    expect(body.items[0]).toMatchObject({
+      available: false,
+      governanceAction: 'none',
+    });
+    expect(body.items[0]?.detectionMethod).not.toBe('model_list');
+
+    const governance = await db.select().from(schema.routingGovernanceStates).all();
+    expect(governance).toHaveLength(1);
+    expect(governance[0]).toMatchObject({
+      subjectType: 'token',
+      subjectId: token.id,
+      modelName: 'gpt-4.1',
+      reasonCode: 'model_unsupported',
+    });
   });
 });

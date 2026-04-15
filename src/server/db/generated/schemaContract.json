@@ -1338,12 +1338,6 @@
           "defaultValue": null,
           "primaryKey": false
         },
-        "flaresolverr_url": {
-          "logicalType": "TEXT",
-          "notNull": false,
-          "defaultValue": null,
-          "primaryKey": false
-        },
         "use_system_proxy": {
           "logicalType": "boolean",
           "notNull": false,
@@ -1402,6 +1396,112 @@
           "logicalType": "datetime",
           "notNull": false,
           "defaultValue": null,
+          "primaryKey": false
+        },
+        "flaresolverr_url": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        }
+      }
+    },
+    "token_coverage_autoprovision_states": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "account_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model_name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "target_group": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'default'",
+          "primaryKey": false
+        },
+        "status": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'pending'",
+          "primaryKey": false
+        },
+        "reason_code": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "message": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "attempt_count": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "last_attempt_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_success_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "cooldown_until": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_created_token_name": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_created_token_group": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
           "primaryKey": false
         }
       }
@@ -1511,7 +1611,7 @@
         "routing_strategy": {
           "logicalType": "text",
           "notNull": false,
-          "defaultValue": "'weighted'",
+          "defaultValue": "'stable_first'",
           "primaryKey": false
         },
         "route_mode": {
@@ -2009,6 +2109,34 @@
       "unique": false
     },
     {
+      "name": "token_coverage_autoprovision_states_account_model_group_unique",
+      "table": "token_coverage_autoprovision_states",
+      "columns": [
+        "account_id",
+        "model_name",
+        "target_group"
+      ],
+      "unique": true
+    },
+    {
+      "name": "token_coverage_autoprovision_states_site_account_idx",
+      "table": "token_coverage_autoprovision_states",
+      "columns": [
+        "site_id",
+        "account_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "token_coverage_autoprovision_states_status_cooldown_idx",
+      "table": "token_coverage_autoprovision_states",
+      "columns": [
+        "status",
+        "cooldown_until"
+      ],
+      "unique": false
+    },
+    {
       "name": "token_model_availability_available_idx",
       "table": "token_model_availability",
       "columns": [
@@ -2138,6 +2266,15 @@
       ]
     },
     {
+      "name": "token_coverage_autoprovision_states_account_model_group_unique",
+      "table": "token_coverage_autoprovision_states",
+      "columns": [
+        "account_id",
+        "model_name",
+        "target_group"
+      ]
+    },
+    {
       "name": "token_model_availability_token_model_unique",
       "table": "token_model_availability",
       "columns": [
@@ -2259,6 +2396,28 @@
     },
     {
       "table": "site_disabled_models",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "token_coverage_autoprovision_states",
+      "columns": [
+        "account_id"
+      ],
+      "referencedTable": "accounts",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "token_coverage_autoprovision_states",
       "columns": [
         "site_id"
       ],

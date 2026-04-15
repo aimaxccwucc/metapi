@@ -8,6 +8,7 @@ const DEFAULT_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const DEFAULT_CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const DEFAULT_GEMINI_CLI_CLIENT_ID = '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
 export const MAX_PROXY_DEBUG_TRACE_ENTRIES = 5_000;
+export const TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING = 30 * 24 * 60 * 60;
 
 function createGeneratedToken(prefix: string): string {
   return `${prefix}${randomBytes(24).toString('base64url')}`;
@@ -138,6 +139,18 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     upstreamStreamFirstByteTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_STREAM_FIRST_BYTE_TIMEOUT_MS, 45_000))),
     upstreamRequestBudgetMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_REQUEST_BUDGET_MS, 120_000))),
     upstreamStreamIdleTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS, 180_000))),
+    proxyFirstByteTimeoutSec: Math.max(0, Math.trunc(parseNumber(env.PROXY_FIRST_BYTE_TIMEOUT_SEC, 0))),
+    proxyMaxChannelAttempts: Math.max(1, Math.trunc(parseNumber(env.PROXY_MAX_CHANNEL_ATTEMPTS, 3))),
+    proxyStickySessionEnabled: parseBoolean(env.PROXY_STICKY_SESSION_ENABLED, true),
+    proxyStickySessionTtlMs: Math.max(30_000, Math.trunc(parseNumber(env.PROXY_STICKY_SESSION_TTL_MS, 30 * 60 * 1000))),
+    proxySessionChannelConcurrencyLimit: Math.max(0, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_CONCURRENCY_LIMIT, 2))),
+    proxySessionChannelQueueWaitMs: Math.max(0, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_QUEUE_WAIT_MS, 1_500))),
+    proxySessionChannelLeaseTtlMs: Math.max(5_000, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_LEASE_TTL_MS, 90_000))),
+    proxySessionChannelLeaseKeepaliveMs: Math.max(1_000, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_LEASE_KEEPALIVE_MS, 15_000))),
+    tokenRouterFailureCooldownMaxSec: Math.max(1, Math.min(30 * 24 * 60 * 60, Math.trunc(parseNumber(env.TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC, 30 * 24 * 60 * 60)))),
+    proxyDebugCaptureHeaders: parseBoolean(env.PROXY_DEBUG_CAPTURE_HEADERS, true),
+    proxyDebugCaptureBodies: parseBoolean(env.PROXY_DEBUG_CAPTURE_BODIES, false),
+    proxyDebugCaptureStreamChunks: parseBoolean(env.PROXY_DEBUG_CAPTURE_STREAM_CHUNKS, false),
     onDemandModelRefreshCooldownMs: Math.max(0, Math.trunc(parseNumber(env.ON_DEMAND_MODEL_REFRESH_COOLDOWN_MS, 15_000))),
     proxyMaxRetries: Math.max(0, Math.min(8, Math.trunc(parseNumber(env.PROXY_MAX_RETRIES, 4)))),
     downstreamAuthCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.DOWNSTREAM_AUTH_CACHE_TTL_MS, 15_000))),
