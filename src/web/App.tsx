@@ -21,7 +21,6 @@ import {
   APP_VERSION_RELOAD_STORAGE_KEY,
   extractEntryAssetPathFromHtml,
   findCurrentEntryAssetPath,
-  shouldAutoReloadForVersionMismatch,
 } from './appVersion.js';
 import {
   isIosDevice,
@@ -920,16 +919,9 @@ function AppShell() {
           return;
         }
 
-        const lastReloadTarget = localStorage.getItem(APP_VERSION_RELOAD_STORAGE_KEY);
-        if (shouldAutoReloadForVersionMismatch(currentEntryAssetPath, latestEntryAssetPath, lastReloadTarget)) {
-          localStorage.setItem(APP_VERSION_RELOAD_STORAGE_KEY, latestEntryAssetPath);
-          window.location.reload();
-          return;
-        }
-
         if (!appVersionMismatchToastShownRef.current) {
           appVersionMismatchToastShownRef.current = true;
-          toast.info(t('检测到后台已更新，当前页面仍在使用旧版本，已尝试自动刷新；若未恢复，请手动刷新页面。'));
+          toast.info(t('检测到后台已更新，建议刷新页面以加载最新版本。'));
         }
       } catch {
         // Ignore version probe failures to avoid interrupting normal usage.

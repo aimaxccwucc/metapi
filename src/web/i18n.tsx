@@ -83,6 +83,7 @@ const zhToEn: Record<string, string> = {
   '返回仪表盘': 'Back to dashboard',
   '首次使用建议先阅读站点文档：': 'For first-time setup, read site docs: ',
   '检测到后台已更新，当前页面仍在使用旧版本，已尝试自动刷新；若未恢复，请手动刷新页面。': 'A newer admin version was detected while this page is still running an older bundle. An automatic reload was attempted; refresh the page manually if needed.',
+  '检测到后台已更新，建议刷新页面以加载最新版本。': 'A newer admin version was detected. Refresh the page to load the latest version.',
   '首次使用建议先阅读快速上手：': 'For first-time setup, start with Quick Start: ',
   '首次使用建议先阅读快速开始：': 'For first-time setup, start with Quick Start: ',
   '个人信息已保存': 'Profile saved',
