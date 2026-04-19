@@ -3,7 +3,6 @@ import type { ReactNode } from 'react';
 import { act, create, type ReactTestInstance } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import App from './App.js';
-import { APP_VERSION_RELOAD_STORAGE_KEY } from './appVersion.js';
 
 const { apiMock, authSessionMock } = vi.hoisted(() => ({
   apiMock: {
@@ -356,7 +355,7 @@ describe('App runtime banner', () => {
     }
   });
 
-  it('reloads once when the current page is still running an old bundle after deployment', async () => {
+  it('does not auto-reload when the current page is still running an old bundle after deployment', async () => {
     const { location } = setupRuntime(1280);
     apiMock.getRuntimeOverview.mockResolvedValue(buildOverview({}));
 
@@ -371,8 +370,7 @@ describe('App runtime banner', () => {
       });
       await flushMicrotasks();
 
-      expect(location.reload).toHaveBeenCalledTimes(1);
-      expect(localStorage.getItem(APP_VERSION_RELOAD_STORAGE_KEY)).toBe('/assets/index-new.js');
+      expect(location.reload).not.toHaveBeenCalled();
     } finally {
       if (root) {
         await act(async () => {

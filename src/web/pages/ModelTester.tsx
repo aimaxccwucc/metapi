@@ -704,7 +704,6 @@ export default function ModelTester() {
   const [customRequestBody, setCustomRequestBody] = useState('');
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const debugPanelPresence = useAnimatedVisibility(showDebugPanel, 220);
-  const [showRouteSummary, setShowRouteSummary] = useState(false);
   const [activeDebugTab, setActiveDebugTab] = useState<DebugTab>(DEBUG_TABS.PREVIEW);
   const [debugRequest, setDebugRequest] = useState('');
   const [debugResponse, setDebugResponse] = useState('');
@@ -2552,10 +2551,7 @@ export default function ModelTester() {
           marginBottom: 16,
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, cursor: 'pointer' }}
-          onClick={() => setShowRouteSummary((prev) => !prev)}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' }}>路由解释 / 历史记录</span>
             {routeDecisionState.data && (
               <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
@@ -2563,10 +2559,6 @@ export default function ModelTester() {
               </span>
             )}
           </div>
-          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-            {showRouteSummary ? '收起' : '展开'}
-          </span>
-        </div>
       </div>
 
       <div
