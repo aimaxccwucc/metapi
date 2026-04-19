@@ -718,6 +718,7 @@ async function sendStreamingEnvelope(
       reply.raw.write('data: [DONE]\n\n');
     }
   } catch (error) {
+    try { controller.abort(); } catch { /* no-op */ }
     if (!reply.raw.writableEnded) {
       const message = JSON.stringify({
         error: { message: (error as any)?.message || 'stream interrupted', type: 'stream_error' },
@@ -725,6 +726,7 @@ async function sendStreamingEnvelope(
       reply.raw.write(`event: error\ndata: ${message}\n\n`);
     }
   } finally {
+    try { controller.abort(); } catch { /* no-op */ }
     try {
       await reader.cancel();
     } catch {
@@ -780,6 +782,13 @@ export async function testRoutes(app: FastifyInstance) {
         updatedAt: now,
         expiresAt: now + JOB_TTL_MS,
       };
+
+      const MAX_JOBS = 500;
+      if (jobs.size >= MAX_JOBS) {
+        for (const [id, job] of jobs) {
+          if (job.status !== 'pending' || job.error) { jobs.delete(id); if (jobs.size < MAX_JOBS * 0.8) break; }
+        }
+      }
 
       jobs.set(jobId, job);
       void runJob(jobId);
@@ -889,6 +898,13 @@ export async function testRoutes(app: FastifyInstance) {
         updatedAt: now,
         expiresAt: now + JOB_TTL_MS,
       };
+
+      const MAX_JOBS = 500;
+      if (jobs.size >= MAX_JOBS) {
+        for (const [id, job] of jobs) {
+          if (job.status !== 'pending' || job.error) { jobs.delete(id); if (jobs.size < MAX_JOBS * 0.8) break; }
+        }
+      }
 
       jobs.set(jobId, job);
       void runJob(jobId);

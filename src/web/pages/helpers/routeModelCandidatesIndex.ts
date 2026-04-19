@@ -74,7 +74,7 @@ export function buildRouteModelCandidatesIndex(
     }
 
     const routeCandidates = Array.from(deduped.values()).sort((a, b) => {
-      if (a.accountId === b.accountId) return a.tokenId - b.tokenId;
+      if (a.accountId === b.accountId) return (a.tokenId ?? 0) - (b.tokenId ?? 0);
       return a.accountId - b.accountId;
     });
 

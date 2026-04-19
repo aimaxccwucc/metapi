@@ -1098,7 +1098,19 @@ export async function fetchChannelsForRouteRows(routes: RouteRow[]): Promise<Map
 
 async function fetchChannelsForRoutes(routeIds: number[]): Promise<Map<number, RouteChannelView[]>> {
   if (routeIds.length === 0) return new Map();
-  return await fetchChannelsForRouteRows(await listRoutesWithSources()).then((channelsByRoute) => {
+
+  let routes: RouteRow[];
+  if (routeIds.length < 20) {
+    const routeRows: TokenRouteTableRow[] = await db.select().from(schema.tokenRoutes)
+      .where(inArray(schema.tokenRoutes.id, routeIds))
+      .all();
+    const sourceRouteIdsByRouteId = await loadRouteSourceIdsMap(routeRows.map((r) => r.id));
+    routes = decorateRoutesWithSources(routeRows, sourceRouteIdsByRouteId);
+  } else {
+    routes = await listRoutesWithSources();
+  }
+
+  return await fetchChannelsForRouteRows(routes).then((channelsByRoute) => {
     const filtered = new Map<number, RouteChannelView[]>();
     for (const routeId of routeIds) {
       filtered.set(routeId, channelsByRoute.get(routeId) || []);
@@ -2193,45 +2205,47 @@ export async function tokensRoutes(app: FastifyInstance) {
     let skipped = 0;
     const errors: string[] = [];
 
-    for (const item of body.channels) {
-      if (!item?.accountId || typeof item.accountId !== 'number') {
-        errors.push('无效的 accountId');
-        continue;
-      }
+    await db.transaction(async (tx) => {
+      for (const item of body.channels) {
+        if (!item?.accountId || typeof item.accountId !== 'number') {
+          errors.push('无效的 accountId');
+          continue;
+        }
 
-      const sourceModel = typeof item.sourceModel === 'string'
-        ? item.sourceModel.trim()
-        : (isExactModelPattern(route.modelPattern) ? route.modelPattern.trim() : '');
-      const effectiveTokenId = item.tokenId ?? await getDefaultTokenId(item.accountId);
+        const sourceModel = typeof item.sourceModel === 'string'
+          ? item.sourceModel.trim()
+          : (isExactModelPattern(route.modelPattern) ? route.modelPattern.trim() : '');
+        const effectiveTokenId = item.tokenId ?? await getDefaultTokenId(item.accountId);
 
-      if (item.tokenId && !await checkTokenBelongsToAccount(item.tokenId, item.accountId)) {
-        errors.push(`令牌 ${item.tokenId} 不属于账号 ${item.accountId}`);
-        continue;
-      }
+        if (item.tokenId && !await checkTokenBelongsToAccount(item.tokenId, item.accountId)) {
+          errors.push(`令牌 ${item.tokenId} 不属于账号 ${item.accountId}`);
+          continue;
+        }
 
-      const tokenIdForKey = typeof effectiveTokenId === 'number' && Number.isFinite(effectiveTokenId) ? effectiveTokenId : 0;
-      const pairKey = `${item.accountId}::${tokenIdForKey}::${sourceModel.toLowerCase()}`;
-      if (existingPairs.has(pairKey)) {
-        skipped += 1;
-        continue;
-      }
+        const tokenIdForKey = typeof effectiveTokenId === 'number' && Number.isFinite(effectiveTokenId) ? effectiveTokenId : 0;
+        const pairKey = `${item.accountId}::${tokenIdForKey}::${sourceModel.toLowerCase()}`;
+        if (existingPairs.has(pairKey)) {
+          skipped += 1;
+          continue;
+        }
 
-      try {
-        await db.insert(schema.routeChannels).values({
-          routeId,
-          accountId: item.accountId,
-          tokenId: effectiveTokenId,
-          sourceModel: sourceModel || null,
-          priority: 0,
-          weight: 10,
-          manualOverride: true,
-        }).run();
-        existingPairs.add(pairKey);
-        created += 1;
-      } catch (e: any) {
-        errors.push(e.message || `添加通道失败: accountId=${item.accountId}`);
+        try {
+          await tx.insert(schema.routeChannels).values({
+            routeId,
+            accountId: item.accountId,
+            tokenId: effectiveTokenId,
+            sourceModel: sourceModel || null,
+            priority: 0,
+            weight: 10,
+            manualOverride: true,
+          }).run();
+          existingPairs.add(pairKey);
+          created += 1;
+        } catch (e: any) {
+          errors.push(e.message || `添加通道失败: accountId=${item.accountId}`);
+        }
       }
-    }
+    });
 
     if (created > 0) {
       await clearRouteDecisionSnapshot(routeId);

@@ -101,6 +101,8 @@ function globToRegexSource(glob: string): string {
 
 const compiledGlobCache = new Map<string, RegExp | null>();
 
+const COMPILED_GLOB_CACHE_LIMIT = 500;
+
 function matchesGlobPattern(model: string, pattern: string): boolean {
   let re = compiledGlobCache.get(pattern);
   if (re === undefined) {
@@ -109,6 +111,7 @@ function matchesGlobPattern(model: string, pattern: string): boolean {
     } catch {
       re = null;
     }
+    if (compiledGlobCache.size >= COMPILED_GLOB_CACHE_LIMIT) compiledGlobCache.clear();
     compiledGlobCache.set(pattern, re);
   }
   return re ? re.test(model) : false;

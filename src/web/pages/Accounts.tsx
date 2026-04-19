@@ -187,6 +187,8 @@ function openExternalUrl(url: string): 'popup' | 'anchor' | 'same-tab' | 'failed
   return 'failed';
 }
 
+const extraConfigCache = new WeakMap<any, Record<string, any>>();
+
 export default function Accounts() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -999,8 +1001,16 @@ export default function Accounts() {
     catch { return {}; }
   };
 
-  const extractManagedSub2ApiAuth = (account: any) => {
+  const cachedParseExtraConfig = (account: any): Record<string, any> => {
+    const cached = extraConfigCache.get(account);
+    if (cached) return cached;
     const parsed = parseAccountExtraConfig(account);
+    extraConfigCache.set(account, parsed);
+    return parsed;
+  };
+
+  const extractManagedSub2ApiAuth = (account: any) => {
+    const parsed = cachedParseExtraConfig(account);
     const auth = parsed?.sub2apiAuth || {};
     return {
       refreshToken: typeof auth.refreshToken === 'string' ? auth.refreshToken : '',
@@ -1010,7 +1020,7 @@ export default function Accounts() {
 
   const openEditPanel = (account: any) => {
     const managedAuth = extractManagedSub2ApiAuth(account);
-    const proxyUrl = parseAccountExtraConfig(account)?.proxyUrl || '';
+    const proxyUrl = cachedParseExtraConfig(account)?.proxyUrl || '';
     closeAddPanel();
     setRebindTarget(null);
     setEditingAccount(account);
@@ -1103,7 +1113,11 @@ export default function Accounts() {
       } else {
         toast.success(`批量操作完成：成功 ${successIds.length}`);
       }
-      setSelectedAccountIds(failedItems.map((item: any) => Number(item.id)).filter((id: number) => Number.isFinite(id) && id > 0));
+      if (action === 'delete') {
+        setSelectedAccountIds(failedItems.map((item: any) => Number(item.id)).filter((id: number) => Number.isFinite(id) && id > 0));
+      } else {
+        setSelectedAccountIds([]);
+      }
       load();
     } catch (e: any) {
       toast.error(e.message || '批量操作失败');
@@ -2352,7 +2366,7 @@ export default function Accounts() {
                             <span className={`badge ${connectionMode === 'apikey' ? 'badge-warning' : 'badge-info'}`} style={{ fontSize: 10 }}>
                               {connectionMode === 'apikey' ? 'API Key' : 'Session'}
                             </span>
-                            {parseAccountExtraConfig(a)?.proxyUrl && (
+                            {cachedParseExtraConfig(a)?.proxyUrl && (
                               <span className="badge badge-purple" style={{ fontSize: 10 }}>代理</span>
                             )}
                           </div>
@@ -2621,7 +2635,7 @@ export default function Accounts() {
                             <span className={`badge ${connectionMode === 'apikey' ? 'badge-warning' : 'badge-info'}`} style={{ fontSize: 10 }}>
                               {connectionMode === 'apikey' ? 'API Key' : 'Session'}
                             </span>
-                            {parseAccountExtraConfig(a)?.proxyUrl && (
+                            {cachedParseExtraConfig(a)?.proxyUrl && (
                               <span className="badge badge-purple" style={{ fontSize: 10 }}>代理</span>
                             )}
                           </div>

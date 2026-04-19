@@ -921,7 +921,11 @@ export default function Sites() {
       } else {
         toast.success(`批量操作完成：成功 ${successIds.length}`);
       }
-      setSelectedSiteIds(failedItems.map((item: any) => Number(item.id)).filter((id: number) => Number.isFinite(id) && id > 0));
+      if (action === 'delete') {
+        setSelectedSiteIds(failedItems.map((item: any) => Number(item.id)).filter((id: number) => Number.isFinite(id) && id > 0));
+      } else {
+        setSelectedSiteIds([]);
+      }
       await load();
     } catch (e: any) {
       toast.error(e.message || '批量操作失败');

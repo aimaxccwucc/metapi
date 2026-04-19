@@ -150,6 +150,20 @@ export function classifyProbeFailureMessage(message: string): MarketplaceProbeCl
   return 'inconclusive';
 }
 
+function resolveModelCredential(
+  preferredCredential: string | null | undefined,
+  preferredToken: AccountTokenRow | null,
+  account: AccountRow,
+  fallbackSiteApiKey: string,
+): string {
+  return (
+    (preferredCredential || '').trim()
+    || (preferredToken?.token || '').trim()
+    || (account.apiToken || '').trim()
+    || fallbackSiteApiKey
+  );
+}
+
 function formatProbeReason(input: { listHit: boolean; probe: MarketplaceProbeResult | null }): string {
   if (!input.probe) {
     return input.listHit ? '模型已出现在上游列表中，但未完成实时探测' : '上游模型列表未包含该模型，且未完成实时探测';
@@ -248,20 +262,14 @@ export async function probeModelAvailabilityViaRealtimeCall(input: {
     }
 
     try {
-      const response = await withTimeout(
-        async () => {
-          return await fetch(
-            probe.url,
-            await withSiteProxyRequestInit(probe.url, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify(probe.body),
-              signal: AbortSignal.timeout(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS),
-            }),
-          );
-        },
-        MARKETPLACE_MODEL_PROBE_TIMEOUT_MS + 500,
-        `model probe timeout (${Math.round(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS / 1000)}s)`,
+      const response = await fetch(
+        probe.url,
+        await withSiteProxyRequestInit(probe.url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(probe.body),
+          signal: AbortSignal.timeout(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS),
+        }),
       );
 
       if (response.ok) {
@@ -298,24 +306,18 @@ export async function probeModelAvailabilityViaRealtimeCall(input: {
 
   const geminiProbe = buildGeminiNativeProbeRequest(input.baseUrl, input.modelName);
   try {
-    const geminiResponse = await withTimeout(
-      async () => {
-        return await fetch(
-          geminiProbe.url,
-          await withSiteProxyRequestInit(geminiProbe.url, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Accept: 'application/json,text/plain,*/*',
-              'x-goog-api-key': input.credential,
-            },
-            body: JSON.stringify(geminiProbe.body),
-            signal: AbortSignal.timeout(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS),
-          }),
-        );
-      },
-      MARKETPLACE_MODEL_PROBE_TIMEOUT_MS + 500,
-      `model probe timeout (${Math.round(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS / 1000)}s)`,
+    const geminiResponse = await fetch(
+      geminiProbe.url,
+      await withSiteProxyRequestInit(geminiProbe.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json,text/plain,*/*',
+          'x-goog-api-key': input.credential,
+        },
+        body: JSON.stringify(geminiProbe.body),
+        signal: AbortSignal.timeout(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS),
+      }),
     );
 
     if (geminiResponse.ok) {
@@ -474,12 +476,7 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
 
   let preferredToken = await resolvePreferredTokenForCandidate(input.candidate, input.preferredTokenId);
   const fallbackSiteApiKey = (site.apiKey || '').trim();
-  let modelCredential = (
-    (input.preferredCredential || '').trim()
-    || (preferredToken?.token || '').trim()
-    || (account.apiToken || '').trim()
-    || fallbackSiteApiKey
-  );
+  let modelCredential = resolveModelCredential(input.preferredCredential, preferredToken, account, fallbackSiteApiKey);
   const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
   const accountAccessToken = (account.accessToken || '').trim();
   const allowAutoCreateKey = input.allowAutoCreateKey !== false;
@@ -523,12 +520,7 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
         if (!preferredToken) {
           preferredToken = await getPreferredAccountToken(account.id);
         }
-        modelCredential = (
-          (input.preferredCredential || '').trim()
-          || (preferredToken?.token || '').trim()
-          || (account.apiToken || '').trim()
-          || fallbackSiteApiKey
-        );
+        modelCredential = resolveModelCredential(input.preferredCredential, preferredToken, account, fallbackSiteApiKey);
         autoKeyCreated = !!modelCredential;
         autoKeyName = createdItem.createdTokenName || preferredToken?.name || null;
         autoKeyGroup = createdItem.createdTokenGroup || null;
@@ -546,12 +538,7 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
             if (!preferredToken) {
               preferredToken = await getPreferredAccountToken(account.id);
             }
-            modelCredential = (
-              (input.preferredCredential || '').trim()
-              || (preferredToken?.token || '').trim()
-              || (account.apiToken || '').trim()
-              || fallbackSiteApiKey
-            );
+            modelCredential = resolveModelCredential(input.preferredCredential, preferredToken, account, fallbackSiteApiKey);
             autoKeyCreated = !!modelCredential;
             autoKeyName = autoKeyName || preferredToken?.name || null;
             autoKeyTokenId = autoKeyTokenId || (typeof preferredToken?.id === 'number' ? preferredToken.id : null);
@@ -602,12 +589,7 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
         if (!preferredToken) {
           preferredToken = await getPreferredAccountToken(account.id);
         }
-        modelCredential = (
-          (input.preferredCredential || '').trim()
-          || (preferredToken?.token || '').trim()
-          || (account.apiToken || '').trim()
-          || fallbackSiteApiKey
-        );
+        modelCredential = resolveModelCredential(input.preferredCredential, preferredToken, account, fallbackSiteApiKey);
         if (modelCredential) {
           autoKeyCreated = true;
           autoKeyName = autoKeyName || preferredToken?.name || null;

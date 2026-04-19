@@ -133,15 +133,15 @@ async function fetchAuthenticatedResponse(url: string, options: RequestOptions =
     }
   }
 
-  ensureAuthSession();
-  const bearerToken = getBearerAuthToken(localStorage);
-  const headers: Record<string, string> = {};
-  if (bearerToken) {
-    headers['Authorization'] = `Bearer ${bearerToken}`;
-  }
-  if (normalizedFetchOptions.body) headers['Content-Type'] = 'application/json';
-
   try {
+    ensureAuthSession();
+    const bearerToken = getBearerAuthToken(localStorage);
+    const headers: Record<string, string> = {};
+    if (bearerToken) {
+      headers['Authorization'] = `Bearer ${bearerToken}`;
+    }
+    if (normalizedFetchOptions.body) headers['Content-Type'] = 'application/json';
+
     const res = await fetch(url, {
       ...normalizedFetchOptions,
       credentials: normalizedFetchOptions.credentials ?? 'same-origin',
@@ -182,11 +182,23 @@ async function fetchAuthenticatedResponse(url: string, options: RequestOptions =
 }
 
 async function request(url: string, options: RequestOptions = {}) {
-  const res = await fetchAuthenticatedResponse(url, options);
-  if (!res.ok) {
-    throw new Error(await extractResponseErrorMessage(res));
+  const method = String(options.method || 'GET').toUpperCase();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetchAuthenticatedResponse(url, options);
+      if (!res.ok) {
+        throw new Error(await extractResponseErrorMessage(res));
+      }
+      return res.json();
+    } catch (err) {
+      lastError = err;
+      if (method !== 'GET' || attempt >= 2) break;
+      if (!(err instanceof TypeError)) break;
+      await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+    }
   }
-  return res.json();
+  throw lastError;
 }
 
 function buildQueryString(params?: Record<string, string | number | boolean | null | undefined>) {
@@ -1546,7 +1558,7 @@ export const api = {
     request('/api/models/marketplace/test', {
       method: 'POST',
       body: JSON.stringify(data),
-      timeoutMs: 120_000,
+      timeoutMs: 300_000,
     }),
   getModelTokenCandidates: () => request('/api/models/token-candidates'),
 

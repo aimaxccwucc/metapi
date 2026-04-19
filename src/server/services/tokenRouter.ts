@@ -1393,7 +1393,16 @@ function getOrCreateSiteModelRuntimeHealthState(
     modelStates = new Map<string, SiteRuntimeHealthState>();
     siteModelRuntimeHealthStates.set(siteId, modelStates);
   }
-  return getOrCreateRuntimeHealthState(modelStates, modelKey, nowMs);
+  const result = getOrCreateRuntimeHealthState(modelStates, modelKey, nowMs);
+  // Prune if total entries across all inner maps exceed limit
+  let totalEntries = 0;
+  for (const ms of siteModelRuntimeHealthStates.values()) {
+    totalEntries += ms.size;
+  }
+  if (totalEntries > 5000) {
+    siteModelRuntimeHealthStates.clear();
+  }
+  return result;
 }
 
 function isRuntimeHealthBreakerOpen(state: SiteRuntimeHealthState | null | undefined, nowMs = Date.now()): boolean {
@@ -1661,6 +1670,17 @@ async function loadSiteRuntimeHealthStateFromSettings(): Promise<void> {
     }
     if (hydratedModelStates.size > 0) {
       siteModelRuntimeHealthStates.set(siteId, hydratedModelStates);
+    }
+  }
+
+  // Prune if total entries exceed limit
+  if (siteModelRuntimeHealthStates.size > 0) {
+    let totalEntries = 0;
+    for (const modelStates of siteModelRuntimeHealthStates.values()) {
+      totalEntries += modelStates.size;
+    }
+    if (totalEntries > 5000) {
+      siteModelRuntimeHealthStates.clear();
     }
   }
 }
@@ -2350,6 +2370,7 @@ let routeCacheSnapshot: RouteCacheSnapshot = {
   routes: [],
 };
 
+const ROUTE_MATCH_CACHE_MAX_SIZE = 2000;
 const routeMatchCache = new Map<number, RouteMatchCacheSnapshot>();
 
 type TtlCache<T> = { data: T; expireAtMs: number };
@@ -2911,6 +2932,7 @@ async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
     loadedAt: nowMs,
     routes,
   };
+  pruneStaleRouteMatchCache(routes);
   return routes;
 }
 
@@ -2975,11 +2997,24 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
   });
 
   const match = { route, channels: mapped };
+  if (routeMatchCache.size >= ROUTE_MATCH_CACHE_MAX_SIZE && !routeMatchCache.has(route.id)) {
+    const oldestKey = routeMatchCache.keys().next().value;
+    if (oldestKey !== undefined) routeMatchCache.delete(oldestKey);
+  }
   routeMatchCache.set(route.id, {
     loadedAt: nowMs,
     match,
   });
   return match;
+}
+
+function pruneStaleRouteMatchCache(enabledRoutes: RouteRow[]): void {
+  const enabledRouteIds = new Set(enabledRoutes.map((r) => r.id));
+  for (const [routeId] of routeMatchCache) {
+    if (!enabledRouteIds.has(routeId)) {
+      routeMatchCache.delete(routeId);
+    }
+  }
 }
 
 function patchCachedChannel(channelId: number, apply: (channel: ChannelRow) => void): void {
@@ -4432,8 +4467,15 @@ export class TokenRouter {
     }
   }
 
-  private getCachedChannelMatch(requestedModel: string): { match: RouteMatch; downstreamPolicy: DownstreamRoutingPolicy } | null {
-    return this.channelMatchCache.get(requestedModel) ?? null;
+  private getCachedChannelMatch(requestedModel: string, downstreamPolicy: DownstreamRoutingPolicy): { match: RouteMatch; downstreamPolicy: DownstreamRoutingPolicy } | null {
+    const cached = this.channelMatchCache.get(requestedModel);
+    if (!cached) return null;
+    if (cached.downstreamPolicy === downstreamPolicy) return cached;
+    if (cached.downstreamPolicy.forcedChannelId === downstreamPolicy.forcedChannelId
+      && cached.downstreamPolicy.stickySessionKey === downstreamPolicy.stickySessionKey) {
+      return cached;
+    }
+    return null;
   }
 
   async getVisiblePublicModels(): Promise<string[]> {
@@ -4532,9 +4574,9 @@ export class TokenRouter {
     await ensureRoutingRuntimeStateLoaded();
 
     // Reuse cached match from the initial selectChannel to avoid redundant DB queries.
-    const cachedMatch = this.getCachedChannelMatch(requestedModel);
+    const cachedMatch = this.getCachedChannelMatch(requestedModel, downstreamPolicy);
     let match: RouteMatch | null = null;
-    if (cachedMatch && cachedMatch.downstreamPolicy === downstreamPolicy) {
+    if (cachedMatch) {
       match = cachedMatch.match;
     } else {
       match = await this.findRoute(requestedModel, downstreamPolicy);

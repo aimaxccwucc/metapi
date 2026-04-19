@@ -174,6 +174,20 @@ function buildProxyLogSearchCondition(search: string) {
   )`;
 }
 
+function looksLikeModelName(search: string): boolean {
+  if (!search || search.includes(' ')) return false;
+  return /^[a-z0-9][a-z0-9.\-_]*$/.test(search);
+}
+
+function buildProxyLogSearchConditionFast(search: string) {
+  if (!search || !looksLikeModelName(search)) return null;
+  const prefixTerm = `${search}%`;
+  return sql<boolean>`(
+    lower(coalesce(${schema.proxyLogs.modelRequested}, '')) like ${prefixTerm}
+    or lower(coalesce(${schema.proxyLogs.modelActual}, '')) like ${prefixTerm}
+  )`;
+}
+
 function buildProxyLogStatusCondition(status: ProxyLogStatusFilter) {
   if (status === 'success') {
     return eq(schema.proxyLogs.status, 'success');
@@ -195,14 +209,18 @@ function buildProxyLogClientCondition(client: ProxyLogClientFilter) {
 function buildProxyLogWhereClause(params: {
   status?: ProxyLogStatusFilter;
   search?: string;
+  searchConditionOverride?: NonNullable<ReturnType<typeof buildProxyLogSearchCondition>> | null;
   client?: ProxyLogClientFilter;
   siteId?: number | null;
   fromUtc?: string | null;
   toUtc?: string | null;
 }) {
+  const searchCondition = params.searchConditionOverride !== undefined
+    ? params.searchConditionOverride
+    : (params.search ? buildProxyLogSearchCondition(params.search) : null);
   const conditions = [
     params.status ? buildProxyLogStatusCondition(params.status) : null,
-    params.search ? buildProxyLogSearchCondition(params.search) : null,
+    searchCondition,
     params.client ? buildProxyLogClientCondition(params.client) : null,
     params.siteId ? eq(schema.sites.id, params.siteId) : null,
     params.fromUtc ? gte(schema.proxyLogs.createdAt, params.fromUtc) : null,
@@ -691,9 +709,33 @@ export async function statsRoutes(app: FastifyInstance) {
     const siteId = normalizeProxyLogSiteId(request.query.siteId);
     const fromUtc = normalizeProxyLogTimeBoundary(request.query.from);
     const toUtc = normalizeProxyLogTimeBoundary(request.query.to);
-    const listWhere = buildProxyLogWhereClause({ status, search, client, siteId, fromUtc, toUtc });
-    const summaryWhere = buildProxyLogWhereClause({ search, client, siteId, fromUtc, toUtc });
-    const clientOptionsWhere = buildProxyLogWhereClause({ status, search, siteId, fromUtc, toUtc });
+
+    // Fast path: if search looks like a model name, try prefix match first
+    let fastPathCondition: ReturnType<typeof buildProxyLogSearchCondition> | undefined = undefined;
+    if (search && looksLikeModelName(search)) {
+      const fastCondition = buildProxyLogSearchConditionFast(search);
+      if (fastCondition) {
+        const fastWhere = buildProxyLogWhereClause({ search, searchConditionOverride: fastCondition, client, siteId, fromUtc, toUtc });
+        let fastCountQuery = db.select({
+          total: sql<number>`count(*)`,
+        }).from(schema.proxyLogs)
+          .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+          .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+          .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
+        if (fastWhere) {
+          fastCountQuery = fastCountQuery.where(fastWhere) as typeof fastCountQuery;
+        }
+        const fastCountRow = await fastCountQuery.get();
+        if (Number(fastCountRow?.total || 0) > 0) {
+          fastPathCondition = fastCondition;
+        }
+      }
+    }
+
+    const listWhere = buildProxyLogWhereClause({
+      status, search, searchConditionOverride: fastPathCondition, client, siteId, fromUtc, toUtc,
+    });
+    const clientOptionsWhere = buildProxyLogWhereClause({ status, search, searchConditionOverride: fastPathCondition, siteId, fromUtc, toUtc });
 
     const listRows = await withProxyLogSelectFields(({ fields }) => {
       let query = db.select({
@@ -727,44 +769,9 @@ export async function statsRoutes(app: FastifyInstance) {
       downstream_api_keys: { id?: number | null; name?: string | null; groupName?: string | null; tags?: string | null } | null;
     }>;
 
-    let totalQuery = db.select({
-      total: sql<number>`count(*)`,
-    }).from(schema.proxyLogs)
-      .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
-      .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-      .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
-    if (listWhere) {
-      totalQuery = totalQuery.where(listWhere) as typeof totalQuery;
-    }
-    const totalRow = await totalQuery.get();
-
-    const clientOptionRows = await withProxyLogSelectFields(({ fields, includeClientFields }) => {
-      if (!includeClientFields) {
-        return Promise.resolve([]);
-      }
-
-      let query = db.select({
-        clientFamily: fields.clientFamily!,
-        clientAppId: fields.clientAppId!,
-        clientAppName: fields.clientAppName!,
-      }).from(schema.proxyLogs)
-        .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
-        .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-        .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
-
-      if (clientOptionsWhere) {
-        query = query.where(clientOptionsWhere) as typeof query;
-      }
-
-      return query.all();
-    }, { includeBillingDetails: false, includeClientFields: true }) as Array<{
-      clientFamily?: string | null;
-      clientAppId?: string | null;
-      clientAppName?: string | null;
-    }>;
-
-    const summaryRow = await withProxyLogSelectFields(({ includeCacheFields }) => {
-      let summaryQuery = db.select({
+    // Combined total + summary in a single query (replaces separate totalQuery and summaryQuery)
+    const combinedRow = await withProxyLogSelectFields(({ includeCacheFields }) => {
+      let combinedQuery = db.select({
         totalCount: sql<number>`count(*)`,
         successCount: sql<number>`coalesce(sum(case when ${schema.proxyLogs.status} = 'success' then 1 else 0 end), 0)`,
         failedCount: sql<number>`coalesce(sum(case when coalesce(${schema.proxyLogs.status}, '') <> 'success' then 1 else 0 end), 0)`,
@@ -789,10 +796,10 @@ export async function statsRoutes(app: FastifyInstance) {
         .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
         .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
         .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
-      if (summaryWhere) {
-        summaryQuery = summaryQuery.where(summaryWhere) as typeof summaryQuery;
+      if (listWhere) {
+        combinedQuery = combinedQuery.where(listWhere) as typeof combinedQuery;
       }
-      return summaryQuery.get();
+      return combinedQuery.get();
     }, { includeBillingDetails: false, includeClientFields: false }) as {
       totalCount?: number;
       successCount?: number;
@@ -806,23 +813,48 @@ export async function statsRoutes(app: FastifyInstance) {
       cacheSavedTokens?: number;
     } | undefined;
 
+    const clientOptionRows = await withProxyLogSelectFields(({ fields, includeClientFields }) => {
+      if (!includeClientFields) {
+        return Promise.resolve([]);
+      }
+
+      let query = db.select({
+        clientFamily: fields.clientFamily!,
+        clientAppId: fields.clientAppId!,
+        clientAppName: fields.clientAppName!,
+      }).from(schema.proxyLogs)
+        .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+        .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+        .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
+
+      if (clientOptionsWhere) {
+        query = query.where(clientOptionsWhere) as typeof query;
+      }
+
+      return query.limit(500).all();
+    }, { includeBillingDetails: false, includeClientFields: true }) as Array<{
+      clientFamily?: string | null;
+      clientAppId?: string | null;
+      clientAppName?: string | null;
+    }>;
+
     return {
       items: listRows.map((row) => mapProxyLogRow(row)),
-      total: Number(totalRow?.total || 0),
+      total: Number(combinedRow?.totalCount || 0),
       page: Math.floor(offset / limit) + 1,
       pageSize: limit,
       clientOptions: buildProxyLogClientOptions(clientOptionRows),
       summary: {
-        totalCount: Number(summaryRow?.totalCount || 0),
-        successCount: Number(summaryRow?.successCount || 0),
-        failedCount: Number(summaryRow?.failedCount || 0),
-        totalCost: toRoundedMicroNumber(summaryRow?.totalCost),
-        totalTokensAll: Number(summaryRow?.totalTokensAll || 0),
-        cacheHitCount: Number(summaryRow?.cacheHitCount || 0),
-        cacheMissCount: Number(summaryRow?.cacheMissCount || 0),
-        cacheStaleCount: Number(summaryRow?.cacheStaleCount || 0),
-        cacheSavedCost: toRoundedMicroNumber(summaryRow?.cacheSavedCost),
-        cacheSavedTokens: Number(summaryRow?.cacheSavedTokens || 0),
+        totalCount: Number(combinedRow?.totalCount || 0),
+        successCount: Number(combinedRow?.successCount || 0),
+        failedCount: Number(combinedRow?.failedCount || 0),
+        totalCost: toRoundedMicroNumber(combinedRow?.totalCost),
+        totalTokensAll: Number(combinedRow?.totalTokensAll || 0),
+        cacheHitCount: Number(combinedRow?.cacheHitCount || 0),
+        cacheMissCount: Number(combinedRow?.cacheMissCount || 0),
+        cacheStaleCount: Number(combinedRow?.cacheStaleCount || 0),
+        cacheSavedCost: toRoundedMicroNumber(combinedRow?.cacheSavedCost),
+        cacheSavedTokens: Number(combinedRow?.cacheSavedTokens || 0),
       },
     };
   });
@@ -1490,7 +1522,7 @@ export async function statsRoutes(app: FastifyInstance) {
   // Refresh models for one account and rebuild routes.
   app.post<{ Params: { accountId: string } }>('/api/models/check/:accountId', async (request) => {
     const accountId = Number.parseInt(request.params.accountId, 10);
-    if (Number.isNaN(accountId)) {
+    if (!Number.isFinite(accountId) || accountId <= 0) {
       return { success: false, error: 'Invalid account id' };
     }
 

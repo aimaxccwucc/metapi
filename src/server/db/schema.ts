@@ -87,6 +87,7 @@ export const accountTokens = sqliteTable('account_tokens', {
 }, (table) => ({
   accountIdIdx: index('account_tokens_account_id_idx').on(table.accountId),
   accountEnabledIdx: index('account_tokens_account_enabled_idx').on(table.accountId, table.enabled),
+  accountEnabledValueStatusIdx: index('account_tokens_account_enabled_value_status_idx').on(table.accountId, table.enabled, table.valueStatus),
   enabledIdx: index('account_tokens_enabled_idx').on(table.enabled),
 }));
 
@@ -220,6 +221,8 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   downstreamKeyCreatedIdx: index('proxy_logs_downstream_api_key_created_at_idx').on(table.downstreamApiKeyId, table.createdAt),
   clientAppCreatedIdx: index('proxy_logs_client_app_id_created_at_idx').on(table.clientAppId, table.createdAt),
   clientFamilyCreatedIdx: index('proxy_logs_client_family_created_at_idx').on(table.clientFamily, table.createdAt),
+  channelIdIdx: index('proxy_logs_channel_id_idx').on(table.channelId),
+  modelRequestedCreatedIdx: index('proxy_logs_model_requested_created_at_idx').on(table.modelRequested, table.createdAt),
 }));
 
 export const proxyVideoTasks = sqliteTable('proxy_video_tasks', {

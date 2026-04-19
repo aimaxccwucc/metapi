@@ -33,6 +33,9 @@ const icons: Record<ToastType, React.ReactNode> = {
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const idRef = useRef(0);
+  const dedupMapRef = useRef<Map<string, number>>(new Map());
+
+  const DEDUP_WINDOW_MS = 3000;
 
   const removeToast = useCallback((id: number) => {
     setToasts(prev => prev.map(t => t.id === id ? { ...t, exiting: true } : t));
@@ -42,6 +45,12 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const addToast = useCallback((type: ToastType, message: string) => {
+    const dedupKey = `${type}:${message}`;
+    const now = Date.now();
+    const lastShown = dedupMapRef.current.get(dedupKey);
+    if (lastShown && now - lastShown < DEDUP_WINDOW_MS) return;
+    dedupMapRef.current.set(dedupKey, now);
+
     const id = ++idRef.current;
     setToasts(prev => [...prev, { id, type, message }]);
     setTimeout(() => removeToast(id), 3200);

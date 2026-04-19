@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { db, schema } from '../../db/index.js';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { detectSite } from '../../services/siteDetector.js';
 import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services/siteProxy.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
@@ -305,8 +305,8 @@ export async function sitesRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: normalizedProtocolConfig.error || 'Invalid protocolConfig.' });
     }
 
-    const existingSites = await db.select().from(schema.sites).all();
-    const maxSortOrder = existingSites.reduce((max, site) => Math.max(max, site.sortOrder || 0), -1);
+    const maxResult = await db.select({ maxOrder: sql<number>`coalesce(MAX(${schema.sites.sortOrder}), -1)` }).from(schema.sites).get();
+    const maxSortOrder = maxResult?.maxOrder ?? -1;
 
     let detectedPlatform = platform;
     if (!detectedPlatform) {
@@ -314,7 +314,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       detectedPlatform = detected?.platform;
     }
     if (!detectedPlatform) {
-      return { error: 'Could not detect platform. Please specify manually.' };
+      return reply.code(400).send({ error: 'Could not detect platform. Please specify manually.' });
     }
     const inserted = await db.insert(schema.sites).values({
       name,
@@ -374,7 +374,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     globalWeight?: number;
   } }>('/api/sites/:id', async (request, reply) => {
     const id = parseInt(request.params.id);
-    if (Number.isNaN(id)) {
+    if (!Number.isFinite(id) || id <= 0) {
       return reply.code(400).send({ error: 'Invalid site id' });
     }
 
@@ -469,8 +469,9 @@ export async function sitesRoutes(app: FastifyInstance) {
   });
 
   // Delete a site
-  app.delete<{ Params: { id: string } }>('/api/sites/:id', async (request) => {
+  app.delete<{ Params: { id: string } }>('/api/sites/:id', async (request, reply) => {
     const id = parseInt(request.params.id);
+    if (!Number.isFinite(id) || id <= 0) return reply.code(400).send({ error: 'Invalid id' });
     await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
     await deleteSiteProtocolConfig(id);
     await flushSiteProtocolConfigPersistence();
@@ -492,39 +493,53 @@ export async function sitesRoutes(app: FastifyInstance) {
     const failedItems: Array<{ id: number; message: string }> = [];
     let protocolConfigChanged = false;
 
+    const existingSites = await db.select().from(schema.sites)
+      .where(inArray(schema.sites.id, ids)).all() as typeof schema.sites.$inferSelect[];
+    const existingMap = new Map<number, typeof schema.sites.$inferSelect>(existingSites.map((s: typeof schema.sites.$inferSelect) => [s.id, s]));
+    const foundIds: number[] = [];
     for (const id of ids) {
-      const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
-      if (!existingSite) {
+      if (existingMap.has(id)) {
+        foundIds.push(id);
+      } else {
         failedItems.push({ id, message: 'Site not found' });
-        continue;
       }
+    }
 
+    if (foundIds.length > 0) {
       try {
         if (action === 'delete') {
-          await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
-          await deleteSiteProtocolConfig(id);
+          await db.delete(schema.sites).where(inArray(schema.sites.id, foundIds)).run();
+          for (const id of foundIds) {
+            await deleteSiteProtocolConfig(id);
+          }
           protocolConfigChanged = true;
+          successIds.push(...foundIds);
         } else if (action === 'enableSystemProxy') {
           await db.update(schema.sites)
             .set({ useSystemProxy: true, updatedAt: new Date().toISOString() })
-            .where(eq(schema.sites.id, id))
+            .where(inArray(schema.sites.id, foundIds))
             .run();
+          successIds.push(...foundIds);
         } else if (action === 'disableSystemProxy') {
           await db.update(schema.sites)
             .set({ useSystemProxy: false, updatedAt: new Date().toISOString() })
-            .where(eq(schema.sites.id, id))
+            .where(inArray(schema.sites.id, foundIds))
             .run();
+          successIds.push(...foundIds);
         } else {
           const nextStatus = action === 'enable' ? 'active' : 'disabled';
           await db.update(schema.sites)
             .set({ status: nextStatus, updatedAt: new Date().toISOString() })
-            .where(eq(schema.sites.id, id))
+            .where(inArray(schema.sites.id, foundIds))
             .run();
-          await applySiteStatusSideEffects(id, existingSite.name, nextStatus);
+          for (const id of foundIds) {
+            const site = existingMap.get(id)!;
+            await applySiteStatusSideEffects(id, site.name, nextStatus);
+          }
+          successIds.push(...foundIds);
         }
-        successIds.push(id);
       } catch (error: any) {
-        failedItems.push({ id, message: error?.message || 'Batch operation failed' });
+        failedItems.push(...foundIds.map((id) => ({ id, message: error?.message || 'Batch operation failed' })));
       }
     }
 
@@ -541,7 +556,7 @@ export async function sitesRoutes(app: FastifyInstance) {
 
   app.post<{ Params: { id: string }; Body?: { modelName?: string } }>('/api/sites/:id/protocol-probe', async (request, reply) => {
     const id = parseInt(request.params.id, 10);
-    if (Number.isNaN(id)) {
+    if (!Number.isFinite(id) || id <= 0) {
       return reply.code(400).send({ error: 'Invalid site id' });
     }
 
@@ -593,9 +608,7 @@ export async function sitesRoutes(app: FastifyInstance) {
   // Get disabled models for a site
   app.get<{ Params: { id: string } }>('/api/sites/:id/disabled-models', async (request, reply) => {
     const id = parseInt(request.params.id);
-    if (Number.isNaN(id)) {
-      return reply.code(400).send({ error: 'Invalid site id' });
-    }
+    if (!Number.isFinite(id) || id <= 0) return reply.code(400).send({ error: 'Invalid site id' });
     const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
     if (!existingSite) {
       return reply.code(404).send({ error: 'Site not found' });
@@ -610,9 +623,7 @@ export async function sitesRoutes(app: FastifyInstance) {
   // Update disabled models for a site (full replace)
   app.put<{ Params: { id: string }; Body: { models?: string[] } }>('/api/sites/:id/disabled-models', async (request, reply) => {
     const id = parseInt(request.params.id);
-    if (Number.isNaN(id)) {
-      return reply.code(400).send({ error: 'Invalid site id' });
-    }
+    if (!Number.isFinite(id) || id <= 0) return reply.code(400).send({ error: 'Invalid site id' });
     const existingSite = await db.select().from(schema.sites).where(eq(schema.sites.id, id)).get();
     if (!existingSite) {
       return reply.code(404).send({ error: 'Site not found' });
@@ -642,8 +653,9 @@ export async function sitesRoutes(app: FastifyInstance) {
   });
 
   // Detect platform for a URL
-  app.post<{ Body: { url: string } }>('/api/sites/detect', async (request) => {
+  app.post<{ Body: { url: string } }>('/api/sites/detect', async (request, reply) => {
     const result = await detectSite(request.body.url);
-    return result || { error: 'Could not detect platform' };
+    if (result) return result;
+    return reply.code(400).send({ error: 'Could not detect platform' });
   });
 }

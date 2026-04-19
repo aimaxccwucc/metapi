@@ -361,9 +361,13 @@ const applyAssistantError = (messages: ChatMessage[], errorMessage: string): Cha
   }
 
   const current = messages[targetIndex];
+  const existingContent = current.content || '';
+  const newContent = existingContent
+    ? `${existingContent}\n\n---\n**Error:** ${errorMessage}`
+    : errorMessage;
   return replaceMessageAt(messages, targetIndex, {
     ...current,
-    content: errorMessage,
+    content: newContent,
     status: MESSAGE_STATUS.ERROR,
     isThinkingComplete: true,
   });
@@ -1702,6 +1706,9 @@ export default function ModelTester() {
         if (!value) continue;
 
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > 1_000_000) {
+          throw new Error('SSE buffer exceeded 1MB limit');
+        }
         const chunks = buffer.split(/\r?\n\r?\n/);
         buffer = chunks.pop() || '';
 
@@ -1861,6 +1868,9 @@ export default function ModelTester() {
         if (!value) continue;
 
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > 1_000_000) {
+          throw new Error('SSE buffer exceeded 1MB limit');
+        }
         const chunks = buffer.split(/\r?\n\r?\n/);
         buffer = chunks.pop() || '';
 
