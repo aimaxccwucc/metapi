@@ -1546,7 +1546,7 @@ export const api = {
     request('/api/models/marketplace/test', {
       method: 'POST',
       body: JSON.stringify(data),
-      timeoutMs: 30_000,
+      timeoutMs: 120_000,
     }),
   getModelTokenCandidates: () => request('/api/models/token-candidates'),
 

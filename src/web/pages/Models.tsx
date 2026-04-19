@@ -306,6 +306,7 @@ export default function Models() {
   const [expandedCheckDetails, setExpandedCheckDetails] = useState<Record<string, boolean>>({});
   const [batchTestingModels, setBatchTestingModels] = useState<Record<string, boolean>>({});
   const batchTestingRef = useRef<Set<string>>(new Set());
+  const [batchTestingProgress, setBatchTestingProgress] = useState<Record<string, { done: number; total: number }>>({});
   const [visibleModelCount, setVisibleModelCount] = useState(MODEL_RENDER_CHUNK);
   const isMobile = useIsMobile();
   const deferredSearch = useDeferredValue(search.trim());
@@ -860,9 +861,6 @@ export default function Models() {
     setBatchTestingModels((prev) => ({ ...prev, [modelName]: true }));
     try {
       // Per site, only test the account with the highest balance.
-      // If multiple accounts share the same site, testing the richest one is
-      // sufficient to verify the site-model reachability while avoiding
-      // redundant API calls that could trigger rate limits or bans.
       const bestPerSite = new Map<string, ModelAccountInfo>();
       for (const a of accounts) {
         const existing = bestPerSite.get(a.site);
@@ -871,14 +869,29 @@ export default function Models() {
         }
       }
       const candidates = Array.from(bestPerSite.values());
+      const total = candidates.length;
+      let done = 0;
+      setBatchTestingProgress((prev) => ({ ...prev, [modelName]: { done: 0, total } }));
       const concurrency = 3;
       for (let i = 0; i < candidates.length; i += concurrency) {
         const batch = candidates.slice(i, i + concurrency);
-        await Promise.allSettled(batch.map((a) => testModelAvailability(modelName, a)));
+        await Promise.allSettled(batch.map(async (a) => {
+          try {
+            await testModelAvailability(modelName, a);
+          } finally {
+            done++;
+            setBatchTestingProgress((prev) => ({ ...prev, [modelName]: { done, total } }));
+          }
+        }));
       }
     } finally {
       batchTestingRef.current.delete(modelName);
       setBatchTestingModels((prev) => ({ ...prev, [modelName]: false }));
+      setBatchTestingProgress((prev) => {
+        const next = { ...prev };
+        delete next[modelName];
+        return next;
+      });
     }
   };
 
@@ -1276,7 +1289,11 @@ export default function Models() {
                           disabled={!!batchTestingModels[m.name]}
                           onClick={(e) => { e.stopPropagation(); void testAllAccountsForModel(m.name, m.accounts); }}
                         >
-                          {batchTestingModels[m.name] ? tr('测试中...') : tr('测试所有站点')}
+                          {batchTestingModels[m.name]
+                            ? (batchTestingProgress[m.name]
+                              ? `${tr('测试中')} ${batchTestingProgress[m.name].done}/${batchTestingProgress[m.name].total}`
+                              : tr('测试中...'))
+                            : tr('测试所有站点')}
                         </button>
                       </div>
 
@@ -1498,7 +1515,11 @@ export default function Models() {
                                 disabled={!!batchTestingModels[m.name]}
                                 onClick={(e) => { e.stopPropagation(); void testAllAccountsForModel(m.name, m.accounts); }}
                               >
-                                {batchTestingModels[m.name] ? tr('测试中...') : tr('测试所有站点')}
+                                {batchTestingModels[m.name]
+                                  ? (batchTestingProgress[m.name]
+                                    ? `${tr('测试中')} ${batchTestingProgress[m.name].done}/${batchTestingProgress[m.name].total}`
+                                    : tr('测试中...'))
+                                  : tr('测试所有站点')}
                               </button>
                             </div>
 

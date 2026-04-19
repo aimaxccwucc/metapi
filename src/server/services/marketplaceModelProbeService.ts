@@ -7,9 +7,9 @@ import { getAdapter } from './platforms/index.js';
 import { withSiteProxyRequestInit } from './siteProxy.js';
 import { autoProvisionTokenCoverage } from './tokenCoverageAutoProvisionService.js';
 
-const MARKETPLACE_MODEL_TEST_TIMEOUT_MS = 15_000;
-const MARKETPLACE_AUTO_KEY_TIMEOUT_MS = 8_000;
-const MARKETPLACE_MODEL_PROBE_TIMEOUT_MS = 10_000;
+const MARKETPLACE_MODEL_TEST_TIMEOUT_MS = 90_000;
+const MARKETPLACE_AUTO_KEY_TIMEOUT_MS = 15_000;
+const MARKETPLACE_MODEL_PROBE_TIMEOUT_MS = 30_000;
 
 type AccountRow = typeof schema.accounts.$inferSelect;
 type SiteRow = typeof schema.sites.$inferSelect;
