@@ -65,7 +65,7 @@ export function calculateChannelHealthScore(
   const experienceFactor = resolveExperienceFactor(successCount, failCount);
   const reliabilityFactor = totalCount >= 3
     ? clamp(0.45 + successRatio * 0.7, 0.45, 1.05)
-    : 1;
+    : (totalCount === 0 ? 0.55 : (totalCount === 1 ? 0.7 : 0.85));
 
   let recencyFactor = 1;
   if (channel.lastFailAt) {

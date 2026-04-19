@@ -34,6 +34,7 @@ import { classifyProxyFailureCategory } from './proxyRetryPolicy.js';
 import { parseCodexQuotaResetHint } from './oauth/quota.js';
 import { extractRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
+import { probeMarketplaceModelAvailability } from './marketplaceModelProbeService.js';
 import { isSiteReachableForRouting } from './siteLifecycleService.js';
 import { invalidateModelTokenCandidatesCache } from './modelTokenCandidatesCache.js';
 import { invalidateModelsMarketplaceCache } from './modelsMarketplaceCache.js';
@@ -103,6 +104,7 @@ type SiteRuntimeFailureContext = {
   modelName?: string | null;
   retryAfterHeader?: string | null;
   retryAfterMs?: number | null;
+  lightweightSitePenalty?: boolean;
 };
 
 type SiteRuntimeHealthState = {
@@ -118,6 +120,7 @@ type SiteRuntimeHealthState = {
   lastUpdatedAtMs: number;
   lastFailureAtMs: number | null;
   lastSuccessAtMs: number | null;
+  globalBreakerCascadeAtMs: number | null;
 };
 
 const MIN_EFFECTIVE_UNIT_COST = 1e-6;
@@ -159,6 +162,7 @@ const ACCOUNT_ROUTING_STATE_TTL_MS = 6 * 60 * 60 * 1000;
 const ACCOUNT_STICKY_BINDING_TTL_MS = 5 * 60 * 1000;
 const ACCOUNT_STICKY_FAILURE_BREAK_MS = 90 * 1000;
 const ACCOUNT_STICKY_BUSY_BREAK_MS = 30 * 1000;
+const ACCOUNT_STICKY_BREAK_AVOID_MS = 45 * 1000;
 const ACCOUNT_RATE_LIMIT_BURST_MIN = 2;
 const ACCOUNT_RATE_LIMIT_BURST_MAX = 6;
 const ACCOUNT_RATE_LIMIT_REFILL_MIN_PER_SEC = 0.15;
@@ -263,6 +267,7 @@ type SiteRuntimeHealthDetails = {
   globalRecoveryProbeReady: boolean;
   modelRecoveryProbeReady: boolean;
   modelKey: string;
+  globalBreakerCascadeAtMs: number | null;
 };
 
 export type SiteRuntimeHealthSnapshotEntry = {
@@ -280,6 +285,7 @@ export type SiteRuntimeHealthSnapshotEntry = {
   lastUpdatedAtMs: number;
   lastFailureAtMs: number | null;
   lastSuccessAtMs: number | null;
+  globalBreakerCascadeAtMs: number | null;
   multiplier: number;
   breakerOpen: boolean;
   recoveryProbeReady: boolean;
@@ -358,6 +364,8 @@ const accountRoutingStates = new Map<number, AccountRoutingState>();
 const accountRateBudgetStates = new Map<number, AccountRateBudgetState>();
 const stickySessionBindings = new Map<string, StickySessionBinding>();
 const stickySessionKeyByChannel = new Map<number, string>();
+const stickyBreakAvoidAccounts = new Map<number, number>();
+const credentialScopeChannelCache = new Map<string, { channelIds: number[]; expiresAtMs: number }>();
 let siteRuntimeHealthLoaded = false;
 let siteRuntimeHealthLoadPromise: Promise<void> | null = null;
 let siteRuntimeHealthSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1195,6 +1203,11 @@ async function loadCredentialScopedChannelIds(
 
   const credentialScope = buildCredentialScopedCooldownFingerprint(account, channel);
   if (credentialScope?.startsWith('oauth:')) {
+    const nowMs = Date.now();
+    const cached = credentialScopeChannelCache.get(credentialScope);
+    if (cached && cached.expiresAtMs > nowMs) {
+      return cached.channelIds.slice();
+    }
     const rows = await db.select({
       channelId: schema.routeChannels.id,
       accountId: schema.accounts.id,
@@ -1204,7 +1217,7 @@ async function loadCredentialScopedChannelIds(
       .from(schema.routeChannels)
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
       .all();
-    return rows
+    const channelIds = rows
       .filter((row: {
         channelId: number;
         accountId: number;
@@ -1216,6 +1229,11 @@ async function loadCredentialScopedChannelIds(
         return buildCredentialScopedCooldownFingerprint(currentAccount, currentChannel) === credentialScope;
       })
       .map((row: { channelId: number }) => row.channelId);
+    credentialScopeChannelCache.set(credentialScope, {
+      channelIds,
+      expiresAtMs: nowMs + 2 * 60 * 1000,
+    });
+    return channelIds.slice();
   }
 
   const accountRows = await db.select({ id: schema.routeChannels.id })
@@ -1255,6 +1273,7 @@ function hydrateSiteRuntimeHealthState(raw: unknown): SiteRuntimeHealthState | n
     lastUpdatedAtMs: Math.max(0, lastUpdatedAtMs),
     lastFailureAtMs: readNullableTimestamp(raw.lastFailureAtMs),
     lastSuccessAtMs: readNullableTimestamp(raw.lastSuccessAtMs),
+    globalBreakerCascadeAtMs: readNullableTimestamp(raw.globalBreakerCascadeAtMs),
   };
 }
 
@@ -1272,6 +1291,7 @@ function cloneSiteRuntimeHealthState(state: SiteRuntimeHealthState): SiteRuntime
     lastUpdatedAtMs: state.lastUpdatedAtMs,
     lastFailureAtMs: state.lastFailureAtMs,
     lastSuccessAtMs: state.lastSuccessAtMs,
+    globalBreakerCascadeAtMs: state.globalBreakerCascadeAtMs,
   };
 }
 
@@ -1358,6 +1378,7 @@ function getOrCreateRuntimeHealthState<K>(states: Map<K, SiteRuntimeHealthState>
       lastUpdatedAtMs: nowMs,
       lastFailureAtMs: null,
       lastSuccessAtMs: null,
+      globalBreakerCascadeAtMs: null,
     };
     states.set(key, initial);
     return initial;
@@ -1453,6 +1474,14 @@ function getSiteRuntimeHealthDetails(siteId: number, modelName?: string | null, 
   const modelState = modelKey ? getSiteModelRuntimeHealthState(siteId, modelKey) : null;
   const globalMultiplier = getRuntimeHealthMultiplier(globalState, nowMs);
   const modelMultiplier = modelState ? getRuntimeHealthMultiplier(modelState, nowMs) : 1;
+  const globalBreakerOpen = isRuntimeHealthBreakerOpen(globalState, nowMs);
+  const globalBreakerCascadeAtMs = globalState?.globalBreakerCascadeAtMs ?? null;
+  const modelBreakerOpen = isRuntimeHealthBreakerOpen(modelState, nowMs) || (
+    globalBreakerOpen
+    && modelState != null
+    && globalBreakerCascadeAtMs != null
+    && (modelState.lastSuccessAtMs ?? 0) < globalBreakerCascadeAtMs
+  );
   return {
     globalMultiplier,
     modelMultiplier,
@@ -1461,11 +1490,12 @@ function getSiteRuntimeHealthDetails(siteId: number, modelName?: string | null, 
       SITE_RUNTIME_MIN_MULTIPLIER * SITE_RUNTIME_MIN_MULTIPLIER,
       1,
     ),
-    globalBreakerOpen: isRuntimeHealthBreakerOpen(globalState, nowMs),
-    modelBreakerOpen: isRuntimeHealthBreakerOpen(modelState, nowMs),
+    globalBreakerOpen,
+    modelBreakerOpen,
     globalRecoveryProbeReady: isRuntimeHealthRecoveryProbeReady(globalState, nowMs),
     modelRecoveryProbeReady: isRuntimeHealthRecoveryProbeReady(modelState, nowMs),
     modelKey,
+    globalBreakerCascadeAtMs,
   };
 }
 
@@ -1483,13 +1513,13 @@ function shouldOpenImmediateRuntimeBreaker(context: SiteRuntimeFailureContext = 
 
 function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteRuntimeFailureContext = {}, nowMs = Date.now()): void {
   const recoveryProbeInFlight = isRuntimeHealthRecoveryProbeReady(state, nowMs);
-  state.penaltyScore += resolveSiteRuntimeFailurePenalty(context);
+  state.penaltyScore += resolveSiteRuntimeFailurePenalty(context) * (context.lightweightSitePenalty ? 0.3 : 1);
   const immediateBreakerMs = Math.max(
     resolveImmediateModelBreakerDurationMs(context),
     resolveImmediateSiteRuntimeBreakerDurationMs(context),
   );
   const retryAfterMs = resolveRetryAfterMsFromContext(context, nowMs);
-  if (immediateBreakerMs > 0 && shouldOpenImmediateRuntimeBreaker(context)) {
+  if (!context.lightweightSitePenalty && immediateBreakerMs > 0 && shouldOpenImmediateRuntimeBreaker(context)) {
     state.breakerLevel = Math.min(
       SITE_RUNTIME_BREAKER_LEVELS_MS.length - 1,
       state.breakerLevel + 1,
@@ -1501,10 +1531,11 @@ function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteR
     state.transientFailureStreak = 0;
     state.lastTransientFailureAtMs = null;
     state.lastFailureAtMs = nowMs;
+    state.globalBreakerCascadeAtMs = state.breakerLevel >= 2 ? nowMs : state.globalBreakerCascadeAtMs;
     return;
   }
 
-  if (isTransientSiteRuntimeFailure(context)) {
+  if (!context.lightweightSitePenalty && isTransientSiteRuntimeFailure(context)) {
     const lastTransientFailureAtMs = state.lastTransientFailureAtMs;
     const shouldContinueStreak = (
       typeof lastTransientFailureAtMs === 'number'
@@ -1523,12 +1554,13 @@ function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteR
       state.lastRecoveryProbeAtMs = recoveryProbeInFlight ? nowMs : state.lastRecoveryProbeAtMs;
       state.lastRecoveryProbeResult = 'failed';
       state.transientFailureStreak = 0;
+      state.globalBreakerCascadeAtMs = state.breakerLevel >= 2 ? nowMs : state.globalBreakerCascadeAtMs;
     }
-  } else {
+  } else if (!context.lightweightSitePenalty) {
     state.transientFailureStreak = 0;
     state.lastTransientFailureAtMs = null;
   }
-  if (retryAfterMs != null && retryAfterMs > 0) {
+  if (!context.lightweightSitePenalty && retryAfterMs != null && retryAfterMs > 0) {
     state.breakerUntilMs = Math.max(state.breakerUntilMs ?? 0, nowMs + retryAfterMs);
     state.recoveryProbeAfterMs = resolveRuntimeHealthRecoveryProbeAfterMs(state.breakerUntilMs, state.breakerLevel, nowMs);
   }
@@ -1549,6 +1581,7 @@ function applyRuntimeHealthSuccess(state: SiteRuntimeHealthState, latencyMs: num
   state.lastRecoveryProbeAtMs = nowMs;
   state.lastRecoveryProbeResult = 'success';
   state.lastSuccessAtMs = nowMs;
+  state.globalBreakerCascadeAtMs = null;
   const normalizedLatencyMs = Math.max(0, Math.trunc(latencyMs));
   state.latencyEmaMs = state.latencyEmaMs == null
     ? normalizedLatencyMs
@@ -2110,6 +2143,7 @@ export async function listSiteRuntimeHealthSnapshots(nowMs = Date.now()): Promis
       lastUpdatedAtMs: state.lastUpdatedAtMs,
       lastFailureAtMs: state.lastFailureAtMs,
       lastSuccessAtMs: state.lastSuccessAtMs,
+      globalBreakerCascadeAtMs: state.globalBreakerCascadeAtMs,
       multiplier: getRuntimeHealthMultiplier(state, nowMs),
       breakerOpen: isRuntimeHealthBreakerOpen(state, nowMs),
       recoveryProbeReady: isRuntimeHealthRecoveryProbeReady(state, nowMs),
@@ -2133,6 +2167,7 @@ export async function listSiteRuntimeHealthSnapshots(nowMs = Date.now()): Promis
         lastUpdatedAtMs: state.lastUpdatedAtMs,
         lastFailureAtMs: state.lastFailureAtMs,
         lastSuccessAtMs: state.lastSuccessAtMs,
+        globalBreakerCascadeAtMs: state.globalBreakerCascadeAtMs,
         multiplier: getRuntimeHealthMultiplier(state, nowMs),
         breakerOpen: isRuntimeHealthBreakerOpen(state, nowMs),
         recoveryProbeReady: isRuntimeHealthRecoveryProbeReady(state, nowMs),
@@ -2248,6 +2283,9 @@ function buildRuntimeBreakerReason(details: SiteRuntimeHealthDetails): string {
     return '模型熔断恢复探测窗口';
   }
   if (details.globalBreakerOpen && details.modelBreakerOpen) {
+    if (details.globalBreakerCascadeAtMs != null) {
+      return '站点熔断中，模型联动熔断中，优先避让';
+    }
     return '站点熔断中，模型熔断中，优先避让';
   }
   if (details.globalBreakerOpen) {
@@ -2282,11 +2320,13 @@ function filterSiteRuntimeBrokenCandidatesByModel(
 ): {
   candidates: RouteChannelCandidate[];
   avoided: Array<{ candidate: RouteChannelCandidate; reason: string; recoveryProbe: boolean }>;
+  probeCandidate: RouteChannelCandidate | null;
 } {
   if (candidates.length === 0) {
     return {
       candidates,
       avoided: [],
+      probeCandidate: null,
     };
   }
 
@@ -2331,8 +2371,9 @@ function filterSiteRuntimeBrokenCandidatesByModel(
       modelState.lastRecoveryProbeAtMs = nowMs;
     }
     return {
-      candidates: [probeCandidate.candidate],
+      candidates: [],
       avoided: avoided.filter((item) => item.candidate.channel.id !== probeCandidate.candidate.channel.id),
+      probeCandidate: probeCandidate.candidate,
     };
   }
 
@@ -2340,11 +2381,50 @@ function filterSiteRuntimeBrokenCandidatesByModel(
     ? {
       candidates: healthy,
       avoided,
+      probeCandidate: null,
     }
     : {
-      candidates,
+      candidates: [],
       avoided,
+      probeCandidate: null,
     };
+}
+
+function executeRuntimeHealthRecoveryProbe(candidate: RouteChannelCandidate, modelName: string, nowMs = Date.now()): void {
+  const normalizedModelName = normalizeModelAlias(modelName);
+  if (!normalizedModelName) return;
+
+  const siteState = getOrCreateSiteRuntimeHealthState(candidate.site.id, nowMs);
+  siteState.lastRecoveryProbeAtMs = nowMs;
+  const modelState = getOrCreateSiteModelRuntimeHealthState(candidate.site.id, normalizedModelName, nowMs);
+  if (modelState) {
+    modelState.lastRecoveryProbeAtMs = nowMs;
+  }
+  scheduleSiteRuntimeHealthPersistence();
+
+  void probeMarketplaceModelAvailability({
+    modelName: normalizedModelName,
+    accountId: candidate.account.id,
+    siteName: candidate.site.name || undefined,
+    preferredTokenId: candidate.token?.id ?? null,
+    skipAutoCreate: false,
+    forceRealtimeProbeOnListMiss: true,
+    allowListHitSuccess: false,
+  }).then((result) => {
+    const observedAtMs = Date.now();
+    if (result.success && result.available) {
+      recordSiteRuntimeSuccess(candidate.site.id, Math.max(0, result.latencyMs ?? 0), normalizedModelName, observedAtMs);
+      if (canUseModelCircuit(candidate.channel.id, normalizedModelName, observedAtMs)) {
+        recordModelCircuitSuccess(candidate.channel.id, normalizedModelName, observedAtMs);
+      }
+      return;
+    }
+    recordSiteRuntimeFailure(candidate.site.id, {
+      modelName: normalizedModelName,
+      errorText: result.success ? result.reason : result.error,
+      lightweightSitePenalty: true,
+    }, observedAtMs);
+  }).catch(() => {});
 }
 
 type RouteMode = 'pattern' | 'explicit_group';
@@ -2442,6 +2522,16 @@ function pruneAccountRoutingStates(nowMs = Date.now()): void {
       accountRoutingStates.delete(accountId);
       accountRateBudgetStates.delete(accountId);
       accountSelectionLeases.delete(accountId);
+    }
+  }
+  for (const [accountId, avoidUntilMs] of stickyBreakAvoidAccounts.entries()) {
+    if (avoidUntilMs <= nowMs) {
+      stickyBreakAvoidAccounts.delete(accountId);
+    }
+  }
+  for (const [scopeKey, cacheEntry] of credentialScopeChannelCache.entries()) {
+    if (cacheEntry.expiresAtMs <= nowMs) {
+      credentialScopeChannelCache.delete(scopeKey);
     }
   }
 }
@@ -2605,11 +2695,13 @@ function partitionAccountSelectionLeases(
     const inflightCount = getAccountSelectionLeases(candidate.account.id, nowMs).length;
     const concurrencyBudget = getAccountConcurrencyBudget(candidate, state);
     const budgetState = syncAccountRateBudgetConfig(candidate.account.id, nowMs);
+    const stickyBreakAvoidUntilMs = stickyBreakAvoidAccounts.get(candidate.account.id) ?? 0;
+    const stickyBreakAvoidActive = stickyBreakAvoidUntilMs > nowMs;
     const rateLimitedUntil = budgetState.denyUntilMs != null && budgetState.denyUntilMs > nowMs
       ? new Date(budgetState.denyUntilMs).toISOString()
       : null;
     const hasBudget = budgetState.tokens >= 1 && !rateLimitedUntil;
-    if (inflightCount < concurrencyBudget && hasBudget) {
+    if (!stickyBreakAvoidActive && inflightCount < concurrencyBudget && hasBudget) {
       return {
         preferred: candidates,
         avoided: [],
@@ -2647,6 +2739,8 @@ function partitionAccountSelectionLeases(
 
   for (const candidate of candidates) {
     uniqueAccountIds.add(candidate.account.id);
+    const stickyBreakAvoidUntilMs = stickyBreakAvoidAccounts.get(candidate.account.id) ?? 0;
+    const stickyBreakAvoidActive = stickyBreakAvoidUntilMs > nowMs;
     const state = accountRoutingStates.get(candidate.account.id) ?? null;
     const inflightCount = getAccountSelectionLeases(candidate.account.id, nowMs).length;
     const concurrencyBudget = getAccountConcurrencyBudget(candidate, state);
@@ -2655,7 +2749,7 @@ function partitionAccountSelectionLeases(
       ? new Date(budgetState.denyUntilMs).toISOString()
       : null;
     const hasBudget = budgetState.tokens >= 1 && !rateLimitedUntil;
-    if (inflightCount < concurrencyBudget && hasBudget) {
+    if (!stickyBreakAvoidActive && inflightCount < concurrencyBudget && hasBudget) {
       preferred.push(candidate);
       continue;
     }
@@ -2783,6 +2877,10 @@ function bindStickySessionToCandidate(
 function clearStickyBindingForChannel(channelId: number): void {
   const stickyKeyHash = stickySessionKeyByChannel.get(channelId);
   if (!stickyKeyHash) return;
+  const binding = stickySessionBindings.get(stickyKeyHash);
+  if (binding) {
+    stickyBreakAvoidAccounts.set(binding.accountId, Date.now() + ACCOUNT_STICKY_BREAK_AVOID_MS);
+  }
   stickySessionKeyByChannel.delete(channelId);
   stickySessionBindings.delete(stickyKeyHash);
   scheduleAccountRuntimePersistence();
@@ -2805,6 +2903,8 @@ function getAccountStickyMultiplier(
   stickyBinding: StickySessionBinding | null,
   stickyReason: 'reused' | 'broken_by_failure' | 'broken_by_busy' | 'none',
 ): number {
+  const avoidUntilMs = stickyBreakAvoidAccounts.get(candidate.account.id) ?? 0;
+  if (avoidUntilMs > Date.now()) return 0.65;
   if (!stickyBinding) return 1;
   if (stickyBinding.accountId !== candidate.account.id) return 1;
   if (stickyReason === 'reused') return 1.35;
@@ -4927,10 +5027,20 @@ export class TokenRouter {
       const rawOrdered = this.getRoundRobinCandidates(match.channels.filter((row) => {
         const target = candidateMap.get(row.channel.id);
         return !!target?.eligible;
-      }));
+      }), runtimeModelResolver);
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawOrdered, runtimeModelResolver, nowMs);
+      if (breakerFiltered.probeCandidate) {
+        const probeModelName = typeof runtimeModelResolver === 'function'
+          ? runtimeModelResolver(breakerFiltered.probeCandidate)
+          : runtimeModelResolver;
+        executeRuntimeHealthRecoveryProbe(
+          breakerFiltered.probeCandidate,
+          probeModelName,
+          nowMs,
+        );
+      }
       const fullyBlockedByRuntimeBreaker =
-        breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawOrdered.length;
+        breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === 0;
       if (breakerFiltered.avoided.length > 0) {
         for (const item of breakerFiltered.avoided) {
           const target = candidateMap.get(item.candidate.channel.id);
@@ -5020,6 +5130,7 @@ export class TokenRouter {
         leasePartition.preferred.length > 0
           ? leasePartition.preferred
           : accountLeaseCandidates,
+        runtimeModelResolver,
       );
       let selected: RouteChannelCandidate | null = null;
 
@@ -5094,8 +5205,18 @@ export class TokenRouter {
       if (rawLayer.length === 0) continue;
 
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
+      if (breakerFiltered.probeCandidate) {
+        const probeModelName = typeof runtimeModelResolver === 'function'
+          ? runtimeModelResolver(breakerFiltered.probeCandidate)
+          : runtimeModelResolver;
+        executeRuntimeHealthRecoveryProbe(
+          breakerFiltered.probeCandidate,
+          probeModelName,
+          nowMs,
+        );
+      }
       const fullyBlockedByRuntimeBreaker =
-        breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === rawLayer.length;
+        breakerFiltered.avoided.length > 0 && breakerFiltered.candidates.length === 0;
       if (breakerFiltered.avoided.length > 0) {
         for (const item of breakerFiltered.avoided) {
           const target = candidateMap.get(item.candidate.channel.id);
@@ -5576,20 +5697,16 @@ export class TokenRouter {
         }
       }
     }
-    const shouldRecordSiteRuntime = !(
+    const roundRobinLightweightSitePenalty = (
       routeStrategy === 'round_robin'
       && failureCategory === 'server'
       && !isProtocolFailure
     );
-    if (shouldRecordSiteRuntime) {
-      recordSiteRuntimeFailure(account.siteId, normalizedContext, nowMs);
-    }
-    const shouldPenalizeAccountRuntime = !(
-      routeStrategy === 'round_robin'
-      && failureCategory === 'server'
-      && !isProtocolFailure
-    );
-    if (shouldPenalizeAccountRuntime) {
+    recordSiteRuntimeFailure(account.siteId, {
+      ...normalizedContext,
+      lightweightSitePenalty: roundRobinLightweightSitePenalty,
+    }, nowMs);
+    if (!roundRobinLightweightSitePenalty) {
       const accountState = getOrCreateAccountRoutingState(account.id, nowMs);
       accountState.successEma = (
         accountState.lastSuccessAtMs == null && accountState.lastFailureAtMs == null
@@ -5619,12 +5736,7 @@ export class TokenRouter {
       scheduleAccountRuntimePersistence();
     }
 
-    const shouldSuppressGovernance = !(
-      routeStrategy === 'round_robin'
-      && failureCategory === 'server'
-      && !isProtocolFailure
-    );
-    const governanceSuppression = shouldSuppressGovernance
+    const governanceSuppression = !roundRobinLightweightSitePenalty
       ? resolveGovernanceSuppression({
         failureCategory,
         channel: ch,
@@ -5801,7 +5913,7 @@ export class TokenRouter {
         : accountLeaseCandidates;
       const selected = this.selectWithModelCircuitGuard(
         selectionPool,
-        (items) => this.selectRoundRobinCandidate(items),
+        (items) => this.selectRoundRobinCandidate(items, runtimeModelResolver),
         (candidate) => (
           typeof runtimeModelResolver === 'function'
             ? runtimeModelResolver(candidate)
@@ -6169,8 +6281,20 @@ export class TokenRouter {
     return reasonParts;
   }
 
-  private getRoundRobinCandidates(candidates: RouteChannelCandidate[]): RouteChannelCandidate[] {
+  private getRoundRobinCandidates(
+    candidates: RouteChannelCandidate[],
+    runtimeModelName?: string | ((candidate: RouteChannelCandidate) => string),
+  ): RouteChannelCandidate[] {
+    const resolveModelName = typeof runtimeModelName === 'function'
+      ? runtimeModelName
+      : (() => runtimeModelName || '');
     return [...candidates].sort((left, right) => {
+      const leftHealth = getSiteRuntimeHealthDetails(left.site.id, resolveModelName(left), Date.now()).combinedMultiplier;
+      const rightHealth = getSiteRuntimeHealthDetails(right.site.id, resolveModelName(right), Date.now()).combinedMultiplier;
+      const healthDiff = rightHealth - leftHealth;
+      if (Math.abs(healthDiff) > 0.05) {
+        return healthDiff > 0 ? 1 : -1;
+      }
       const selectionOrder = compareNullableTimeAsc(
         left.channel.lastSelectedAt || left.channel.lastUsedAt,
         right.channel.lastSelectedAt || right.channel.lastUsedAt,
@@ -6184,8 +6308,11 @@ export class TokenRouter {
     });
   }
 
-  private selectRoundRobinCandidate(candidates: RouteChannelCandidate[]): RouteChannelCandidate | null {
-    return this.getRoundRobinCandidates(candidates)[0] ?? null;
+  private selectRoundRobinCandidate(
+    candidates: RouteChannelCandidate[],
+    runtimeModelName?: string | ((candidate: RouteChannelCandidate) => string),
+  ): RouteChannelCandidate | null {
+    return this.getRoundRobinCandidates(candidates, runtimeModelName)[0] ?? null;
   }
 
   private compareStableFirstCandidates(left: RouteChannelCandidate, right: RouteChannelCandidate): number {
