@@ -697,6 +697,7 @@ export default function ModelTester() {
   const [loadingModels, setLoadingModels] = useState(true);
   const [error, setError] = useState('');
   const [pendingPayload, setPendingPayload] = useState<TestChatPayload | null>(null);
+  const [forcedChannelId, setForcedChannelId] = useState<number | null>(null);
   const [pendingJobId, setPendingJobId] = useState<string | null>(null);
 
   const [customRequestMode, setCustomRequestMode] = useState(false);
@@ -892,6 +893,7 @@ export default function ModelTester() {
     setParameterEnabled(restored.parameterEnabled);
     setPendingPayload(restored.pendingPayload);
     setPendingJobId(restored.pendingJobId || null);
+    setForcedChannelId(restored.forcedChannelId ?? null);
     setCustomRequestMode(restored.customRequestMode);
     setCustomRequestBody(restored.customRequestBody);
     setShowDebugPanel(restored.showDebugPanel);
@@ -1002,6 +1004,7 @@ export default function ModelTester() {
       },
       pendingPayload,
       pendingJobId,
+      forcedChannelId,
       customRequestMode,
       customRequestBody,
       showDebugPanel,
@@ -1994,8 +1997,11 @@ export default function ModelTester() {
   }, [input, inputs.mode, inputs.model, inputs.protocol, recordHistory, startChatJob, startStream]);
 
   const dispatchProxyEnvelope = useCallback(async (envelope: ProxyTestEnvelope, nextMessages?: ChatMessage[]) => {
+    const finalEnvelope: ProxyTestEnvelope = forcedChannelId
+      ? { ...envelope, forcedChannelId }
+      : envelope;
     setError('');
-    setDebugRequest(formatJson(envelope.rawMode ? { path: envelope.path, rawJsonText: envelope.rawJsonText } : envelope));
+    setDebugRequest(formatJson(finalEnvelope.rawMode ? { path: finalEnvelope.path, rawJsonText: finalEnvelope.rawJsonText } : finalEnvelope));
     setDebugResponse('');
     setActiveDebugTab(DEBUG_TABS.REQUEST);
     setDebugTimestamp(new Date().toISOString());
@@ -2003,20 +2009,20 @@ export default function ModelTester() {
       mode: inputs.mode,
       protocol: inputs.protocol,
       model: inputs.model,
-      title: buildHistoryTitle(inputs.mode, inputs.protocol, inputs.model, input || envelope.path),
-      request: envelope,
-      requestPreview: input || envelope.path,
+      title: buildHistoryTitle(inputs.mode, inputs.protocol, inputs.model, input || finalEnvelope.path),
+      request: finalEnvelope,
+      requestPreview: input || finalEnvelope.path,
       status: 'pending',
     });
 
-    if (envelope.stream && nextMessages) {
-      await startProxyStream(envelope, nextMessages);
+    if (finalEnvelope.stream && nextMessages) {
+      await startProxyStream(finalEnvelope, nextMessages);
       return;
     }
 
     setSending(true);
     try {
-      const result = await api.proxyTest(envelope);
+      const result = await api.proxyTest(finalEnvelope);
       setDebugResponse(formatJson(result));
       setActiveDebugTab(DEBUG_TABS.RESPONSE);
       setNonConversationResult(result);
@@ -2027,7 +2033,7 @@ export default function ModelTester() {
       }
 
       setError('');
-      pushDebug('info', `代理请求成功：${envelope.path}`);
+      pushDebug('info', `代理请求成功：${finalEnvelope.path}`);
       void refreshRouteDecision(inputs.model, { silent: true });
     } catch (requestError: any) {
       const message = requestError?.message || '请求失败';
@@ -2042,7 +2048,7 @@ export default function ModelTester() {
     } finally {
       setSending(false);
     }
-  }, [input, inputs.mode, inputs.model, inputs.protocol, pushDebug, recordHistory, refreshRouteDecision, startProxyStream, updateMostRecentPendingHistory]);
+  }, [input, inputs.mode, inputs.model, inputs.protocol, forcedChannelId, pushDebug, recordHistory, refreshRouteDecision, startProxyStream, updateMostRecentPendingHistory]);
 
   const buildPayloadWithMessages = useCallback((nextMessages: ChatMessage[]): {
     payload: TestChatPayload | null;
@@ -2542,179 +2548,22 @@ export default function ModelTester() {
         style={{
           padding: 16,
           marginBottom: 16,
-          display: 'grid',
-          gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1.1fr) minmax(0, 0.9fr)',
-          gap: 16,
         }}
       >
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
-            <div>
-              <div style={{ fontSize: 15, fontWeight: 600 }}>路由解释摘要</div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                直接复用当前路由决策接口，查看模型会命中哪条通道。
-              </div>
-            </div>
-            <button
-              className="btn btn-ghost"
-              style={{ border: '1px solid var(--color-border)', padding: '6px 12px' }}
-              onClick={() => { void refreshRouteDecision(inputs.model); }}
-              disabled={!inputs.model || customRequestMode || routeDecisionState.loading}
-            >
-              {routeDecisionState.loading ? '刷新中...' : '刷新解释'}
-            </button>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, cursor: 'pointer' }}
+          onClick={() => setShowDebugPanel((prev) => !prev)}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' }}>路由解释 / 历史记录</span>
+            {routeDecisionState.data && (
+              <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                {routeDecisionState.data.selectedLabel || '未选出通道'}
+              </span>
+            )}
           </div>
-          {!inputs.model || customRequestMode ? (
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-              {customRequestMode ? '自定义请求模式下不自动推断路由解释。' : '请选择模型后查看路由解释。'}
-            </div>
-          ) : routeDecisionState.error ? (
-            <div style={{ fontSize: 12, color: 'var(--color-danger)' }}>{routeDecisionState.error}</div>
-          ) : routeDecisionState.data ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
-                <div style={{ padding: 10, border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)' }}>
-                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 4 }}>命中路由</div>
-                  <div style={{ fontSize: 13, fontWeight: 600, wordBreak: 'break-all' }}>{routeDecisionState.data.modelPattern || '未匹配'}</div>
-                </div>
-                <div style={{ padding: 10, border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)' }}>
-                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 4 }}>最终选择</div>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{routeDecisionState.data.selectedLabel || '未选出通道'}</div>
-                </div>
-                <div style={{ padding: 10, border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-sm)' }}>
-                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 4 }}>实际转发模型</div>
-                  <div style={{ fontSize: 13, fontWeight: 600, wordBreak: 'break-all' }}>{routeDecisionState.data.actualModel || inputs.model}</div>
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {routeDecisionState.data.summary.slice(0, 5).map((line, index) => (
-                  <div key={`${line}-${index}`} style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                    {line}
-                  </div>
-                ))}
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {routeDecisionState.data.candidates.slice(0, 4).map((candidate) => (
-                  <div
-                    key={candidate.channelId}
-                    style={{
-                      padding: 10,
-                      border: '1px solid var(--color-border-light)',
-                      borderRadius: 'var(--radius-sm)',
-                      background: routeDecisionState.data?.selectedChannelId === candidate.channelId ? 'var(--color-primary-soft)' : 'transparent',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 4 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>
-                        {candidate.username} @ {candidate.siteName}
-                      </div>
-                      <div style={{ fontSize: 12, color: candidate.eligible ? 'var(--color-success)' : 'var(--color-danger)' }}>
-                        {candidate.probability.toFixed(2)}%
-                      </div>
-                    </div>
-                    {(candidate.modelCircuitStatus?.reason || candidate.circuitStatus?.reason) ? (
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
-                        {candidate.modelCircuitStatus?.reason ? (
-                          <span
-                            style={{
-                              fontSize: 11,
-                              padding: '2px 6px',
-                              borderRadius: 999,
-                              background: candidate.modelCircuitStatus.isOpen
-                                ? 'color-mix(in srgb, var(--color-danger) 12%, transparent)'
-                                : 'color-mix(in srgb, var(--color-warning) 12%, transparent)',
-                              color: candidate.modelCircuitStatus.isOpen ? 'var(--color-danger)' : 'var(--color-warning)',
-                            }}
-                          >
-                            模型熔断：{candidate.modelCircuitStatus.reason}
-                          </span>
-                        ) : null}
-                        {candidate.circuitStatus?.reason ? (
-                          <span
-                            style={{
-                              fontSize: 11,
-                              padding: '2px 6px',
-                              borderRadius: 999,
-                              background: candidate.circuitStatus.isOpen
-                                ? 'color-mix(in srgb, var(--color-danger) 10%, transparent)'
-                                : 'color-mix(in srgb, var(--color-info) 10%, transparent)',
-                              color: candidate.circuitStatus.isOpen ? 'var(--color-danger)' : 'var(--color-info)',
-                            }}
-                          >
-                            站点状态：{candidate.circuitStatus.reason}
-                          </span>
-                        ) : null}
-                      </div>
-                    ) : null}
-                    <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{candidate.reason}</div>
-                  </div>
-                ))}
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                {routeDecisionState.refreshedAt ? `最近刷新：${new Date(routeDecisionState.refreshedAt).toLocaleString()}` : '尚未刷新'}
-              </div>
-            </div>
-          ) : (
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>正在等待路由解释数据。</div>
-          )}
-        </div>
-
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
-            <div>
-              <div style={{ fontSize: 15, fontWeight: 600 }}>最近历史</div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                本地保存最近 {MODEL_TESTER_HISTORY_LIMIT} 条请求快照，支持重新载入。
-              </div>
-            </div>
-          </div>
-          {historyEntries.length === 0 ? (
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>暂无历史记录。</div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 320, overflowY: 'auto' }}>
-              {historyEntries.slice(0, 8).map((entry) => (
-                <div
-                  key={entry.id}
-                  style={{
-                    padding: 10,
-                    border: '1px solid var(--color-border-light)',
-                    borderRadius: 'var(--radius-sm)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 6,
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{entry.title}</div>
-                    <div style={{ fontSize: 11, color: entry.status === 'succeeded' ? 'var(--color-success)' : entry.status === 'pending' ? 'var(--color-warning)' : 'var(--color-danger)' }}>
-                      {entry.status}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{entry.requestPreview}</div>
-                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                    {new Date(entry.createdAt).toLocaleString()}
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    <button
-                      className="btn btn-ghost"
-                      style={{ border: '1px solid var(--color-border)', padding: '4px 8px', fontSize: 11 }}
-                      onClick={() => loadHistoryEntry(entry)}
-                    >
-                      载入
-                    </button>
-                    <button
-                      className="btn btn-ghost"
-                      style={{ border: '1px solid var(--color-border)', padding: '4px 8px', fontSize: 11 }}
-                      onClick={() => { void dispatchProxyEnvelope(entry.request); }}
-                      disabled={sending || !!pendingJobId}
-                    >
-                      重放
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+            {showDebugPanel ? '收起' : '展开'}
+          </span>
         </div>
       </div>
 
@@ -2777,6 +2626,7 @@ export default function ModelTester() {
               onChange={(next) => {
                 if (!next) return;
                 updateInput('model', next);
+                setForcedChannelId(null);
               }}
               options={modelSelectOptions}
               placeholder={
@@ -2819,6 +2669,53 @@ export default function ModelTester() {
               对话模式下可模拟 OpenAI / Responses / Claude / Gemini Native。
             </div>
           </div>
+
+          {!customRequestMode && routeDecisionState.data?.candidates?.length ? (
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 600 }}>
+                  指定站点 / 通道
+                </div>
+                {forcedChannelId && (
+                  <button
+                    className="btn btn-ghost"
+                    style={{ border: '1px solid var(--color-border)', padding: '2px 8px', fontSize: 11 }}
+                    onClick={() => setForcedChannelId(null)}
+                  >
+                    清除
+                  </button>
+                )}
+              </div>
+              <ModernSelect
+                value={forcedChannelId ? String(forcedChannelId) : ''}
+                onChange={(next) => {
+                  if (!next) {
+                    setForcedChannelId(null);
+                  } else {
+                    setForcedChannelId(Number(next));
+                  }
+                }}
+                options={[
+                  { value: '', label: '自动选择（默认）' },
+                  ...routeDecisionState.data.candidates
+                    .filter((c) => c.eligible)
+                    .map((candidate) => ({
+                      value: String(candidate.channelId),
+                      label: `${candidate.username}@${candidate.siteName} (${candidate.tokenName})`,
+                    })),
+                ]}
+                placeholder="自动选择（默认）"
+              />
+              {forcedChannelId && (
+                <div style={{ fontSize: 11, color: 'var(--color-info)', marginTop: 4 }}>
+                  已固定通道 #{forcedChannelId}，不会自动切换其他通道。
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                选择后请求将固定使用该站点通道，不自动切换。
+              </div>
+            </div>
+          ) : null}
 
           {inputs.mode === 'conversation' && (
             <div style={{ marginBottom: 14 }}>

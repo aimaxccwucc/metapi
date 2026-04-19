@@ -93,6 +93,7 @@ export type TesterProxyEnvelope = {
   stream: boolean;
   jobMode: boolean;
   rawMode: boolean;
+  forcedChannelId?: number | null;
   jsonBody?: unknown;
   rawJsonText?: string;
   multipartFields?: Record<string, string>;
@@ -146,6 +147,7 @@ export type ModelTesterSessionState = {
   conversationFiles: ConversationDraftFile[];
   pendingPayload: TesterProxyEnvelope | null;
   pendingJobId?: string | null;
+  forcedChannelId?: number | null;
   customRequestMode: boolean;
   customRequestBody: string;
   showDebugPanel: boolean;
@@ -1245,6 +1247,12 @@ export const parseModelTesterSession = (raw: string | null): ModelTesterSessionS
     state.pendingJobId = parsed.pendingJobId;
   } else if (parsed.pendingJobId === null) {
     state.pendingJobId = null;
+  }
+
+  if (typeof parsed.forcedChannelId === 'number' && Number.isFinite(parsed.forcedChannelId) && parsed.forcedChannelId > 0) {
+    state.forcedChannelId = Math.trunc(parsed.forcedChannelId);
+  } else if (parsed.forcedChannelId === null) {
+    state.forcedChannelId = null;
   }
 
   if (!state.pendingJobId && state.messages.length > 0) {

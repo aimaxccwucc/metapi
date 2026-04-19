@@ -230,6 +230,7 @@ export type ProxyTestRequestEnvelope = {
   stream?: boolean;
   jobMode?: boolean;
   rawMode?: boolean;
+  forcedChannelId?: number | null;
   jsonBody?: unknown;
   rawJsonText?: string;
   multipartFields?: Record<string, string>;

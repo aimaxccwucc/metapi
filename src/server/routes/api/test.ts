@@ -52,6 +52,7 @@ type ProxyTestEnvelope = {
   stream?: boolean;
   jobMode?: boolean;
   rawMode?: boolean;
+  forcedChannelId?: number | null;
   jsonBody?: unknown;
   rawJsonText?: string;
   multipartFields?: Record<string, string>;
@@ -65,6 +66,7 @@ type ValidatedProxyTestEnvelope = {
   stream: boolean;
   jobMode: boolean;
   rawMode: boolean;
+  forcedChannelId: number | null;
   jsonBody?: unknown;
   rawJsonText?: string;
   multipartFields?: Record<string, string>;
@@ -289,6 +291,7 @@ function convertLegacyPayloadToEnvelope(
       stream: forceStream,
       jobMode: false,
       rawMode: false,
+      forcedChannelId: null,
       jsonBody: convertOpenAiPayloadToClaudeBody(payload, forceStream),
     };
   }
@@ -301,6 +304,7 @@ function convertLegacyPayloadToEnvelope(
       stream: forceStream,
       jobMode: false,
       rawMode: false,
+      forcedChannelId: null,
       jsonBody: convertOpenAiPayloadToResponsesBody(payload, forceStream),
     };
   }
@@ -312,6 +316,7 @@ function convertLegacyPayloadToEnvelope(
     stream: forceStream,
     jobMode: false,
     rawMode: false,
+    forcedChannelId: null,
     jsonBody: {
       ...payload,
       stream: forceStream,
@@ -356,6 +361,9 @@ function validateProxyEnvelope(
     stream: body.stream === true,
     jobMode: body.jobMode === true,
     rawMode: body.rawMode === true,
+    forcedChannelId: typeof body.forcedChannelId === 'number' && Number.isFinite(body.forcedChannelId) && body.forcedChannelId > 0
+      ? Math.trunc(body.forcedChannelId)
+      : null,
   };
 
   if (requestKind === 'json') {
@@ -472,6 +480,11 @@ async function buildUpstreamRequestInit(
   forceStream: boolean,
 ): Promise<UndiciRequestInit> {
   const headers: Record<string, string> = createDefaultHeadersForPath(envelope.path);
+
+  if (typeof envelope.forcedChannelId === 'number' && envelope.forcedChannelId > 0) {
+    headers['x-metapi-tester-request'] = '1';
+    headers['x-metapi-tester-forced-channel-id'] = String(envelope.forcedChannelId);
+  }
 
   if (envelope.requestKind === 'json') {
     headers['Content-Type'] = 'application/json';

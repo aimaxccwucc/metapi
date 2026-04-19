@@ -3,6 +3,7 @@ import { getProxyAuthContext } from '../../middleware/auth.js';
 import { getDefaultGlobalPolicy, isModelAllowedByPolicyOrAllowedRoutes, recordManagedKeyCostUsage } from '../../services/downstreamApiKeyService.js';
 import { EMPTY_DOWNSTREAM_ROUTING_POLICY, type DownstreamRoutingPolicy } from '../../services/downstreamPolicyTypes.js';
 import { detectDownstreamClientContext } from './downstreamClientContext.js';
+import { getTesterForcedChannelId } from '../../proxy-core/channelSelection.js';
 
 function normalizeStickyPart(value: unknown): string {
   if (typeof value !== 'string') return '';
@@ -49,9 +50,16 @@ export function getDownstreamRoutingPolicy(request: FastifyRequest): DownstreamR
   const basePolicy = authContext.source === 'global'
     ? getDefaultGlobalPolicy()
     : authContext.policy;
+
+  const forcedChannelId = getTesterForcedChannelId({
+    headers: request.headers as Record<string, unknown>,
+    clientIp: request.ip,
+  });
+
   return {
     ...basePolicy,
     stickySessionKey: buildStickySessionKey(request),
+    forcedChannelId,
     publicRoutesOnly: true,
   };
 }

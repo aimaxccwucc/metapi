@@ -4453,6 +4453,10 @@ export class TokenRouter {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     await ensureRoutingRuntimeStateLoaded();
 
+    if (typeof downstreamPolicy.forcedChannelId === 'number' && downstreamPolicy.forcedChannelId > 0) {
+      return this.selectPreferredChannel(requestedModel, downstreamPolicy.forcedChannelId, downstreamPolicy);
+    }
+
     let match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
     this.cacheChannelMatch(requestedModel, match, downstreamPolicy);
