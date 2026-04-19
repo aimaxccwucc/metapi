@@ -304,6 +304,7 @@ export default function Models() {
   const [availabilityTesting, setAvailabilityTesting] = useState<Record<string, boolean>>({});
   const [availabilityChecks, setAvailabilityChecks] = useState<Record<string, AvailabilityCheckState>>({});
   const [expandedCheckDetails, setExpandedCheckDetails] = useState<Record<string, boolean>>({});
+  const [batchTestingModels, setBatchTestingModels] = useState<Record<string, boolean>>({});
   const [visibleModelCount, setVisibleModelCount] = useState(MODEL_RENDER_CHUNK);
   const isMobile = useIsMobile();
   const deferredSearch = useDeferredValue(search.trim());
@@ -852,6 +853,16 @@ export default function Models() {
     }
   };
 
+  const testAllAccountsForModel = async (modelName: string, accounts: ModelAccountInfo[]) => {
+    setBatchTestingModels((prev) => ({ ...prev, [modelName]: true }));
+    const concurrency = 3;
+    for (let i = 0; i < accounts.length; i += concurrency) {
+      const batch = accounts.slice(i, i + concurrency);
+      await Promise.allSettled(batch.map((a) => testModelAvailability(modelName, a)));
+    }
+    setBatchTestingModels((prev) => ({ ...prev, [modelName]: false }));
+  };
+
   const filterControls = (
     <>
       <div className="filter-panel-section">
@@ -1238,9 +1249,20 @@ export default function Models() {
                       </div>
                     </div>
 
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)' }}>{tr('账号明细')}</span>
+                        <button
+                          className="btn btn-ghost"
+                          style={{ border: '1px solid var(--color-border)', padding: '4px 10px', fontSize: 11 }}
+                          disabled={!!batchTestingModels[m.name]}
+                          onClick={(e) => { e.stopPropagation(); void testAllAccountsForModel(m.name, m.accounts); }}
+                        >
+                          {batchTestingModels[m.name] ? tr('测试中...') : tr('测试所有站点')}
+                        </button>
+                      </div>
+
                     {isMobile ? (
                       <div style={{ display: 'grid', gap: 8 }}>
-                        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)' }}>{tr('账号明细')}</div>
                         {sortAccountsForDetail(m.accounts).map((a) => (
                           <div
                             key={a.id}
@@ -1447,6 +1469,18 @@ export default function Models() {
                                   <span className="badge badge-muted">{metadataHydrating ? tr('正在加载价格元数据...') : tr('暂无价格元数据')}</span>
                                 )}
                               </div>
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+                              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)' }}>{tr('账号明细')}</span>
+                              <button
+                                className="btn btn-ghost"
+                                style={{ border: '1px solid var(--color-border)', padding: '4px 10px', fontSize: 11 }}
+                                disabled={!!batchTestingModels[m.name]}
+                                onClick={(e) => { e.stopPropagation(); void testAllAccountsForModel(m.name, m.accounts); }}
+                              >
+                                {batchTestingModels[m.name] ? tr('测试中...') : tr('测试所有站点')}
+                              </button>
                             </div>
 
                             <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse', tableLayout: 'fixed' }}>
