@@ -273,7 +273,47 @@ export async function probeRouteChannelsForRoute(
 ): Promise<RouteProbeResponse> {
   const slicedChannels = enabledChannels.slice(0, resolveRouteProbeLimit(options?.limit));
 
-  if (slicedChannels.length === 0) {
+  // Deduplicate by site: only probe the channel whose account has the highest balance per site.
+  // Remaining channels for the same site are marked as skipped in the response.
+  const bestChannelPerSite = new Map<number, RouteChannelLike>();
+  const skippedByDedup: RouteChannelLike[] = [];
+  for (const ch of slicedChannels) {
+    const siteId: number = ch.site?.id ?? ch.accountId;
+    const existing = bestChannelPerSite.get(siteId);
+    if (!existing) {
+      bestChannelPerSite.set(siteId, ch);
+    } else {
+      const balanceA = Number((existing as any).account?.balance ?? 0);
+      const balanceB = Number((ch as any).account?.balance ?? 0);
+      if (balanceB > balanceA) {
+        skippedByDedup.push(existing);
+        bestChannelPerSite.set(siteId, ch);
+      } else {
+        skippedByDedup.push(ch);
+      }
+    }
+  }
+  const channelsToProbe = Array.from(bestChannelPerSite.values());
+  const skippedItems: RouteProbeItem[] = skippedByDedup.map((ch) => ({
+    channelId: ch.id,
+    accountId: ch.accountId,
+    accountName: ch.account?.username || null,
+    siteId: ch.site?.id ?? 0,
+    siteName: ch.site?.name || `site-${ch.site?.id ?? 0}`,
+    tokenId: ch.token?.id ?? null,
+    tokenName: ch.token?.name ?? null,
+    sourceModel: ch.sourceModel ?? null,
+    available: false,
+    reason: '同站点仅探测余额最高的账号',
+    probeClassification: null,
+    probeEndpoint: null,
+    latencyMs: null,
+    detectionMethod: 'unknown' as const,
+    governanceAction: 'none' as const,
+    governanceReasonCode: null,
+  }));
+
+  if (channelsToProbe.length === 0) {
     return {
       success: true,
       routeId: route.id,
@@ -293,7 +333,7 @@ export async function probeRouteChannelsForRoute(
   const autoGovernance = options?.autoGovernance === true;
   const earlyStop = options?.earlyStopOnAvailable === true;
   let foundAvailable = false;
-  const items: RouteProbeItem[] = await mapWithConcurrency(slicedChannels, ROUTE_PROBE_CONCURRENCY, async (channel) => {
+  const items: RouteProbeItem[] = await mapWithConcurrency(channelsToProbe, ROUTE_PROBE_CONCURRENCY, async (channel) => {
     // Early stop: skip remaining channels once we found one available
     if (earlyStop && foundAvailable) {
       return {
@@ -384,26 +424,28 @@ export async function probeRouteChannelsForRoute(
     invalidateTokenRouterCache();
   }
 
+  const allItems = [...items, ...skippedItems];
+
   return {
     success: true,
     routeId: route.id,
     routeModelPattern: route.modelPattern,
     probedModel: route.modelPattern,
     autoGovernance,
-    total: items.length,
-    availableCount: items.filter((item) => item.available).length,
-    unavailableCount: items.filter((item) => !item.available && !item.inconclusive && item.detectionMethod !== 'unknown').length,
-    skippedCount: items.filter((item) => !item.available && item.detectionMethod === 'unknown').length,
-    inconclusiveCount: items.filter((item) => item.inconclusive === true).length,
-    failedCount: items.filter((item) => item.detectionMethod === 'probe_failed').length,
-    items,
+    total: allItems.length,
+    availableCount: allItems.filter((item) => item.available).length,
+    unavailableCount: allItems.filter((item) => !item.available && !item.inconclusive && item.detectionMethod !== 'unknown').length,
+    skippedCount: allItems.filter((item) => !item.available && item.detectionMethod === 'unknown').length,
+    inconclusiveCount: allItems.filter((item) => item.inconclusive === true).length,
+    failedCount: allItems.filter((item) => item.detectionMethod === 'probe_failed').length,
+    items: allItems,
   };
 }
 
 // ── batch probe ──────────────────────────────────────────────────────
 
 const BATCH_PROBE_ROUTE_CONCURRENCY = 3;
-const BATCH_PROBE_TOTAL_TIMEOUT_MS = 60_000;
+const BATCH_PROBE_TOTAL_TIMEOUT_MS = 180_000;
 
 export type BatchProbeResult = {
   results: RouteProbeResponse[];
