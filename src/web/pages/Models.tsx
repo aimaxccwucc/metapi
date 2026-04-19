@@ -859,9 +859,21 @@ export default function Models() {
     batchTestingRef.current.add(modelName);
     setBatchTestingModels((prev) => ({ ...prev, [modelName]: true }));
     try {
+      // Per site, only test the account with the highest balance.
+      // If multiple accounts share the same site, testing the richest one is
+      // sufficient to verify the site-model reachability while avoiding
+      // redundant API calls that could trigger rate limits or bans.
+      const bestPerSite = new Map<string, ModelAccountInfo>();
+      for (const a of accounts) {
+        const existing = bestPerSite.get(a.site);
+        if (!existing || a.balance > existing.balance) {
+          bestPerSite.set(a.site, a);
+        }
+      }
+      const candidates = Array.from(bestPerSite.values());
       const concurrency = 3;
-      for (let i = 0; i < accounts.length; i += concurrency) {
-        const batch = accounts.slice(i, i + concurrency);
+      for (let i = 0; i < candidates.length; i += concurrency) {
+        const batch = candidates.slice(i, i + concurrency);
         await Promise.allSettled(batch.map((a) => testModelAvailability(modelName, a)));
       }
     } finally {
