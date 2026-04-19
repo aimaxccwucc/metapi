@@ -305,6 +305,7 @@ export default function Models() {
   const [availabilityChecks, setAvailabilityChecks] = useState<Record<string, AvailabilityCheckState>>({});
   const [expandedCheckDetails, setExpandedCheckDetails] = useState<Record<string, boolean>>({});
   const [batchTestingModels, setBatchTestingModels] = useState<Record<string, boolean>>({});
+  const batchTestingRef = useRef<Set<string>>(new Set());
   const [visibleModelCount, setVisibleModelCount] = useState(MODEL_RENDER_CHUNK);
   const isMobile = useIsMobile();
   const deferredSearch = useDeferredValue(search.trim());
@@ -854,13 +855,19 @@ export default function Models() {
   };
 
   const testAllAccountsForModel = async (modelName: string, accounts: ModelAccountInfo[]) => {
+    if (batchTestingRef.current.has(modelName)) return;
+    batchTestingRef.current.add(modelName);
     setBatchTestingModels((prev) => ({ ...prev, [modelName]: true }));
-    const concurrency = 3;
-    for (let i = 0; i < accounts.length; i += concurrency) {
-      const batch = accounts.slice(i, i + concurrency);
-      await Promise.allSettled(batch.map((a) => testModelAvailability(modelName, a)));
+    try {
+      const concurrency = 3;
+      for (let i = 0; i < accounts.length; i += concurrency) {
+        const batch = accounts.slice(i, i + concurrency);
+        await Promise.allSettled(batch.map((a) => testModelAvailability(modelName, a)));
+      }
+    } finally {
+      batchTestingRef.current.delete(modelName);
+      setBatchTestingModels((prev) => ({ ...prev, [modelName]: false }));
     }
-    setBatchTestingModels((prev) => ({ ...prev, [modelName]: false }));
   };
 
   const filterControls = (

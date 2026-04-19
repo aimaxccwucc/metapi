@@ -4526,6 +4526,8 @@ export class TokenRouter {
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
     excludeSiteIds: ReadonlySet<number> = new Set<number>(),
   ): Promise<SelectedChannel | null> {
+    // Forced channel: no failover allowed – the tester explicitly chose one channel.
+    if (typeof downstreamPolicy.forcedChannelId === 'number' && downstreamPolicy.forcedChannelId > 0) return null;
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     await ensureRoutingRuntimeStateLoaded();
 

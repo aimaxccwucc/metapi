@@ -704,6 +704,7 @@ export default function ModelTester() {
   const [customRequestBody, setCustomRequestBody] = useState('');
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const debugPanelPresence = useAnimatedVisibility(showDebugPanel, 220);
+  const [showRouteSummary, setShowRouteSummary] = useState(false);
   const [activeDebugTab, setActiveDebugTab] = useState<DebugTab>(DEBUG_TABS.PREVIEW);
   const [debugRequest, setDebugRequest] = useState('');
   const [debugResponse, setDebugResponse] = useState('');
@@ -1034,6 +1035,7 @@ export default function ModelTester() {
     assetPrompt,
     customRequestBody,
     embeddingInputText,
+    forcedChannelId,
     imageMaskFile?.dataUrl,
     parameterEnabled,
     pendingJobId,
@@ -2551,7 +2553,7 @@ export default function ModelTester() {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, cursor: 'pointer' }}
-          onClick={() => setShowDebugPanel((prev) => !prev)}
+          onClick={() => setShowRouteSummary((prev) => !prev)}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' }}>路由解释 / 历史记录</span>
@@ -2562,7 +2564,7 @@ export default function ModelTester() {
             )}
           </div>
           <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-            {showDebugPanel ? '收起' : '展开'}
+            {showRouteSummary ? '收起' : '展开'}
           </span>
         </div>
       </div>
