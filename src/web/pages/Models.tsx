@@ -230,7 +230,7 @@ function buildAvailabilityDetail(input: {
   if (input.detectionMethod === 'model_list') {
     parts.push('检测方式：上游模型列表匹配（未发起实际 API 调用，结果仅供参考）');
   } else if (input.probeEndpoint) {
-    parts.push(`检测方式：实时 API 探测 ${humanizeProbeEndpoint(input.probeEndpoint)}（max_tokens=1 最小请求）`);
+    parts.push(`检测方式：实时 API 探测 ${humanizeProbeEndpoint(input.probeEndpoint)}（短文本验证请求）`);
   }
   if (input.probeClassification) {
     const labelMap: Record<string, string> = {
@@ -626,7 +626,7 @@ export default function Models() {
             style={actionButtonStyle}
             onClick={() => { void testModelAvailability(modelName, account); }}
             disabled={checking}
-            title="通过模型列表查询或实时 API 探测（max_tokens=1）验证可用性，与真实请求路由（tokenRouter）路径不同，结果仅供参考"
+            title="通过模型列表查询或实时 API 探测（短文本验证）验证可用性，与真实请求路由（tokenRouter）路径不同，结果仅供参考"
           >
             {checking ? tr('检测中...') : tr('检测')}
           </button>
