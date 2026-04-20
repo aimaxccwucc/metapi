@@ -2270,6 +2270,16 @@ body {
   justify-content: flex-end;
 }
 
+.site-balance-inline.clickable {
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.site-balance-inline.clickable:hover .site-balance-primary,
+.site-balance-inline.clickable:focus-visible .site-balance-primary {
+  text-decoration: underline;
+  color: var(--color-accent);
+}
+
 .site-balance-primary {
   font-size: 14px;
   font-weight: 600;

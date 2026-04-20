@@ -26,6 +26,7 @@ import {
   type SiteEditorState,
   type SiteForm,
 } from './helpers/sitesEditor.js';
+import SiteAccountsModal from './SiteAccountsModal.js';
 
 type SiteSortMode = SortMode | 'reachability-desc' | 'reachability-asc';
 
@@ -176,15 +177,19 @@ function SiteBalanceDisplay(props: {
   balance?: number | null;
   summary?: SiteSubscriptionSummary | null;
   align?: 'start' | 'end';
+  onClick?: () => void;
 }) {
-  const { balance, summary, align = 'start' } = props;
+  const { balance, summary, align = 'start', onClick } = props;
   const walletBalanceText = formatUsd(balance);
   const subscriptionValue = buildSubscriptionInlineValue(summary);
   const tooltip = buildSubscriptionTooltip(summary);
 
   return (
     <div
-      className={`site-balance-inline ${align === 'end' ? 'align-end' : ''}`.trim()}
+      className={`site-balance-inline ${align === 'end' ? 'align-end' : ''}${onClick ? ' clickable' : ''}`.trim()}
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
     >
       <span className="site-balance-primary">{walletBalanceText}</span>
       {subscriptionValue ? (
@@ -350,6 +355,7 @@ export default function Sites() {
   const lastEditorRef = useRef<SiteEditorState | null>(null);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
   const highlightTimerRef = useRef<number | null>(null);
+  const [accountsModalSiteId, setAccountsModalSiteId] = useState<number | null>(null);
   const toast = useToast();
   const [disabledModels, setDisabledModels] = useState<string[]>([]);
   const [disabledModelInput, setDisabledModelInput] = useState('');
@@ -1160,6 +1166,14 @@ export default function Sites() {
           : <>确定要删除选中的 <strong>{deleteConfirm?.count || 0}</strong> 个站点吗？</>}
       />
 
+      <SiteAccountsModal
+        open={accountsModalSiteId !== null}
+        onClose={() => setAccountsModalSiteId(null)}
+        siteId={accountsModalSiteId}
+        siteName={sites.find(s => s.id === accountsModalSiteId)?.name || ''}
+        onSiteBalanceChange={load}
+      />
+
       {activeEditor && (
         <CenteredModal
           open={Boolean(editor)}
@@ -1689,6 +1703,7 @@ export default function Sites() {
                           balance={site.totalBalance}
                           summary={site.subscriptionSummary}
                           align="end"
+                          onClick={() => setAccountsModalSiteId(site.id)}
                         />
                       )}
                     />
@@ -1893,6 +1908,7 @@ export default function Sites() {
                       <SiteBalanceDisplay
                         balance={site.totalBalance}
                         summary={site.subscriptionSummary}
+                        onClick={() => setAccountsModalSiteId(site.id)}
                       />
                     </td>
                     <td>
