@@ -1053,7 +1053,10 @@ export async function fetchChannelsForRouteRows(routes: RouteRow[]): Promise<Map
   }> = await db.select().from(schema.routeChannels)
     .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-    .leftJoin(schema.accountTokens, eq(schema.routeChannels.tokenId, schema.accountTokens.id))
+    .leftJoin(schema.accountTokens, and(
+      eq(schema.routeChannels.tokenId, schema.accountTokens.id),
+      eq(schema.accountTokens.enabled, true),
+    ))
     .where(inArray(schema.routeChannels.routeId, actualRouteIds))
     .all();
 

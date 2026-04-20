@@ -156,10 +156,14 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
       return;
     }
 
-    // For native Anthropic streams, EOF without message_stop is not a clean
-    // completion. Forward the partial stream as-is instead of fabricating an
-    // end_turn/message_stop pair that makes clients think the run finished.
+    // For native Anthropic streams, EOF without message_stop means the stream
+    // was truncated (e.g. upstream timeout, network error, or server-side abort).
+    // Synthesize a message_delta + message_stop pair so that downstream clients
+    // (especially Claude CLI) can detect the response boundary and not hang.
+    // The stop_reason is set to 'end_turn' (not 'max_tokens') because we don't
+    // know the real reason — but sending no terminal event at all is worse.
     if (input.downstreamFormat === 'claude' && !claudeContext.doneSent) {
+      input.writeLines(anthropicMessagesTransformer.serializeDone(streamContext, claudeContext));
       return;
     }
 

@@ -1,7 +1,8 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { refreshBalance } from './balanceService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
+import { config } from '../config.js';
 import {
   MarketplaceModelProbeError,
   classifyProbeFailureMessage,
@@ -29,6 +30,60 @@ const UPSTREAM_GROUP_EMPTY_RECHECK_MS = 15 * 60 * 1000;
 const SLOW_SITE_RECHECK_MS = 20 * 60 * 1000;
 const MANUAL_ROUTE_PROBE_MARKER = '[manual_route_probe]';
 const DEFAULT_PROBING_LEASE_MS = 10 * 60 * 1000;
+
+/**
+ * Re-enable route channels that were auto-disabled due to consecutive failures,
+ * when a governance probe confirms the channel is healthy again.
+ */
+async function reEnableAutoDisabledChannels(entry: RoutingGovernanceEntry): Promise<void> {
+  const threshold = config.channelAutoDisableOnConsecutiveFail;
+  if (threshold <= 0) return;
+
+  const conditions: ReturnType<typeof eq>[] = [];
+  if (entry.subjectType === 'channel') {
+    conditions.push(eq(schema.routeChannels.id, entry.subjectId));
+  } else if (entry.subjectType === 'account') {
+    conditions.push(eq(schema.routeChannels.accountId, entry.subjectId));
+  } else if (entry.subjectType === 'token') {
+    conditions.push(eq(schema.routeChannels.tokenId, entry.subjectId));
+  } else if (entry.subjectType === 'site') {
+    const accountIds = await db.select({ id: schema.accounts.id })
+      .from(schema.accounts)
+      .where(eq(schema.accounts.siteId, entry.subjectId))
+      .all();
+    if (accountIds.length > 0) {
+      conditions.push(inArray(schema.routeChannels.accountId, accountIds.map((a: { id: number }) => a.id)));
+    }
+  }
+
+  if (conditions.length === 0) return;
+
+  const combinedCondition = conditions.length === 1
+    ? and(conditions[0], eq(schema.routeChannels.enabled, false))
+    : and(or(...conditions), eq(schema.routeChannels.enabled, false));
+
+  if (!combinedCondition) return;
+
+  await db.update(schema.routeChannels)
+    .set({
+      enabled: true,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+      cooldownUntil: null,
+    })
+    .where(combinedCondition)
+    .run();
+}
+
+async function completeProbeAndRestore(
+  entry: RoutingGovernanceEntry,
+  input: Parameters<typeof completeRoutingGovernanceProbe>[1],
+): Promise<void> {
+  await completeRoutingGovernanceProbe(entry.id, input);
+  if (input.restored) {
+    await reEnableAutoDisabledChannels(entry).catch(() => {});
+  }
+}
 
 function nowPlusMs(ms: number): string {
   return new Date(Date.now() + Math.max(1_000, Math.trunc(ms))).toISOString();
@@ -208,7 +263,10 @@ async function resolveProbeContext(entry: RoutingGovernanceEntry): Promise<{
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
       .innerJoin(schema.tokenRoutes, eq(schema.routeChannels.routeId, schema.tokenRoutes.id))
-      .leftJoin(schema.accountTokens, eq(schema.routeChannels.tokenId, schema.accountTokens.id))
+      .leftJoin(schema.accountTokens, and(
+        eq(schema.routeChannels.tokenId, schema.accountTokens.id),
+        eq(schema.accountTokens.enabled, true),
+      ))
       .where(eq(schema.routeChannels.id, entry.subjectId))
       .get();
     if (!row) return null;
@@ -265,7 +323,7 @@ async function handleRateLimitRecovery(entry: RoutingGovernanceEntry): Promise<b
         allowAutoCreateKey: false,
       });
       if (result.success && result.available) {
-        await completeRoutingGovernanceProbe(entry.id, {
+        await completeProbeAndRestore(entry, {
           restored: true,
           reasonCode: 'rate_limit',
           lastProbeStatus: 'available',
@@ -292,7 +350,7 @@ async function handleRateLimitRecovery(entry: RoutingGovernanceEntry): Promise<b
     }
   }
   // 无探测上下文或探测异常，被动释放
-  await completeRoutingGovernanceProbe(entry.id, {
+  await completeProbeAndRestore(entry, {
     restored: true,
     reasonCode: 'rate_limit',
     lastProbeStatus: 'cooldown_elapsed',
@@ -424,7 +482,7 @@ async function handleProbeBasedRecovery(entry: RoutingGovernanceEntry): Promise<
   }
 
   if (result.success && result.available) {
-    await completeRoutingGovernanceProbe(entry.id, {
+    await completeProbeAndRestore(entry, {
       restored: true,
       reasonCode: entry.reasonCode as RoutingGovernanceReasonCode,
       lastProbeStatus: 'available',
@@ -460,7 +518,7 @@ async function handleProbeBasedRecovery(entry: RoutingGovernanceEntry): Promise<
 }
 
 async function handlePassiveExpiryRelease(entry: RoutingGovernanceEntry): Promise<boolean> {
-  await completeRoutingGovernanceProbe(entry.id, {
+  await completeProbeAndRestore(entry, {
     restored: true,
     reasonCode: entry.reasonCode as RoutingGovernanceReasonCode,
     lastProbeStatus: 'passive_release',

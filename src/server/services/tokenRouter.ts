@@ -3071,7 +3071,10 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
       .from(schema.routeChannels)
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
-      .leftJoin(schema.accountTokens, eq(schema.routeChannels.tokenId, schema.accountTokens.id))
+      .leftJoin(schema.accountTokens, and(
+        eq(schema.routeChannels.tokenId, schema.accountTokens.id),
+        eq(schema.accountTokens.enabled, true),
+      ))
       .where(inArray(schema.routeChannels.routeId, enabledSourceRouteIds))
       .all()
     : [];
@@ -5642,12 +5645,14 @@ export class TokenRouter {
       }
     }
 
+    const shouldAutoDisable = consecutiveFailCount >= config.channelAutoDisableOnConsecutiveFail;
     await db.update(schema.routeChannels).set({
       failCount,
       lastFailAt: nowIso,
       consecutiveFailCount,
       cooldownLevel,
       cooldownUntil,
+      ...(shouldAutoDisable ? { enabled: false } : {}),
     }).where(inArray(schema.routeChannels.id, affectedChannelIds)).run();
 
     for (const affectedChannelId of affectedChannelIds) {
@@ -5657,6 +5662,7 @@ export class TokenRouter {
         channel.cooldownUntil = cooldownUntil;
         channel.consecutiveFailCount = consecutiveFailCount;
         channel.cooldownLevel = cooldownLevel;
+        if (shouldAutoDisable) channel.enabled = false;
       });
     }
     releaseChannelSelectionLease(channelId);

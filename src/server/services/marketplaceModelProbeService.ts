@@ -1,6 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { ensureDefaultTokenForAccount, getPreferredAccountToken, syncTokensFromUpstream } from './accountTokenService.js';
+import { ensureDefaultTokenForAccount, getPreferredAccountToken, isUsableAccountToken, syncTokensFromUpstream } from './accountTokenService.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
 import { fetchModelPricingCatalog } from './modelPricingService.js';
 import { getAdapter } from './platforms/index.js';
@@ -387,19 +387,15 @@ async function resolvePreferredTokenForCandidate(
         eq(schema.accountTokens.accountId, candidate.account.id),
       ))
       .get();
-    if (!token) {
-      throw new MarketplaceModelProbeError(400, {
-        success: false,
-        error: 'token_not_found',
-        message: `账号 ${candidate.account.id} 下不存在令牌 ${preferredTokenId}`,
-        accountId: candidate.account.id,
-        tokenId: preferredTokenId,
-      });
+    if (token && isUsableAccountToken(token)) {
+      return token;
     }
-    return token;
+    // Preferred token is disabled/invalid or not found — fall back to account default
   }
 
-  if (candidate.token) return candidate.token;
+  if (candidate.token && isUsableAccountToken(candidate.token)) {
+    return candidate.token;
+  }
   return await getPreferredAccountToken(candidate.account.id);
 }
 
@@ -408,6 +404,43 @@ export async function resolveMarketplaceProbeCandidate(input: {
   accountId?: number | null;
   siteName?: string | null;
 }): Promise<MarketplaceProbeCandidate> {
+  // When accountId is explicitly provided, bypass modelAvailability.available pre-filter.
+  // The purpose of probing is to *verify* availability — relying on potentially stale
+  // modelAvailability records would make probes fail before even trying.
+  if (input.accountId != null) {
+    const accountRows = await db.select()
+      .from(schema.accounts)
+      .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+      .where(
+        and(
+          eq(schema.accounts.id, input.accountId),
+          eq(schema.accounts.status, 'active'),
+          eq(schema.sites.status, 'active'),
+        ),
+      )
+      .all();
+
+    const filtered = accountRows
+      .filter((row: typeof accountRows[number]) => (input.siteName ? row.sites.name === input.siteName : true));
+
+    if (filtered.length === 0) {
+      throw new MarketplaceModelProbeError(404, {
+        success: false,
+        error: 'no_available_account_for_model',
+        message: 'no available account for this model',
+        modelName: input.modelName,
+      });
+    }
+
+    const targetRow = filtered[0]!;
+    return {
+      account: targetRow.accounts,
+      site: targetRow.sites,
+      token: null,
+    };
+  }
+
+  // When no accountId is provided, use modelAvailability as the discovery filter
   const modelRows = await db.select()
     .from(schema.modelAvailability)
     .innerJoin(schema.accounts, eq(schema.modelAvailability.accountId, schema.accounts.id))
@@ -423,7 +456,6 @@ export async function resolveMarketplaceProbeCandidate(input: {
     .all();
 
   const candidateRows = modelRows
-    .filter((row: typeof modelRows[number]) => (input.accountId == null ? true : row.accounts.id === input.accountId))
     .filter((row: typeof modelRows[number]) => (input.siteName ? row.sites.name === input.siteName : true));
 
   if (candidateRows.length === 0) {

@@ -167,6 +167,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     proxyFileRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(env.PROXY_FILE_RETENTION_PRUNE_INTERVAL_MINUTES, 60))),
     proxyErrorKeywords: parseCsvList(env.PROXY_ERROR_KEYWORDS),
     proxyEmptyContentFailEnabled: parseBoolean(env.PROXY_EMPTY_CONTENT_FAIL, true),
+    channelAutoDisableOnConsecutiveFail: Math.max(2, Math.trunc(parseNumber(env.CHANNEL_AUTO_DISABLE_CONSECUTIVE_FAIL, 2))),
     codexResponsesWebsocketBeta: parseOptionalSecret(env.CODEX_RESPONSES_WEBSOCKET_BETA) || 'responses_websockets=2026-02-06',
     codexHeaderDefaults: {
       userAgent: parseOptionalSecret(env.CODEX_HEADER_DEFAULTS_USER_AGENT),
