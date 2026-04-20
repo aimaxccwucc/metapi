@@ -232,15 +232,18 @@ export async function sitesRoutes(app: FastifyInstance) {
     }).from(schema.accounts).all();
 
     const totalBalanceBySiteId: Record<number, number> = {};
+    const accountCountBySiteId: Record<number, number> = {};
     const subscriptionBySiteId: Record<number, SiteSubscriptionAggregate | undefined> = {};
     for (const row of accountRows) {
       totalBalanceBySiteId[row.siteId] = roundMetric((totalBalanceBySiteId[row.siteId] || 0) + Number(row.balance || 0));
+      accountCountBySiteId[row.siteId] = (accountCountBySiteId[row.siteId] || 0) + 1;
       subscriptionBySiteId[row.siteId] = aggregateSiteSubscription(subscriptionBySiteId[row.siteId], row.extraConfig);
     }
 
     return siteRows.map((site) => ({
       ...site,
       totalBalance: Math.round((totalBalanceBySiteId[site.id] || 0) * 1_000_000) / 1_000_000,
+      accountCount: accountCountBySiteId[site.id] || 0,
       subscriptionSummary: subscriptionBySiteId[site.id] || null,
       protocolConfig: sanitizeSiteProtocolConfigForPlatform(protocolConfigs[site.id] || {
         mode: 'auto',

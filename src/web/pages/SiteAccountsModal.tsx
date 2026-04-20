@@ -181,6 +181,8 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
           ? `账号 "${loginForm.username}" 已添加，API Key 已自动获取`
           : `账号 "${loginForm.username}" 已添加（未找到 API Key，请手动设置）`;
         toast.success(msg);
+        setLoginForm({ ...createLoginForm(), siteId: siteId! });
+        setVerifyResult(null);
         refreshAll();
       } else {
         toast.error(result.message || '登录失败');
@@ -235,6 +237,8 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
       });
       if (result.batch) {
         toast.info(result.message || `批量创建完成：成功 ${result.successCount}，失败 ${result.failedCount}`);
+        setTokenForm({ ...createTokenForm('session'), siteId: siteId! });
+        setVerifyResult(null);
         refreshAll();
         return;
       }
@@ -250,6 +254,8 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
         toast.success(`账号已添加${extra}`);
       }
       setShowAdd(false);
+      setTokenForm({ ...createTokenForm('session'), siteId: siteId! });
+      setVerifyResult(null);
       refreshAll();
     } catch (e: any) {
       toast.error(e.message || '添加失败');

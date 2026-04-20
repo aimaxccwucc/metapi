@@ -61,6 +61,7 @@ type SiteRow = {
   isPinned?: boolean;
   sortOrder?: number;
   totalBalance?: number;
+  accountCount?: number;
   subscriptionSummary?: SiteSubscriptionSummary | null;
   createdAt?: string;
   protocolConfig?: {
@@ -175,11 +176,12 @@ function buildSubscriptionTooltip(summary?: SiteSubscriptionSummary | null): str
 
 function SiteBalanceDisplay(props: {
   balance?: number | null;
+  accountCount?: number;
   summary?: SiteSubscriptionSummary | null;
   align?: 'start' | 'end';
   onClick?: () => void;
 }) {
-  const { balance, summary, align = 'start', onClick } = props;
+  const { balance, accountCount, summary, align = 'start', onClick } = props;
   const walletBalanceText = formatUsd(balance);
   const subscriptionValue = buildSubscriptionInlineValue(summary);
   const tooltip = buildSubscriptionTooltip(summary);
@@ -192,6 +194,9 @@ function SiteBalanceDisplay(props: {
       tabIndex={onClick ? 0 : undefined}
     >
       <span className="site-balance-primary">{walletBalanceText}</span>
+      {typeof accountCount === 'number' && accountCount > 0 ? (
+        <span className="site-balance-count">（{accountCount}）</span>
+      ) : null}
       {subscriptionValue ? (
         <>
           <span className="site-balance-divider">/</span>
@@ -1701,6 +1706,7 @@ export default function Sites() {
                       value={(
                         <SiteBalanceDisplay
                           balance={site.totalBalance}
+                          accountCount={site.accountCount}
                           summary={site.subscriptionSummary}
                           align="end"
                           onClick={() => setAccountsModalSiteId(site.id)}
@@ -1907,6 +1913,7 @@ export default function Sites() {
                     <td className="site-balance-cell">
                       <SiteBalanceDisplay
                         balance={site.totalBalance}
+                        accountCount={site.accountCount}
                         summary={site.subscriptionSummary}
                         onClick={() => setAccountsModalSiteId(site.id)}
                       />
