@@ -194,13 +194,18 @@ function buildProbeEndpoints(platform: string): Array<'chat' | 'responses' | 'me
 
 function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' | 'responses' | 'messages') {
   const normalizedBase = String(baseUrl || '').trim().replace(/\/+$/, '');
+  // Use a realistic probe payload that can expose upstream overload/capacity issues.
+  // A simple "ping" with max_tokens=1 passes even on severely overloaded upstreams,
+  // giving false confidence.  A short but meaningful prompt with max_tokens=8 forces
+  // the upstream to actually process and generate, catching 503/timeout errors early.
+  const probePrompt = 'Respond with exactly one sentence describing the weather today.';
   if (endpoint === 'responses') {
     return {
       url: `${normalizedBase}/v1/responses`,
       body: {
         model: modelName,
-        input: 'ping',
-        max_output_tokens: 1,
+        input: probePrompt,
+        max_output_tokens: 8,
         temperature: 0,
       },
     };
@@ -210,8 +215,8 @@ function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' 
       url: `${normalizedBase}/v1/messages`,
       body: {
         model: modelName,
-        max_tokens: 1,
-        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 8,
+        messages: [{ role: 'user', content: probePrompt }],
       },
     };
   }
@@ -219,8 +224,8 @@ function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' 
     url: `${normalizedBase}/v1/chat/completions`,
     body: {
       model: modelName,
-      messages: [{ role: 'user', content: 'ping' }],
-      max_tokens: 1,
+      messages: [{ role: 'user', content: probePrompt }],
+      max_tokens: 8,
       temperature: 0,
       stream: false,
     },
@@ -232,8 +237,8 @@ function buildGeminiNativeProbeRequest(baseUrl: string, modelName: string) {
   return {
     url: `${normalizedBase}/v1beta/models/${encodeURIComponent(modelName)}:generateContent`,
     body: {
-      contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
-      generationConfig: { maxOutputTokens: 1, temperature: 0 },
+      contents: [{ role: 'user', parts: [{ text: 'Respond with exactly one sentence describing the weather today.' }] }],
+      generationConfig: { maxOutputTokens: 8, temperature: 0 },
     },
   };
 }

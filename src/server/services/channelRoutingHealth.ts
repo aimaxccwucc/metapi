@@ -48,10 +48,15 @@ function resolveExperienceFactor(successCount: number, failCount: number): numbe
     return 0.94;
   }
 
-  if (totalCount === 0) return 0.72;
-  if (failCount === 1) return 0.58;
-  if (failCount === 2) return 0.44;
-  return 0.32;
+  // Channel has been tried but never succeeded — penalize heavily based on failure count.
+  // Real-world data shows channels with 0 successes and multiple failures are essentially dead.
+  if (failCount >= 3) return 0.15;
+  if (failCount >= 2) return 0.28;
+  if (failCount >= 1) return 0.40;
+
+  // Channel has never been used at all — moderate penalty since we have zero signal.
+  if (totalCount === 0) return 0.55;
+  return 0.72;
 }
 
 export function calculateChannelHealthScore(
@@ -65,7 +70,7 @@ export function calculateChannelHealthScore(
   const experienceFactor = resolveExperienceFactor(successCount, failCount);
   const reliabilityFactor = totalCount >= 3
     ? clamp(0.45 + successRatio * 0.7, 0.45, 1.05)
-    : (totalCount === 0 ? 0.55 : (totalCount === 1 ? 0.7 : 0.85));
+    : (totalCount === 0 ? 0.55 : (totalCount === 1 ? 0.6 : (successCount === 0 ? 0.4 : 0.85)));
 
   let recencyFactor = 1;
   if (channel.lastFailAt) {

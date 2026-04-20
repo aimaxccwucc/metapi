@@ -575,8 +575,8 @@ async function executeSingleEndpointProbe(input: {
     siteUrl: candidate.site.url,
     openaiBody: {
       model: candidate.modelName,
-      messages: [{ role: 'user', content: 'ping' }],
-      max_tokens: 1,
+      messages: [{ role: 'user', content: 'Respond with exactly one sentence describing the weather today.' }],
+      max_tokens: 8,
       temperature: 0,
       stream: false,
     },
