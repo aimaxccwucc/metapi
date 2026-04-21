@@ -708,6 +708,7 @@ describe('GET /api/routes/diagnostics', () => {
     });
 
     expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('proxy-chat');
     const body = response.json() as {
       total: number;
       availableCount: number;
@@ -739,6 +740,192 @@ describe('GET /api/routes/diagnostics', () => {
       state: 'suppressed',
     });
     expect(governance[0]?.reasonDetail || '').toContain('[manual_route_probe]');
+  });
+
+  it('treats 200 probe responses with empty content as inconclusive instead of available', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'empty-probe-site',
+      url: 'https://empty-probe-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'empty-probe-user',
+      accessToken: 'empty-probe-access',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'empty-probe-token',
+      token: 'sk-empty-probe',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+      checkedAt: new Date().toISOString(),
+    }).run();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4.1',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gpt-4.1',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    getModelsMock.mockResolvedValue(['gpt-4.1']);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'chatcmpl-empty',
+      object: 'chat.completion',
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: '' },
+        finish_reason: 'stop',
+      }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/probe`,
+      payload: { limit: 20, autoGovernance: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      availableCount: number;
+      inconclusiveCount: number;
+      items: Array<{
+        available: boolean;
+        inconclusive?: boolean;
+        governanceAction: string;
+        governanceReasonCode: string | null;
+        reason: string;
+      }>;
+    };
+    expect(body.availableCount).toBe(0);
+    expect(body.inconclusiveCount).toBe(1);
+    expect(body.items[0]).toMatchObject({
+      available: false,
+      inconclusive: true,
+      governanceAction: 'suppressed',
+      governanceReasonCode: 'invalid_channel',
+    });
+    expect(body.items[0]?.reason || '').toContain('empty content');
+  });
+
+  it('uses local proxy canary semantics for route probe when channel is known', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'route-proxy-canary-site',
+      url: 'https://route-proxy-canary.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'route-proxy-canary-user',
+      accessToken: 'route-proxy-canary-access',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'route-proxy-canary-token',
+      token: 'sk-route-proxy-canary',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gemini-2.5-pro-search',
+      available: true,
+      checkedAt: new Date().toISOString(),
+    }).run();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gemini-2.5-pro',
+      enabled: true,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gemini-2.5-pro-search',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    getModelsMock.mockResolvedValue(['gemini-2.5-pro-search']);
+    fetchMock.mockImplementation(async (url: string, init?: Record<string, unknown>) => {
+      if (String(url).startsWith('http://127.0.0.1:4000/')) {
+        const headers = (init?.headers || {}) as Record<string, string>;
+        expect(headers['x-metapi-tester-request']).toBe('1');
+        expect(headers['x-metapi-tester-forced-channel-id']).toBe(String(channel.id));
+        return new Response(JSON.stringify({
+          id: 'proxy-ok',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({
+        id: 'upstream-empty',
+        choices: [{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/probe`,
+      payload: { limit: 20, autoGovernance: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      availableCount: number;
+      inconclusiveCount: number;
+      items: Array<{
+        channelId: number;
+        available: boolean;
+        probeEndpoint: string | null;
+        probeClassification: string | null;
+      }>;
+    };
+    expect(body.availableCount).toBe(1);
+    expect(body.inconclusiveCount).toBe(0);
+    expect(body.items[0]).toMatchObject({
+      channelId: channel.id,
+      available: true,
+      probeEndpoint: 'proxy-chat',
+      probeClassification: 'supported',
+    });
   });
 
   it('clears matching governance entries when a probed route channel becomes available again', async () => {
@@ -838,6 +1025,80 @@ describe('GET /api/routes/diagnostics', () => {
     expect(governance).toHaveLength(0);
   });
 
+  it('probes explicit-group routes using channel sourceModel aliases', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'alias-route-site',
+      url: 'https://alias-route.example.com',
+      platform: 'new-api',
+      status: 'active',
+      apiKey: 'sk-site',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'alias-route-user',
+      accessToken: 'alias-access',
+      apiToken: 'sk-alias-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'alias-token',
+      token: 'sk-alias-token',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gemini-3.0-pro',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gemini-3-pro-preview',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    getModelsMock.mockResolvedValue(['gemini-3-pro-preview']);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 'ok' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/probe`,
+      payload: { limit: 20, autoGovernance: false },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      availableCount: number;
+      items: Array<{
+        available: boolean;
+        sourceModel: string | null;
+        reason: string;
+      }>;
+    };
+    expect(body.availableCount).toBe(1);
+    expect(body.items[0]).toMatchObject({
+      available: true,
+      sourceModel: 'gemini-3-pro-preview',
+    });
+    expect(getModelsMock).toHaveBeenCalledWith(site.url, token.token, undefined);
+    const fetchArgs = fetchMock.mock.calls[0] ?? [];
+    expect(JSON.parse(String((fetchArgs[1] as any)?.body || '{}'))).toMatchObject({
+      model: 'gemini-3-pro-preview',
+    });
+  });
+
   it('does not clear governance when route probe only hits model list without realtime success', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'restore-site',
@@ -925,7 +1186,123 @@ describe('GET /api/routes/diagnostics', () => {
     expect(governance.length).toBeGreaterThanOrEqual(1);
     // Original governance remains
     expect(governance.some((g) => g.reasonCode === 'model_unsupported')).toBe(true);
-    // Probe failure also creates an invalid_channel governance
-    expect(governance.some((g) => g.reasonCode === 'invalid_channel')).toBe(true);
+    // This probe result is treated as model_unsupported, so the old suppression stays in place
+    expect(governance.some((g) => g.reasonCode === 'invalid_channel')).toBe(false);
+  });
+
+  it('probes sibling channels on the same site instead of skipping by highest balance only', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'same-site-probe',
+      url: 'https://same-site-probe.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'same-a',
+      accessToken: 'same-a-token',
+      apiToken: 'sk-same-a',
+      status: 'active',
+      balance: 100,
+    }).returning().get();
+
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'same-b',
+      accessToken: 'same-b-token',
+      apiToken: 'sk-same-b',
+      status: 'active',
+      balance: 1,
+    }).returning().get();
+
+    const tokenA = await db.insert(schema.accountTokens).values({
+      accountId: accountA.id,
+      name: 'same-token-a',
+      token: 'sk-same-a',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const tokenB = await db.insert(schema.accountTokens).values({
+      accountId: accountB.id,
+      name: 'same-token-b',
+      token: 'sk-same-b',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4.1',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values([
+      {
+        routeId: route.id,
+        accountId: accountA.id,
+        tokenId: tokenA.id,
+        sourceModel: 'gpt-4.1',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+      },
+      {
+        routeId: route.id,
+        accountId: accountB.id,
+        tokenId: tokenB.id,
+        sourceModel: 'gpt-4.1',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+      },
+    ]).run();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: accountA.id,
+        modelName: 'gpt-4.1',
+        available: true,
+        checkedAt: new Date().toISOString(),
+      },
+      {
+        accountId: accountB.id,
+        modelName: 'gpt-4.1',
+        available: true,
+        checkedAt: new Date().toISOString(),
+      },
+    ]).run();
+
+    getModelsMock.mockResolvedValue(['gpt-4.1']);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'ok-a' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'ok-b' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/probe`,
+      payload: { limit: 20, autoGovernance: false },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      total: number;
+      availableCount: number;
+      skippedCount: number;
+      items: Array<{ tokenId: number | null; available: boolean; reason: string }>;
+    };
+    expect(body.total).toBe(2);
+    expect(body.availableCount).toBe(2);
+    expect(body.skippedCount).toBe(0);
+    expect(body.items.map((item) => item.tokenId).sort((a, b) => Number(a) - Number(b))).toEqual([tokenA.id, tokenB.id]);
+    expect(body.items.some((item) => item.reason.includes('同站点仅探测余额最高的账号'))).toBe(false);
   });
 });

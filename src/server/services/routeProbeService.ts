@@ -15,7 +15,7 @@ import {
   clearRoutingGovernanceStates,
   type RoutingGovernanceReasonCode,
 } from './routingGovernanceService.js';
-import { invalidateTokenRouterCache } from './tokenRouter.js';
+import { invalidateTokenRouterCache, tokenRouter } from './tokenRouter.js';
 
 // ── types (mirror the shapes used by the API) ────────────────────────
 
@@ -132,6 +132,34 @@ type RouteLike = {
   probePolicy?: string | null;
   [k: string]: unknown;
 };
+
+async function orderRouteProbeChannels(
+  route: RouteLike,
+  channels: RouteChannelLike[],
+): Promise<RouteChannelLike[]> {
+  if (channels.length <= 1) return channels;
+
+  const selectedChannelIds: number[] = [];
+  const ordered: RouteChannelLike[] = [];
+  const channelById = new Map(channels.map((channel) => [channel.id, channel]));
+
+  while (selectedChannelIds.length < channels.length) {
+    const selected = await tokenRouter.previewSelectedChannelForRoute(route.id, route.modelPattern, selectedChannelIds);
+    const selectedChannelId = typeof selected?.channel.id === 'number' ? selected.channel.id : null;
+    if (selectedChannelId === null || selectedChannelIds.includes(selectedChannelId)) break;
+    selectedChannelIds.push(selectedChannelId);
+    const matched = channelById.get(selectedChannelId);
+    if (matched) ordered.push(matched);
+  }
+
+  if (ordered.length === channels.length) return ordered;
+
+  const seen = new Set(ordered.map((channel) => channel.id));
+  for (const channel of channels) {
+    if (!seen.has(channel.id)) ordered.push(channel);
+  }
+  return ordered;
+}
 
 async function applyRouteProbeGovernance(input: {
   channel: RouteChannelLike;
@@ -269,9 +297,127 @@ async function applyRouteProbeGovernance(input: {
 export async function probeRouteChannelsForRoute(
   route: RouteLike,
   enabledChannels: RouteChannelLike[],
-  options?: { limit?: number; autoGovernance?: boolean; earlyStopOnAvailable?: boolean },
+  options?: { limit?: number; autoGovernance?: boolean; earlyStopOnAvailable?: boolean; dedupeBySite?: boolean },
 ): Promise<RouteProbeResponse> {
-  const slicedChannels = enabledChannels.slice(0, resolveRouteProbeLimit(options?.limit));
+  const earlyStop = options?.earlyStopOnAvailable === true;
+  const orderedChannels = earlyStop
+    ? await orderRouteProbeChannels(route, enabledChannels)
+    : enabledChannels;
+  const slicedChannels = orderedChannels.slice(0, resolveRouteProbeLimit(options?.limit));
+
+  const dedupeBySite = options?.dedupeBySite === true;
+
+  if (!dedupeBySite) {
+    const autoGovernance = options?.autoGovernance === true;
+    const earlyStop = options?.earlyStopOnAvailable === true;
+    let foundAvailable = false;
+    const items: RouteProbeItem[] = await mapWithConcurrency(slicedChannels, earlyStop ? 1 : ROUTE_PROBE_CONCURRENCY, async (channel) => {
+      if (earlyStop && foundAvailable) {
+        return {
+          channelId: channel.id,
+          accountId: channel.accountId,
+          accountName: channel.account.username || null,
+          siteId: channel.site.id,
+          siteName: channel.site.name || `site-${channel.site.id}`,
+          tokenId: channel.token?.id ?? null,
+          tokenName: channel.token?.name ?? null,
+          sourceModel: channel.sourceModel ?? null,
+          available: false,
+          reason: '已找到可用通道，跳过探测',
+          probeClassification: null,
+          probeEndpoint: null,
+          latencyMs: null,
+          detectionMethod: 'unknown' as const,
+          governanceAction: 'none' as const,
+          governanceReasonCode: null,
+        } satisfies RouteProbeItem;
+      }
+
+      const probeModel = channel.sourceModel || route.modelPattern;
+      const probe = await probeMarketplaceModelAvailability({
+        modelName: probeModel,
+        accountId: channel.accountId,
+        siteName: channel.site.name || undefined,
+        preferredTokenId: channel.token?.id ?? null,
+        proxyCanaryForcedChannelId: channel.id,
+        skipAutoCreate: false,
+        forceRealtimeProbeOnListMiss: true,
+        allowListHitSuccess: false,
+      });
+
+      const baseResult: RouteProbeItem = probe.success
+        ? {
+          channelId: channel.id,
+          accountId: channel.accountId,
+          accountName: channel.account.username || null,
+          siteId: channel.site.id,
+          siteName: channel.site.name || `site-${channel.site.id}`,
+          tokenId: probe.usedTokenId ?? channel.token?.id ?? null,
+          tokenName: probe.usedTokenName ?? channel.token?.name ?? null,
+          sourceModel: channel.sourceModel ?? null,
+          available: probe.available === true,
+          inconclusive: probe.available !== true && (probe.probeClassification === 'inconclusive' || probe.probeClassification === 'protocol_mismatch') ? true : undefined,
+          reason: probe.reason,
+          probeClassification: probe.probeClassification ?? null,
+          probeEndpoint: probe.probeEndpoint ?? null,
+          latencyMs: probe.latencyMs ?? null,
+          detectionMethod: probe.detectionMethod,
+          governanceAction: 'none',
+          governanceReasonCode: null,
+          autoKeyCreated: probe.autoKeyCreated || undefined,
+          autoKeyName: probe.autoKeyName,
+        }
+        : {
+          channelId: channel.id,
+          accountId: channel.accountId,
+          accountName: channel.account.username || null,
+          siteId: channel.site.id,
+          siteName: channel.site.name || `site-${channel.site.id}`,
+          tokenId: channel.token?.id ?? null,
+          tokenName: channel.token?.name ?? null,
+          sourceModel: channel.sourceModel ?? null,
+          available: false,
+          reason: probe.message || probe.error,
+          probeClassification: classifyProbeClassificationFromError(probe.error),
+          probeEndpoint: null,
+          latencyMs: probe.latencyMs ?? null,
+          detectionMethod: 'probe_failed',
+          governanceAction: 'none',
+          governanceReasonCode: null,
+          autoKeyCreated: probe.autoKeyCreated || undefined,
+          autoKeyName: probe.autoKeyName,
+        } satisfies RouteProbeItem;
+
+      if (baseResult.available) foundAvailable = true;
+
+      return await applyRouteProbeGovernance({
+        channel,
+        route,
+        probeModel,
+        result: baseResult,
+        autoGovernance,
+      });
+    });
+
+    if (items.some((item) => item.governanceAction !== 'none')) {
+      invalidateTokenRouterCache();
+    }
+
+    return {
+      success: true,
+      routeId: route.id,
+      routeModelPattern: route.modelPattern,
+      probedModel: route.modelPattern,
+      autoGovernance,
+      total: items.length,
+      availableCount: items.filter((item) => item.available).length,
+      unavailableCount: items.filter((item) => !item.available && !item.inconclusive && item.detectionMethod !== 'unknown').length,
+      skippedCount: items.filter((item) => !item.available && item.detectionMethod === 'unknown').length,
+      inconclusiveCount: items.filter((item) => item.inconclusive === true).length,
+      failedCount: items.filter((item) => item.detectionMethod === 'probe_failed').length,
+      items,
+    };
+  }
 
   // Deduplicate by site: only probe the channel whose account has the highest balance per site.
   // Remaining channels for the same site are marked as skipped in the response.
@@ -331,9 +477,8 @@ export async function probeRouteChannelsForRoute(
   }
 
   const autoGovernance = options?.autoGovernance === true;
-  const earlyStop = options?.earlyStopOnAvailable === true;
   let foundAvailable = false;
-  const items: RouteProbeItem[] = await mapWithConcurrency(channelsToProbe, ROUTE_PROBE_CONCURRENCY, async (channel) => {
+  const items: RouteProbeItem[] = await mapWithConcurrency(channelsToProbe, earlyStop ? 1 : ROUTE_PROBE_CONCURRENCY, async (channel) => {
     // Early stop: skip remaining channels once we found one available
     if (earlyStop && foundAvailable) {
       return {
@@ -356,11 +501,13 @@ export async function probeRouteChannelsForRoute(
       } satisfies RouteProbeItem;
     }
 
+    const probeModel = channel.sourceModel || route.modelPattern;
     const probe = await probeMarketplaceModelAvailability({
-      modelName: route.modelPattern,
+      modelName: probeModel,
       accountId: channel.accountId,
       siteName: channel.site.name || undefined,
       preferredTokenId: channel.token?.id ?? null,
+      proxyCanaryForcedChannelId: channel.id,
       skipAutoCreate: false,
       forceRealtimeProbeOnListMiss: true,
       allowListHitSuccess: false,
@@ -414,7 +561,7 @@ export async function probeRouteChannelsForRoute(
     return await applyRouteProbeGovernance({
       channel,
       route,
-      probeModel: route.modelPattern,
+      probeModel,
       result: baseResult,
       autoGovernance,
     });

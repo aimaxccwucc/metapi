@@ -1,15 +1,18 @@
 import { and, eq } from 'drizzle-orm';
+import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { ensureDefaultTokenForAccount, getPreferredAccountToken, isUsableAccountToken, syncTokensFromUpstream } from './accountTokenService.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
 import { fetchModelPricingCatalog } from './modelPricingService.js';
 import { getAdapter } from './platforms/index.js';
 import { withSiteProxyRequestInit } from './siteProxy.js';
+import { pullSseDataEvents } from './proxyUsageParser.js';
 import { autoProvisionTokenCoverage } from './tokenCoverageAutoProvisionService.js';
 
 const MARKETPLACE_MODEL_TEST_TIMEOUT_MS = 90_000;
 const MARKETPLACE_AUTO_KEY_TIMEOUT_MS = 15_000;
 const MARKETPLACE_MODEL_PROBE_TIMEOUT_MS = 30_000;
+const LOCAL_PROXY_CANARY_TIMEOUT_MS = 20_000;
 
 type AccountRow = typeof schema.accounts.$inferSelect;
 type SiteRow = typeof schema.sites.$inferSelect;
@@ -243,6 +246,152 @@ function buildGeminiNativeProbeRequest(baseUrl: string, modelName: string) {
   };
 }
 
+function buildLocalProxyCanaryRequest(modelName: string) {
+  return {
+    url: `http://127.0.0.1:${config.port}/v1/chat/completions`,
+    body: {
+      model: modelName,
+      messages: [{ role: 'user', content: 'Respond with exactly one sentence describing the weather today.' }],
+      max_tokens: 8,
+      temperature: 0,
+      stream: false,
+    },
+  };
+}
+
+function hasNonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasToolCallLike(value: unknown): boolean {
+  if (!value) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (isRecord(value)) return Object.keys(value).length > 0;
+  return false;
+}
+
+function isMeaningfulContentPartType(value: unknown): boolean {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized) return false;
+  return normalized === 'tool_use'
+    || normalized === 'tool_result'
+    || normalized === 'thinking'
+    || normalized === 'redacted_thinking'
+    || normalized === 'reasoning'
+    || normalized === 'refusal'
+    || normalized.includes('function_call')
+    || normalized.includes('tool_call');
+}
+
+function hasCompletionContentFromChoice(choice: any): boolean {
+  if (hasNonEmptyString(choice?.text)) return true;
+  if (hasNonEmptyString(choice?.completion)) return true;
+  if (hasNonEmptyString(choice?.output_text)) return true;
+
+  const message = choice?.message;
+  if (hasNonEmptyString(message?.content)) return true;
+  if (Array.isArray(message?.content)) {
+    for (const part of message.content) {
+      if (hasNonEmptyString(part?.text) || hasNonEmptyString(part?.output_text) || hasNonEmptyString(part?.content)) {
+        return true;
+      }
+      if (isMeaningfulContentPartType(part?.type)) return true;
+    }
+  }
+
+  if (hasNonEmptyString(message?.refusal)) return true;
+  if (hasToolCallLike(message?.tool_calls) || hasToolCallLike(message?.toolCalls)) return true;
+  if (hasToolCallLike(message?.function_call) || hasToolCallLike(message?.functionCall)) return true;
+  if (hasToolCallLike(choice?.tool_calls) || hasToolCallLike(choice?.toolCalls)) return true;
+  if (hasToolCallLike(choice?.function_call) || hasToolCallLike(choice?.functionCall)) return true;
+
+  const delta = choice?.delta;
+  if (hasNonEmptyString(delta?.content) || hasNonEmptyString(delta?.refusal)) return true;
+  if (hasToolCallLike(delta?.tool_calls) || hasToolCallLike(delta?.toolCalls)) return true;
+  if (hasToolCallLike(delta?.function_call) || hasToolCallLike(delta?.functionCall)) return true;
+
+  return false;
+}
+
+function hasCompletionContentFromPayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  const obj: any = payload;
+
+  if (Array.isArray(obj?.choices)) {
+    for (const choice of obj.choices) {
+      if (hasCompletionContentFromChoice(choice)) return true;
+    }
+    if (hasCompletionContentFromChoice(obj)) return true;
+  }
+
+  if (hasNonEmptyString(obj?.output_text) || hasNonEmptyString(obj?.outputText)) return true;
+
+  if (Array.isArray(obj?.output)) {
+    for (const item of obj.output) {
+      if (!isRecord(item)) continue;
+      const type = String((item as any).type || '').toLowerCase();
+      if (type.includes('function_call') || type.includes('tool_call')) return true;
+      if (hasNonEmptyString((item as any).text) || hasNonEmptyString((item as any).output_text)) return true;
+      if (Array.isArray((item as any).content)) {
+        for (const part of (item as any).content) {
+          if (hasNonEmptyString((part as any)?.text) || hasNonEmptyString((part as any)?.output_text) || hasNonEmptyString((part as any)?.content)) {
+            return true;
+          }
+          if (isMeaningfulContentPartType((part as any)?.type)) return true;
+        }
+      }
+      if (hasToolCallLike((item as any).tool_calls) || hasToolCallLike((item as any).toolCalls)) return true;
+      if (hasToolCallLike((item as any).function_call) || hasToolCallLike((item as any).functionCall)) return true;
+    }
+  }
+
+  if (Array.isArray(obj?.content)) {
+    for (const part of obj.content) {
+      if (hasNonEmptyString((part as any)?.text) || hasNonEmptyString((part as any)?.output_text) || hasNonEmptyString((part as any)?.content)) {
+        return true;
+      }
+      if (isMeaningfulContentPartType((part as any)?.type)) return true;
+    }
+  }
+
+  if (hasNonEmptyString(obj?.delta) || hasNonEmptyString(obj?.text)) return true;
+  if (hasToolCallLike(obj?.tool_calls) || hasToolCallLike(obj?.toolCalls)) return true;
+  if (hasToolCallLike(obj?.function_call) || hasToolCallLike(obj?.functionCall)) return true;
+
+  return false;
+}
+
+function probeResponseHasOutput(rawText: string): boolean {
+  const textValue = String(rawText || '');
+  const trimmed = textValue.trim();
+  if (!trimmed) return false;
+
+  try {
+    return hasCompletionContentFromPayload(JSON.parse(trimmed));
+  } catch {
+    const pulled = pullSseDataEvents(textValue);
+    if (pulled.events.length > 0) {
+      for (const event of pulled.events) {
+        const payload = event.trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+          if (hasCompletionContentFromPayload(JSON.parse(payload))) return true;
+        } catch {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    if (textValue.includes('data:')) return false;
+    return true;
+  }
+}
+
 export async function probeModelAvailabilityViaRealtimeCall(input: {
   baseUrl: string;
   platform: string;
@@ -277,18 +426,24 @@ export async function probeModelAvailabilityViaRealtimeCall(input: {
         }),
       );
 
+      const responseText = await response.text();
+
       if (response.ok) {
-        return {
-          available: true,
-          reason: `probe succeeded via ${endpoint} (HTTP ${response.status})`,
-          checkedUrl: probe.url,
-          statusCode: response.status,
-          endpoint,
-          classification: 'supported',
-        };
+        if (probeResponseHasOutput(responseText)) {
+          return {
+            available: true,
+            reason: `probe succeeded via ${endpoint} (HTTP ${response.status})`,
+            checkedUrl: probe.url,
+            statusCode: response.status,
+            endpoint,
+            classification: 'supported',
+          };
+        }
+
+        attemptMessages.push(`${endpoint}:${response.status} empty content`);
+        continue;
       }
 
-      const responseText = await response.text();
       const summarized = summarizeProbeError(responseText) || `HTTP ${response.status}`;
       const classification = classifyProbeFailureMessage(summarized);
       if (classification === 'model_unavailable' || classification === 'credential') {
@@ -325,31 +480,36 @@ export async function probeModelAvailabilityViaRealtimeCall(input: {
       }),
     );
 
-    if (geminiResponse.ok) {
-      return {
-        available: true,
-        reason: `probe succeeded via gemini-native (HTTP ${geminiResponse.status})`,
-        checkedUrl: geminiProbe.url,
-        statusCode: geminiResponse.status,
-        endpoint: 'gemini-native',
-        classification: 'supported',
-      };
-    }
-
     const geminiText = await geminiResponse.text();
-    const geminiSummary = summarizeProbeError(geminiText) || `HTTP ${geminiResponse.status}`;
-    const geminiClass = classifyProbeFailureMessage(geminiSummary);
-    if (geminiClass === 'model_unavailable' || geminiClass === 'credential') {
-      return {
-        available: false,
-        reason: `probe rejected model via gemini-native: ${geminiSummary}`,
-        checkedUrl: geminiProbe.url,
-        statusCode: geminiResponse.status,
-        endpoint: 'gemini-native',
-        classification: geminiClass,
-      };
+
+    if (geminiResponse.ok) {
+      if (probeResponseHasOutput(geminiText)) {
+        return {
+          available: true,
+          reason: `probe succeeded via gemini-native (HTTP ${geminiResponse.status})`,
+          checkedUrl: geminiProbe.url,
+          statusCode: geminiResponse.status,
+          endpoint: 'gemini-native',
+          classification: 'supported',
+        };
+      }
+
+      attemptMessages.push(`gemini-native:${geminiResponse.status} empty content`);
+    } else {
+      const geminiSummary = summarizeProbeError(geminiText) || `HTTP ${geminiResponse.status}`;
+      const geminiClass = classifyProbeFailureMessage(geminiSummary);
+      if (geminiClass === 'model_unavailable' || geminiClass === 'credential') {
+        return {
+          available: false,
+          reason: `probe rejected model via gemini-native: ${geminiSummary}`,
+          checkedUrl: geminiProbe.url,
+          statusCode: geminiResponse.status,
+          endpoint: 'gemini-native',
+          classification: geminiClass,
+        };
+      }
+      attemptMessages.push(`gemini-native:${geminiResponse.status} ${geminiSummary}`);
     }
-    attemptMessages.push(`gemini-native:${geminiResponse.status} ${geminiSummary}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || 'unknown error');
     attemptMessages.push(`gemini-native: ${message}`);
@@ -363,6 +523,78 @@ export async function probeModelAvailabilityViaRealtimeCall(input: {
     endpoint: attemptMessages[0]?.split(':')[0] || null,
     classification: classifyProbeFailureMessage(attemptMessages[0] || ''),
   };
+}
+
+export async function probeModelAvailabilityViaLocalProxyCanary(input: {
+  modelName: string;
+  forcedChannelId?: number | null;
+}): Promise<MarketplaceProbeResult> {
+  const { fetch } = await import('undici');
+  const probe = buildLocalProxyCanaryRequest(input.modelName);
+
+  try {
+    const response = await fetch(probe.url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.proxyToken}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json,text/event-stream,text/plain,*/*',
+        ...(typeof input.forcedChannelId === 'number' && input.forcedChannelId > 0
+          ? {
+            'x-metapi-tester-request': '1',
+            'x-metapi-tester-forced-channel-id': String(input.forcedChannelId),
+          }
+          : {}),
+      },
+      body: JSON.stringify(probe.body),
+      signal: AbortSignal.timeout(LOCAL_PROXY_CANARY_TIMEOUT_MS),
+    });
+
+    const responseText = await response.text();
+
+    if (response.ok) {
+      if (probeResponseHasOutput(responseText)) {
+        return {
+          available: true,
+          reason: `probe succeeded via proxy-chat (HTTP ${response.status})`,
+          checkedUrl: probe.url,
+          statusCode: response.status,
+          endpoint: 'proxy-chat',
+          classification: 'supported',
+        };
+      }
+
+      return {
+        available: null,
+        reason: 'proxy-chat:200 empty content',
+        checkedUrl: probe.url,
+        statusCode: response.status,
+        endpoint: 'proxy-chat',
+        classification: 'inconclusive',
+      };
+    }
+
+    const summarized = summarizeProbeError(responseText) || `HTTP ${response.status}`;
+    const classification = classifyProbeFailureMessage(summarized);
+    return {
+      available: classification === 'model_unavailable' || classification === 'credential' ? false : null,
+      reason: `proxy-chat:${response.status} ${summarized}`,
+      checkedUrl: probe.url,
+      statusCode: response.status,
+      endpoint: 'proxy-chat',
+      classification,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || 'unknown error');
+    return {
+      available: null,
+      reason: `proxy-chat: ${message}`,
+      checkedUrl: probe.url,
+      statusCode: null,
+      endpoint: 'proxy-chat',
+      classification: classifyProbeFailureMessage(message),
+    };
+  }
 }
 
 function canonicalModelAlias(value: string): string {
@@ -484,6 +716,8 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
   modelName: string;
   candidate: MarketplaceProbeCandidate;
   preferredTokenId?: number | null;
+  useLocalProxyCanary?: boolean;
+  proxyCanaryForcedChannelId?: number | null;
   preferredCredential?: string | null;
   allowAutoCreateKey?: boolean;
   forceRealtimeProbeOnListMiss?: boolean;
@@ -735,12 +969,19 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
     }
 
     // Model is in the list — verify with a real request
-    const probe = await probeModelAvailabilityViaRealtimeCall({
-      baseUrl: site.url,
-      platform: site.platform,
-      credential: modelCredential,
-      modelName,
-    });
+    const shouldUseLocalProxyCanary = input.useLocalProxyCanary === true
+      || (typeof input.proxyCanaryForcedChannelId === 'number' && input.proxyCanaryForcedChannelId > 0);
+    const probe = shouldUseLocalProxyCanary
+      ? await probeModelAvailabilityViaLocalProxyCanary({
+        modelName,
+        forcedChannelId: input.proxyCanaryForcedChannelId,
+      })
+      : await probeModelAvailabilityViaRealtimeCall({
+        baseUrl: site.url,
+        platform: site.platform,
+        credential: modelCredential,
+        modelName,
+      });
     probeCheckedUrl = probe.checkedUrl;
     probeStatusCode = probe.statusCode;
     probeEndpoint = probe.endpoint;
@@ -797,6 +1038,8 @@ export async function testMarketplaceModelAvailability(input: {
   accountId?: number | null;
   siteName?: string | null;
   preferredTokenId?: number | null;
+  useLocalProxyCanary?: boolean;
+  proxyCanaryForcedChannelId?: number | null;
   preferredCredential?: string | null;
   allowAutoCreateKey?: boolean;
   forceRealtimeProbeOnListMiss?: boolean;
@@ -811,6 +1054,8 @@ export async function testMarketplaceModelAvailability(input: {
     modelName: input.modelName,
     candidate,
     preferredTokenId: input.preferredTokenId,
+    useLocalProxyCanary: input.useLocalProxyCanary,
+    proxyCanaryForcedChannelId: input.proxyCanaryForcedChannelId,
     preferredCredential: input.preferredCredential,
     allowAutoCreateKey: input.allowAutoCreateKey,
     forceRealtimeProbeOnListMiss: input.forceRealtimeProbeOnListMiss,
@@ -823,6 +1068,8 @@ export async function probeMarketplaceModelAvailability(input: {
   accountId?: number | null;
   siteName?: string | null;
   preferredTokenId?: number | null;
+  useLocalProxyCanary?: boolean;
+  proxyCanaryForcedChannelId?: number | null;
   preferredCredential?: string | null;
   skipAutoCreate?: boolean;
   forceRealtimeProbeOnListMiss?: boolean;
@@ -834,6 +1081,8 @@ export async function probeMarketplaceModelAvailability(input: {
       accountId: input.accountId,
       siteName: input.siteName,
       preferredTokenId: input.preferredTokenId,
+      useLocalProxyCanary: input.useLocalProxyCanary,
+      proxyCanaryForcedChannelId: input.proxyCanaryForcedChannelId,
       preferredCredential: input.preferredCredential,
       allowAutoCreateKey: input.skipAutoCreate !== true,
       forceRealtimeProbeOnListMiss: input.forceRealtimeProbeOnListMiss,

@@ -34,11 +34,14 @@ vi.mock('undici', async () => {
 });
 
 type DbModule = typeof import('../../db/index.js');
+type TokenRouterModule = typeof import('../../services/tokenRouter.js');
 
 describe('/api/models/marketplace', () => {
   let app: FastifyInstance;
   let db: DbModule['db'];
   let schema: DbModule['schema'];
+  let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
+  let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -50,8 +53,11 @@ describe('/api/models/marketplace', () => {
     const dbModule = await import('../../db/index.js');
     const routesModule = await import('./stats.js');
     const customRoutesModule = await import('../../custom/register.js');
+    const tokenRouterModule = await import('../../services/tokenRouter.js');
     db = dbModule.db;
     schema = dbModule.schema;
+    invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
+    resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
 
     app = Fastify();
     await app.register(routesModule.statsRoutes);
@@ -76,10 +82,14 @@ describe('/api/models/marketplace', () => {
     await db.delete(schema.checkinLogs).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
+    invalidateTokenRouterCache();
+    resetSiteRuntimeHealthState();
   });
 
   afterAll(async () => {
     await app.close();
+    invalidateTokenRouterCache();
+    resetSiteRuntimeHealthState();
     delete process.env.DATA_DIR;
   });
 
@@ -180,7 +190,10 @@ describe('/api/models/marketplace', () => {
       { name: 'metapi-default-gpt-4-1', key: 'sk-new', enabled: true, tokenGroup: 'default' },
     ]);
     getModelsMock.mockResolvedValue(['gpt-4.1', 'gpt-4o']);
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 'ok' }), {
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({
+      id: 'ok',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+    }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }));
@@ -194,7 +207,6 @@ describe('/api/models/marketplace', () => {
       },
     });
 
-    console.log('DEBUG response:', response.statusCode, JSON.stringify(response.json()));
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       success: true,
@@ -414,5 +426,383 @@ describe('/api/models/marketplace', () => {
     } finally {
       await routeApp.close();
     }
+  });
+
+  it('tests marketplace availability against the selected route channel when routeId is provided', async () => {
+    const tokensRoutesModule = await import('./tokens.js');
+    const routeApp = Fastify();
+    await routeApp.register(tokensRoutesModule.tokensRoutes);
+
+    try {
+      const site = await db.insert(schema.sites).values({
+        name: 'route-marketplace-site',
+        url: 'https://route-marketplace.example.com',
+        platform: 'new-api',
+        status: 'active',
+      }).returning().get();
+
+      const account = await db.insert(schema.accounts).values({
+        siteId: site.id,
+        username: 'route-marketplace-user',
+        accessToken: 'session-token',
+        status: 'active',
+        balance: 10,
+      }).returning().get();
+
+      const token = await db.insert(schema.accountTokens).values({
+        accountId: account.id,
+        name: 'route-marketplace-token',
+        token: 'sk-route-marketplace',
+        enabled: true,
+        isDefault: true,
+        valueStatus: 'ready',
+      }).returning().get();
+
+      const route = await db.insert(schema.tokenRoutes).values({
+        modelPattern: 'gpt-5.4',
+        enabled: true,
+      }).returning().get();
+
+      await db.insert(schema.routeChannels).values({
+        routeId: route.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: 'gpt-5.4',
+        enabled: true,
+      }).run();
+
+      getModelsMock.mockResolvedValue(['gpt-5.4']);
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({
+        id: 'ok',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/models/marketplace/test',
+        payload: {
+          modelName: 'gpt-5.4',
+          routeId: route.id,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        success: true,
+        available: true,
+        routeId: route.id,
+        channelId: expect.any(Number),
+        usedTokenId: token.id,
+        usedTokenName: token.name,
+      });
+    } finally {
+      await routeApp.close();
+    }
+  });
+
+  it('uses the real selected route channel when marketplace test is called without routeId', async () => {
+    const siteBad = await db.insert(schema.sites).values({
+      name: 'glm-bad-site',
+      url: 'https://glm-bad.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const accountBad = await db.insert(schema.accounts).values({
+      siteId: siteBad.id,
+      username: 'glm-bad-user',
+      accessToken: 'bad-session',
+      status: 'active',
+      balance: 1,
+    }).returning().get();
+
+    const tokenBad = await db.insert(schema.accountTokens).values({
+      accountId: accountBad.id,
+      name: 'glm-bad-token',
+      token: 'sk-glm-bad',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const siteGood = await db.insert(schema.sites).values({
+      name: 'glm-good-site',
+      url: 'https://glm-good.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const accountGood = await db.insert(schema.accounts).values({
+      siteId: siteGood.id,
+      username: 'glm-good-user',
+      accessToken: 'good-session',
+      status: 'active',
+      balance: 100,
+    }).returning().get();
+
+    const tokenGood = await db.insert(schema.accountTokens).values({
+      accountId: accountGood.id,
+      name: 'glm-good-token',
+      token: 'sk-glm-good',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'glm-5.1',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values([
+      {
+        routeId: route.id,
+        accountId: accountBad.id,
+        tokenId: tokenBad.id,
+        sourceModel: 'glm-5.1',
+        priority: 1,
+        weight: 1,
+        enabled: true,
+      },
+      {
+        routeId: route.id,
+        accountId: accountGood.id,
+        tokenId: tokenGood.id,
+        sourceModel: 'glm-5.1',
+        priority: 0,
+        weight: 10,
+        enabled: true,
+      },
+    ]).run();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: accountBad.id,
+        modelName: 'glm-5.1',
+        available: true,
+        checkedAt: new Date().toISOString(),
+      },
+      {
+        accountId: accountGood.id,
+        modelName: 'glm-5.1',
+        available: true,
+        checkedAt: new Date().toISOString(),
+      },
+    ]).run();
+    invalidateTokenRouterCache();
+
+    getModelsMock.mockImplementation(async (_url: string, token: string) => {
+      if (token === tokenBad.token) return ['glm-5.1'];
+      if (token === tokenGood.token) return ['glm-5.1'];
+      return [];
+    });
+
+    fetchMock.mockImplementation(async (_url: string, init?: Record<string, unknown>) => {
+      const headers = ((init?.headers || {}) as Record<string, string>);
+      const auth = String(headers.Authorization || '');
+      if (auth.includes(tokenBad.token)) {
+        return new Response(JSON.stringify({ error: { message: 'Authentication Failed' } }), {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({
+        id: 'glm-ok',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'glm-5.1',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      available: true,
+      routeId: route.id,
+      usedTokenId: tokenGood.id,
+      usedTokenName: tokenGood.name,
+    });
+    const fetchArgs = fetchMock.mock.calls[0] ?? [];
+    const headers = ((fetchArgs[1] as any)?.headers || {}) as Record<string, string>;
+    expect(String(fetchArgs[0] || '')).toContain('http://127.0.0.1:4000/v1/chat/completions');
+    expect(headers.Authorization || '').toContain('Bearer ');
+    expect(headers['x-metapi-tester-request']).toBeUndefined();
+    expect(headers['x-metapi-tester-forced-channel-id']).toBeUndefined();
+  });
+
+  it('tests marketplace route availability against the selected channel sourceModel alias', async () => {
+    const tokensRoutesModule = await import('./tokens.js');
+    const routeApp = Fastify();
+    await routeApp.register(tokensRoutesModule.tokensRoutes);
+
+    try {
+      const site = await db.insert(schema.sites).values({
+        name: 'route-alias-marketplace-site',
+        url: 'https://route-alias-marketplace.example.com',
+        platform: 'new-api',
+        status: 'active',
+      }).returning().get();
+
+      const account = await db.insert(schema.accounts).values({
+        siteId: site.id,
+        username: 'route-alias-user',
+        accessToken: 'session-token',
+        status: 'active',
+        balance: 10,
+      }).returning().get();
+
+      const token = await db.insert(schema.accountTokens).values({
+        accountId: account.id,
+        name: 'route-alias-token',
+        token: 'sk-route-alias',
+        enabled: true,
+        isDefault: true,
+        valueStatus: 'ready',
+      }).returning().get();
+
+      const route = await db.insert(schema.tokenRoutes).values({
+        modelPattern: 'gemini-3.0-pro',
+        displayName: 'gemini-3.0-pro',
+        routeMode: 'explicit_group',
+        enabled: true,
+      }).returning().get();
+
+      await db.insert(schema.routeChannels).values({
+        routeId: route.id,
+        accountId: account.id,
+        tokenId: token.id,
+        sourceModel: 'gemini-3-pro-preview',
+        enabled: true,
+      }).run();
+
+      getModelsMock.mockResolvedValue(['gemini-3-pro-preview']);
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({
+        id: 'ok',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/models/marketplace/test',
+        payload: {
+          modelName: 'gemini-3.0-pro',
+          routeId: route.id,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        success: true,
+        available: true,
+        routeId: route.id,
+      });
+      expect(getModelsMock).toHaveBeenCalledWith(site.url, token.token, undefined);
+      const fetchArgs = fetchMock.mock.calls[0] ?? [];
+      expect(String(fetchArgs[0] || '')).toContain('/v1/chat/completions');
+      expect(JSON.parse(String((fetchArgs[1] as any)?.body || '{}'))).toMatchObject({
+        model: 'gemini-3-pro-preview',
+      });
+    } finally {
+      await routeApp.close();
+    }
+  });
+
+  it('uses local proxy canary semantics when marketplace test targets a known channel', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'proxy-canary-site',
+      url: 'https://proxy-canary.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'proxy-canary-user',
+      accessToken: 'session-token',
+      status: 'active',
+      balance: 10,
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'proxy-canary-token',
+      token: 'sk-proxy-canary',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gemini-2.5-pro',
+      enabled: true,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gemini-2.5-pro-search',
+      enabled: true,
+    }).returning().get();
+
+    getModelsMock.mockResolvedValue(['gemini-2.5-pro-search']);
+    fetchMock.mockImplementation(async (url: string, init?: Record<string, unknown>) => {
+      if (String(url).startsWith('http://127.0.0.1:4000/')) {
+        const headers = (init?.headers || {}) as Record<string, string>;
+        expect(headers.Authorization).toBeDefined();
+        expect(headers['x-metapi-tester-request']).toBe('1');
+        expect(headers['x-metapi-tester-forced-channel-id']).toBe(String(channel.id));
+        return new Response(JSON.stringify({
+          id: 'proxy-ok',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({
+        id: 'upstream-empty',
+        choices: [{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'gemini-2.5-pro',
+        channelId: channel.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      available: true,
+      routeId: route.id,
+      channelId: channel.id,
+      probeEndpoint: 'proxy-chat',
+      probeClassification: 'supported',
+    });
+    expect(fetchMock.mock.calls.some((call) => String(call[0] || '').startsWith('http://127.0.0.1:4000/v1/chat/completions'))).toBe(true);
   });
 });
