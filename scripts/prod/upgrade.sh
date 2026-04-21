@@ -21,6 +21,8 @@ PUBLIC_CHECK_INTERVAL="${PUBLIC_CHECK_INTERVAL:-3}"
 STABLE_CHECK_ROUNDS="${STABLE_CHECK_ROUNDS:-3}"
 STABLE_CHECK_INTERVAL="${STABLE_CHECK_INTERVAL:-5}"
 BACKUP_KEEP_COUNT="${BACKUP_KEEP_COUNT:-2}"
+CHAT_SMOKE_MODELS="${CHAT_SMOKE_MODELS:-gpt-5.4,glm-5.1}"
+CHAT_SMOKE_MAX_TIME="${CHAT_SMOKE_MAX_TIME:-25}"
 
 # Image tag used by scripts/dev/deploy-prod-local.sh
 IMAGE_TAG="${IMAGE_TAG:-metapi-local:latest}"
@@ -183,6 +185,45 @@ stable_window_check() {
   done
 }
 
+run_chat_smoke_check() {
+  local models_csv="$1"
+  local max_time="$2"
+  local env_file="$DEPLOY_DIR/.env"
+  [ -f "$env_file" ] || die "missing $env_file"
+
+  local proxy_token
+  proxy_token="$(awk -F= '$1=="PROXY_TOKEN" {sub(/^[^=]*=/, ""); print substr($0, index($0,$2))}' "$env_file" | tail -n 1 | tr -d '\r')"
+  [ -n "$proxy_token" ] || die "PROXY_TOKEN missing in $env_file"
+
+  IFS=',' read -r -a models <<< "$models_csv"
+  local model
+  for model in "${models[@]}"; do
+    model="$(printf '%s' "$model" | xargs)"
+    [ -n "$model" ] || continue
+    echo "[check] chat smoke: $model"
+    local body
+    body=$(printf '{"model":"%s","messages":[{"role":"user","content":"只回复OK"}],"stream":false,"max_tokens":8}' "$model")
+    local tmp_body
+    tmp_body="$(mktemp)"
+    local code_and_time
+    code_and_time=$(curl -sS -o "$tmp_body" -w '%{http_code} %{time_total}' --max-time "$max_time" \
+      http://127.0.0.1:4000/v1/chat/completions \
+      -H "Authorization: Bearer $proxy_token" \
+      -H 'Content-Type: application/json' \
+      -d "$body") || {
+        cat "$tmp_body" 2>/dev/null || true
+        rm -f "$tmp_body"
+        die "chat smoke failed for $model"
+      }
+    local http_code
+    http_code="${code_and_time%% *}"
+    echo "[check] chat smoke result: model=$model code_time=$code_and_time"
+    sed -n '1,6p' "$tmp_body"
+    rm -f "$tmp_body"
+    [ "$http_code" = "200" ] || die "chat smoke returned HTTP $http_code for $model"
+  done
+}
+
 require_cmd docker
 require_cmd curl
 
@@ -291,6 +332,7 @@ wait_for_health "$HOST_URL" "host" "$HOST_CHECK_RETRIES" "$HOST_CHECK_INTERVAL"
 wait_for_health "$PUBLIC_URL" "public" "$PUBLIC_CHECK_RETRIES" "$PUBLIC_CHECK_INTERVAL"
 stable_window_check "$HOST_URL" "host" "$STABLE_CHECK_ROUNDS" "$STABLE_CHECK_INTERVAL"
 stable_window_check "$PUBLIC_URL" "public" "$STABLE_CHECK_ROUNDS" "$STABLE_CHECK_INTERVAL"
+run_chat_smoke_check "$CHAT_SMOKE_MODELS" "$CHAT_SMOKE_MAX_TIME"
 
 echo "[6/8] Show container status"
 cd "$DEPLOY_DIR"

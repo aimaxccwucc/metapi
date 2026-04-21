@@ -2130,6 +2130,7 @@ export async function tokensRoutes(app: FastifyInstance) {
     return await probeRouteChannelsForRoute(route, enabledChannels, {
       limit: request.body?.limit,
       autoGovernance: request.body?.autoGovernance,
+      earlyStopOnAvailable: isExplicitGroupRoute(route),
     });
   });
 

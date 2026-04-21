@@ -95,6 +95,27 @@ describe('detectProxyFailure (empty content)', () => {
     expect(failure).toBeNull();
   });
 
+  it('flags terminal payloads with empty content when probe only gets a 200 shell', () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    const rawText = JSON.stringify({
+      id: 'chatcmpl_probe_empty',
+      object: 'chat.completion',
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: '' },
+        finish_reason: 'stop',
+      }],
+    });
+
+    const failure = detectProxyFailure({
+      rawText,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    });
+
+    expect(failure).toMatchObject({ status: 502, reason: 'Upstream returned empty content' });
+  });
+
   it('does not treat tool call payloads as empty content', () => {
     config.proxyEmptyContentFailEnabled = true;
 

@@ -27,9 +27,7 @@ function buildStickySessionKey(request: FastifyRequest): string | null {
     clientContext.previousResponseId
     || clientContext.promptCacheKey
     || clientContext.sessionId
-    || clientContext.traceHint
-    || clientContext.clientAppId
-    || clientContext.clientKind,
+    || clientContext.traceHint,
   );
   if (!stickyIdentity) return null;
 

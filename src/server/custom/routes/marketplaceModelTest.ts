@@ -160,6 +160,7 @@ export async function registerMarketplaceModelTestRoutes(app: FastifyInstance) {
               modelName: probeModelName,
               candidate: loaded.candidate,
               preferredTokenId: loaded.channel.tokenId ?? null,
+              proxyCanaryForcedChannelId: selectedChannelId,
               useLocalProxyCanary: true,
               forceRealtimeProbeOnListMiss: true,
             });

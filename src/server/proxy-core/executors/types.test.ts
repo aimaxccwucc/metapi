@@ -1,4 +1,4 @@
-import { gzipSync, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
+import { brotliCompressSync, gzipSync, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { Response } from 'undici';
 import { describe, expect, it } from 'vitest';
 import { materializeErrorResponse, readRuntimeResponseText } from './types.js';
@@ -33,6 +33,33 @@ describe('readRuntimeResponseText', () => {
         },
       },
     );
+
+    await expect(readRuntimeResponseText(response)).resolves.toBe(payload);
+  });
+
+
+  it('decompresses brotli responses before reading the body text', async () => {
+    const payload = JSON.stringify({ ok: true, text: 'hello br' });
+    const response = new Response(brotliCompressSync(Buffer.from(payload)), {
+      status: 200,
+      headers: {
+        'content-encoding': 'br',
+        'content-type': 'application/json; charset=utf-8',
+      },
+    });
+
+    await expect(readRuntimeResponseText(response)).resolves.toBe(payload);
+  });
+
+  it('decompresses gzip responses before reading the body text', async () => {
+    const payload = JSON.stringify({ ok: true, text: 'hello gzip' });
+    const response = new Response(gzipSync(Buffer.from(payload)), {
+      status: 200,
+      headers: {
+        'content-encoding': 'gzip',
+        'content-type': 'application/json; charset=utf-8',
+      },
+    });
 
     await expect(readRuntimeResponseText(response)).resolves.toBe(payload);
   });

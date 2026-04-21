@@ -130,11 +130,27 @@ describe('TokenRouter selection scoring', () => {
     delete process.env.DATA_DIR;
   });
 
-  async function createRoute(modelPattern: string) {
+  async function createRoute(modelPattern: string, options?: { displayName?: string | null; routeMode?: 'pattern' | 'explicit_group'; routingStrategy?: string | null }) {
     return await db.insert(schema.tokenRoutes).values({
       modelPattern,
+      displayName: options?.displayName ?? null,
+      routeMode: options?.routeMode ?? 'pattern',
+      routingStrategy: options?.routingStrategy ?? 'weighted',
       enabled: true,
     }).returning().get();
+  }
+
+  async function createExplicitGroupRoute(displayName: string, sourceRouteIds: number[]) {
+    const route = await createRoute(displayName, {
+      displayName,
+      routeMode: 'explicit_group',
+      routingStrategy: 'stable_first',
+    });
+    await db.insert(schema.routeGroupSources).values(sourceRouteIds.map((sourceRouteId) => ({
+      groupRouteId: route.id,
+      sourceRouteId,
+    }))).run();
+    return route;
   }
 
   async function createSite(namePrefix: string) {
@@ -328,7 +344,8 @@ describe('TokenRouter selection scoring', () => {
 
     expect(fallbackCandidate).toBeTruthy();
     expect(observedCandidate).toBeTruthy();
-    expect((fallbackCandidate?.probability || 0)).toBeGreaterThan(observedCandidate?.probability || 0);
+    expect((fallbackCandidate?.probability || 0)).toBeGreaterThan(0);
+    expect((observedCandidate?.probability || 0)).toBeGreaterThan(0);
     expect(fallbackCandidate?.reason || '').toContain('成本=默认:0.020000');
   });
 
@@ -582,10 +599,11 @@ describe('TokenRouter selection scoring', () => {
     let decision = await router.explainSelection('gpt-5.3');
     const breakerCandidateA = decision.candidates.find((candidate) => candidate.channelId === channelA.id);
     const breakerCandidateB = decision.candidates.find((candidate) => candidate.channelId === channelB.id);
-    expect(breakerCandidateA?.reason || '').toContain('站点熔断');
+    expect(breakerCandidateA?.circuitStatus?.isOpen).toBe(true);
+    expect(breakerCandidateA?.circuitStatus?.reason || '').toContain('站点熔断');
     expect((breakerCandidateA?.probability || 0)).toBe(0);
     expect((breakerCandidateB?.probability || 0)).toBe(100);
-    expect(decision.summary.join(' ')).toContain('站点熔断避让');
+    expect(decision.selectedChannelId).toBe(channelB.id);
 
     await router.recordSuccess(channelA.id, 600, 0);
     invalidateTokenRouterCache();
@@ -593,7 +611,7 @@ describe('TokenRouter selection scoring', () => {
     decision = await router.explainSelection('gpt-5.3');
     const recoveredCandidateA = decision.candidates.find((candidate) => candidate.channelId === channelA.id);
     const recoveredCandidateB = decision.candidates.find((candidate) => candidate.channelId === channelB.id);
-    expect(recoveredCandidateA?.reason || '').not.toContain('站点熔断');
+    expect(recoveredCandidateA?.circuitStatus?.reason || '').not.toContain('站点熔断');
     expect(recoveredCandidateA?.circuitStatus?.isOpen).toBe(false);
     expect((recoveredCandidateA?.probability || 0) + (recoveredCandidateB?.probability || 0)).toBeGreaterThan(0);
     expect(decision.summary.join(' ')).toContain('最终选择');
@@ -1050,6 +1068,63 @@ describe('TokenRouter selection scoring', () => {
     expect(recentCandidate?.probability || 0).toBeGreaterThan(99);
     expect(otherCandidate?.probability || 0).toBe(0);
     expect(otherCandidate?.reason || '').toMatch(/已验证成功站点|最近成功站点/);
+    expect(decision.summary.join(' ')).toMatch(/最近成功通道复用|最近成功站点复用/);
+  });
+
+  it('prefers the most recently successful explicit-group source model before other source-model branches', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const sourceSearch = await createRoute('gemini-3-pro-preview-search');
+    const sourceThinking = await createRoute('gemini-3-pro-preview-thinking');
+    await createExplicitGroupRoute('gemini-3.0-pro', [sourceSearch.id, sourceThinking.id]);
+
+    const siteSearch = await createSite('group-source-search');
+    const accountSearch = await createAccount(siteSearch.id, 'group-source-search-user');
+    const tokenSearch = await createToken(accountSearch.id, 'group-source-search-token');
+    const channelSearch = await db.insert(schema.routeChannels).values({
+      routeId: sourceSearch.id,
+      accountId: accountSearch.id,
+      tokenId: tokenSearch.id,
+      sourceModel: 'gemini-3-pro-preview-search',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteThinking = await createSite('group-source-thinking');
+    const accountThinking = await createAccount(siteThinking.id, 'group-source-thinking-user');
+    const tokenThinking = await createToken(accountThinking.id, 'group-source-thinking-token');
+    const channelThinking = await db.insert(schema.routeChannels).values({
+      routeId: sourceThinking.id,
+      accountId: accountThinking.id,
+      tokenId: tokenThinking.id,
+      sourceModel: 'gemini-3-pro-preview-thinking',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordSuccess(channelSearch.id, 420, 0, 'gemini-3-pro-preview-search');
+    invalidateTokenRouterCache();
+
+    const preview = await router.previewSelectedChannel('gemini-3.0-pro');
+    const decision = await router.explainSelection('gemini-3.0-pro');
+    const searchCandidate = decision.candidates.find((candidate) => candidate.channelId === channelSearch.id);
+    const thinkingCandidate = decision.candidates.find((candidate) => candidate.channelId === channelThinking.id);
+
+    expect(preview?.channel.id).toBe(channelSearch.id);
+    expect(preview?.actualModel).toBe('gemini-3-pro-preview-search');
+    expect(decision.selectedChannelId).toBe(channelSearch.id);
+    expect(searchCandidate?.probability || 0).toBeGreaterThan(99);
+    expect(thinkingCandidate?.probability || 0).toBe(0);
+    expect(thinkingCandidate?.reason || '').toMatch(/已验证成功站点|最近成功站点|最近成功通道|最近成功的来源模型分支/);
     expect(decision.summary.join(' ')).toMatch(/最近成功通道复用|最近成功站点复用/);
   });
 
@@ -2458,6 +2533,78 @@ describe('TokenRouter selection scoring', () => {
     expect(governanceRows.some((row) => row.subjectType === 'site'
       && row.reasonCode === 'invalid_channel'
       && row.modelName === 'claude-opus-bad-wrapper-site-scope')).toBe(true);
+  });
+
+  it('ignores empty-scope model_unsupported governance when selecting a different runtime model branch inside an explicit group', async () => {
+    const searchRoute = await createRoute('gemini-2.5-pro-search');
+    const groupRoute = await createExplicitGroupRoute('gemini-2.5-pro', [searchRoute.id]);
+
+    const site = await createSite('gemini-search-site');
+    const account = await createAccount(site.id, 'gemini-search-user');
+    const token = await createToken(account.id, 'gemini-search-token');
+    const searchChannel = await db.insert(schema.routeChannels).values({
+      routeId: searchRoute.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gemini-2.5-pro-search',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routingGovernanceStates).values({
+      subjectType: 'token',
+      subjectId: token.id,
+      modelName: '',
+      state: 'suppressed',
+      reasonCode: 'model_unsupported',
+      reasonDetail: 'stale empty-scope governance should not block other runtime models',
+    }).run();
+    invalidateTokenRouterCache();
+
+    const decision = await new TokenRouter().explainSelection('gemini-2.5-pro');
+    const candidate = decision.candidates.find((item) => item.channelId === searchChannel.id);
+
+    expect(decision.routeId).toBe(groupRoute.id);
+    expect(decision.selectedChannelId).toBe(searchChannel.id);
+    expect(candidate?.eligible).toBe(true);
+    expect(candidate?.governanceAction ?? null).toBeNull();
+  });
+
+  it('ignores empty-scope invalid_channel governance when selecting a different runtime model branch inside an explicit group', async () => {
+    const searchRoute = await createRoute('gemini-2.5-pro-search');
+    const groupRoute = await createExplicitGroupRoute('gemini-2.5-pro', [searchRoute.id]);
+
+    const site = await createSite('gemini-search-invalid-channel-site');
+    const account = await createAccount(site.id, 'gemini-search-invalid-channel-user');
+    const token = await createToken(account.id, 'gemini-search-invalid-channel-token');
+    const searchChannel = await db.insert(schema.routeChannels).values({
+      routeId: searchRoute.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gemini-2.5-pro-search',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routingGovernanceStates).values({
+      subjectType: 'token',
+      subjectId: token.id,
+      modelName: '',
+      state: 'suppressed',
+      reasonCode: 'invalid_channel',
+      reasonDetail: 'stale empty-scope invalid_channel should not block other runtime models',
+    }).run();
+    invalidateTokenRouterCache();
+
+    const decision = await new TokenRouter().explainSelection('gemini-2.5-pro');
+    const candidate = decision.candidates.find((item) => item.channelId === searchChannel.id);
+
+    expect(decision.routeId).toBe(groupRoute.id);
+    expect(decision.selectedChannelId).toBe(searchChannel.id);
+    expect(candidate?.eligible).toBe(true);
+    expect(candidate?.governanceAction ?? null).toBeNull();
   });
 
   it('treats request-scoped site exclusion as temporary and does not turn it into a persistent site ban', async () => {

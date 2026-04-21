@@ -68,6 +68,8 @@ import {
   writeResponseCache,
 } from '../../services/responseCacheService.js';
 import { DefaultProxyConductor } from '../conductor/DefaultProxyConductor.js';
+import { readRuntimeResponseText } from '../executors/types.js';
+import { isTrustedTesterRequest } from '../channelSelection.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
 
@@ -189,6 +191,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
   const requestEnvelope = parsedRequestEnvelope.value!;
   const requestedModel = requestEnvelope.model;
   const isStream = requestEnvelope.stream;
+  const isTesterProbe = isTrustedTesterRequest({
+    headers: request.headers as Record<string, unknown>,
+    clientIp: request.ip,
+  });
   const isCompactRequest = downstreamPath === '/v1/responses/compact';
   if (isCompactRequest && isStream) {
     return reply.code(400).send({
@@ -597,12 +603,14 @@ export async function handleOpenAiResponsesSurfaceRequest(
             retryCount,
             reason: errText,
           });
-          await tokenRouter.recordFailure(selected.channel.id, {
-            status,
-            errorText: rawErrText,
-            modelName,
-            retryAfterHeader,
-          });
+          if (!isTesterProbe) {
+            await tokenRouter.recordFailure(selected.channel.id, {
+              status,
+              errorText: rawErrText,
+              modelName,
+              retryAfterHeader,
+            });
+          }
           logProxy(
             selected,
             requestedModel,
@@ -710,7 +718,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
           }
 
           try {
-            await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+            if (!isTesterProbe) {
+              await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+            }
             recordProxyDebugTrace({
               clientContext,
               kind: 'proxy_success',
@@ -787,7 +797,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           });
 
           if (!upstreamContentType.includes('text/event-stream')) {
-            const rawText = await upstream.text();
+            const rawText = await readRuntimeResponseText(upstream);
             if (looksLikeResponsesSseText(rawText)) {
               startSseResponse();
               const streamResult = await streamSession.run(
@@ -796,11 +806,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
               );
               const latency = Date.now() - startTime;
               if (streamResult.status === 'failed') {
-                await tokenRouter.recordFailure(selected.channel.id, {
-                  status: 502,
-                  errorText: streamResult.errorMessage,
-                  modelName,
-                });
+                if (!isTesterProbe) {
+                  await tokenRouter.recordFailure(selected.channel.id, {
+                    status: 502,
+                    errorText: streamResult.errorMessage,
+                    modelName,
+                  });
+                }
                 logProxy(
                   selected,
                   requestedModel,
@@ -840,11 +852,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
             const latency = Date.now() - startTime;
             const failure = detectProxyFailure({ rawText, usage: parsedUsage });
             if (failure) {
-              await tokenRouter.recordFailure(selected.channel.id, {
-                status: failure.status,
-                errorText: failure.reason,
-                modelName,
-              });
+              if (!isTesterProbe) {
+                await tokenRouter.recordFailure(selected.channel.id, {
+                  status: failure.status,
+                  errorText: failure.reason,
+                  modelName,
+                });
+              }
               logProxy(
                 selected,
                 requestedModel,
@@ -996,7 +1010,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           rawText = collected.rawText;
           upstreamData = collected.payload;
         } else {
-          rawText = await upstream.text();
+          rawText = await readRuntimeResponseText(upstream);
           if (looksLikeResponsesSseText(rawText)) {
             upstreamData = collectResponsesFinalPayloadFromSseText(rawText, modelName).payload;
           } else {
@@ -1016,11 +1030,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
         const parsedUsage = parseProxyUsage(upstreamData);
         const failure = detectProxyFailure({ rawText, usage: parsedUsage });
         if (failure) {
-          await tokenRouter.recordFailure(selected.channel.id, {
-            status: failure.status,
-            errorText: failure.reason,
-            modelName,
-          });
+            if (!isTesterProbe) {
+              await tokenRouter.recordFailure(selected.channel.id, {
+                status: failure.status,
+                errorText: failure.reason,
+                modelName,
+              });
+            }
           logProxy(
             selected,
             requestedModel,
@@ -1081,11 +1097,13 @@ export async function handleOpenAiResponsesSurfaceRequest(
           usage: parsedUsage,
         });
         if (downstreamFailure) {
-          await tokenRouter.recordFailure(selected.channel.id, {
-            status: downstreamFailure.status,
-            errorText: downstreamFailure.reason,
-            modelName,
-          });
+          if (!isTesterProbe) {
+            await tokenRouter.recordFailure(selected.channel.id, {
+              status: downstreamFailure.status,
+              errorText: downstreamFailure.reason,
+              modelName,
+            });
+          }
           logProxy(
             selected,
             requestedModel,
@@ -1152,7 +1170,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
           resolvedUsage,
         });
 
-        await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+        if (!isTesterProbe) {
+          await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+        }
         recordProxyDebugTrace({
           clientContext,
           kind: 'proxy_success',

@@ -71,6 +71,8 @@ import {
   writeResponseCache,
 } from '../../services/responseCacheService.js';
 import { DefaultProxyConductor } from '../conductor/DefaultProxyConductor.js';
+import { readRuntimeResponseText } from '../executors/types.js';
+import { isTrustedTesterRequest } from '../channelSelection.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
 
@@ -191,6 +193,10 @@ export async function handleChatSurfaceRequest(
   }
 
   const requestEnvelope = parsedRequestEnvelope.value!;
+  const isTesterProbe = isTrustedTesterRequest({
+    headers: request.headers as Record<string, unknown>,
+    clientIp: request.ip,
+  });
   const {
     requestedModel,
     isStream,
@@ -612,12 +618,14 @@ export async function handleChatSurfaceRequest(
             retryCount,
             reason: errText,
           });
-          await tokenRouter.recordFailure(selected.channel.id, {
-            status,
-            errorText: rawErrText,
-            modelName,
-            retryAfterHeader,
-          });
+          if (!isTesterProbe) {
+            await tokenRouter.recordFailure(selected.channel.id, {
+              status,
+              errorText: rawErrText,
+              modelName,
+              retryAfterHeader,
+            });
+          }
           logProxy(
             selected,
             requestedModel,
@@ -723,7 +731,7 @@ export async function handleChatSurfaceRequest(
           let rawText = '';
           let lastStreamResultToolCalls: Array<Record<string, unknown>> | undefined;
           if (!upstreamContentType.includes('text/event-stream')) {
-            const fallbackText = await upstream.text();
+            const fallbackText = await readRuntimeResponseText(upstream);
             rawText = fallbackText;
             if (looksLikeResponsesSseText(fallbackText)) {
               startSseResponse();
@@ -736,11 +744,13 @@ export async function handleChatSurfaceRequest(
               }
               if (streamResult.status === 'failed') {
                 const latency = Date.now() - startTime;
-                await tokenRouter.recordFailure(selected.channel.id, {
-                  status: 502,
-                  errorText: streamResult.errorMessage,
-                  modelName,
-                });
+                if (!isTesterProbe) {
+                  await tokenRouter.recordFailure(selected.channel.id, {
+                    status: 502,
+                    errorText: streamResult.errorMessage,
+                    modelName,
+                  });
+                }
                 logProxy(
                   selected,
                   requestedModel,
@@ -775,11 +785,13 @@ export async function handleChatSurfaceRequest(
               const failure = detectProxyFailure({ rawText, usage: parsedUsage });
               if (failure) {
                 const latency = Date.now() - startTime;
+              if (!isTesterProbe) {
                 await tokenRouter.recordFailure(selected.channel.id, {
                   status: failure.status,
                   errorText: failure.reason,
                   modelName,
                 });
+              }
                 logProxy(
                   selected,
                   requestedModel,
@@ -951,7 +963,9 @@ export async function handleChatSurfaceRequest(
             resolvedUsage,
           });
 
-          await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+          if (!isTesterProbe) {
+            await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+          }
           recordDownstreamCostUsage(request, estimatedCost);
           logProxy(
             selected,
@@ -987,7 +1001,7 @@ export async function handleChatSurfaceRequest(
           rawText = collected.rawText;
           upstreamData = collected.payload;
         } else {
-          rawText = await upstream.text();
+          rawText = await readRuntimeResponseText(upstream);
           if (looksLikeResponsesSseText(rawText)) {
             upstreamData = collectResponsesFinalPayloadFromSseText(rawText, modelName).payload;
           } else {
@@ -1014,11 +1028,13 @@ export async function handleChatSurfaceRequest(
         const parsedUsage = parseProxyUsage(upstreamData);
         const failure = detectProxyFailure({ rawText, usage: parsedUsage });
         if (failure) {
-          await tokenRouter.recordFailure(selected.channel.id, {
-            status: failure.status,
-            errorText: failure.reason,
-            modelName,
-          });
+          if (!isTesterProbe) {
+            await tokenRouter.recordFailure(selected.channel.id, {
+              status: failure.status,
+              errorText: failure.reason,
+              modelName,
+            });
+          }
           logProxy(
             selected,
             requestedModel,
@@ -1071,11 +1087,13 @@ export async function handleChatSurfaceRequest(
           usage: parsedUsage,
         });
         if (downstreamFailure) {
-          await tokenRouter.recordFailure(selected.channel.id, {
-            status: downstreamFailure.status,
-            errorText: downstreamFailure.reason,
-            modelName,
-          });
+          if (!isTesterProbe) {
+            await tokenRouter.recordFailure(selected.channel.id, {
+              status: downstreamFailure.status,
+              errorText: downstreamFailure.reason,
+              modelName,
+            });
+          }
           logProxy(
             selected,
             requestedModel,
@@ -1143,7 +1161,9 @@ export async function handleChatSurfaceRequest(
           resolvedUsage,
         });
 
-        await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+        if (!isTesterProbe) {
+          await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+        }
         recordProxyDebugTrace({
           clientContext,
           kind: 'proxy_success',
@@ -1588,7 +1608,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
 
         const latency = Date.now() - startTime;
         const contentType = upstream.headers.get('content-type') || 'application/json';
-        const text = await upstream.text();
+        const text = await readRuntimeResponseText(upstream);
         let payload: unknown = text;
         try {
           payload = JSON.parse(text);

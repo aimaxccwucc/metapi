@@ -238,7 +238,7 @@ export async function readRuntimeResponseText(
   response: RuntimeResponse,
 ): Promise<string> {
   const contentEncoding = response.headers.get('content-encoding');
-  if (!hasZstdContentEncoding(contentEncoding)) {
+  if (!contentEncoding || !contentEncoding.trim()) {
     return response.text().catch(() => '');
   }
 

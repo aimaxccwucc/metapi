@@ -12,7 +12,6 @@ import { videosProxyRoute } from './videos.js';
 import { filesProxyRoute } from './files.js';
 
 export async function proxyRoutes(app: FastifyInstance) {
-  // Auth middleware for all /v1 routes
   app.addHook('onRequest', async (request, reply) => {
     await proxyAuthMiddleware(request, reply);
   });

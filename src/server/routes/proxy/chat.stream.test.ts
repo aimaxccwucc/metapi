@@ -1431,7 +1431,7 @@ describe('chat proxy stream behavior', () => {
     expect(response.body).not.toContain('event: ping');
   });
 
-  it('does not synthesize message_stop when anthropic upstream EOFs before terminal event on /v1/messages', async () => {
+  it('synthesizes message_stop when anthropic upstream EOFs before terminal event on /v1/messages', async () => {
     const encoder = new TextEncoder();
     const upstreamBody = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -1461,8 +1461,8 @@ describe('chat proxy stream behavior', () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain('event: message_start');
     expect(response.body).toContain('event: content_block_delta');
-    expect(response.body).not.toContain('event: message_stop');
-    expect(response.body).not.toContain('"stop_reason":"end_turn"');
+    expect(response.body).toContain('event: message_stop');
+    expect(response.body).toContain('"stop_reason":"end_turn"');
   });
 
   it('normalizes Claude thinking adaptive type for legacy upstreams on /v1/messages', async () => {
@@ -5296,5 +5296,36 @@ describe('chat proxy stream behavior', () => {
       status: 429,
       retryAfterHeader: '23',
     }));
+  });
+
+  it('does not mutate router health state for trusted tester chat probes', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'tester-ok',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      remoteAddress: '127.0.0.1',
+      headers: {
+        authorization: 'Bearer sk-test',
+        'x-metapi-tester-request': '1',
+        'x-metapi-tester-forced-channel-id': '11',
+      },
+      payload: {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'ping' }],
+        stream: false,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(recordSuccessMock).not.toHaveBeenCalled();
+    expect(recordFailureMock).not.toHaveBeenCalled();
   });
 });

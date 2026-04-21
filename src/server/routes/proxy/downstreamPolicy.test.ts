@@ -49,7 +49,7 @@ describe('getDownstreamRoutingPolicy', () => {
     await app.close();
   });
 
-  it('falls back to client app identity when session id is unavailable', async () => {
+  it('does not derive sticky session key from client app identity alone', async () => {
     getProxyAuthContextMock.mockReturnValue({
       source: 'global',
       keyId: null,
@@ -80,7 +80,7 @@ describe('getDownstreamRoutingPolicy', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      stickySessionKey: 'global:global:/v1/search:cherry_studio',
+      stickySessionKey: null,
       publicRoutesOnly: true,
     });
 

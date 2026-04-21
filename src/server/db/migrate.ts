@@ -213,6 +213,30 @@ function findMatchingMigrationByStatement(
   return null;
 }
 
+function findMatchingMigrationBySqlText(
+  migrationsFolder: string,
+  failedSqlText: string,
+): RecoveryMigrationRecord | null {
+  const journalPath = resolve(migrationsFolder, 'meta', '_journal.json');
+  const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as MigrationJournalFile;
+  const normalizedFailedSql = normalizeSqlForMatch(failedSqlText);
+
+  for (const entry of journal.entries ?? []) {
+    const migrationSql = readFileSync(resolve(migrationsFolder, `${entry.tag}.sql`), 'utf8');
+    if (normalizeSqlForMatch(migrationSql) !== normalizedFailedSql) {
+      continue;
+    }
+
+    return {
+      tag: entry.tag,
+      createdAt: Number(entry.when),
+      hash: createHash('sha256').update(migrationSql).digest('hex'),
+    };
+  }
+
+  return null;
+}
+
 function findMatchingMigrationByErrorMessage(
   migrationsFolder: string,
   error: unknown,
@@ -327,6 +351,10 @@ function isRecoverableSchemaConflictError(error: unknown): boolean {
     || lowered.includes('already exists');
 }
 
+function isSqliteMultiStatementError(error: unknown): boolean {
+  return normalizeSchemaErrorMessage(error).toLowerCase().includes('contains more than one statement');
+}
+
 function isSitesPlatformUrlUniqueConflictError(error: unknown): boolean {
   const lowered = normalizeSchemaErrorMessage(error).toLowerCase();
   if (!lowered.includes('unique constraint failed: sites.platform, sites.url')) {
@@ -434,6 +462,33 @@ function tryRecoverDuplicateColumnMigrationError(
   const recovered = recoverMigrationSequence(sqlite, migrationsFolder, matchedMigration.tag);
   if (recovered) {
     console.warn(`[db] Recovered duplicate-column migration sequence through ${matchedMigration.tag}.`);
+  }
+  return recovered;
+}
+
+function tryRecoverMultiStatementMigrationError(
+  sqlite: Database.Database,
+  migrationsFolder: string,
+  error: unknown,
+): boolean {
+  if (!isSqliteMultiStatementError(error)) {
+    return false;
+  }
+
+  const failedSqlText = extractFailedSqlFromError(error);
+  if (!failedSqlText) {
+    return false;
+  }
+
+  const matchedMigration = findMatchingMigrationBySqlText(migrationsFolder, failedSqlText)
+    ?? findMatchingMigrationByErrorMessage(migrationsFolder, error);
+  if (!matchedMigration) {
+    return false;
+  }
+
+  const recovered = recoverMigrationSequence(sqlite, migrationsFolder, matchedMigration.tag);
+  if (recovered) {
+    console.warn(`[db] Recovered multi-statement SQLite migration sequence through ${matchedMigration.tag}.`);
   }
   return recovered;
 }
@@ -550,6 +605,7 @@ export const __migrateTestUtils = {
   markMigrationRecordIfMissing,
   recoverMigrationSequence,
   tryRecoverDuplicateColumnMigrationError,
+  tryRecoverMultiStatementMigrationError,
   isSitesPlatformUrlUniqueConflictError,
   deduplicateLegacySitesForUniqueIndex,
 };
@@ -596,12 +652,15 @@ export function runSqliteMigrations(): void {
     migrate(drizzle(sqlite), { migrationsFolder });
   } catch (error) {
     const recoveredDuplicateColumns = tryRecoverDuplicateColumnMigrationError(sqlite, migrationsFolder, error);
+    const recoveredMultiStatement = !recoveredDuplicateColumns
+      && tryRecoverMultiStatementMigrationError(sqlite, migrationsFolder, error);
     const recoveredDuplicateSites = (
       !recoveredDuplicateColumns
+      && !recoveredMultiStatement
       && isSitesPlatformUrlUniqueConflictError(error)
       && deduplicateLegacySitesForUniqueIndex(sqlite)
     );
-    if (!recoveredDuplicateColumns && !recoveredDuplicateSites) {
+    if (!recoveredDuplicateColumns && !recoveredMultiStatement && !recoveredDuplicateSites) {
       sqlite.close();
       throw error;
     }

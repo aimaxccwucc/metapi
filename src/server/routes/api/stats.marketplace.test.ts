@@ -557,7 +557,7 @@ describe('/api/models/marketplace', () => {
       enabled: true,
     }).returning().get();
 
-    await db.insert(schema.routeChannels).values([
+    const insertedChannels = await db.insert(schema.routeChannels).values([
       {
         routeId: route.id,
         accountId: accountBad.id,
@@ -576,7 +576,9 @@ describe('/api/models/marketplace', () => {
         weight: 10,
         enabled: true,
       },
-    ]).run();
+    ]).returning().all();
+    const channelGood = insertedChannels.find((channel) => channel.tokenId === tokenGood.id);
+    expect(channelGood).toBeTruthy();
 
     await db.insert(schema.modelAvailability).values([
       {
@@ -638,8 +640,8 @@ describe('/api/models/marketplace', () => {
     const headers = ((fetchArgs[1] as any)?.headers || {}) as Record<string, string>;
     expect(String(fetchArgs[0] || '')).toContain('http://127.0.0.1:4000/v1/chat/completions');
     expect(headers.Authorization || '').toContain('Bearer ');
-    expect(headers['x-metapi-tester-request']).toBeUndefined();
-    expect(headers['x-metapi-tester-forced-channel-id']).toBeUndefined();
+    expect(headers['x-metapi-tester-request']).toBe('1');
+    expect(headers['x-metapi-tester-forced-channel-id']).toBe(String(channelGood.id));
   });
 
   it('tests marketplace route availability against the selected channel sourceModel alias', async () => {
@@ -804,5 +806,83 @@ describe('/api/models/marketplace', () => {
       probeClassification: 'supported',
     });
     expect(fetchMock.mock.calls.some((call) => String(call[0] || '').startsWith('http://127.0.0.1:4000/v1/chat/completions'))).toBe(true);
+  });
+
+  it('pins default marketplace local proxy canary to the preview-selected channel', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'default-proxy-pin-site',
+      url: 'https://default-proxy-pin.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'default-proxy-pin-user',
+      accessToken: 'session-token',
+      status: 'active',
+      balance: 10,
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default-proxy-pin-token',
+      token: 'sk-default-proxy-pin',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gemini-default-proxy-pin',
+      displayName: 'gemini-default-proxy-pin',
+      routeMode: 'explicit_group',
+      enabled: true,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'gemini-default-proxy-pin-search',
+      enabled: true,
+    }).returning().get();
+
+    getModelsMock.mockResolvedValue(['gemini-default-proxy-pin-search']);
+    fetchMock.mockImplementation(async (url: string, init?: Record<string, unknown>) => {
+      if (String(url).startsWith('http://127.0.0.1:4000/')) {
+        const headers = (init?.headers || {}) as Record<string, string>;
+        expect(headers.Authorization).toBeDefined();
+        expect(headers['x-metapi-tester-request']).toBe('1');
+        expect(headers['x-metapi-tester-forced-channel-id']).toBe(String(channel.id));
+        return new Response(JSON.stringify({
+          id: 'proxy-ok',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      throw new Error('unexpected upstream probe path');
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'gemini-default-proxy-pin',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      available: true,
+      routeId: route.id,
+      channelId: channel.id,
+      probeEndpoint: 'proxy-chat',
+      probeClassification: 'supported',
+    });
   });
 });

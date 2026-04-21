@@ -1554,7 +1554,7 @@ export const api = {
     const query = params.toString();
     return request(`/api/models/marketplace${query ? `?${query}` : ''}`, { timeoutMs: options?.refresh ? 45_000 : 15_000 });
   },
-  testMarketplaceModelAvailability: (data: { modelName: string; accountId?: number; siteName?: string }) =>
+  testMarketplaceModelAvailability: (data: { modelName: string; accountId?: number; siteName?: string; routeId?: number; channelId?: number }) =>
     request('/api/models/marketplace/test', {
       method: 'POST',
       body: JSON.stringify(data),

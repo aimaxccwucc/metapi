@@ -611,6 +611,9 @@ async function loadGovernanceSnapshotForCandidates(
     const subjectIds = subjectIdByType.get(subjectType);
     if (!subjectIds || !subjectIds.has(state.subjectId)) continue;
     const normalizedModelName = normalizeModelAlias(state.modelName || '');
+    if ((state.reasonCode === 'model_unsupported' || state.reasonCode === 'invalid_channel') && !normalizedModelName) {
+      continue;
+    }
     if (normalizedModelName && !modelNames.has(normalizedModelName)) {
       continue;
     }
@@ -3723,6 +3726,82 @@ function partitionModelPreferredSiteCandidates<
   };
 }
 
+
+function partitionPreferredSuccessfulRuntimeModelCandidates(
+  candidates: RouteChannelCandidate[],
+  runtimeModelResolver: (candidate: RouteChannelCandidate) => string,
+  nowMs = Date.now(),
+): {
+  preferred: RouteChannelCandidate[];
+  avoided: RouteChannelCandidate[];
+  preferredRuntimeModels: Set<string>;
+  source: 'none' | 'runtime_model_success';
+} {
+  if (candidates.length <= 1) {
+    return {
+      preferred: candidates,
+      avoided: [],
+      preferredRuntimeModels: new Set(candidates.map((candidate) => normalizeModelAlias(runtimeModelResolver(candidate) || '')).filter(Boolean)),
+      source: 'none',
+    };
+  }
+
+  const latestSuccessAtByRuntimeModel = new Map<string, number>();
+  for (const candidate of candidates) {
+    const runtimeModelName = normalizeModelAlias(runtimeModelResolver(candidate) || '');
+    if (!runtimeModelName) continue;
+
+    const persistedSuccessAtMs = getChannelPersistedSuccessAtMs(candidate.channel);
+    const persistedFailureAtMs = parseIsoTimeMs(candidate.channel.lastFailAt);
+    if (persistedSuccessAtMs != null && persistedSuccessAtMs > (persistedFailureAtMs ?? 0)) {
+      latestSuccessAtByRuntimeModel.set(
+        runtimeModelName,
+        Math.max(latestSuccessAtByRuntimeModel.get(runtimeModelName) ?? 0, persistedSuccessAtMs),
+      );
+    }
+
+    const state = getSiteModelRuntimeHealthState(candidate.site.id, runtimeModelName);
+    const runtimeSuccessAtMs = state?.lastSuccessAtMs ?? null;
+    const runtimeFailureAtMs = state?.lastFailureAtMs ?? null;
+    if (runtimeSuccessAtMs == null || runtimeSuccessAtMs <= (runtimeFailureAtMs ?? 0)) continue;
+    if (isRuntimeHealthBreakerOpen(state, nowMs)) continue;
+    latestSuccessAtByRuntimeModel.set(
+      runtimeModelName,
+      Math.max(latestSuccessAtByRuntimeModel.get(runtimeModelName) ?? 0, runtimeSuccessAtMs),
+    );
+  }
+
+  if (latestSuccessAtByRuntimeModel.size === 0) {
+    return {
+      preferred: candidates,
+      avoided: [],
+      preferredRuntimeModels: new Set<string>(),
+      source: 'none',
+    };
+  }
+
+  let latestSuccessAtMs: number | null = null;
+  const preferredRuntimeModels = new Set<string>();
+  for (const [runtimeModelName, successAtMs] of latestSuccessAtByRuntimeModel.entries()) {
+    if (latestSuccessAtMs == null || successAtMs > latestSuccessAtMs) {
+      latestSuccessAtMs = successAtMs;
+      preferredRuntimeModels.clear();
+      preferredRuntimeModels.add(runtimeModelName);
+      continue;
+    }
+    if (successAtMs === latestSuccessAtMs) {
+      preferredRuntimeModels.add(runtimeModelName);
+    }
+  }
+
+  return {
+    preferred: candidates.filter((candidate) => preferredRuntimeModels.has(normalizeModelAlias(runtimeModelResolver(candidate) || ''))),
+    avoided: candidates.filter((candidate) => !preferredRuntimeModels.has(normalizeModelAlias(runtimeModelResolver(candidate) || ''))),
+    preferredRuntimeModels,
+    source: 'runtime_model_success',
+  };
+}
+
 async function markPersistedModelUnavailableForChannel(
   channel: Pick<ChannelRow, 'tokenId'>,
   accountId: number,
@@ -4631,6 +4710,26 @@ export class TokenRouter {
     return selected;
   }
 
+  async previewSelectedChannelForRoute(
+    routeId: number,
+    requestedModel: string,
+    excludeChannelIds: number[] = [],
+    downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
+    excludeSiteIds: ReadonlySet<number> = new Set<number>(),
+  ): Promise<SelectedChannel | null> {
+    if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
+    await ensureRoutingRuntimeStateLoaded();
+
+    let match = await this.findRouteById(routeId, downstreamPolicy);
+    if (!match) return null;
+    let selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy, excludeChannelIds, false, excludeSiteIds);
+    if (selected) return selected;
+    match = await this.tryAutoHealRouteMatch(requestedModel, match, downstreamPolicy);
+    if (!match) return null;
+    selected = await this.selectFromMatch(match, requestedModel, downstreamPolicy, excludeChannelIds, false, excludeSiteIds);
+    return selected;
+  }
+
   async selectPreferredChannel(
     requestedModel: string,
     preferredChannelId: number,
@@ -5309,7 +5408,21 @@ export class TokenRouter {
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
         : candidateLayerSource;
-      const selectionPools = buildCandidateSelectionPools(candidateLayer, mappedModel, nowMs);
+      const runtimeModelPartition = requestedByDisplayName && typeof runtimeModelResolver === 'function'
+        ? partitionPreferredSuccessfulRuntimeModelCandidates(candidateLayer, runtimeModelResolver, nowMs)
+        : null;
+      const effectiveCandidateLayer = runtimeModelPartition && runtimeModelPartition.source !== 'none'
+        ? runtimeModelPartition.preferred
+        : candidateLayer;
+      if (runtimeModelPartition && runtimeModelPartition.source !== 'none') {
+        summary.push(`优先级 P${priority}：最近成功来源模型复用 ${runtimeModelPartition.preferredRuntimeModels.size}`);
+        for (const row of runtimeModelPartition.avoided) {
+          const target = candidateMap.get(row.channel.id);
+          if (!target || !target.eligible || target.avoidedByRecentFailure) continue;
+          target.reason = '当前优先复用最近成功的来源模型分支；仅当该分支不可用时才会尝试其他来源模型';
+        }
+      }
+      const selectionPools = buildCandidateSelectionPools(effectiveCandidateLayer, mappedModel, nowMs);
       let selectedPool: CandidateSelectionPool | null = null;
       for (const pool of selectionPools.pools) {
         if (pool.candidates.length === 0) continue;
@@ -5989,7 +6102,13 @@ export class TokenRouter {
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
         : candidateLayerSource;
-      const selectionPools = buildCandidateSelectionPools(candidateLayer, mappedModel, nowMs);
+      const runtimeModelPartition = requestedByDisplayName && typeof runtimeModelResolver === 'function'
+        ? partitionPreferredSuccessfulRuntimeModelCandidates(candidateLayer, runtimeModelResolver, nowMs)
+        : null;
+      const effectiveCandidateLayer = runtimeModelPartition && runtimeModelPartition.source !== 'none'
+        ? runtimeModelPartition.preferred
+        : candidateLayer;
+      const selectionPools = buildCandidateSelectionPools(effectiveCandidateLayer, mappedModel, nowMs);
       let selectedPool: CandidateSelectionPool | null = null;
       for (const pool of selectionPools.pools) {
         if (pool.candidates.length === 0) continue;

@@ -321,6 +321,26 @@ function hasCompletionContentFromPayload(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return false;
   const obj: any = payload;
 
+  if (Array.isArray(obj?.candidates)) {
+    for (const candidate of obj.candidates) {
+      if (hasNonEmptyString(candidate?.text) || hasNonEmptyString(candidate?.output_text)) return true;
+      if (Array.isArray(candidate?.content?.parts)) {
+        for (const part of candidate.content.parts) {
+          if (hasNonEmptyString(part?.text) || hasNonEmptyString(part?.output_text) || hasNonEmptyString(part?.content)) {
+            return true;
+          }
+        }
+      }
+      if (Array.isArray(candidate?.content)) {
+        for (const part of candidate.content) {
+          if (hasNonEmptyString(part?.text) || hasNonEmptyString(part?.output_text) || hasNonEmptyString(part?.content)) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+
   if (Array.isArray(obj?.choices)) {
     for (const choice of obj.choices) {
       if (hasCompletionContentFromChoice(choice)) return true;

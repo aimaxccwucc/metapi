@@ -385,6 +385,73 @@ describe('sqlite migrate bootstrap', () => {
     verified.close();
   });
 
+  it('recovers multi-statement sqlite migrations by replaying each statement and marking the migration applied', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'metapi-migrate-multi-statement-'));
+    process.env.DATA_DIR = dataDir;
+    vi.resetModules();
+
+    const migrateModule = await import('./migrate.js');
+    const { __migrateTestUtils } = migrateModule;
+
+    const sqlite = new Database(':memory:');
+    sqlite.exec('CREATE TABLE proxy_logs (id integer PRIMARY KEY AUTOINCREMENT NOT NULL, channel_id integer, model_requested text, created_at text);');
+
+    const tempMigrationsDir = mkdtempSync(join(tmpdir(), 'metapi-migration-files-multi-statement-'));
+    mkdirSync(join(tempMigrationsDir, 'meta'), { recursive: true });
+
+    writeFileSync(
+      join(tempMigrationsDir, 'meta', '_journal.json'),
+      JSON.stringify({
+        entries: [
+          {
+            tag: '0024_proxy_logs_indexes',
+            when: 1774800000000,
+          },
+        ],
+      }),
+    );
+
+    const migrationSql = [
+      'CREATE INDEX IF NOT EXISTS `proxy_logs_channel_id_idx` ON `proxy_logs` (`channel_id`);',
+      'CREATE INDEX IF NOT EXISTS `proxy_logs_model_requested_created_at_idx` ON `proxy_logs` (`model_requested`,`created_at`);',
+    ].join('\n');
+
+    writeFileSync(
+      join(tempMigrationsDir, '0024_proxy_logs_indexes.sql'),
+      migrationSql,
+    );
+
+    const multiStatementError = {
+      message: "DrizzleError: Failed to run the query 'CREATE INDEX IF NOT EXISTS `proxy_logs_channel_id_idx` ON `proxy_logs` (`channel_id`);\nCREATE INDEX IF NOT EXISTS `proxy_logs_model_requested_created_at_idx` ON `proxy_logs` (`model_requested`,`created_at`);\n'",
+      cause: {
+        message: 'RangeError: The supplied SQL string contains more than one statement',
+      },
+    };
+
+    const recovered = __migrateTestUtils.tryRecoverMultiStatementMigrationError(
+      sqlite,
+      tempMigrationsDir,
+      multiStatementError,
+    );
+
+    expect(recovered).toBe(true);
+
+    const indexes = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'proxy_logs_%' ORDER BY name ASC")
+      .all() as Array<{ name: string }>;
+    const applied = sqlite
+      .prepare('SELECT hash, created_at FROM __drizzle_migrations')
+      .all() as Array<{ hash: string; created_at: number }>;
+
+    expect(indexes.map((row) => row.name)).toEqual([
+      'proxy_logs_channel_id_idx',
+      'proxy_logs_model_requested_created_at_idx',
+    ]);
+    expect(applied).toHaveLength(1);
+    expect(Number(applied[0].created_at)).toBe(1774800000000);
+
+    sqlite.close();
+  });
   it('deduplicates legacy duplicate sites before applying the oauth site unique index', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'metapi-migrate-duplicate-sites-'));
     const dbPath = join(dataDir, 'hub.db');
