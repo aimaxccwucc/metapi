@@ -13,6 +13,8 @@ const MARKETPLACE_MODEL_TEST_TIMEOUT_MS = 90_000;
 const MARKETPLACE_AUTO_KEY_TIMEOUT_MS = 15_000;
 const MARKETPLACE_MODEL_PROBE_TIMEOUT_MS = 30_000;
 const LOCAL_PROXY_CANARY_TIMEOUT_MS = 20_000;
+const DEFAULT_PROBE_PROMPT = 'Respond with exactly one sentence describing the weather today.';
+const DEFAULT_PROBE_MAX_OUTPUT_TOKENS = 8;
 
 type AccountRow = typeof schema.accounts.$inferSelect;
 type SiteRow = typeof schema.sites.$inferSelect;
@@ -195,20 +197,33 @@ function buildProbeEndpoints(platform: string): Array<'chat' | 'responses' | 'me
   return ['chat', 'responses', 'messages'];
 }
 
-function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' | 'responses' | 'messages') {
+function normalizeProbePrompt(prompt?: string | null): string {
+  const normalized = String(prompt || '').trim();
+  return normalized || DEFAULT_PROBE_PROMPT;
+}
+
+function normalizeProbeMaxOutputTokens(value?: number | null): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return DEFAULT_PROBE_MAX_OUTPUT_TOKENS;
+  return Math.max(1, Math.min(DEFAULT_PROBE_MAX_OUTPUT_TOKENS, Math.trunc(parsed)));
+}
+
+function buildProbeRequest(
+  baseUrl: string,
+  modelName: string,
+  endpoint: 'chat' | 'responses' | 'messages',
+  options?: { prompt?: string | null; maxOutputTokens?: number | null },
+) {
   const normalizedBase = String(baseUrl || '').trim().replace(/\/+$/, '');
-  // Use a realistic probe payload that can expose upstream overload/capacity issues.
-  // A simple "ping" with max_tokens=1 passes even on severely overloaded upstreams,
-  // giving false confidence.  A short but meaningful prompt with max_tokens=8 forces
-  // the upstream to actually process and generate, catching 503/timeout errors early.
-  const probePrompt = 'Respond with exactly one sentence describing the weather today.';
+  const probePrompt = normalizeProbePrompt(options?.prompt);
+  const maxOutputTokens = normalizeProbeMaxOutputTokens(options?.maxOutputTokens);
   if (endpoint === 'responses') {
     return {
       url: `${normalizedBase}/v1/responses`,
       body: {
         model: modelName,
         input: probePrompt,
-        max_output_tokens: 8,
+        max_output_tokens: maxOutputTokens,
         temperature: 0,
       },
     };
@@ -218,7 +233,7 @@ function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' 
       url: `${normalizedBase}/v1/messages`,
       body: {
         model: modelName,
-        max_tokens: 8,
+        max_tokens: maxOutputTokens,
         messages: [{ role: 'user', content: probePrompt }],
       },
     };
@@ -228,31 +243,42 @@ function buildProbeRequest(baseUrl: string, modelName: string, endpoint: 'chat' 
     body: {
       model: modelName,
       messages: [{ role: 'user', content: probePrompt }],
-      max_tokens: 8,
+      max_tokens: maxOutputTokens,
       temperature: 0,
       stream: false,
     },
   };
 }
 
-function buildGeminiNativeProbeRequest(baseUrl: string, modelName: string) {
+function buildGeminiNativeProbeRequest(
+  baseUrl: string,
+  modelName: string,
+  options?: { prompt?: string | null; maxOutputTokens?: number | null },
+) {
   const normalizedBase = String(baseUrl || '').trim().replace(/\/+$/, '');
+  const probePrompt = normalizeProbePrompt(options?.prompt);
+  const maxOutputTokens = normalizeProbeMaxOutputTokens(options?.maxOutputTokens);
   return {
     url: `${normalizedBase}/v1beta/models/${encodeURIComponent(modelName)}:generateContent`,
     body: {
-      contents: [{ role: 'user', parts: [{ text: 'Respond with exactly one sentence describing the weather today.' }] }],
-      generationConfig: { maxOutputTokens: 8, temperature: 0 },
+      contents: [{ role: 'user', parts: [{ text: probePrompt }] }],
+      generationConfig: { maxOutputTokens, temperature: 0 },
     },
   };
 }
 
-function buildLocalProxyCanaryRequest(modelName: string) {
+function buildLocalProxyCanaryRequest(
+  modelName: string,
+  options?: { prompt?: string | null; maxOutputTokens?: number | null },
+) {
+  const probePrompt = normalizeProbePrompt(options?.prompt);
+  const maxOutputTokens = normalizeProbeMaxOutputTokens(options?.maxOutputTokens);
   return {
     url: `http://127.0.0.1:${config.port}/v1/chat/completions`,
     body: {
       model: modelName,
-      messages: [{ role: 'user', content: 'Respond with exactly one sentence describing the weather today.' }],
-      max_tokens: 8,
+      messages: [{ role: 'user', content: probePrompt }],
+      max_tokens: maxOutputTokens,
       temperature: 0,
       stream: false,
     },
@@ -417,13 +443,18 @@ export async function probeModelAvailabilityViaRealtimeCall(input: {
   platform: string;
   credential: string;
   modelName: string;
+  prompt?: string | null;
+  maxOutputTokens?: number | null;
 }): Promise<MarketplaceProbeResult> {
   const { fetch } = await import('undici');
   const endpointOrder = buildProbeEndpoints(input.platform);
   const attemptMessages: string[] = [];
 
   for (const endpoint of endpointOrder) {
-    const probe = buildProbeRequest(input.baseUrl, input.modelName, endpoint);
+    const probe = buildProbeRequest(input.baseUrl, input.modelName, endpoint, {
+      prompt: input.prompt,
+      maxOutputTokens: input.maxOutputTokens,
+    });
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Accept: 'application/json,text/event-stream,text/plain,*/*',
@@ -484,7 +515,10 @@ export async function probeModelAvailabilityViaRealtimeCall(input: {
     }
   }
 
-  const geminiProbe = buildGeminiNativeProbeRequest(input.baseUrl, input.modelName);
+  const geminiProbe = buildGeminiNativeProbeRequest(input.baseUrl, input.modelName, {
+    prompt: input.prompt,
+    maxOutputTokens: input.maxOutputTokens,
+  });
   try {
     const geminiResponse = await fetch(
       geminiProbe.url,
@@ -548,9 +582,14 @@ export async function probeModelAvailabilityViaRealtimeCall(input: {
 export async function probeModelAvailabilityViaLocalProxyCanary(input: {
   modelName: string;
   forcedChannelId?: number | null;
+  prompt?: string | null;
+  maxOutputTokens?: number | null;
 }): Promise<MarketplaceProbeResult> {
   const { fetch } = await import('undici');
-  const probe = buildLocalProxyCanaryRequest(input.modelName);
+  const probe = buildLocalProxyCanaryRequest(input.modelName, {
+    prompt: input.prompt,
+    maxOutputTokens: input.maxOutputTokens,
+  });
 
   try {
     const response = await fetch(probe.url, {
@@ -742,6 +781,8 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
   allowAutoCreateKey?: boolean;
   forceRealtimeProbeOnListMiss?: boolean;
   allowListHitSuccess?: boolean;
+  probePrompt?: string | null;
+  probeMaxOutputTokens?: number | null;
 }): Promise<MarketplaceModelAvailabilityResult> {
   const modelName = String(input.modelName || '').trim();
   if (!modelName) {
@@ -995,12 +1036,16 @@ export async function testMarketplaceModelAvailabilityForCandidate(input: {
       ? await probeModelAvailabilityViaLocalProxyCanary({
         modelName,
         forcedChannelId: input.proxyCanaryForcedChannelId,
+        prompt: input.probePrompt,
+        maxOutputTokens: input.probeMaxOutputTokens,
       })
       : await probeModelAvailabilityViaRealtimeCall({
         baseUrl: site.url,
         platform: site.platform,
         credential: modelCredential,
         modelName,
+        prompt: input.probePrompt,
+        maxOutputTokens: input.probeMaxOutputTokens,
       });
     probeCheckedUrl = probe.checkedUrl;
     probeStatusCode = probe.statusCode;
@@ -1064,6 +1109,8 @@ export async function testMarketplaceModelAvailability(input: {
   allowAutoCreateKey?: boolean;
   forceRealtimeProbeOnListMiss?: boolean;
   allowListHitSuccess?: boolean;
+  probePrompt?: string | null;
+  probeMaxOutputTokens?: number | null;
 }): Promise<MarketplaceModelAvailabilityResult> {
   const candidate = await resolveMarketplaceProbeCandidate({
     modelName: input.modelName,
@@ -1080,6 +1127,8 @@ export async function testMarketplaceModelAvailability(input: {
     allowAutoCreateKey: input.allowAutoCreateKey,
     forceRealtimeProbeOnListMiss: input.forceRealtimeProbeOnListMiss,
     allowListHitSuccess: input.allowListHitSuccess,
+    probePrompt: input.probePrompt,
+    probeMaxOutputTokens: input.probeMaxOutputTokens,
   });
 }
 
@@ -1094,6 +1143,8 @@ export async function probeMarketplaceModelAvailability(input: {
   skipAutoCreate?: boolean;
   forceRealtimeProbeOnListMiss?: boolean;
   allowListHitSuccess?: boolean;
+  probePrompt?: string | null;
+  probeMaxOutputTokens?: number | null;
 }): Promise<MarketplaceModelAvailabilitySuccess | MarketplaceModelAvailabilityFailure> {
   try {
     return await testMarketplaceModelAvailability({
@@ -1107,6 +1158,8 @@ export async function probeMarketplaceModelAvailability(input: {
       allowAutoCreateKey: input.skipAutoCreate !== true,
       forceRealtimeProbeOnListMiss: input.forceRealtimeProbeOnListMiss,
       allowListHitSuccess: input.allowListHitSuccess,
+      probePrompt: input.probePrompt,
+      probeMaxOutputTokens: input.probeMaxOutputTokens,
     });
   } catch (error) {
     if (error instanceof MarketplaceModelProbeError) {

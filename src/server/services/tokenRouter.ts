@@ -2413,6 +2413,8 @@ function executeRuntimeHealthRecoveryProbe(candidate: RouteChannelCandidate, mod
     skipAutoCreate: false,
     forceRealtimeProbeOnListMiss: true,
     allowListHitSuccess: false,
+    probePrompt: config.autoProbePrompt,
+    probeMaxOutputTokens: config.autoProbeMaxOutputTokens,
   }).then((result) => {
     const observedAtMs = Date.now();
     if (result.success && result.available) {

@@ -60,9 +60,14 @@ describe('buildConfig', () => {
     expect(config.upstreamRequestBudgetMs).toBe(120_000);
     expect(config.upstreamStreamIdleTimeoutMs).toBe(180_000);
     expect(config.onDemandModelRefreshCooldownMs).toBe(15_000);
+    expect(config.autoRouteProbeThrottleMs).toBe(1_800_000);
+    expect(config.routingAutoRecoveryRecheckMs).toBe(7_200_000);
+    expect(config.autoProbePrompt).toBe('Reply exactly: OK');
+    expect(config.autoProbeMaxOutputTokens).toBe(2);
     expect(config.proxyMaxRetries).toBe(4);
     expect(config.downstreamAuthCacheTtlMs).toBe(15_000);
     expect(config.downstreamAuthNegativeCacheTtlMs).toBe(5_000);
+    expect(config.responseCacheEnabled).toBe(false);
     expect(config.responseCacheTtlMs).toBe(3_600_000);
     expect(config.responseCacheMaxRows).toBe(2_000);
     expect(config.responseCacheStaleIfErrorMs).toBe(600_000);
@@ -87,9 +92,14 @@ describe('buildConfig', () => {
       UPSTREAM_REQUEST_BUDGET_MS: '45000',
       UPSTREAM_STREAM_IDLE_TIMEOUT_MS: '12000',
       ON_DEMAND_MODEL_REFRESH_COOLDOWN_MS: '22000',
+      AUTO_ROUTE_PROBE_THROTTLE_MS: '2700000',
+      ROUTING_AUTO_RECOVERY_RECHECK_MS: '10800000',
+      AUTO_PROBE_PROMPT: 'Reply exactly: pong',
+      AUTO_PROBE_MAX_OUTPUT_TOKENS: '3',
       PROXY_MAX_RETRIES: '5',
       DOWNSTREAM_AUTH_CACHE_TTL_MS: '30000',
       DOWNSTREAM_AUTH_NEGATIVE_CACHE_TTL_MS: '7000',
+      RESPONSE_CACHE_ENABLED: 'true',
       RESPONSE_CACHE_TTL_MS: '1800000',
       RESPONSE_CACHE_MAX_ROWS: '1200',
       RESPONSE_CACHE_STALE_IF_ERROR_MS: '300000',
@@ -103,9 +113,14 @@ describe('buildConfig', () => {
     expect(config.upstreamRequestBudgetMs).toBe(45_000);
     expect(config.upstreamStreamIdleTimeoutMs).toBe(12_000);
     expect(config.onDemandModelRefreshCooldownMs).toBe(22_000);
+    expect(config.autoRouteProbeThrottleMs).toBe(2_700_000);
+    expect(config.routingAutoRecoveryRecheckMs).toBe(10_800_000);
+    expect(config.autoProbePrompt).toBe('Reply exactly: pong');
+    expect(config.autoProbeMaxOutputTokens).toBe(3);
     expect(config.proxyMaxRetries).toBe(5);
     expect(config.downstreamAuthCacheTtlMs).toBe(30_000);
     expect(config.downstreamAuthNegativeCacheTtlMs).toBe(7_000);
+    expect(config.responseCacheEnabled).toBe(true);
     expect(config.responseCacheTtlMs).toBe(1_800_000);
     expect(config.responseCacheMaxRows).toBe(1_200);
     expect(config.responseCacheStaleIfErrorMs).toBe(300_000);
@@ -121,6 +136,10 @@ describe('buildConfig', () => {
       PROXY_DEBUG_TRACE_ENABLED: 'true',
       PROXY_DEBUG_TRACE_MAX_ENTRIES: '777',
       PROXY_EMPTY_CONTENT_FAIL: 'false',
+      AUTO_ROUTE_PROBE_THROTTLE_MS: '1200000',
+      ROUTING_AUTO_RECOVERY_RECHECK_MS: '5400000',
+      AUTO_PROBE_PROMPT: 'Reply exactly: OK',
+      AUTO_PROBE_MAX_OUTPUT_TOKENS: '4',
     });
 
     expect(config.disableCrossProtocolFallback).toBe(true);
@@ -128,6 +147,10 @@ describe('buildConfig', () => {
     expect(config.proxyDebugTraceEnabled).toBe(true);
     expect(config.proxyDebugTraceMaxEntries).toBe(777);
     expect(config.proxyEmptyContentFailEnabled).toBe(false);
+    expect(config.autoRouteProbeThrottleMs).toBe(1_200_000);
+    expect(config.routingAutoRecoveryRecheckMs).toBe(5_400_000);
+    expect(config.autoProbePrompt).toBe('Reply exactly: OK');
+    expect(config.autoProbeMaxOutputTokens).toBe(4);
   });
 
   it('clamps proxy debug trace max entries to the supported upper bound', () => {

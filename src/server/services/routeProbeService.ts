@@ -16,6 +16,7 @@ import {
   type RoutingGovernanceReasonCode,
 } from './routingGovernanceService.js';
 import { invalidateTokenRouterCache, tokenRouter } from './tokenRouter.js';
+import { config } from '../config.js';
 
 // ── types (mirror the shapes used by the API) ────────────────────────
 
@@ -297,7 +298,14 @@ async function applyRouteProbeGovernance(input: {
 export async function probeRouteChannelsForRoute(
   route: RouteLike,
   enabledChannels: RouteChannelLike[],
-  options?: { limit?: number; autoGovernance?: boolean; earlyStopOnAvailable?: boolean; dedupeBySite?: boolean },
+  options?: {
+    limit?: number;
+    autoGovernance?: boolean;
+    earlyStopOnAvailable?: boolean;
+    dedupeBySite?: boolean;
+    probePrompt?: string;
+    probeMaxOutputTokens?: number;
+  },
 ): Promise<RouteProbeResponse> {
   const earlyStop = options?.earlyStopOnAvailable === true;
   const orderedChannels = earlyStop
@@ -343,6 +351,8 @@ export async function probeRouteChannelsForRoute(
         skipAutoCreate: false,
         forceRealtimeProbeOnListMiss: true,
         allowListHitSuccess: false,
+        probePrompt: options?.probePrompt,
+        probeMaxOutputTokens: options?.probeMaxOutputTokens,
       });
 
       const baseResult: RouteProbeItem = probe.success
@@ -511,6 +521,8 @@ export async function probeRouteChannelsForRoute(
       skipAutoCreate: false,
       forceRealtimeProbeOnListMiss: true,
       allowListHitSuccess: false,
+      probePrompt: options?.probePrompt,
+      probeMaxOutputTokens: options?.probeMaxOutputTokens,
     });
 
     const baseResult: RouteProbeItem = probe.success
@@ -605,7 +617,13 @@ export type BatchProbeResult = {
  */
 export async function probeBatchRoutes(
   routeChannelPairs: Array<{ route: RouteLike; channels: RouteChannelLike[] }>,
-  options?: { limit?: number; autoGovernance?: boolean; earlyStopOnAvailable?: boolean },
+  options?: {
+    limit?: number;
+    autoGovernance?: boolean;
+    earlyStopOnAvailable?: boolean;
+    probePrompt?: string;
+    probeMaxOutputTokens?: number;
+  },
 ): Promise<BatchProbeResult> {
   const deadline = Date.now() + BATCH_PROBE_TOTAL_TIMEOUT_MS;
   const results: RouteProbeResponse[] = [];
@@ -646,7 +664,6 @@ export async function probeBatchRoutes(
 
 // ── auto-probe on failure ────────────────────────────────────────────
 
-const AUTO_PROBE_THROTTLE_MS = 5 * 60 * 1000;
 const autoProbeThrottle = new Map<string, number>();
 
 /**
@@ -654,15 +671,16 @@ const autoProbeThrottle = new Map<string, number>();
  * Probes only manual routes that match the failed model.
  */
 export async function triggerRouteProbeForFailedModel(modelName: string): Promise<void> {
+  const autoProbeThrottleMs = config.autoRouteProbeThrottleMs;
   const now = Date.now();
   const lastProbe = autoProbeThrottle.get(modelName) ?? 0;
-  if (now - lastProbe < AUTO_PROBE_THROTTLE_MS) return;
+  if (now - lastProbe < autoProbeThrottleMs) return;
   autoProbeThrottle.set(modelName, now);
 
   // Periodically prune stale throttle entries to prevent unbounded growth
   if (autoProbeThrottle.size > 200) {
     for (const [key, ts] of autoProbeThrottle) {
-      if (now - ts >= AUTO_PROBE_THROTTLE_MS) autoProbeThrottle.delete(key);
+      if (now - ts >= autoProbeThrottleMs) autoProbeThrottle.delete(key);
     }
   }
 
@@ -723,7 +741,11 @@ export async function triggerRouteProbeForFailedModel(modelName: string): Promis
 
   if (routeChannelPairs.length === 0) return;
 
-  const batchResult = await probeBatchRoutes(routeChannelPairs, { autoGovernance: true });
+  const batchResult = await probeBatchRoutes(routeChannelPairs, {
+    autoGovernance: true,
+    probePrompt: config.autoProbePrompt,
+    probeMaxOutputTokens: config.autoProbeMaxOutputTokens,
+  });
 
   // Record the result as an event
   const totalAvailable = batchResult.results.reduce((s, r) => s + r.availableCount, 0);

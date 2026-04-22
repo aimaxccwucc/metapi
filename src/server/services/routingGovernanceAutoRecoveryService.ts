@@ -23,7 +23,6 @@ import {
   type RoutingGovernanceSubjectType,
 } from './routingGovernanceService.js';
 
-const AUTO_RECOVERY_RECHECK_MS = 30 * 60 * 1000;
 const MODEL_UNSUPPORTED_RECHECK_MS = 12 * 60 * 60 * 1000;
 const INVALID_CHANNEL_RECHECK_MS = 6 * 60 * 60 * 1000;
 const UPSTREAM_GROUP_EMPTY_RECHECK_MS = 15 * 60 * 1000;
@@ -87,6 +86,10 @@ async function completeProbeAndRestore(
 
 function nowPlusMs(ms: number): string {
   return new Date(Date.now() + Math.max(1_000, Math.trunc(ms))).toISOString();
+}
+
+function resolveAutoRecoveryRecheckMs(): number {
+  return Math.max(5 * 60_000, Math.trunc(config.routingAutoRecoveryRecheckMs || 0));
 }
 
 function isExactModelPattern(modelPattern?: string | null): boolean {
@@ -321,6 +324,8 @@ async function handleRateLimitRecovery(entry: RoutingGovernanceEntry): Promise<b
         candidate: context.candidate,
         preferredTokenId: context.preferredTokenId,
         allowAutoCreateKey: false,
+        probePrompt: config.autoProbePrompt,
+        probeMaxOutputTokens: config.autoProbeMaxOutputTokens,
       });
       if (result.success && result.available) {
         await completeProbeAndRestore(entry, {
@@ -339,8 +344,8 @@ async function handleRateLimitRecovery(entry: RoutingGovernanceEntry): Promise<b
         reasonCode: 'rate_limit',
         lastProbeStatus: result.success ? 'unavailable' : 'probe_failed',
         lastProbeMessage: result.success ? result.reason : (result as any).message || '限流探测失败',
-        suppressUntil: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
-        probeAfter: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
+        suppressUntil: nowPlusMs(resolveAutoRecoveryRecheckMs()),
+        probeAfter: nowPlusMs(resolveAutoRecoveryRecheckMs()),
         lastFailureAt: new Date().toISOString(),
         failureCountDelta: 1,
       });
@@ -368,8 +373,8 @@ async function handleBalanceRecovery(entry: RoutingGovernanceEntry): Promise<boo
       reasonCode: entry.reasonCode as RoutingGovernanceReasonCode,
       lastProbeStatus: 'skipped',
       lastProbeMessage: '当前治理主体不支持自动余额复测',
-      suppressUntil: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
-      probeAfter: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
+      suppressUntil: nowPlusMs(resolveAutoRecoveryRecheckMs()),
+      probeAfter: nowPlusMs(resolveAutoRecoveryRecheckMs()),
     });
     return false;
   }
@@ -383,8 +388,8 @@ async function handleBalanceRecovery(entry: RoutingGovernanceEntry): Promise<boo
       reasonCode: entry.reasonCode as RoutingGovernanceReasonCode,
       lastProbeStatus: 'balance_refresh_failed',
       lastProbeMessage: error?.message || '余额刷新失败',
-      suppressUntil: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
-      probeAfter: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
+      suppressUntil: nowPlusMs(resolveAutoRecoveryRecheckMs()),
+      probeAfter: nowPlusMs(resolveAutoRecoveryRecheckMs()),
       lastFailureAt: new Date().toISOString(),
       failureCountDelta: 1,
     });
@@ -406,8 +411,8 @@ async function handleBalanceRecovery(entry: RoutingGovernanceEntry): Promise<boo
         reasonCode: entry.reasonCode as RoutingGovernanceReasonCode,
         lastProbeStatus: 'balance_still_zero',
         lastProbeMessage: `余额刷新后仍不可用：balance=${balance ?? '?'}, quota=${quota ?? '?'}, used=${used}`,
-        suppressUntil: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
-        probeAfter: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
+        suppressUntil: nowPlusMs(resolveAutoRecoveryRecheckMs()),
+        probeAfter: nowPlusMs(resolveAutoRecoveryRecheckMs()),
         lastFailureAt: new Date().toISOString(),
         failureCountDelta: 1,
       });
@@ -428,8 +433,8 @@ async function handleProbeBasedRecovery(entry: RoutingGovernanceEntry): Promise<
       reasonCode: entry.reasonCode as RoutingGovernanceReasonCode,
       lastProbeStatus: 'skipped',
       lastProbeMessage: '自动复测缺少可用探测模型或账号上下文',
-      suppressUntil: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
-      probeAfter: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
+      suppressUntil: nowPlusMs(resolveAutoRecoveryRecheckMs()),
+      probeAfter: nowPlusMs(resolveAutoRecoveryRecheckMs()),
     });
     return false;
   }
@@ -441,6 +446,8 @@ async function handleProbeBasedRecovery(entry: RoutingGovernanceEntry): Promise<
       candidate: context.candidate,
       preferredTokenId: context.preferredTokenId,
       allowAutoCreateKey: false,
+      probePrompt: config.autoProbePrompt,
+      probeMaxOutputTokens: config.autoProbeMaxOutputTokens,
     });
   } catch (error) {
     if (error instanceof MarketplaceModelProbeError) {
@@ -502,7 +509,7 @@ async function handleProbeBasedRecovery(entry: RoutingGovernanceEntry): Promise<
   );
   const nextWaitMs = nextReasonCode === 'model_unsupported'
     ? MODEL_UNSUPPORTED_RECHECK_MS
-    : AUTO_RECOVERY_RECHECK_MS;
+    : resolveAutoRecoveryRecheckMs();
 
   await completeRoutingGovernanceProbe(entry.id, {
     restored: false,
@@ -645,8 +652,8 @@ export async function executeRoutingGovernanceAutoRecoveryPass(options: {
         reasonCode: 'manual_recheck_needed',
         lastProbeStatus: 'probe_failed',
         lastProbeMessage: error?.message || '自动复测执行失败',
-        suppressUntil: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
-        probeAfter: nowPlusMs(AUTO_RECOVERY_RECHECK_MS),
+        suppressUntil: nowPlusMs(resolveAutoRecoveryRecheckMs()),
+        probeAfter: nowPlusMs(resolveAutoRecoveryRecheckMs()),
         lastFailureAt: new Date().toISOString(),
         failureCountDelta: 1,
       }).catch(() => {});
