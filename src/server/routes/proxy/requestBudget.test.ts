@@ -47,7 +47,8 @@ describe('requestBudget', () => {
       const budget = createRequestBudget(60_000);
       expect(budget.getPerAttemptTimeoutMs()).toBe(20_000);
       expect(budget.getStreamFirstByteTimeoutMs()).toBe(45_000);
-      expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true })).toBe(10_000);
+      expect(budget.getPerAttemptTimeoutMs({ preferFastFail: true })).toBe(20_000);
+      expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true })).toBe(45_000);
       expect(budget.getPerAttemptTimeoutMs({ preferFastFail: true, hardCapMs: 4_000 })).toBe(4_000);
       expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true, hardCapMs: 4_000 })).toBe(4_000);
     } finally {

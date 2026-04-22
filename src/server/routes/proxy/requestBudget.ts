@@ -130,14 +130,14 @@ export function createRequestBudget(totalBudgetMs = config.upstreamRequestBudget
     getPerAttemptTimeoutMs: (options) => {
       const fastFailCap = Number.isFinite(options?.hardCapMs as number)
         ? Math.max(1_000, Math.trunc(options?.hardCapMs as number))
-        : 10_000;
+        : config.upstreamRequestTimeoutMs;
       const hardCap = options?.preferFastFail ? fastFailCap : config.upstreamRequestTimeoutMs;
       return resolveCappedTimeout(hardCap);
     },
     getStreamFirstByteTimeoutMs: (options) => {
       const fastFailCap = Number.isFinite(options?.hardCapMs as number)
         ? Math.max(1_000, Math.trunc(options?.hardCapMs as number))
-        : 10_000;
+        : config.upstreamStreamFirstByteTimeoutMs;
       const hardCap = options?.preferFastFail
         ? Math.min(fastFailCap, config.upstreamStreamFirstByteTimeoutMs)
         : config.upstreamStreamFirstByteTimeoutMs;
