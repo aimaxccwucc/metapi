@@ -88,6 +88,10 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function isResponseCacheGloballyEnabled(): boolean {
+  return config.responseCacheEnabled !== false;
+}
+
 function markResponseCacheReady(): void {
   responseCacheAvailable = true;
   responseCacheAvailabilityRetryAtMs = 0;
@@ -214,6 +218,11 @@ function roundCost(value: unknown): number {
 }
 
 export async function isResponseCacheAvailable(): Promise<boolean> {
+  if (!isResponseCacheGloballyEnabled()) {
+    markResponseCacheUnavailable('response cache disabled by config');
+    return false;
+  }
+
   if (responseCacheAvailable !== null) {
     const now = Date.now();
     if (responseCacheAvailable === false && now >= responseCacheAvailabilityRetryAtMs) {
@@ -335,6 +344,7 @@ export function buildRouteScope(input: {
  * 仅对确定性非流式请求生效；routeScope/surface/requestFingerprint 用于隔离不同 surface、上游路由和完整请求体差异。
  */
 export function buildCacheKey(req: CacheableRequest): string | null {
+  if (!isResponseCacheGloballyEnabled()) return null;
   const temp = req.temperature;
   if (typeof temp === 'number' && temp > 0) return null;
   const topP = req.top_p;

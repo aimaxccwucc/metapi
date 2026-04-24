@@ -124,7 +124,7 @@ describe('system routes', () => {
         ready: true,
       },
       responseCache: {
-        ready: true,
+        ready: false,
         availabilityChecked: true,
       },
       downstreamAuthCache: {
@@ -147,7 +147,7 @@ describe('system routes', () => {
     expect(metrics.headers['content-type']).toContain('text/plain');
     expect(metrics.body).toContain('metapi_up 1');
     expect(metrics.body).toContain('metapi_ready 1');
-    expect(metrics.body).toContain('metapi_response_cache_ready 1');
+    expect(metrics.body).toContain('metapi_response_cache_ready 0');
     expect(metrics.body).toContain('metapi_response_cache_failures_total{kind="write"} 0');
     expect(metrics.body).toContain('metapi_response_cache_inflight_total{kind="registered"}');
     expect(metrics.body).toContain('metapi_downstream_auth_cache_total{kind="hit"}');
@@ -202,7 +202,7 @@ describe('system routes', () => {
         ready: true,
       },
       responseCache: {
-        ready: true,
+        ready: false,
         availabilityChecked: true,
       },
       downstreamAuthCache: {

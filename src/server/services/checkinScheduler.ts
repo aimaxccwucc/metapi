@@ -22,6 +22,7 @@ export type CheckinScheduleMode = 'cron' | 'interval';
 let checkinTask: cron.ScheduledTask | null = null;
 let checkinIntervalTimer: ReturnType<typeof setInterval> | null = null;
 let balanceTask: cron.ScheduledTask | null = null;
+let balanceRefreshRunning = false;
 let dailySummaryTask: cron.ScheduledTask | null = null;
 let logCleanupTask: cron.ScheduledTask | null = null;
 let siteHealthTask: cron.ScheduledTask | null = null;
@@ -224,6 +225,12 @@ function startCheckinSchedule() {
 
 function createBalanceTask(cronExpr: string) {
   return cron.schedule(cronExpr, async () => {
+    if (balanceRefreshRunning) {
+      console.log('[Scheduler] Balance refresh skipped: existing run is in progress');
+      return;
+    }
+
+    balanceRefreshRunning = true;
     console.log(`[Scheduler] Refreshing balances at ${new Date().toISOString()}`);
     try {
       await refreshAllBalances();
@@ -231,6 +238,8 @@ function createBalanceTask(cronExpr: string) {
       console.log('[Scheduler] Balance refresh complete');
     } catch (err) {
       console.error('[Scheduler] Balance refresh error:', err);
+    } finally {
+      balanceRefreshRunning = false;
     }
   });
 }
@@ -398,7 +407,9 @@ export async function startScheduler() {
   siteHealthTask = createSiteHealthTask(activeSiteHealthCron);
   dailySummaryTask = createDailySummaryTask(activeDailySummaryCron);
   logCleanupTask = createLogCleanupTask(activeLogCleanupCron);
-  responseCacheCleanupTask = createResponseCacheCleanupTask('0 * * * *');
+  responseCacheCleanupTask = config.responseCacheEnabled
+    ? createResponseCacheCleanupTask('0 * * * *')
+    : null;
   routingGovernanceRecoveryTask = createRoutingGovernanceRecoveryTask(ROUTING_GOVERNANCE_RECOVERY_DEFAULT_CRON);
   tokenCoverageReconcileTask = createTokenCoverageReconcileTask(TOKEN_COVERAGE_RECONCILE_DEFAULT_CRON);
 
@@ -483,6 +494,7 @@ export function __resetCheckinSchedulerForTests() {
   stopCheckinSchedule();
   balanceTask?.stop();
   dailySummaryTask?.stop();
+  balanceRefreshRunning = false;
   logCleanupTask?.stop();
   siteHealthTask?.stop();
   responseCacheCleanupTask?.stop();

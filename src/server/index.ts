@@ -360,12 +360,16 @@ try {
   await ensureProxyLogCacheColumns();
   await ensureProxyLogClientColumns();
   await ensureProxyLogDownstreamApiKeyIdColumn();
-  try {
-    if (!await ensureResponseCacheTable()) {
-      console.warn('Response cache schema is unavailable; response cache disabled.');
+  if (config.responseCacheEnabled) {
+    try {
+      if (!await ensureResponseCacheTable()) {
+        console.warn('Response cache schema is unavailable; response cache disabled.');
+      }
+    } catch (error) {
+      console.warn(`Failed to verify response cache table: ${(error as Error)?.message || 'unknown error'}`);
     }
-  } catch (error) {
-    console.warn(`Failed to verify response cache table: ${(error as Error)?.message || 'unknown error'}`);
+  } else {
+    console.log('Response cache disabled by config; skipping response cache schema bootstrap.');
   }
   const finalRows = await db.select().from(schema.settings).all();
   const finalMap = toSettingsMap(finalRows);
