@@ -41,6 +41,29 @@ const EMPTY_ROUTE_CANDIDATE_VIEW: RouteCandidateView = {
   tokenOptionsByAccountId: {},
 };
 
+function canonicalModelAlias(modelName: string): string {
+  const normalized = String(modelName || '').trim().toLowerCase();
+  if (!normalized) return '';
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex >= 0 && slashIndex < normalized.length - 1) {
+    return normalized.slice(slashIndex + 1);
+  }
+  return normalized;
+}
+
+function isExactModelPattern(modelPattern: string): boolean {
+  const normalized = modelPattern.trim();
+  if (!normalized) return false;
+  if (normalized.toLowerCase().startsWith('re:')) return false;
+  return !/[\*\?]/.test(normalized);
+}
+
+function isModelAliasEquivalent(left: string, right: string): boolean {
+  const a = canonicalModelAlias(left);
+  const b = canonicalModelAlias(right);
+  return !!a && !!b && a === b;
+}
+
 export function buildRouteModelCandidatesIndex(
   routes: RouteModelPatternLike[],
   modelCandidates: RouteModelCandidatesByModelName,
@@ -61,13 +84,18 @@ export function buildRouteModelCandidatesIndex(
 
     const deduped = new Map<string, IndexedRouteModelCandidate>();
     for (const [modelName, candidates] of Object.entries(modelCandidates || {})) {
-      if (!matchesModelPattern(modelName, modelPattern)) continue;
+      const matched = matchesModelPattern(modelName, modelPattern)
+        || (isExactModelPattern(modelPattern) && isModelAliasEquivalent(modelName, modelPattern));
+      if (!matched) continue;
       for (const candidate of candidates || []) {
-        const key = `${candidate.accountId}::${candidate.tokenId ?? 'account'}::${modelName}`;
+        const dedupeModelName = isExactModelPattern(modelPattern)
+          ? (canonicalModelAlias(modelPattern) || modelPattern)
+          : modelName;
+        const key = `${candidate.accountId}::${candidate.tokenId ?? 'account'}::${dedupeModelName}`;
         if (!deduped.has(key)) {
           deduped.set(key, {
             ...candidate,
-            modelName,
+            modelName: dedupeModelName,
           });
         }
       }

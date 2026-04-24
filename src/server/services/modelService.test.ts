@@ -421,6 +421,58 @@ describe('rebuildTokenRoutesFromAvailability', () => {
     )).toBe(true);
   });
 
+  it('treats provider-prefixed aliases as eligible candidates for exact routes', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'glm-alias-site',
+      url: 'https://glm-alias-site.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'glm-alias-user',
+      accessToken: 'glm-access',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'glm-token',
+      token: 'sk-glm-alias',
+      source: 'manual',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'z-ai/glm-5.1',
+      available: true,
+    }).run();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'glm-5.1',
+      probePolicy: 'manual',
+      enabled: true,
+    }).returning().get();
+
+    const rebuild = await rebuildTokenRoutesFromAvailability();
+
+    expect(rebuild.models).toBe(1);
+
+    const channels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, route.id))
+      .all();
+
+    expect(channels).toHaveLength(1);
+    expect(channels[0]).toMatchObject({
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'z-ai/glm-5.1',
+    });
+  });
+
   it('preserves exact source routes referenced by explicit groups and syncs their channels', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-grouped',

@@ -57,6 +57,7 @@ let inFlightRefreshModelsAndRebuildRoutes: Promise<{
   refresh: ModelRefreshResult[];
   rebuild: Awaited<ReturnType<typeof rebuildTokenRoutesFromAvailability>>;
 }> | null = null;
+const inFlightAccountRefreshes = new Map<string, Promise<ModelRefreshResult>>();
 let lastOnDemandRefreshStartedAtMs = 0;
 const onDemandRefreshMetricsState = {
   triggeredTotal: 0,
@@ -266,6 +267,31 @@ async function upsertModelAvailabilityBatch(
   }
 }
 
+async function upsertTokenModelAvailabilityBatch(
+  rows: Array<{ tokenId: number; modelName: string; available: boolean; latencyMs?: number | null; checkedAt: string }>,
+): Promise<void> {
+  if (rows.length === 0) return;
+  if (runtimeDbDialect === 'mysql') {
+    await (db.insert(schema.tokenModelAvailability).values(rows) as any).onDuplicateKeyUpdate({
+      set: {
+        available: sql`VALUES(available)`,
+        latencyMs: sql`VALUES(latency_ms)`,
+        checkedAt: sql`VALUES(checked_at)`,
+      },
+    }).run();
+    return;
+  }
+
+  await (db.insert(schema.tokenModelAvailability).values(rows) as any).onConflictDoUpdate({
+    target: [schema.tokenModelAvailability.tokenId, schema.tokenModelAvailability.modelName],
+    set: {
+      available: sql`excluded.available`,
+      latencyMs: sql`excluded.latency_ms`,
+      checkedAt: sql`excluded.checked_at`,
+    },
+  }).run();
+}
+
 async function updateOauthModelDiscoveryState(input: {
   account: typeof schema.accounts.$inferSelect;
   checkedAt: string;
@@ -430,6 +456,43 @@ function isExactModelPattern(modelPattern: string): boolean {
   return !/[\*\?]/.test(normalized);
 }
 
+function canonicalModelAlias(modelName: string): string {
+  const normalized = modelName.trim().toLowerCase();
+  if (!normalized) return '';
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex >= 0 && slashIndex < normalized.length - 1) {
+    return normalized.slice(slashIndex + 1);
+  }
+  return normalized;
+}
+
+function isModelAliasEquivalent(left: string, right: string): boolean {
+  const a = canonicalModelAlias(left);
+  const b = canonicalModelAlias(right);
+  return !!a && !!b && a === b;
+}
+
+function compareExactRouteSourceModelPreference(
+  routePattern: string,
+  leftSourceModel: string,
+  rightSourceModel: string,
+): number {
+  const normalizedRoutePattern = routePattern.trim().toLowerCase();
+  const rank = (sourceModel: string): [number, number, string] => {
+    const normalizedSourceModel = sourceModel.trim().toLowerCase();
+    if (normalizedSourceModel === normalizedRoutePattern) {
+      return [0, normalizedSourceModel.length, normalizedSourceModel];
+    }
+    return [normalizedSourceModel.includes('/') ? 2 : 1, normalizedSourceModel.length, normalizedSourceModel];
+  };
+
+  const leftRank = rank(leftSourceModel);
+  const rightRank = rank(rightSourceModel);
+  if (leftRank[0] !== rightRank[0]) return leftRank[0] - rightRank[0];
+  if (leftRank[1] !== rightRank[1]) return leftRank[1] - rightRank[1];
+  return leftRank[2].localeCompare(rightRank[2]);
+}
+
 type RouteSyncCandidate = {
   accountId: number;
   tokenId: number | null;
@@ -472,9 +535,13 @@ function collectPatternRouteCandidates(
   modelPattern: string,
   modelCandidates: Map<string, Map<string, AvailabilityCandidate>>,
 ): RouteSyncCandidate[] {
+  const exactModelPattern = isExactModelPattern(modelPattern);
+  const normalizedExactAlias = exactModelPattern ? canonicalModelAlias(modelPattern) : '';
   const merged = new Map<string, RouteSyncCandidate>();
   for (const [modelName, candidateMap] of modelCandidates.entries()) {
-    if (!matchesModelPattern(modelName, modelPattern)) continue;
+    const matched = matchesModelPattern(modelName, modelPattern)
+      || (!!normalizedExactAlias && isModelAliasEquivalent(modelName, modelPattern));
+    if (!matched) continue;
     for (const candidate of candidateMap.values()) {
       const normalizedSourceModel = modelName.trim();
       if (!normalizedSourceModel) continue;
@@ -483,7 +550,17 @@ function collectPatternRouteCandidates(
         tokenId: candidate.tokenId,
         sourceModel: normalizedSourceModel,
       };
-      merged.set(buildRouteSyncCandidateKey(item), item);
+      const dedupeKey = exactModelPattern
+        ? `${candidate.accountId}:${candidate.tokenId ?? 'account'}:${normalizedExactAlias}`
+        : buildRouteSyncCandidateKey(item);
+      const existing = merged.get(dedupeKey);
+      if (!existing) {
+        merged.set(dedupeKey, item);
+        continue;
+      }
+      if (exactModelPattern && compareExactRouteSourceModelPreference(modelPattern, item.sourceModel, existing.sourceModel) < 0) {
+        merged.set(dedupeKey, item);
+      }
     }
   }
   return Array.from(merged.values());
@@ -632,6 +709,24 @@ export async function refreshModelsForAccount(
   accountId: number,
   options?: { allowInactive?: boolean },
 ): Promise<ModelRefreshResult> {
+  const key = `${accountId}:${options?.allowInactive === true ? 'allow-inactive' : 'active-only'}`;
+  const inFlight = inFlightAccountRefreshes.get(key);
+  if (inFlight) return await inFlight;
+
+  const task = runRefreshModelsForAccount(accountId, options)
+    .finally(() => {
+      if (inFlightAccountRefreshes.get(key) === task) {
+        inFlightAccountRefreshes.delete(key);
+      }
+    });
+  inFlightAccountRefreshes.set(key, task);
+  return await task;
+}
+
+async function runRefreshModelsForAccount(
+  accountId: number,
+  options?: { allowInactive?: boolean },
+): Promise<ModelRefreshResult> {
   invalidateModelTokenCandidatesCache();
   invalidateModelsMarketplaceCache();
   const row = await db.select().from(schema.accounts)
@@ -695,9 +790,9 @@ export async function refreshModelsForAccount(
       );
     }
     if (previousTokenModelAvailability.length > 0) {
-      await db.insert(schema.tokenModelAvailability).values(
+      await upsertTokenModelAvailabilityBatch(
         previousTokenModelAvailability.map(({ id: _id, ...row }) => row),
-      ).run();
+      );
     }
   };
 
@@ -1153,7 +1248,7 @@ export async function refreshModelsForAccount(
     const latencyMs = Date.now() - startedAt;
     const checkedAt = new Date().toISOString();
 
-    await db.insert(schema.tokenModelAvailability).values(
+    await upsertTokenModelAvailabilityBatch(
       models.map((modelName) => ({
         tokenId: token.id,
         modelName,
@@ -1161,7 +1256,7 @@ export async function refreshModelsForAccount(
         latencyMs,
         checkedAt,
       })),
-    ).run();
+    );
 
     scannedTokenCount++;
     mergeDiscoveredModels(models, latencyMs);

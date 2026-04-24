@@ -140,4 +140,37 @@ describe('buildRouteModelCandidatesIndex', () => {
     expect(index[1].accountOptions).toEqual([{ id: 7, label: 'direct-user @ direct-site' }]);
     expect(index[1].tokenOptionsByAccountId).toEqual({});
   });
+
+  it('includes provider-prefixed aliases for exact routes as one candidate family', () => {
+    const routes = [{ id: 1, modelPattern: 'glm-5.1' }];
+    const modelCandidates: RouteModelCandidatesByModelName = {
+      'z-ai/glm-5.1': [{
+        modelName: 'ignored',
+        accountId: 9,
+        tokenId: 101,
+        tokenName: 'tk-glm',
+        isDefault: true,
+        username: 'glm-user',
+        siteId: 8,
+        siteName: 'glm-site',
+      }],
+    };
+
+    const index = buildRouteModelCandidatesIndex(routes, modelCandidates, matchesModelPattern);
+
+    expect(index[1].routeCandidates).toHaveLength(1);
+    expect(index[1].routeCandidates[0]).toMatchObject({
+      accountId: 9,
+      tokenId: 101,
+      modelName: 'glm-5.1',
+    });
+    expect(index[1].tokenOptionsByAccountId[9]).toEqual([
+      {
+        id: 101,
+        name: 'tk-glm',
+        isDefault: true,
+        sourceModel: 'glm-5.1',
+      },
+    ]);
+  });
 });

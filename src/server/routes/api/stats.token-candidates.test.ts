@@ -206,6 +206,85 @@ describe('/api/models/token-candidates', () => {
     expect(body.modelsMissingTokenGroups['gpt-5.2-codex']).toBeUndefined();
   });
 
+  it('normalizes provider-prefixed aliases when reporting missing managed-token coverage', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'glm-managed-site',
+      url: 'https://glm-managed-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'glm-managed-user',
+      accessToken: 'session-token',
+      status: 'active',
+    }).returning().get();
+
+    const token = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-glm-default',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'glm-5.1',
+      available: true,
+    }).run();
+
+    await db.insert(schema.tokenModelAvailability).values({
+      tokenId: token.id,
+      modelName: 'z-ai/glm-5.1',
+      available: true,
+    }).run();
+
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      groupRatio: { default: 1, vip: 0.5 },
+      models: [{
+        modelName: 'z-ai/glm-5.1',
+        quotaType: 0,
+        modelDescription: null,
+        tags: [],
+        supportedEndpointTypes: [],
+        ownerBy: null,
+        enableGroups: ['default', 'vip'],
+        groupPricing: {},
+      }],
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/models/token-candidates',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      modelsWithoutToken: Record<string, Array<{ accountId: number }>>;
+      modelsMissingTokenGroups: Record<string, Array<{
+        accountId: number;
+        missingGroups: string[];
+        availableGroups: string[];
+      }>>;
+    };
+
+    expect(body.modelsWithoutToken['glm-5.1']).toBeUndefined();
+    expect(body.modelsWithoutToken['z-ai/glm-5.1']).toBeUndefined();
+    expect(body.modelsMissingTokenGroups['glm-5.1']).toEqual([
+      expect.objectContaining({
+        accountId: account.id,
+        missingGroups: ['vip'],
+        availableGroups: ['default'],
+        requiredGroups: ['default', 'vip'],
+      }),
+    ]);
+    expect(body.modelsMissingTokenGroups['z-ai/glm-5.1']).toBeUndefined();
+  });
+
   it('includes direct account connections in route token candidates so manual routes can select them', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'direct-site',

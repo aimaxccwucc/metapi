@@ -62,4 +62,28 @@ describe('buildRouteMissingTokenIndex', () => {
       },
     ]);
   });
+
+  it('normalizes provider-prefixed aliases and matches exact routes by alias', () => {
+    const merged = normalizeMissingTokenModels({
+      'z-ai/glm-5.1': [
+        { accountId: 7, username: 'alice', siteId: 1, siteName: 'site-a' },
+      ],
+      ' glm-5.1 ': [
+        { accountId: 7, username: 'alice', siteId: 1, siteName: 'site-a' },
+      ],
+    });
+
+    expect(merged['glm-5.1']).toEqual([
+      { accountId: 7, username: 'alice', siteId: 1, siteName: 'site-a' },
+    ]);
+    expect(merged['z-ai/glm-5.1']).toBeUndefined();
+
+    const index = buildRouteMissingTokenIndex(
+      [{ id: 1, modelPattern: 'glm-5.1' }],
+      merged,
+      matchesModelPattern,
+    );
+
+    expect(index[1].map((item) => item.modelName)).toEqual(['glm-5.1']);
+  });
 });

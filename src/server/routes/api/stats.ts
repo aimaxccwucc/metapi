@@ -86,6 +86,24 @@ const PROXY_LOG_CLIENT_FAMILY_LABELS: Record<string, string> = {
   generic: '通用',
 };
 
+function canonicalModelAlias(modelName: string): string {
+  const normalized = (modelName || '').trim().toLowerCase();
+  if (!normalized) return '';
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex >= 0 && slashIndex < normalized.length - 1) {
+    return normalized.slice(slashIndex + 1);
+  }
+  return normalized;
+}
+
+function buildAccountModelCoverageKey(accountId: number, modelName: string): string {
+  return `${accountId}::${canonicalModelAlias(modelName)}`;
+}
+
+function normalizeHintModelName(modelName: string): string {
+  return canonicalModelAlias(modelName);
+}
+
 function normalizeProxyLogPageSize(raw?: string): number {
   const parsed = Number.parseInt(raw || '50', 10);
   if (!Number.isFinite(parsed)) return 50;
@@ -1333,7 +1351,7 @@ export async function statsRoutes(app: FastifyInstance) {
     for (const row of rows) {
       const modelName = (row.token_model_availability.modelName || '').trim();
       if (!modelName) continue;
-      const accountModelKey = `${row.accounts.id}::${modelName.toLowerCase()}`;
+      const accountModelKey = buildAccountModelCoverageKey(row.accounts.id, modelName);
       coveredAccountModelSet.add(accountModelKey);
 
       const resolvedTokenGroup = resolveTokenGroupLabel(row.account_tokens.tokenGroup, row.account_tokens.name);
@@ -1366,13 +1384,14 @@ export async function statsRoutes(app: FastifyInstance) {
     for (const row of availableModelRows) {
       const modelName = (row.modelName || '').trim();
       if (!modelName) continue;
-      const coverageKey = `${row.accountId}::${modelName.toLowerCase()}`;
+      const coverageKey = buildAccountModelCoverageKey(row.accountId, modelName);
+      const hintModelName = normalizeHintModelName(modelName) || modelName;
       const usesManagedTokens = requiresManagedAccountTokens(row);
       if (usesManagedTokens) {
         if (coveredAccountModelSet.has(coverageKey)) continue;
-        if (!modelsWithoutToken[modelName]) modelsWithoutToken[modelName] = [];
-        if (modelsWithoutToken[modelName].some((item) => item.accountId === row.accountId)) continue;
-        modelsWithoutToken[modelName].push({
+        if (!modelsWithoutToken[hintModelName]) modelsWithoutToken[hintModelName] = [];
+        if (modelsWithoutToken[hintModelName].some((item) => item.accountId === row.accountId)) continue;
+        modelsWithoutToken[hintModelName].push({
           accountId: row.accountId,
           username: row.username,
           siteId: row.siteId,
@@ -1452,7 +1471,7 @@ export async function statsRoutes(app: FastifyInstance) {
             if (!groups.has(groupKey)) groups.set(groupKey, group);
           }
           if (groups.size === 0) continue;
-          requiredGroupsByAccountModel.set(`${result.accountId}::${modelName.toLowerCase()}`, groups);
+          requiredGroupsByAccountModel.set(buildAccountModelCoverageKey(result.accountId, modelName), groups);
         }
       }
     }
@@ -1461,7 +1480,8 @@ export async function statsRoutes(app: FastifyInstance) {
       if (!requiresManagedAccountTokens(row)) continue;
       const modelName = (row.modelName || '').trim();
       if (!modelName) continue;
-      const accountModelKey = `${row.accountId}::${modelName.toLowerCase()}`;
+      const accountModelKey = buildAccountModelCoverageKey(row.accountId, modelName);
+      const hintModelName = normalizeHintModelName(modelName) || modelName;
 
       const requiredGroups = requiredGroupsByAccountModel.get(accountModelKey);
       if (!requiredGroups || requiredGroups.size === 0) continue;
@@ -1472,8 +1492,8 @@ export async function statsRoutes(app: FastifyInstance) {
         .map(([, label]) => label);
       if (missingGroups.length === 0) continue;
 
-      if (!modelsMissingTokenGroups[modelName]) modelsMissingTokenGroups[modelName] = [];
-      if (modelsMissingTokenGroups[modelName].some((item) => item.accountId === row.accountId)) continue;
+      if (!modelsMissingTokenGroups[hintModelName]) modelsMissingTokenGroups[hintModelName] = [];
+      if (modelsMissingTokenGroups[hintModelName].some((item) => item.accountId === row.accountId)) continue;
       const hintRow = {
         accountId: row.accountId,
         username: row.username,
@@ -1495,7 +1515,7 @@ export async function statsRoutes(app: FastifyInstance) {
       if (unknownGroupCoverageByAccountModel.has(accountModelKey)) {
         hintRow.groupCoverageUncertain = true;
       }
-      modelsMissingTokenGroups[modelName].push(hintRow);
+      modelsMissingTokenGroups[hintModelName].push(hintRow);
     }
 
     const endpointTypesByModel: Record<string, string[]> = {};

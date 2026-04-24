@@ -21,6 +21,29 @@ type RoutePatternLike = {
   modelPattern: string;
 };
 
+function canonicalModelAlias(modelName: string): string {
+  const normalized = String(modelName || '').trim().toLowerCase();
+  if (!normalized) return '';
+  const slashIndex = normalized.lastIndexOf('/');
+  if (slashIndex >= 0 && slashIndex < normalized.length - 1) {
+    return normalized.slice(slashIndex + 1);
+  }
+  return normalized;
+}
+
+function isExactModelPattern(modelPattern: string): boolean {
+  const normalized = modelPattern.trim();
+  if (!normalized) return false;
+  if (normalized.toLowerCase().startsWith('re:')) return false;
+  return !/[\*\?]/.test(normalized);
+}
+
+function isModelAliasEquivalent(left: string, right: string): boolean {
+  const a = canonicalModelAlias(left);
+  const b = canonicalModelAlias(right);
+  return !!a && !!b && a === b;
+}
+
 export function normalizeMissingTokenModels(
   withoutTokenByModel: MissingTokenModelsByName,
 ): MissingTokenModelsByName {
@@ -33,7 +56,7 @@ export function normalizeMissingTokenModels(
     : [];
 
   for (const modelName of Object.keys(withoutTokenByModel || {})) {
-    const normalizedModelName = String(modelName || '').trim();
+    const normalizedModelName = canonicalModelAlias(String(modelName || '').trim()) || String(modelName || '').trim();
     if (!normalizedModelName) continue;
     const accountMap = new Map<number, MissingTokenModelAccount>();
     for (const account of withoutTokenByModel[modelName] || []) {
@@ -58,7 +81,14 @@ export function normalizeMissingTokenModels(
       });
     }
     if (accountMap.size > 0) {
-      normalized[normalizedModelName] = Array.from(accountMap.values()).sort((a, b) => a.accountId - b.accountId);
+      const existing = normalized[normalizedModelName] || [];
+      const mergedAccountMap = new Map<number, MissingTokenModelAccount>(
+        existing.map((account) => [account.accountId, account]),
+      );
+      for (const account of accountMap.values()) {
+        mergedAccountMap.set(account.accountId, account);
+      }
+      normalized[normalizedModelName] = Array.from(mergedAccountMap.values()).sort((a, b) => a.accountId - b.accountId);
     }
   }
   return normalized;
@@ -80,7 +110,9 @@ export function buildRouteMissingTokenIndex(
 
     const matchedHints: RouteMissingTokenHint[] = [];
     for (const [modelName, accounts] of Object.entries(missingByModel || {})) {
-      if (!matchesModelPattern(modelName, modelPattern)) continue;
+      const matched = matchesModelPattern(modelName, modelPattern)
+        || (isExactModelPattern(modelPattern) && isModelAliasEquivalent(modelName, modelPattern));
+      if (!matched) continue;
       const dedupedAccounts = new Map<number, MissingTokenModelAccount>();
       for (const account of accounts || []) {
         if (!account || !Number.isFinite(account.accountId)) continue;
