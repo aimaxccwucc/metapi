@@ -173,6 +173,8 @@ const SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS = {
   ssl: 25 * 60 * 1000,
   groupEmpty: 30 * 60 * 1000,
   badResponseWrapper: 90 * 60 * 1000,
+  emptyContent: 10 * 60 * 1000,
+  http554: 20 * 60 * 1000,
 } as const;
 const CODEX_CLAUDE_SUCCESS_POOL_RECENT_MS = 7 * 24 * 60 * 60 * 1000;
 const CODEX_CLAUDE_SUCCESS_POOL_SIZE = 4;
@@ -1044,6 +1046,8 @@ function resolveImmediateModelBreakerDurationMs(context: SiteRuntimeFailureConte
 function resolveImmediateSiteRuntimeBreakerDurationMs(context: SiteRuntimeFailureContext = {}): number {
   const category = classifyProxyFailureCategory(context.status, context.errorText);
   if (category === 'upstream_group_empty') return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.groupEmpty;
+  if (isUpstream554Failure(context)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.http554;
+  if (isEmptyContentFailure(context)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.emptyContent;
   if (isGenericBadResponseStatusWrapper(context.errorText)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.badResponseWrapper;
   if (isSslHandshakeFailure(context.errorText)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.ssl;
   if (isTimeoutLikeFailure(context)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.timeout;
@@ -1053,9 +1057,21 @@ function resolveImmediateSiteRuntimeBreakerDurationMs(context: SiteRuntimeFailur
 function resolveExtendedChannelCooldownMs(context: SiteRuntimeFailureContext = {}): number {
   const category = classifyProxyFailureCategory(context.status, context.errorText);
   if (category === 'upstream_group_empty') return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.groupEmpty;
+  if (isUpstream554Failure(context)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.http554;
+  if (isEmptyContentFailure(context)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.emptyContent;
   if (isSslHandshakeFailure(context.errorText)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.ssl;
   if (isTimeoutLikeFailure(context)) return SITE_RUNTIME_IMMEDIATE_BREAKER_OVERRIDES_MS.timeout;
   return 0;
+}
+
+function isEmptyContentFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  return /upstream\s+returned\s+empty\s+content/i.test((context.errorText || '').trim());
+}
+
+function isUpstream554Failure(context: SiteRuntimeFailureContext = {}): boolean {
+  const status = typeof context.status === 'number' ? context.status : 0;
+  if (status === 554) return true;
+  return /upstream\s+returned\s+http\s+554\b/i.test((context.errorText || '').trim());
 }
 
 function isAuthLikeFailure(context: SiteRuntimeFailureContext = {}): boolean {
@@ -1510,6 +1526,8 @@ function shouldOpenImmediateRuntimeBreaker(context: SiteRuntimeFailureContext = 
     || category === 'rate_limit'
     || category === 'upstream_group_empty'
     || category === 'model_unsupported'
+    || isUpstream554Failure(context)
+    || isEmptyContentFailure(context)
     || (category === 'invalid_channel' && isGenericBadResponseStatusWrapper(errorText))
     || (category === 'invalid_channel' && /无权访问\s*.+\s*分组|no\s+access\s+to\s+group|no\s+tool\s+output\s+found\s+for\s+function\s+call/i.test(errorText));
 }

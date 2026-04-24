@@ -369,7 +369,7 @@ describe('TokenRouter runtime cache', () => {
     expect(thirdRecord?.cooldownLevel).toBe(1);
   });
 
-  it('extends weighted cooldowns for timeout, ssl 525, and upstream group empty failures', async () => {
+  it('extends weighted cooldowns for timeout, ssl 525, upstream group empty, empty-content, and 554 failures', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'extended-cooldown-site',
       url: 'https://extended-cooldown-site.example.com',
@@ -413,6 +413,8 @@ describe('TokenRouter runtime cache', () => {
     const timeoutChannel = await makeChannel(10);
     const sslChannel = await makeChannel(11);
     const groupEmptyChannel = await makeChannel(12);
+    const emptyContentChannel = await makeChannel(13);
+    const http554Channel = await makeChannel(14);
     const router = new TokenRouter();
 
     let startedAt = Date.now();
@@ -452,6 +454,32 @@ describe('TokenRouter runtime cache', () => {
       .get();
     cooldownMs = Date.parse(String(record?.cooldownUntil || '')) - startedAt;
     expect(cooldownMs).toBeGreaterThanOrEqual(19 * 60 * 1000);
+
+    startedAt = Date.now();
+    await router.recordFailure(emptyContentChannel.id, {
+      status: 502,
+      errorText: 'Upstream returned empty content',
+      modelName: 'gpt-4o-mini-extended-cooldown',
+    });
+    record = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, emptyContentChannel.id))
+      .get();
+    cooldownMs = Date.parse(String(record?.cooldownUntil || '')) - startedAt;
+    expect(cooldownMs).toBeGreaterThanOrEqual(9 * 60 * 1000);
+    expect(cooldownMs).toBeLessThanOrEqual(11 * 60 * 1000);
+
+    startedAt = Date.now();
+    await router.recordFailure(http554Channel.id, {
+      status: 554,
+      errorText: 'Upstream returned HTTP 554',
+      modelName: 'gpt-4o-mini-extended-cooldown',
+    });
+    record = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, http554Channel.id))
+      .get();
+    cooldownMs = Date.parse(String(record?.cooldownUntil || '')) - startedAt;
+    expect(cooldownMs).toBeGreaterThanOrEqual(19 * 60 * 1000);
+    expect(cooldownMs).toBeLessThanOrEqual(21 * 60 * 1000);
   });
 
   it('round robins across all available channels regardless of priority', async () => {
