@@ -66,4 +66,60 @@ describe('chatFormatsCore inline think parsing', () => {
       contentDelta: 'visible answer',
     });
   });
+
+  it('does not duplicate responses text when done events replay the full message content', () => {
+    const context = createStreamTransformContext('gpt-test');
+
+    expect(normalizeUpstreamStreamEvent({
+      type: 'response.output_text.delta',
+      output_index: 0,
+      delta: 'hello',
+    }, context, 'gpt-test')).toMatchObject({
+      contentDelta: 'hello',
+    });
+
+    expect(normalizeUpstreamStreamEvent({
+      type: 'response.output_text.done',
+      output_index: 0,
+      text: 'hello',
+    }, context, 'gpt-test')).toEqual({});
+
+    expect(normalizeUpstreamStreamEvent({
+      type: 'response.content_part.done',
+      output_index: 0,
+      part: {
+        type: 'output_text',
+        text: 'hello',
+      },
+    }, context, 'gpt-test')).toEqual({});
+
+    expect(normalizeUpstreamStreamEvent({
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: {
+        type: 'message',
+        content: [{ type: 'output_text', text: 'hello' }],
+      },
+    }, context, 'gpt-test')).toEqual({});
+  });
+
+  it('keeps only the missing suffix when responses done events include the full accumulated text', () => {
+    const context = createStreamTransformContext('gpt-test');
+
+    expect(normalizeUpstreamStreamEvent({
+      type: 'response.output_text.delta',
+      output_index: 0,
+      delta: 'hel',
+    }, context, 'gpt-test')).toMatchObject({
+      contentDelta: 'hel',
+    });
+
+    expect(normalizeUpstreamStreamEvent({
+      type: 'response.output_text.done',
+      output_index: 0,
+      text: 'hello',
+    }, context, 'gpt-test')).toMatchObject({
+      contentDelta: 'lo',
+    });
+  });
 });

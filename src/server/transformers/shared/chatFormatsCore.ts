@@ -24,6 +24,8 @@ export type StreamTransformContext = {
   roleSent: boolean;
   doneSent: boolean;
   toolCalls: Record<number, { id?: string; name?: string; arguments?: string }>;
+  responsesOutputText: Record<number, string>;
+  responsesReasoningText: Record<number, string>;
   thinkTagParser: ThinkTagParserState;
 };
 
@@ -100,6 +102,54 @@ function ensureIntegerTimestamp(value: unknown, fallback: number): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.trunc(n);
+}
+
+function computeNovelStreamText(existingText: string, incomingText: string): { novel: string; merged: string } {
+  if (!incomingText) return { novel: '', merged: existingText };
+  if (!existingText) return { novel: incomingText, merged: incomingText };
+  if (existingText === incomingText) return { novel: '', merged: existingText };
+  if (incomingText.startsWith(existingText)) {
+    return {
+      novel: incomingText.slice(existingText.length),
+      merged: incomingText,
+    };
+  }
+  if (existingText.endsWith(incomingText) || existingText.includes(incomingText)) {
+    return { novel: '', merged: existingText };
+  }
+
+  const maxOverlap = Math.min(existingText.length, incomingText.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (existingText.slice(-overlap) === incomingText.slice(0, overlap)) {
+      const novel = incomingText.slice(overlap);
+      return {
+        novel,
+        merged: `${existingText}${novel}`,
+      };
+    }
+  }
+
+  return {
+    novel: incomingText,
+    merged: `${existingText}${incomingText}`,
+  };
+}
+
+function normalizeResponsesOutputIndex(payload: Record<string, unknown>): number {
+  return typeof payload.output_index === 'number' && Number.isFinite(payload.output_index)
+    ? Math.max(0, Math.trunc(payload.output_index))
+    : 0;
+}
+
+function takeNovelResponsesText(
+  store: Record<number, string>,
+  outputIndex: number,
+  rawText: string,
+): string {
+  if (!rawText) return '';
+  const next = computeNovelStreamText(store[outputIndex] || '', rawText);
+  store[outputIndex] = next.merged;
+  return next.novel;
 }
 
 function joinNonEmpty(parts: string[]): string {
@@ -320,6 +370,8 @@ export function createStreamTransformContext(modelName: string): StreamTransform
     roleSent: false,
     doneSent: false,
     toolCalls: {},
+    responsesOutputText: {},
+    responsesReasoningText: {},
     thinkTagParser: createThinkTagParserState(),
   };
 }
@@ -1126,20 +1178,60 @@ export function normalizeUpstreamStreamEvent(
   }
 
   const type = typeof payload.type === 'string' ? payload.type : '';
-  if (type.startsWith('response.output_text')) {
-    const parsed = extractStreamingTextAndReasoning(payload.delta, context.thinkTagParser);
+  if (type === 'response.output_text.delta' || type === 'response.output_text.done') {
+    const outputIndex = normalizeResponsesOutputIndex(payload);
+    const rawText = type === 'response.output_text.done'
+      ? (typeof payload.text === 'string' ? payload.text : textFromPart(payload.text))
+      : (typeof payload.delta === 'string' ? payload.delta : textFromPart(payload.delta));
+    const novelText = takeNovelResponsesText(context.responsesOutputText, outputIndex, rawText);
+    const parsed = extractStreamingTextAndReasoning(novelText, context.thinkTagParser);
     return {
       contentDelta: parsed.content || undefined,
       reasoningDelta: parsed.reasoning || undefined,
     };
   }
 
-  if (type === 'response.reasoning_summary_text.delta') {
-    const deltaText = typeof payload.delta === 'string'
-      ? payload.delta
-      : extractTextAndReasoning(payload.delta).content;
+  if (type === 'response.content_part.done' && isRecord((payload as any).part)) {
+    const outputIndex = normalizeResponsesOutputIndex(payload);
+    const part = (payload as any).part as Record<string, unknown>;
+    const partType = typeof part.type === 'string' ? part.type.trim().toLowerCase() : '';
+    if (partType === 'output_text' || partType === 'text') {
+      const novelText = takeNovelResponsesText(context.responsesOutputText, outputIndex, textFromPart(part));
+      const parsed = extractStreamingTextAndReasoning(novelText, context.thinkTagParser);
+      return {
+        contentDelta: parsed.content || undefined,
+        reasoningDelta: parsed.reasoning || undefined,
+      };
+    }
+    if (partType === 'summary_text' || partType === 'reasoning') {
+      const novelText = takeNovelResponsesText(context.responsesReasoningText, outputIndex, textFromPart(part));
+      return {
+        reasoningDelta: novelText || undefined,
+      };
+    }
+    return {};
+  }
+
+  if (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_summary_text.done') {
+    const outputIndex = normalizeResponsesOutputIndex(payload);
+    const rawText = type === 'response.reasoning_summary_text.done'
+      ? (typeof payload.text === 'string' ? payload.text : textFromPart(payload.text))
+      : (typeof payload.delta === 'string' ? payload.delta : textFromPart(payload.delta));
+    const novelText = takeNovelResponsesText(context.responsesReasoningText, outputIndex, rawText);
     return {
-      reasoningDelta: deltaText || undefined,
+      reasoningDelta: novelText || undefined,
+    };
+  }
+
+  if (type === 'response.reasoning_summary_part.done' && isRecord((payload as any).part)) {
+    const outputIndex = normalizeResponsesOutputIndex(payload);
+    const novelText = takeNovelResponsesText(
+      context.responsesReasoningText,
+      outputIndex,
+      textFromPart((payload as any).part),
+    );
+    return {
+      reasoningDelta: novelText || undefined,
     };
   }
 
@@ -1182,6 +1274,27 @@ export function normalizeUpstreamStreamEvent(
         }],
       };
     }
+  }
+
+  if (type === 'response.output_item.done' && isRecord((payload as any).item)) {
+    const outputIndex = normalizeResponsesOutputIndex(payload);
+    const item = (payload as any).item as Record<string, unknown>;
+    const itemType = typeof item.type === 'string' ? item.type.trim().toLowerCase() : '';
+    if (itemType === 'message') {
+      const novelText = takeNovelResponsesText(context.responsesOutputText, outputIndex, textFromPart(item.content));
+      const parsed = extractStreamingTextAndReasoning(novelText, context.thinkTagParser);
+      return {
+        contentDelta: parsed.content || undefined,
+        reasoningDelta: parsed.reasoning || undefined,
+      };
+    }
+    if (itemType === 'reasoning') {
+      const novelText = takeNovelResponsesText(context.responsesReasoningText, outputIndex, textFromPart(item.summary));
+      return {
+        reasoningDelta: novelText || undefined,
+      };
+    }
+    return {};
   }
 
   if (type === 'response.function_call_arguments.delta' || type === 'response.function_call_arguments.done') {
