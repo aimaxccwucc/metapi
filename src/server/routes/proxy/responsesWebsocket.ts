@@ -163,6 +163,40 @@ function cloneJsonObject<T>(value: T): T {
   return structuredClone(value);
 }
 
+function hasNonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function hasMeaningfulContentPart(part: unknown): boolean {
+  if (!isRecord(part)) return false;
+  const partType = asTrimmedString(part.type).toLowerCase();
+  if (partType === 'output_text' || partType === 'text') {
+    return hasNonEmptyString(part.text);
+  }
+  return partType.length > 0;
+}
+
+function hasMeaningfulOutputItem(item: unknown): boolean {
+  if (!isRecord(item)) return false;
+  const itemType = asTrimmedString(item.type).toLowerCase();
+  if (itemType === 'message') {
+    return Array.isArray(item.content) && item.content.some((part) => hasMeaningfulContentPart(part));
+  }
+  if (itemType === 'reasoning') {
+    return (
+      (Array.isArray(item.summary) && item.summary.some((part) => hasMeaningfulContentPart(part)))
+      || hasNonEmptyString(item.encrypted_content)
+    );
+  }
+  return itemType.length > 0;
+}
+
+function hasMeaningfulResponsesPayloadOutput(payload: unknown): boolean {
+  if (!isRecord(payload)) return false;
+  if (hasNonEmptyString(payload.output_text)) return true;
+  return Array.isArray(payload.output) && payload.output.some((item) => hasMeaningfulOutputItem(item));
+}
+
 function toResponseInputArray(value: unknown): unknown[] {
   return Array.isArray(value) ? cloneJsonObject(value) : [];
 }
@@ -328,6 +362,37 @@ function collectResponsesOutput(payloads: unknown[]): unknown[] {
       outputByIndex.set(Number(payload.output_index), cloneJsonObject(payload.item));
       continue;
     }
+    if (
+      type === 'response.output_text.delta'
+      && Number.isInteger(payload.output_index)
+      && hasNonEmptyString(payload.delta)
+    ) {
+      const outputIndex = Number(payload.output_index);
+      const existing = outputByIndex.get(outputIndex);
+      const nextItem = isRecord(existing)
+        ? cloneJsonObject(existing)
+        : {
+          id: asTrimmedString(payload.item_id) || `msg_${outputIndex}`,
+          type: 'message',
+          role: 'assistant',
+          status: 'in_progress',
+          content: [],
+        };
+      const content = Array.isArray(nextItem.content) ? [...nextItem.content] : [];
+      const textIndex = content.findIndex((part) => isRecord(part) && asTrimmedString(part.type).toLowerCase() === 'output_text');
+      if (textIndex >= 0 && isRecord(content[textIndex])) {
+        const current = content[textIndex] as Record<string, unknown>;
+        content[textIndex] = {
+          ...current,
+          text: `${typeof current.text === 'string' ? current.text : ''}${String(payload.delta)}`,
+        };
+      } else {
+        content.push({ type: 'output_text', text: String(payload.delta) });
+      }
+      nextItem.content = content;
+      outputByIndex.set(outputIndex, nextItem);
+      continue;
+    }
     if (type === 'response.completed' && isRecord(payload.response) && Array.isArray(payload.response.output)) {
       payload.response.output.forEach((item, index) => {
         outputByIndex.set(index, cloneJsonObject(item));
@@ -346,6 +411,12 @@ function collectResponsesUsageFromEvents(payloads: Array<Record<string, unknown>
     merged = mergeProxyUsage(merged, parseProxyUsage(payload));
   }
   return merged;
+}
+
+function hasMeaningfulResponsesEventsOutput(payloads: Array<Record<string, unknown>>): boolean {
+  return hasMeaningfulResponsesPayloadOutput({
+    output: collectResponsesOutput(payloads),
+  });
 }
 
 async function writeResponsesWebsocketProxyLog(input: {
@@ -464,11 +535,16 @@ async function forwardResponsesRequestViaHttp(input: {
   const pulled = openAiResponsesTransformer.pullSseEvents(response.body);
   const forwardedPayloads: unknown[] = [];
   let sawTerminalPayload = false;
+  let sawMeaningfulOutput = false;
   for (const event of pulled.events) {
     if (event.data === '[DONE]') continue;
     try {
       const payload = JSON.parse(event.data);
       forwardedPayloads.push(payload);
+      if (!sawMeaningfulOutput) {
+        const responsePayload = isRecord(payload) && isRecord(payload.response) ? payload.response : payload;
+        sawMeaningfulOutput = hasMeaningfulResponsesPayloadOutput(responsePayload);
+      }
       const type = isRecord(payload) ? asTrimmedString(payload.type) : '';
       if (type === 'response.completed' || type === 'response.failed') {
         sawTerminalPayload = true;
@@ -479,6 +555,9 @@ async function forwardResponsesRequestViaHttp(input: {
     }
   }
   if (!sawTerminalPayload) {
+    if (sawMeaningfulOutput) {
+      return collectResponsesOutput(forwardedPayloads);
+    }
     writeResponsesWebsocketError(input.socket, 408, 'stream closed before response.completed');
   }
   return collectResponsesOutput(forwardedPayloads);
@@ -704,6 +783,36 @@ async function handleResponsesWebsocketConnection(
               const runtimeError = error instanceof CodexWebsocketRuntimeError
                 ? error
                 : new CodexWebsocketRuntimeError('upstream websocket request failed');
+              const runtimeHasMeaningfulOutput = hasMeaningfulResponsesEventsOutput(runtimeError.events);
+              if (runtimeHasMeaningfulOutput) {
+                const runtimeUsage = collectResponsesUsageFromEvents(runtimeError.events);
+                await tokenRouter.recordSuccess?.(
+                  codexWebsocketChannel.channel.id,
+                  Date.now() - requestStartedAt,
+                  0,
+                  actualModel,
+                );
+                await writeResponsesWebsocketProxyLog({
+                  selected: codexWebsocketChannel,
+                  modelRequested: requestModel || actualModel,
+                  modelActual: actualModel,
+                  status: 'success',
+                  httpStatus: 200,
+                  latencyMs: Date.now() - requestStartedAt,
+                  errorMessage: null,
+                  retryCount: 0,
+                  downstreamPath,
+                  upstreamPath: prepared.path,
+                  clientContext,
+                  usage: runtimeUsage,
+                  downstreamApiKeyId: authContext.key?.id ?? null,
+                });
+                lastResponseOutput = collectResponsesOutput(runtimeError.events);
+                for (const payload of runtimeError.events) {
+                  socket.send(JSON.stringify(payload));
+                }
+                return;
+              }
               await tokenRouter.recordFailure?.(codexWebsocketChannel.channel.id, {
                 status: runtimeError.status ?? 0,
                 errorText: runtimeError.message,

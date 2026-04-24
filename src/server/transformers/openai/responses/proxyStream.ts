@@ -80,6 +80,13 @@ function hasMeaningfulAggregateOutput(state: ReturnType<typeof createOpenAiRespo
   return state.outputItems.some((item) => hasMeaningfulOutputItem(item));
 }
 
+function shouldGracefullyFinalizeTruncatedStream(input: {
+  requiresExplicitTerminalEvent: boolean;
+  state: ReturnType<typeof createOpenAiResponsesAggregateState>;
+}): boolean {
+  return input.requiresExplicitTerminalEvent && hasMeaningfulAggregateOutput(input.state);
+}
+
 function shouldFailEmptyResponsesCompletion(input: {
   payload: unknown;
   state: ReturnType<typeof createOpenAiResponsesAggregateState>;
@@ -163,6 +170,10 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
   const closeOut = () => {
     if (finalized) return;
     if (requiresExplicitTerminalEvent) {
+      if (hasMeaningfulAggregateOutput(responsesState)) {
+        finalize();
+        return;
+      }
       fail({
         type: 'response.failed',
         error: {
@@ -319,12 +330,26 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
       const lifecycleSummary = await lifecycle.run();
       if (terminalResult.status !== 'failed') {
         if (lifecycleSummary.reason === 'reader_error') {
+          if (shouldGracefullyFinalizeTruncatedStream({
+            requiresExplicitTerminalEvent,
+            state: responsesState,
+          })) {
+            finalize();
+            return terminalResult;
+          }
           terminalResult = {
             status: 'failed',
             errorMessage: `[stream:upstream_error] ${lifecycleSummary.readerErrorMessage || 'upstream stream reader error'}`,
             terminationReason: 'upstream_error',
           };
         } else if (lifecycleSummary.reason === 'eof_with_trailing_buffer') {
+          if (shouldGracefullyFinalizeTruncatedStream({
+            requiresExplicitTerminalEvent,
+            state: responsesState,
+          })) {
+            finalize();
+            return terminalResult;
+          }
           terminalResult = {
             status: 'failed',
             errorMessage: '[stream:truncated] stream closed before response.completed',

@@ -1293,7 +1293,7 @@ describe('responses websocket transport', () => {
     });
   });
 
-  it('emits websocket error when the upstream stream closes before a terminal responses event', async () => {
+  it('does not emit websocket error when the upstream stream closes before a terminal responses event after meaningful output', async () => {
     const selectedChannel = createSelectedChannel({
       siteUrl: upstreamSiteUrl,
     });
@@ -1321,7 +1321,7 @@ describe('responses websocket transport', () => {
 
     const socket = createClientSocket(baseUrl);
     await waitForSocketOpen(socket);
-    const messagesPromise = waitForSocketMessages(socket, 3, 400);
+    const messagesPromise = waitForSocketMessages(socket, 2, 400);
 
     socket.send(JSON.stringify({
       type: 'response.create',
@@ -1341,18 +1341,15 @@ describe('responses websocket transport', () => {
     expect(messages.map((message) => message.type)).toEqual([
       'response.created',
       'response.output_text.delta',
-      'error',
     ]);
-    expect(messages[2]?.error?.message).toContain('stream closed before response.completed');
     expect(dbInsertValuesMock).toHaveBeenCalledWith(expect.objectContaining({
       routeId: 22,
       channelId: 11,
       accountId: 33,
       modelRequested: 'gpt-5.4',
       modelActual: 'gpt-5.4',
-      status: 'failed',
-      httpStatus: 502,
-      errorMessage: expect.stringContaining('stream closed before response.completed'),
+      status: 'success',
+      httpStatus: 200,
     }));
   });
 });

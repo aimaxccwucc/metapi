@@ -642,7 +642,7 @@ describe('responses proxy codex oauth refresh', () => {
     expect(String(insertedProxyLogs.at(-1)?.errorMessage || '')).toContain('tool execution failed');
   });
 
-  it('does not record success when a native responses stream closes before response.completed', async () => {
+  it('records success when a native responses stream closes before response.completed after meaningful output', async () => {
     fetchMock.mockResolvedValue(createSseResponse([
       'event: response.created\n',
       'data: {"type":"response.created","response":{"id":"resp_codex_truncated","model":"gpt-5.4","created_at":1706000000,"status":"in_progress","output":[]}}\n\n',
@@ -664,15 +664,16 @@ describe('responses proxy codex oauth refresh', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.body).toContain('event: response.failed');
-    expect(response.body).not.toContain('event: response.completed');
-    expect(recordSuccessMock).not.toHaveBeenCalled();
-    expect(recordFailureMock).toHaveBeenCalledTimes(1);
+    expect(response.body).not.toContain('event: response.failed');
+    expect(response.body).toContain('event: response.completed');
+    expect(recordFailureMock).not.toHaveBeenCalled();
+    expect(recordSuccessMock).toHaveBeenCalledTimes(1);
     expect(insertedProxyLogs.at(-1)).toMatchObject({
-      status: 'failed',
+      status: 'success',
       httpStatus: 200,
     });
-    expect(String(insertedProxyLogs.at(-1)?.errorMessage || '')).toContain('stream closed before response.completed');
+    expect(String(insertedProxyLogs.at(-1)?.errorMessage || '')).toContain('[downstream:/v1/responses]');
+    expect(String(insertedProxyLogs.at(-1)?.errorMessage || '')).not.toContain('stream closed before response.completed');
   });
 
   it('does not record success when a native responses stream completes with empty content and empty usage while empty-content failure is enabled', async () => {
