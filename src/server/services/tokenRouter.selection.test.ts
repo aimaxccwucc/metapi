@@ -1909,7 +1909,7 @@ describe('TokenRouter selection scoring', () => {
     }
   });
 
-  it('applies sticky session preference and breaks stickiness when the bound account is busy', async () => {
+  it('keeps sticky session preference even when the bound account is busy', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
       valueScoreFactor: 0,
@@ -1963,13 +1963,13 @@ describe('TokenRouter selection scoring', () => {
     const candidateBWhileBusy = decisionWhileBusy.candidates.find((candidate) => candidate.channelId === channelB.id);
 
     expect(first?.channel.id).toBe(channelA.id);
-    expect(second?.channel.id).toBe(channelB.id);
+    expect(second?.channel.id).toBe(channelA.id);
     expect(candidateAWhileBusy?.accountRuntimeState?.stickyActive).toBe(true);
-    expect(candidateAWhileBusy?.accountRuntimeState?.stickyPreferred).toBe(false);
-    expect(candidateAWhileBusy?.avoidedByAccountLease).toBe(true);
-    expect(decisionWhileBusy.summary.join(' ')).toContain('账号粘性已打破');
-    expect(decisionWhileBusy.summary.join(' ')).toContain('账号并发避让');
-    expect((candidateBWhileBusy?.probability || 0)).toBeGreaterThan(0);
+    expect(candidateAWhileBusy?.accountRuntimeState?.stickyPreferred).toBe(true);
+    expect(candidateAWhileBusy?.avoidedByAccountLease).toBe(false);
+    expect(decisionWhileBusy.summary.join(' ')).toContain('账号粘性复用');
+    expect(decisionWhileBusy.summary.join(' ')).not.toContain('账号粘性已打破');
+    expect(candidateBWhileBusy?.probability || 0).toBe(0);
 
     await router.recordSuccess(channelA.id, 320, 0, 'gpt-sticky-session');
     const decisionRecovered = await router.explainSelection('gpt-sticky-session', [], stickyPolicy);

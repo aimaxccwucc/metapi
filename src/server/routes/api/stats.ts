@@ -481,7 +481,7 @@ function buildSiteAvailabilitySummaries(
 function mapProxyLogRow(
   row: {
     proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
-    accounts: { username?: string | null } | null;
+    accounts: { username?: string | null; balance?: number | null } | null;
     sites: { id?: number | null; name?: string | null; url?: string | null } | null;
     downstream_api_keys: {
       id?: number | null;
@@ -503,6 +503,7 @@ function mapProxyLogRow(
     clientAppName: clientMeta.clientAppName,
     clientConfidence: clientMeta.clientConfidence,
     username: row.accounts?.username || null,
+    accountBalance: typeof row.accounts?.balance === 'number' ? row.accounts.balance : null,
     siteId: row.sites?.id || null,
     siteName: row.sites?.name || null,
     siteUrl: row.sites?.url || null,
@@ -782,7 +783,7 @@ export async function statsRoutes(app: FastifyInstance) {
         .all();
     }, { includeBillingDetails: false }) as Array<{
       proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
-      accounts: { username?: string | null } | null;
+      accounts: { username?: string | null; balance?: number | null } | null;
       sites: { id?: number | null; name?: string | null; url?: string | null } | null;
       downstream_api_keys: { id?: number | null; name?: string | null; groupName?: string | null; tags?: string | null } | null;
     }>;
@@ -902,7 +903,7 @@ export async function statsRoutes(app: FastifyInstance) {
         .get()
     ), { includeBillingDetails: true }) as {
       proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
-      accounts: { username?: string | null } | null;
+      accounts: { username?: string | null; balance?: number | null } | null;
       sites: { id?: number | null; name?: string | null; url?: string | null } | null;
       downstream_api_keys: { id?: number | null; name?: string | null; groupName?: string | null; tags?: string | null } | null;
     } | undefined;

@@ -50,6 +50,7 @@ describe('stats proxy logs routes', () => {
       siteId: site.id,
       username: 'proxy-user',
       accessToken: 'proxy-token',
+      balance: 12.34,
       status: 'active',
     }).returning().get();
 
@@ -160,6 +161,7 @@ describe('stats proxy logs routes', () => {
     expect(body.items[0]?.downstreamKeyName).toBe('项目A-Key');
     expect(body.items[0]?.downstreamKeyGroupName).toBe('项目A');
     expect(body.items[0]?.downstreamKeyTags).toEqual(['VIP', '灰度']);
+    expect(body.items[0]?.accountBalance).toBe(12.34);
     expect(body.items[0]?.clientFamily).toBe('codex');
     expect(body.items[0]?.clientAppId).toBe(null);
     expect(body.items[0]?.clientAppName).toBe(null);
@@ -169,11 +171,11 @@ describe('stats proxy logs routes', () => {
       { value: 'family:codex', label: '协议 · Codex' },
     ]);
     expect(body.summary).toEqual({
-      totalCount: 3,
-      successCount: 1,
+      totalCount: 2,
+      successCount: 0,
       failedCount: 2,
-      totalCost: 0.6,
-      totalTokensAll: 49,
+      totalCost: 0.5,
+      totalTokensAll: 34,
       cacheHitCount: 0,
       cacheMissCount: 0,
       cacheStaleCount: 0,
@@ -248,6 +250,7 @@ describe('stats proxy logs routes', () => {
       siteId: site.id,
       username: 'detail-user',
       accessToken: 'detail-token',
+      balance: 56.78,
       status: 'active',
     }).returning().get();
 
@@ -292,6 +295,7 @@ describe('stats proxy logs routes', () => {
       id: number;
       siteName: string | null;
       username: string | null;
+      accountBalance: number | null;
       downstreamKeyName: string | null;
       downstreamKeyGroupName: string | null;
       downstreamKeyTags: string[];
@@ -305,6 +309,7 @@ describe('stats proxy logs routes', () => {
     expect(body.id).toBe(logId);
     expect(body.siteName).toBe('detail-site');
     expect(body.username).toBe('detail-user');
+    expect(body.accountBalance).toBe(56.78);
     expect(body.downstreamKeyName).toBe('detail-key');
     expect(body.downstreamKeyGroupName).toBe('测试项目');
     expect(body.downstreamKeyTags).toEqual(['回归', '日志']);

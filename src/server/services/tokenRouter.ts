@@ -161,7 +161,6 @@ const ACCOUNT_LATENCY_EMA_ALPHA = 0.25;
 const ACCOUNT_ROUTING_STATE_TTL_MS = 6 * 60 * 60 * 1000;
 const ACCOUNT_STICKY_BINDING_TTL_MS = 5 * 60 * 1000;
 const ACCOUNT_STICKY_FAILURE_BREAK_MS = 90 * 1000;
-const ACCOUNT_STICKY_BUSY_BREAK_MS = 30 * 1000;
 const ACCOUNT_STICKY_BREAK_AVOID_MS = 45 * 1000;
 const ACCOUNT_RATE_LIMIT_BURST_MIN = 2;
 const ACCOUNT_RATE_LIMIT_BURST_MAX = 6;
@@ -2693,6 +2692,7 @@ function tryConsumeAccountRateBudget(candidate: RouteChannelCandidate, nowMs = D
 function partitionAccountSelectionLeases(
   candidates: RouteChannelCandidate[],
   nowMs = Date.now(),
+  options: { allowBusySingleCandidate?: boolean } = {},
 ): {
   preferred: RouteChannelCandidate[];
   avoided: Array<{
@@ -2724,7 +2724,7 @@ function partitionAccountSelectionLeases(
       ? new Date(budgetState.denyUntilMs).toISOString()
       : null;
     const hasBudget = budgetState.tokens >= 1 && !rateLimitedUntil;
-    if (!stickyBreakAvoidActive && inflightCount < concurrencyBudget && hasBudget) {
+    if (!stickyBreakAvoidActive && (inflightCount < concurrencyBudget || (options.allowBusySingleCandidate && hasBudget)) && hasBudget) {
       return {
         preferred: candidates,
         avoided: [],
@@ -2814,7 +2814,7 @@ function preferStickySessionCandidates(
 ): {
   preferred: RouteChannelCandidate[];
   stickyBinding: StickySessionBinding | null;
-  stickyReason: 'reused' | 'broken_by_failure' | 'broken_by_busy' | 'none';
+  stickyReason: 'reused' | 'broken_by_failure' | 'none';
 } {
   if (candidates.length <= 1) {
     return {
@@ -2844,20 +2844,10 @@ function preferStickySessionCandidates(
   }
 
   const stickyState = accountRoutingStates.get(stickyBinding.accountId) ?? null;
-  const stickyInflight = getAccountSelectionLeases(stickyBinding.accountId, nowMs).length;
-  const stickyBudget = getAccountConcurrencyBudget(stickyCandidates[0], stickyState);
-  const stickyBusy = stickyInflight >= stickyBudget && (stickyBinding.expiresAtMs - nowMs) > ACCOUNT_STICKY_BUSY_BREAK_MS;
   const stickyFailedRecently = stickyState?.lastFailureAtMs != null
     && (nowMs - stickyState.lastFailureAtMs) <= ACCOUNT_STICKY_FAILURE_BREAK_MS
     && (stickyState.lastSuccessAtMs ?? 0) < stickyState.lastFailureAtMs;
 
-  if (stickyBusy) {
-    return {
-      preferred: candidates,
-      stickyBinding,
-      stickyReason: 'broken_by_busy',
-    };
-  }
   if (stickyFailedRecently) {
     return {
       preferred: candidates,
@@ -2924,7 +2914,7 @@ function getAccountSuccessMultiplier(successEma: number): number {
 function getAccountStickyMultiplier(
   candidate: RouteChannelCandidate,
   stickyBinding: StickySessionBinding | null,
-  stickyReason: 'reused' | 'broken_by_failure' | 'broken_by_busy' | 'none',
+  stickyReason: 'reused' | 'broken_by_failure' | 'none',
 ): number {
   const avoidUntilMs = stickyBreakAvoidAccounts.get(candidate.account.id) ?? 0;
   if (avoidUntilMs > Date.now()) return 0.65;
@@ -2932,7 +2922,6 @@ function getAccountStickyMultiplier(
   if (stickyBinding.accountId !== candidate.account.id) return 1;
   if (stickyReason === 'reused') return 1.35;
   if (stickyReason === 'broken_by_failure') return 0.85;
-  if (stickyReason === 'broken_by_busy') return 0.92;
   return 1;
 }
 
@@ -5188,8 +5177,6 @@ export class TokenRouter {
       summary.push(`账号粘性复用 account=${stickyAccountId}`);
     } else if (stickyPreference.stickyReason === 'broken_by_failure' && stickyAccountId != null) {
       summary.push(`账号粘性已打破：最近失败 account=${stickyAccountId}`);
-    } else if (stickyPreference.stickyReason === 'broken_by_busy' && stickyAccountId != null) {
-      summary.push(`账号粘性已打破：账号繁忙 account=${stickyAccountId}`);
     }
     if (routeStrategy === 'round_robin') {
       const rawOrdered = this.getRoundRobinCandidates(match.channels.filter((row) => {
@@ -5443,7 +5430,9 @@ export class TokenRouter {
       const stickyCandidates = stickyLayer.preferred.length > 0
         ? stickyLayer.preferred
         : recentFailurePartition.preferred;
-      const accountLeasePartition = partitionAccountSelectionLeases(stickyCandidates, nowMs);
+      const accountLeasePartition = partitionAccountSelectionLeases(stickyCandidates, nowMs, {
+        allowBusySingleCandidate: stickyLayer.stickyReason === 'reused',
+      });
       if (accountLeasePartition.avoided.length > 0) {
         for (const item of accountLeasePartition.avoided) {
           const target = candidateMap.get(item.candidate.channel.id);

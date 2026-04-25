@@ -25,6 +25,7 @@ import { tr } from '../i18n.js';
 type ProxyLogRenderItem = ProxyLogListItem & {
   billingDetails?: ProxyLogBillingDetails;
   username?: string | null;
+  accountBalance?: number | null;
   siteName?: string | null;
   siteUrl?: string | null;
   errorMessage?: string | null;
@@ -101,11 +102,34 @@ function renderCacheBadge(status?: string | null) {
 }
 
 function resolveProxyLogSiteLabel(log: ProxyLogRenderItem): string | null {
+  if (isNoChannelProxyLog(log)) return '未选出通道';
   const siteName = String(log.siteName || '').trim();
   if (siteName) return siteName;
   const cacheStatus = String(log.cacheStatus || '').trim().toLowerCase();
   if (cacheStatus === 'hit') return '缓存命中';
   if (cacheStatus === 'stale') return '旧缓存兜底';
+  return null;
+}
+
+function isNoChannelProxyLog(log: Pick<ProxyLogRenderItem, 'errorMessage' | 'siteId' | 'accountId'> & { channelId?: number | null }) {
+  const message = String(log.errorMessage || '').trim();
+  if (!/no available channels?/i.test(message)) return false;
+  return !log.siteId && !log.accountId && !log.channelId;
+}
+
+function resolveProxyLogSiteDetailLabel(log: ProxyLogRenderItem) {
+  if (isNoChannelProxyLog(log)) return '未请求上游';
+  return log.siteName || '未知站点';
+}
+
+function resolveProxyLogAccountDetailLabel(log: ProxyLogRenderItem) {
+  if (isNoChannelProxyLog(log)) return '未分配账号';
+  return log.username || '未知账号';
+}
+
+function resolveProxyLogUpstreamPathLabel(log: ProxyLogRenderItem, upstreamPath?: string | null) {
+  if (upstreamPath) return upstreamPath;
+  if (isNoChannelProxyLog(log)) return '未请求上游';
   return null;
 }
 
@@ -142,6 +166,11 @@ function formatCompactNumber(value: number, digits = 6) {
   if (!Number.isFinite(value)) return '0';
   const formatted = value.toFixed(digits).replace(/\.?0+$/, '');
   return formatted || '0';
+}
+
+function formatAccountBalance(value?: number | null) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
+  return `$${value.toFixed(2)}`;
 }
 
 function formatPerMillionPrice(value: number) {
@@ -1113,6 +1142,10 @@ export default function ProxyLogs() {
                       <div className="mobile-summary-metric-value">{typeof log.estimatedCost === 'number' ? `$${log.estimatedCost.toFixed(6)}` : '-'}</div>
                     </div>
                     <div className="mobile-summary-metric">
+                      <div className="mobile-summary-metric-label">余额</div>
+                      <div className="mobile-summary-metric-value">{formatAccountBalance(log.accountBalance)}</div>
+                    </div>
+                    <div className="mobile-summary-metric">
                       <div className="mobile-summary-metric-label">缓存节省</div>
                       <div className="mobile-summary-metric-value">{typeof log.cacheSavedCost === 'number' && log.cacheSavedCost > 0 ? `$${log.cacheSavedCost.toFixed(6)}` : '-'}</div>
                     </div>
@@ -1157,6 +1190,7 @@ export default function ProxyLogs() {
                 <th style={{ textAlign: 'right' }}>输入</th>
                 <th style={{ textAlign: 'right' }}>输出</th>
                 <th style={{ textAlign: 'right' }}>花费</th>
+                <th style={{ textAlign: 'right' }}>余额</th>
                 <th style={{ textAlign: 'right' }}>缓存节省</th>
                 <th style={{ textAlign: 'center' }}>重试</th>
               </tr>
@@ -1244,6 +1278,9 @@ export default function ProxyLogs() {
                         {typeof log.estimatedCost === 'number' ? `$${log.estimatedCost.toFixed(6)}` : '-'}
                       </td>
                       <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
+                        {formatAccountBalance(log.accountBalance)}
+                      </td>
+                      <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
                         {typeof log.cacheSavedCost === 'number' && log.cacheSavedCost > 0 ? `$${log.cacheSavedCost.toFixed(6)}` : '-'}
                       </td>
                       <td style={{ textAlign: 'center' }}>
@@ -1256,7 +1293,7 @@ export default function ProxyLogs() {
                     </tr>
                     {expanded === log.id && (
                       <tr style={{ background: 'var(--color-bg)' }}>
-                        <td colSpan={12} style={{ padding: 0 }}>
+                        <td colSpan={13} style={{ padding: 0 }}>
                           <div className="anim-collapse is-open">
                             <div className="anim-collapse-inner">
                               <div className="animate-fade-in" style={{
@@ -1279,8 +1316,9 @@ export default function ProxyLogs() {
                                       ，用时: <strong style={{ color: latencyColor(detailLog.latencyMs) }}>{formatLatency(detailLog.latencyMs)}</strong>
                                       {detail && (
                                         <>
-                                          ，站点: <strong style={{ color: 'var(--color-text-primary)' }}>{detailLog.siteName || '未知站点'}</strong>
-                                          ，账号: <strong style={{ color: 'var(--color-text-primary)' }}>{detailLog.username || '未知账号'}</strong>
+                                          ，站点: <strong style={{ color: 'var(--color-text-primary)' }}>{resolveProxyLogSiteDetailLabel(detailLog)}</strong>
+                                          ，账号: <strong style={{ color: 'var(--color-text-primary)' }}>{resolveProxyLogAccountDetailLabel(detailLog)}</strong>
+                                          ，余额: <strong style={{ color: 'var(--color-text-primary)' }}>{formatAccountBalance(detailLog.accountBalance)}</strong>
                                         </>
                                       )}
                                       {isNonGenerationSuccess(detailLog) && (
@@ -1358,13 +1396,13 @@ export default function ProxyLogs() {
 
                                 <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                                   <span style={{ fontWeight: 600, color: 'var(--color-primary)', flexShrink: 0 }}>上游请求路径</span>
-                                  {detail && pathMeta.upstreamPath ? (
+                                  {detail && resolveProxyLogUpstreamPathLabel(detailLog, pathMeta.upstreamPath) ? (
                                     <code style={{
                                       fontFamily: 'var(--font-mono)', fontSize: 12,
                                       background: 'var(--color-bg-card)', padding: '1px 8px', borderRadius: 4,
                                       border: '1px solid var(--color-border-light)',
                                     }}>
-                                      {pathMeta.upstreamPath}
+                                      {resolveProxyLogUpstreamPathLabel(detailLog, pathMeta.upstreamPath)}
                                     </code>
                                   ) : (
                                     <span style={{ color: 'var(--color-text-muted)' }}>未记录</span>

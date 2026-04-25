@@ -62,6 +62,7 @@ function buildListResponse(overrides?: Partial<{
         estimatedCost: 1.23,
         errorMessage: 'downstream: /v1/chat upstream: /api/chat',
         username: 'tester',
+        accountBalance: 12.34,
         siteName: 'main-site',
         siteUrl: 'https://main-site.example.com',
         clientFamily: 'codex',
@@ -141,6 +142,7 @@ describe('ProxyLogs server-driven page', () => {
       estimatedCost: 1.23,
       errorMessage: 'downstream: /v1/chat upstream: /api/chat',
       username: 'tester',
+      accountBalance: 12.34,
       siteName: 'main-site',
       siteUrl: 'https://main-site.example.com',
       clientFamily: 'codex',
@@ -216,6 +218,8 @@ describe('ProxyLogs server-driven page', () => {
       expect(text).toContain('Cherry Studio');
       expect(text).toContain('Codex');
       expect(text).toContain('推测');
+      expect(text).toContain('余额');
+      expect(text).toContain('$12.34');
       expect(text).toContain('下游 Key: 移动端灰度');
     } finally {
       root?.unmount();
@@ -319,6 +323,95 @@ describe('ProxyLogs server-driven page', () => {
       expect(text).toContain('缓存命中');
       expect(text).toContain('旧缓存兜底');
       expect(text).not.toContain('>-<');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('labels no-channel failures as selection failures instead of unknown upstreams', async () => {
+    apiMock.getProxyLogs.mockResolvedValue(buildListResponse({
+      items: [
+        {
+          id: 301,
+          createdAt: '2026-03-09 16:10:00',
+          modelRequested: 'gpt-5.5',
+          modelActual: null,
+          status: 'failed',
+          latencyMs: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          retryCount: 0,
+          estimatedCost: 0,
+          errorMessage: '[downstream:/v1/chat/completions] No available channels for this model',
+          accountId: null,
+          username: null,
+          siteId: null,
+          siteName: null,
+          siteUrl: null,
+          clientFamily: 'generic',
+        },
+      ],
+      total: 1,
+      summary: {
+        totalCount: 1,
+        successCount: 0,
+        failedCount: 1,
+        totalCost: 0,
+        totalTokensAll: 0,
+      },
+    }));
+    apiMock.getProxyLogDetail.mockResolvedValue({
+      id: 301,
+      createdAt: '2026-03-09 16:10:00',
+      modelRequested: 'gpt-5.5',
+      modelActual: null,
+      status: 'failed',
+      latencyMs: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      retryCount: 0,
+      estimatedCost: 0,
+      errorMessage: '[downstream:/v1/chat/completions] No available channels for this model',
+      accountId: null,
+      username: null,
+      siteId: null,
+      siteName: null,
+      siteUrl: null,
+      clientFamily: 'generic',
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const row = root!.root.find((node) => (
+        node.type === 'tr' && node.props['data-testid'] === 'proxy-log-row-301'
+      ));
+      expect(collectText(row)).toContain('未选出通道');
+
+      await act(async () => {
+        row.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root!.root);
+      expect(text).toContain('站点: 未请求上游');
+      expect(text).toContain('账号: 未分配账号');
+      expect(text).toContain('上游请求路径未请求上游');
+      expect(text).not.toContain('站点: 未知站点');
+      expect(text).not.toContain('账号: 未知账号');
     } finally {
       root?.unmount();
     }
