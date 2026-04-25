@@ -169,6 +169,13 @@
       "when": 1775950000000,
       "tag": "0024_proxy_logs_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1777084866249,
+      "tag": "0025_downstream_key_exclusions",
+      "breakpoints": true
     }
   ]
 }

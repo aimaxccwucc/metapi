@@ -3240,6 +3240,28 @@ function buildExcludedSiteIdsFromMatch(
   return new Set<number>(seed);
 }
 
+function buildDownstreamCredentialRefs(candidate: RouteChannelCandidate): string[] {
+  const refs = [
+    `channel:${candidate.channel.id}`,
+    `account:${candidate.account.id}`,
+    `site:${candidate.site.id}`,
+  ];
+  if (candidate.token?.id) refs.push(`token:${candidate.token.id}`);
+  const username = String(candidate.account.username || '').trim().toLowerCase();
+  if (username) refs.push(`site:${candidate.site.id}:user:${username}`);
+  return refs;
+}
+
+function isCandidateExcludedByDownstreamCredentialRef(
+  candidate: RouteChannelCandidate,
+  downstreamPolicy?: DownstreamRoutingPolicy | null,
+): boolean {
+  const excludedRefs = downstreamPolicy?.excludedCredentialRefs ?? [];
+  if (excludedRefs.length === 0) return false;
+  const candidateRefs = new Set(buildDownstreamCredentialRefs(candidate));
+  return excludedRefs.some((ref) => candidateRefs.has(String(ref || '').trim().toLowerCase()));
+}
+
 function getChannelPersistedSuccessAtMs(
   channel: Pick<ChannelRow, 'lastUsedAt' | 'successCount'>,
 ): number | null {
@@ -4111,6 +4133,7 @@ type PricingReferenceRefreshOptions = {
 
 type CandidateEligibilityOptions = {
   requestedModel: string;
+  downstreamPolicy?: DownstreamRoutingPolicy;
   bypassSourceModelCheck?: boolean;
   excludeChannelIds?: number[];
   excludeSiteIds?: ReadonlySet<number>;
@@ -4319,7 +4342,7 @@ function buildVisibleEnabledRoutes(routes: RouteRow[]): RouteRow[] {
     if (isExplicitGroupRoute(route)) {
       return normalizeRouteDisplayName(route.displayName).length > 0;
     }
-    return hasCustomDisplayName(route);
+    return hasCustomDisplayName(route) || isExactRouteModelPattern(route.modelPattern);
   });
 }
 
@@ -4971,6 +4994,7 @@ export class TokenRouter {
       );
       const reasonParts = this.getCandidateEligibilityReasons(row, {
         requestedModel,
+        downstreamPolicy,
         bypassSourceModelCheck,
         excludeChannelIds,
         excludeSiteIds: effectiveExcludeSiteIds,
@@ -6003,6 +6027,7 @@ export class TokenRouter {
       );
       const reasons = this.getCandidateEligibilityReasons(candidate, {
         requestedModel,
+        downstreamPolicy,
         bypassSourceModelCheck,
         excludeChannelIds,
         excludeSiteIds: effectiveExcludeSiteIds,
@@ -6394,6 +6419,14 @@ export class TokenRouter {
 
     if (excludeSiteIds.has(candidate.site.id)) {
       reasonParts.push('当前请求站点已失败');
+    }
+
+    if ((options.downstreamPolicy?.excludedSiteIds ?? []).includes(candidate.site.id)) {
+      reasonParts.push('下游项目排除站点');
+    }
+
+    if (isCandidateExcludedByDownstreamCredentialRef(candidate, options.downstreamPolicy)) {
+      reasonParts.push('下游项目排除凭证');
     }
 
     const tokenValue = this.resolveChannelTokenValue(candidate);

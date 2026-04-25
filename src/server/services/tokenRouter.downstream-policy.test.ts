@@ -102,7 +102,7 @@ describe('TokenRouter downstream policy', () => {
     expect(blockedPick).toBeNull();
   });
 
-  it('restricts proxy selection to public routes when publicRoutesOnly is enabled', async () => {
+  it('allows exact pattern routes on proxy surface but keeps wildcard routes internal', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'site-public-only',
       url: 'https://public-only.example.com',
@@ -123,8 +123,22 @@ describe('TokenRouter downstream policy', () => {
       enabled: true,
     }).returning().get();
 
+    const wildcardRoute = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-*',
+      enabled: true,
+    }).returning().get();
+
     await db.insert(schema.routeChannels).values({
       routeId: exactRoute.id,
+      accountId: account.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: wildcardRoute.id,
       accountId: account.id,
       tokenId: null,
       priority: 0,
@@ -141,9 +155,16 @@ describe('TokenRouter downstream policy', () => {
       siteWeightMultipliers: {},
       publicRoutesOnly: true,
     });
+    const wildcardOnlyPick = await router.selectChannel('gpt-hidden-model', {
+      allowedRouteIds: [],
+      supportedModels: [],
+      siteWeightMultipliers: {},
+      publicRoutesOnly: true,
+    });
 
     expect(internalPick).toBeTruthy();
-    expect(proxyPick).toBeNull();
+    expect(proxyPick?.channel.routeId).toBe(exactRoute.id);
+    expect(wildcardOnlyPick).toBeNull();
   });
 
   it('keeps explicit-group routes available for proxy selection when publicRoutesOnly is enabled', async () => {
@@ -406,6 +427,89 @@ describe('TokenRouter downstream policy', () => {
     expect(lowCandidate).toBeTruthy();
     // combined multiplier: high=3*0.5=1.5, low=1*1=1
     expect((highCandidate?.probability || 0)).toBeGreaterThan(lowCandidate?.probability || 0);
+  });
+
+  it('excludes sites and credentials from downstream project policy', async () => {
+    const blockedSite = await db.insert(schema.sites).values({
+      name: 'blocked-site',
+      url: 'https://blocked.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const allowedSite = await db.insert(schema.sites).values({
+      name: 'allowed-site',
+      url: 'https://allowed.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const blockedAccount = await db.insert(schema.accounts).values({
+      siteId: blockedSite.id,
+      username: 'blocked-user',
+      accessToken: 'access-blocked',
+      apiToken: 'sk-blocked',
+      status: 'active',
+    }).returning().get();
+
+    const allowedAccount = await db.insert(schema.accounts).values({
+      siteId: allowedSite.id,
+      username: 'allowed-user',
+      accessToken: 'access-allowed',
+      apiToken: 'sk-allowed',
+      status: 'active',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-project-policy',
+      enabled: true,
+    }).returning().get();
+
+    const blockedChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: blockedAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const allowedChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: allowedAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    const siteExcludedPick = await router.selectChannel('gpt-project-policy', {
+      allowedRouteIds: [],
+      supportedModels: [],
+      siteWeightMultipliers: {},
+      excludedSiteIds: [blockedSite.id],
+    });
+    const explanation = await router.explainSelectionForRoute(route.id, 'gpt-project-policy', [], {
+      allowedRouteIds: [],
+      supportedModels: [],
+      siteWeightMultipliers: {},
+      excludedSiteIds: [allowedSite.id],
+      excludedCredentialRefs: [`channel:${blockedChannel.id}`],
+    });
+    const allExcludedPick = await router.selectChannel('gpt-project-policy', {
+      allowedRouteIds: [],
+      supportedModels: [],
+      siteWeightMultipliers: {},
+      excludedSiteIds: [blockedSite.id],
+      excludedCredentialRefs: [`account:${allowedAccount.id}`],
+    });
+
+    expect(siteExcludedPick?.channel.id).toBe(allowedChannel.id);
+    expect(allExcludedPick).toBeNull();
+    const explanationReasons = explanation.candidates.map((candidate) => candidate.reason).join('\n');
+    expect(explanationReasons).toContain('下游项目排除凭证');
+    expect(explanationReasons).toContain('下游项目排除站点');
   });
 
   it('supports union semantics between supportedModels and allowedRouteIds', async () => {

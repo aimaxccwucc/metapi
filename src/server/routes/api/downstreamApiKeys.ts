@@ -155,6 +155,7 @@ function resolveBucketTsExpression(bucketSeconds: number) {
 async function validatePolicyReferences(input: {
   allowedRouteIds: number[];
   siteWeightMultipliers: Record<number, number>;
+  excludedSiteIds?: number[];
 }): Promise<string | null> {
   const routeIds = input.allowedRouteIds || [];
   if (routeIds.length > 0) {
@@ -169,10 +170,13 @@ async function validatePolicyReferences(input: {
     }
   }
 
-  const siteIds = Object.keys(input.siteWeightMultipliers || {})
+  const siteIds = Array.from(new Set([
+    ...Object.keys(input.siteWeightMultipliers || {})
     .map((key) => Number(key))
     .filter((value) => Number.isFinite(value) && value > 0)
-    .map((value) => Math.trunc(value));
+      .map((value) => Math.trunc(value)),
+    ...(input.excludedSiteIds || []),
+  ]));
   if (siteIds.length > 0) {
     const rows = await db.select({ id: schema.sites.id })
       .from(schema.sites)
@@ -181,7 +185,7 @@ async function validatePolicyReferences(input: {
     const existingIds = new Set(rows.map((row) => Number(row.id)));
     const missingIds = siteIds.filter((id) => !existingIds.has(id));
     if (missingIds.length > 0) {
-      return `siteWeightMultipliers 包含不存在的站点: ${missingIds.join(', ')}`;
+      return `站点策略包含不存在的站点: ${missingIds.join(', ')}`;
     }
   }
 
@@ -454,6 +458,8 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       supportedModels?: unknown;
       allowedRouteIds?: unknown;
       siteWeightMultipliers?: unknown;
+      excludedSiteIds?: unknown;
+      excludedCredentialRefs?: unknown;
     };
   }>('/api/downstream-keys', async (request, reply) => {
     let normalized: ReturnType<typeof normalizeDownstreamApiKeyPayload>;
@@ -475,6 +481,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     const policyRefError = await validatePolicyReferences({
       allowedRouteIds: normalized.allowedRouteIds,
       siteWeightMultipliers: normalized.siteWeightMultipliers,
+      excludedSiteIds: normalized.excludedSiteIds,
     });
     if (policyRefError) {
       return reply.code(400).send({ success: false, message: policyRefError });
@@ -498,6 +505,8 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
         supportedModels: toPersistenceJson(normalized.supportedModels),
         allowedRouteIds: toPersistenceJson(normalized.allowedRouteIds),
         siteWeightMultipliers: toPersistenceJson(normalized.siteWeightMultipliers),
+        excludedSiteIds: toPersistenceJson(normalized.excludedSiteIds),
+        excludedCredentialRefs: toPersistenceJson(normalized.excludedCredentialRefs),
         createdAt: nowIso,
         updatedAt: nowIso,
       }).run();
@@ -540,6 +549,8 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
       supportedModels?: unknown;
       allowedRouteIds?: unknown;
       siteWeightMultipliers?: unknown;
+      excludedSiteIds?: unknown;
+      excludedCredentialRefs?: unknown;
     };
   }>('/api/downstream-keys/:id', async (request, reply) => {
     const id = parseRouteId(request.params.id);
@@ -571,6 +582,8 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
         supportedModels: request.body?.supportedModels ?? existingView.supportedModels,
         allowedRouteIds: request.body?.allowedRouteIds ?? existingView.allowedRouteIds,
         siteWeightMultipliers: request.body?.siteWeightMultipliers ?? existingView.siteWeightMultipliers,
+        excludedSiteIds: request.body?.excludedSiteIds ?? existingView.excludedSiteIds,
+        excludedCredentialRefs: request.body?.excludedCredentialRefs ?? existingView.excludedCredentialRefs,
       });
     } catch (error: unknown) {
       return reply.code(400).send({ success: false, message: (error as Error)?.message || '参数无效' });
@@ -588,6 +601,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     const policyRefError = await validatePolicyReferences({
       allowedRouteIds: normalized.allowedRouteIds,
       siteWeightMultipliers: normalized.siteWeightMultipliers,
+      excludedSiteIds: normalized.excludedSiteIds,
     });
     if (policyRefError) {
       return reply.code(400).send({ success: false, message: policyRefError });
@@ -609,6 +623,8 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
         supportedModels: toPersistenceJson(normalized.supportedModels),
         allowedRouteIds: toPersistenceJson(normalized.allowedRouteIds),
         siteWeightMultipliers: toPersistenceJson(normalized.siteWeightMultipliers),
+        excludedSiteIds: toPersistenceJson(normalized.excludedSiteIds),
+        excludedCredentialRefs: toPersistenceJson(normalized.excludedCredentialRefs),
         updatedAt: nowIso,
       }).where(eq(schema.downstreamApiKeys.id, id)).run();
 

@@ -355,6 +355,18 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "excluded_site_ids": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "excluded_credential_refs": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },
@@ -1835,6 +1847,14 @@
       "unique": false
     },
     {
+      "name": "proxy_logs_channel_id_idx",
+      "table": "proxy_logs",
+      "columns": [
+        "channel_id"
+      ],
+      "unique": false
+    },
+    {
       "name": "proxy_logs_client_app_id_created_at_idx",
       "table": "proxy_logs",
       "columns": [
@@ -1874,6 +1894,15 @@
       "table": "proxy_logs",
       "columns": [
         "model_actual",
+        "created_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "proxy_logs_model_requested_created_at_idx",
+      "table": "proxy_logs",
+      "columns": [
+        "model_requested",
         "created_at"
       ],
       "unique": false

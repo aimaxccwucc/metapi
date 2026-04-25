@@ -75,6 +75,8 @@ const LEGACY_COMPAT_COLUMNS = new Set([
   'proxy_video_tasks.last_polled_at',
   'downstream_api_keys.group_name',
   'downstream_api_keys.tags',
+  'downstream_api_keys.excluded_site_ids',
+  'downstream_api_keys.excluded_credential_refs',
   'proxy_logs.billing_details',
   'proxy_logs.cache_status',
   'proxy_logs.cache_saved_cost',

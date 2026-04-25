@@ -1,4 +1,2 @@
-ALTER TABLE "sites" ADD COLUMN "auto_checkin_policy" TEXT NOT NULL DEFAULT 'normal';
-ALTER TABLE "sites" ADD COLUMN "auto_checkin_reason" TEXT;
-ALTER TABLE "sites" ADD COLUMN "auto_checkin_updated_at" TEXT;
-CREATE INDEX "sites_auto_checkin_policy_idx" ON "sites" ("auto_checkin_policy");
+ALTER TABLE "downstream_api_keys" ADD COLUMN "excluded_site_ids" TEXT;
+ALTER TABLE "downstream_api_keys" ADD COLUMN "excluded_credential_refs" TEXT;
