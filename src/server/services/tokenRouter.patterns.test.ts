@@ -82,7 +82,7 @@ describe('TokenRouter patterns and model mapping', () => {
   async function createRouteWithSingleChannel(
     modelPattern: string,
     modelMapping?: string,
-    options?: { displayName?: string; sourceModel?: string | null },
+    options?: { displayName?: string; sourceModel?: string | null; manualOverride?: boolean },
   ) {
     const site = await createSite('pattern-site');
     const account = await createAccount(site.id, 'pattern-user');
@@ -100,6 +100,7 @@ describe('TokenRouter patterns and model mapping', () => {
       priority: 0,
       weight: 10,
       enabled: true,
+      manualOverride: options?.manualOverride ?? false,
     }).returning().get();
     return { route, channel };
   }
@@ -212,6 +213,51 @@ describe('TokenRouter patterns and model mapping', () => {
     expect(selected?.channel.id).toBe(exact.channel.id);
     expect(selected?.actualModel).toBe('claude-opus-4-6');
     expect(decision.actualModel).toBe('claude-opus-4-6');
+  });
+
+  it('allows manually pinned heterogeneous source models on exact routes', async () => {
+    const manual = await createRouteWithSingleChannel(
+      'gpt-5.5',
+      undefined,
+      {
+        sourceModel: 'glm-5.1',
+        manualOverride: true,
+      },
+    );
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('gpt-5.5');
+    const decision = await router.explainSelection('gpt-5.5');
+    const candidate = decision.candidates.find((item) => item.channelId === manual.channel.id);
+
+    expect(selected).toBeTruthy();
+    expect(selected?.channel.id).toBe(manual.channel.id);
+    expect(selected?.actualModel).toBe('glm-5.1');
+    expect(decision.actualModel).toBe('glm-5.1');
+    expect(candidate?.eligible).toBe(true);
+    expect(candidate?.reason || '').not.toContain('来源模型不匹配');
+    expect(decision.summary).toContain('实际转发模型：glm-5.1');
+  });
+
+  it('still filters automatically discovered heterogeneous source models on exact routes', async () => {
+    const auto = await createRouteWithSingleChannel(
+      'gpt-5.5',
+      undefined,
+      {
+        sourceModel: 'glm-5.1',
+        manualOverride: false,
+      },
+    );
+    const router = new TokenRouter();
+
+    const decision = await router.explainSelectionForRoute(auto.route.id, 'gpt-5.5');
+    const selected = await router.previewSelectedChannel('gpt-5.5');
+    const candidate = decision.candidates.find((item) => item.channelId === auto.channel.id);
+
+    expect(selected).toBeNull();
+    expect(decision.selectedChannelId).toBeUndefined();
+    expect(candidate?.eligible).toBe(false);
+    expect(candidate?.reason || '').toContain('来源模型不匹配=glm-5.1');
   });
 
   it('prefers an explicit-group exposed model over a legacy exact pattern route', async () => {

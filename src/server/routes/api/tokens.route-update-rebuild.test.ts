@@ -430,6 +430,34 @@ describe('PUT /api/routes/:id route rebuild', () => {
     expect(stored?.manualOverride).toBe(true);
   });
 
+  it('allows a manual exact-route channel when the token supports the provided source model', async () => {
+    const candidate = await seedAccountWithToken('glm-5.1');
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.5',
+      enabled: true,
+    }).returning().get();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/routes/${route.id}/channels`,
+      payload: {
+        accountId: candidate.account.id,
+        tokenId: candidate.token.id,
+        sourceModel: 'glm-5.1',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      routeId: route.id,
+      accountId: candidate.account.id,
+      tokenId: candidate.token.id,
+      sourceModel: 'glm-5.1',
+      manualOverride: true,
+    });
+  });
+
   it('creates account-direct automatic channels for exact routes backed by apikey model availability', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'direct-site',

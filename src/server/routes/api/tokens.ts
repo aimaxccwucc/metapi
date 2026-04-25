@@ -2535,7 +2535,8 @@ export async function tokensRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: '令牌不存在或不属于当前账号' });
     }
 
-    if (isExactModelPattern(route.modelPattern) && effectiveTokenId && !await tokenSupportsModel(effectiveTokenId, route.modelPattern)) {
+    const effectiveSourceModel = sourceModel || (isExactModelPattern(route.modelPattern) ? route.modelPattern.trim() : '');
+    if (effectiveSourceModel && effectiveTokenId && !await tokenSupportsModel(effectiveTokenId, effectiveSourceModel)) {
       return reply.code(400).send({ success: false, message: '该令牌不支持当前模型' });
     }
 
@@ -2633,7 +2634,10 @@ export async function tokensRoutes(app: FastifyInstance) {
       ? (channel.tokenId ?? await getDefaultTokenId(channel.accountId))
       : (body.tokenId === null ? await getDefaultTokenId(channel.accountId) : Number(body.tokenId));
 
-    if (isExactModelPattern(route.modelPattern) && nextTokenId && !await tokenSupportsModel(nextTokenId, route.modelPattern)) {
+    const nextSourceModel = body.sourceModel === undefined
+      ? ((channel.sourceModel || '').trim() || (isExactModelPattern(route.modelPattern) ? route.modelPattern.trim() : ''))
+      : (body.sourceModel === null ? '' : String(body.sourceModel).trim());
+    if (nextSourceModel && nextTokenId && !await tokenSupportsModel(nextTokenId, nextSourceModel)) {
       return reply.code(400).send({ success: false, message: '该令牌不支持当前模型' });
     }
 

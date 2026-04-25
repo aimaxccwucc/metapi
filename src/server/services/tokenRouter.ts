@@ -4498,14 +4498,35 @@ function normalizeChannelSourceModel(channelSourceModel: string | null | undefin
   return (channelSourceModel || '').trim();
 }
 
+function shouldUseChannelSourceModelForCandidate(
+  candidate: RouteChannelCandidate,
+  requestedByDisplayName: boolean,
+): boolean {
+  const sourceModel = normalizeChannelSourceModel(candidate.channel.sourceModel);
+  if (!sourceModel) return false;
+  if (requestedByDisplayName) return true;
+  return candidate.channel.manualOverride === true;
+}
+
+function resolveRuntimeModelForCandidate(
+  candidate: RouteChannelCandidate,
+  mappedModel: string,
+  requestedByDisplayName: boolean,
+): string {
+  if (shouldUseChannelSourceModelForCandidate(candidate, requestedByDisplayName)) {
+    return normalizeChannelSourceModel(candidate.channel.sourceModel);
+  }
+  return mappedModel;
+}
+
 function resolveActualModelForSelectedChannel(
   requestedModel: string,
   route: RouteRow,
   mappedModel: string,
-  channelSourceModel: string | null | undefined,
+  channel: Pick<ChannelRow, 'sourceModel' | 'manualOverride'>,
 ): string {
-  const sourceModel = normalizeChannelSourceModel(channelSourceModel);
-  if (isRouteDisplayNameMatch(requestedModel, route.displayName) && sourceModel) {
+  const sourceModel = normalizeChannelSourceModel(channel.sourceModel);
+  if (sourceModel && (channel.manualOverride === true || isRouteDisplayNameMatch(requestedModel, route.displayName))) {
     return sourceModel;
   }
   return mappedModel;
@@ -4925,9 +4946,12 @@ export class TokenRouter {
     const useChannelSourceModelForCost = (options.useChannelSourceModelForCost ?? false) || requestedByDisplayName;
     const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
     const routeStrategy = resolveRouteStrategy(match.route);
-    const runtimeModelResolver = requestedByDisplayName
-      ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
-      : mappedModel;
+    const runtimeModelResolver = (candidate: RouteChannelCandidate) => (
+      resolveRuntimeModelForCandidate(candidate, mappedModel, requestedByDisplayName)
+    );
+    const sourceModelRuntimeRouting = match.channels.some((candidate) => (
+      shouldUseChannelSourceModelForCandidate(candidate, requestedByDisplayName)
+    ));
     const cachedNowMs = Date.now();
     let persistedUnavailableModels: PersistedUnavailableModelSnapshot;
     if (unavailableModelsCacheData && cachedNowMs < unavailableModelsCacheData.expireAtMs) {
@@ -4984,9 +5008,7 @@ export class TokenRouter {
     const candidateMap = new Map<number, RouteDecisionCandidate>();
 
     for (const row of match.channels) {
-      const runtimeModelName = typeof runtimeModelResolver === 'function'
-        ? runtimeModelResolver(row)
-        : runtimeModelResolver;
+      const runtimeModelName = runtimeModelResolver(row);
       const governanceBlock = findGovernanceBlockFromSnapshot(
         governanceSnapshot,
         row,
@@ -5176,9 +5198,7 @@ export class TokenRouter {
       }), runtimeModelResolver);
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawOrdered, runtimeModelResolver, nowMs);
       if (breakerFiltered.probeCandidate) {
-        const probeModelName = typeof runtimeModelResolver === 'function'
-          ? runtimeModelResolver(breakerFiltered.probeCandidate)
-          : runtimeModelResolver;
+        const probeModelName = runtimeModelResolver(breakerFiltered.probeCandidate);
         executeRuntimeHealthRecoveryProbe(
           breakerFiltered.probeCandidate,
           probeModelName,
@@ -5312,12 +5332,7 @@ export class TokenRouter {
       const selectedLabel = selectedChannel
         ? `${selectedChannel.username} @ ${selectedChannel.siteName} / ${selectedChannel.tokenName}`
         : `channel-${selected.channel.id}`;
-      const actualModel = resolveActualModelForSelectedChannel(
-        requestedModel,
-        match.route,
-        mappedModel,
-        selected.channel.sourceModel,
-      );
+      const actualModel = resolveActualModelForSelectedChannel(requestedModel, match.route, mappedModel, selected.channel);
       summary.push(`全局轮询：可用 ${ordered.length}，忽略优先级`);
       if (stickyPreference.stickyReason === 'reused' && stickyPreference.stickyBinding) {
         summary.push(`账号粘性复用 ${stickyPreference.stickyBinding.accountId}`);
@@ -5352,9 +5367,7 @@ export class TokenRouter {
 
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
       if (breakerFiltered.probeCandidate) {
-        const probeModelName = typeof runtimeModelResolver === 'function'
-          ? runtimeModelResolver(breakerFiltered.probeCandidate)
-          : runtimeModelResolver;
+        const probeModelName = runtimeModelResolver(breakerFiltered.probeCandidate);
         executeRuntimeHealthRecoveryProbe(
           breakerFiltered.probeCandidate,
           probeModelName,
@@ -5452,7 +5465,7 @@ export class TokenRouter {
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
         : candidateLayerSource;
-      const runtimeModelPartition = requestedByDisplayName && typeof runtimeModelResolver === 'function'
+      const runtimeModelPartition = sourceModelRuntimeRouting
         ? partitionPreferredSuccessfulRuntimeModelCandidates(candidateLayer, runtimeModelResolver, nowMs)
         : null;
       const effectiveCandidateLayer = runtimeModelPartition && runtimeModelPartition.source !== 'none'
@@ -5489,7 +5502,7 @@ export class TokenRouter {
 
       const weighted = this.calculateWeightedSelection(
         selectedPool.candidates,
-        useChannelSourceModelForCost ? runtimeModelResolver : mappedModel,
+        (useChannelSourceModelForCost || sourceModelRuntimeRouting) ? runtimeModelResolver : mappedModel,
         downstreamPolicy,
         nowMs,
         routeStrategy === 'stable_first' ? 'stable_first' : 'weighted',
@@ -5556,12 +5569,7 @@ export class TokenRouter {
     const selectedLabel = selectedChannel
       ? `${selectedChannel.username} @ ${selectedChannel.siteName} / ${selectedChannel.tokenName}`
       : `channel-${selected.channel.id}`;
-    const actualModel = resolveActualModelForSelectedChannel(
-      requestedModel,
-      match.route,
-      mappedModel,
-      selected.channel.sourceModel,
-    );
+    const actualModel = resolveActualModelForSelectedChannel(requestedModel, match.route, mappedModel, selected.channel);
     summary.push(`最终选择：${selectedLabel}（P${selectedPriority}）`);
     if (actualModel !== mappedModel) {
       summary.push(`实际转发模型：${actualModel}`);
@@ -5994,9 +6002,12 @@ export class TokenRouter {
     const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
     const bypassSourceModelCheck = requestedByDisplayName;
     const routeStrategy = resolveRouteStrategy(match.route);
-    const runtimeModelResolver = requestedByDisplayName
-      ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
-      : mappedModel;
+    const runtimeModelResolver = (candidate: RouteChannelCandidate) => (
+      resolveRuntimeModelForCandidate(candidate, mappedModel, requestedByDisplayName)
+    );
+    const sourceModelRuntimeRouting = match.channels.some((candidate) => (
+      shouldUseChannelSourceModelForCandidate(candidate, requestedByDisplayName)
+    ));
     const cachedNowMs = Date.now();
     let persistedUnavailableModels: PersistedUnavailableModelSnapshot;
     if (unavailableModelsCacheData && cachedNowMs < unavailableModelsCacheData.expireAtMs) {
@@ -6017,9 +6028,7 @@ export class TokenRouter {
     const nowMs = Date.now();
     const effectiveExcludeSiteIds = buildExcludedSiteIdsFromMatch(match, excludeChannelIds, excludeSiteIds);
     const evaluatedCandidates = match.channels.map((candidate) => {
-      const runtimeModelName = typeof runtimeModelResolver === 'function'
-        ? runtimeModelResolver(candidate)
-        : runtimeModelResolver;
+      const runtimeModelName = runtimeModelResolver(candidate);
       const governanceBlock = findGovernanceBlockFromSnapshot(
         governanceSnapshot,
         candidate,
@@ -6078,11 +6087,7 @@ export class TokenRouter {
       const selected = this.selectWithModelCircuitGuard(
         selectionPool,
         (items) => this.selectRoundRobinCandidate(items, runtimeModelResolver),
-        (candidate) => (
-          typeof runtimeModelResolver === 'function'
-            ? runtimeModelResolver(candidate)
-            : runtimeModelResolver
-        ),
+        runtimeModelResolver,
         nowMs,
         recordSelection,
       );
@@ -6098,12 +6103,7 @@ export class TokenRouter {
         bindStickySessionToCandidate(downstreamPolicy.stickySessionKey, selected, nowMs, leaseMs);
       }
 
-      const actualModel = resolveActualModelForSelectedChannel(
-        requestedModel,
-        match.route,
-        mappedModel,
-        selected.channel.sourceModel,
-      );
+      const actualModel = resolveActualModelForSelectedChannel(requestedModel, match.route, mappedModel, selected.channel);
 
       return {
         ...selected,
@@ -6147,7 +6147,7 @@ export class TokenRouter {
       const candidateLayer = leasePartition.preferred.length > 0
         ? leasePartition.preferred
         : candidateLayerSource;
-      const runtimeModelPartition = requestedByDisplayName && typeof runtimeModelResolver === 'function'
+      const runtimeModelPartition = sourceModelRuntimeRouting
         ? partitionPreferredSuccessfulRuntimeModelCandidates(candidateLayer, runtimeModelResolver, nowMs)
         : null;
       const effectiveCandidateLayer = runtimeModelPartition && runtimeModelPartition.source !== 'none'
@@ -6167,15 +6167,11 @@ export class TokenRouter {
           selectedPool.candidates,
           (items) => this.stableFirstSelect(
             items,
-            requestedByDisplayName ? runtimeModelResolver : mappedModel,
+            runtimeModelResolver,
             downstreamPolicy,
             nowMs,
           ),
-          (candidate) => (
-            requestedByDisplayName && typeof runtimeModelResolver === 'function'
-              ? runtimeModelResolver(candidate)
-              : mappedModel
-          ),
+          runtimeModelResolver,
           nowMs,
           recordSelection,
         )
@@ -6183,15 +6179,11 @@ export class TokenRouter {
           selectedPool.candidates,
           (items) => this.weightedRandomSelect(
             items,
-            requestedByDisplayName ? runtimeModelResolver : mappedModel,
+            runtimeModelResolver,
             downstreamPolicy,
             nowMs,
           ),
-          (candidate) => (
-            requestedByDisplayName && typeof runtimeModelResolver === 'function'
-              ? runtimeModelResolver(candidate)
-              : mappedModel
-          ),
+          runtimeModelResolver,
           nowMs,
           recordSelection,
         );
@@ -6209,12 +6201,7 @@ export class TokenRouter {
         bindStickySessionToCandidate(downstreamPolicy.stickySessionKey, selected, nowMs, leaseMs);
       }
 
-      const actualModel = resolveActualModelForSelectedChannel(
-        requestedModel,
-        match.route,
-        mappedModel,
-        selected.channel.sourceModel,
-      );
+      const actualModel = resolveActualModelForSelectedChannel(requestedModel, match.route, mappedModel, selected.channel);
 
       return {
         ...selected,
@@ -6367,7 +6354,9 @@ export class TokenRouter {
     const nowIso = options.nowIso ?? new Date().toISOString();
     const nowMs = options.nowMs ?? Date.now();
 
-    if (!bypassSourceModelCheck && !channelSupportsRequestedModel(candidate.channel.sourceModel, options.requestedModel)) {
+    const manualSourceModelOverride = candidate.channel.manualOverride === true
+      && !!normalizeChannelSourceModel(candidate.channel.sourceModel);
+    if (!bypassSourceModelCheck && !manualSourceModelOverride && !channelSupportsRequestedModel(candidate.channel.sourceModel, options.requestedModel)) {
       reasonParts.push(`来源模型不匹配=${candidate.channel.sourceModel || ''}`);
     }
 
