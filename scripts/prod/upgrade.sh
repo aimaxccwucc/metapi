@@ -315,7 +315,15 @@ rollback() {
   echo "[rollback] Done" >&2
 }
 
-trap 'rollback' ERR
+UPGRADE_SUCCESS=0
+on_exit() {
+  local status=$?
+  if [ "$status" -ne 0 ] && [ "$UPGRADE_SUCCESS" -ne 1 ]; then
+    rollback
+  fi
+}
+
+trap 'on_exit' EXIT
 
 echo "[3/8] Pre-upgrade health checks"
 health_check "$HOST_URL" "host"
@@ -340,7 +348,8 @@ docker compose ps "$SERVICE_NAME"
 docker inspect "$CONTAINER_NAME" --format '{{.Id}} {{.Image}} {{.Config.Image}}'
 
 echo "[7/8] Mark upgrade as successful"
-trap - ERR
+UPGRADE_SUCCESS=1
+trap - EXIT
 echo "success=1" >>"$BACKUP_DIR/state.env"
 
 echo "[7.5/8] Prune old backups"
