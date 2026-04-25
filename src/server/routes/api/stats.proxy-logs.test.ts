@@ -162,6 +162,7 @@ describe('stats proxy logs routes', () => {
     expect(body.items[0]?.downstreamKeyGroupName).toBe('项目A');
     expect(body.items[0]?.downstreamKeyTags).toEqual(['VIP', '灰度']);
     expect(body.items[0]?.accountBalance).toBe(12.34);
+    expect(body.items[0]?.accountBalanceEstimated).toBe(12.14);
     expect(body.items[0]?.clientFamily).toBe('codex');
     expect(body.items[0]?.clientAppId).toBe(null);
     expect(body.items[0]?.clientAppName).toBe(null);
@@ -296,6 +297,7 @@ describe('stats proxy logs routes', () => {
       siteName: string | null;
       username: string | null;
       accountBalance: number | null;
+      accountBalanceEstimated: number | null;
       downstreamKeyName: string | null;
       downstreamKeyGroupName: string | null;
       downstreamKeyTags: string[];
@@ -310,6 +312,7 @@ describe('stats proxy logs routes', () => {
     expect(body.siteName).toBe('detail-site');
     expect(body.username).toBe('detail-user');
     expect(body.accountBalance).toBe(56.78);
+    expect(body.accountBalanceEstimated).toBe(56.66);
     expect(body.downstreamKeyName).toBe('detail-key');
     expect(body.downstreamKeyGroupName).toBe('测试项目');
     expect(body.downstreamKeyTags).toEqual(['回归', '日志']);

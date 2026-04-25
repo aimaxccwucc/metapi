@@ -63,6 +63,7 @@ function buildListResponse(overrides?: Partial<{
         errorMessage: 'downstream: /v1/chat upstream: /api/chat',
         username: 'tester',
         accountBalance: 12.34,
+        accountBalanceEstimated: 11.11,
         siteName: 'main-site',
         siteUrl: 'https://main-site.example.com',
         clientFamily: 'codex',
@@ -143,6 +144,7 @@ describe('ProxyLogs server-driven page', () => {
       errorMessage: 'downstream: /v1/chat upstream: /api/chat',
       username: 'tester',
       accountBalance: 12.34,
+      accountBalanceEstimated: 11.11,
       siteName: 'main-site',
       siteUrl: 'https://main-site.example.com',
       clientFamily: 'codex',
@@ -219,7 +221,7 @@ describe('ProxyLogs server-driven page', () => {
       expect(text).toContain('Codex');
       expect(text).toContain('推测');
       expect(text).toContain('余额');
-      expect(text).toContain('$12.34');
+      expect(text).toContain('$11.11');
       expect(text).toContain('下游 Key: 移动端灰度');
     } finally {
       root?.unmount();

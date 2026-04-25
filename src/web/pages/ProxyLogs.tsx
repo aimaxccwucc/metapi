@@ -26,6 +26,7 @@ type ProxyLogRenderItem = ProxyLogListItem & {
   billingDetails?: ProxyLogBillingDetails;
   username?: string | null;
   accountBalance?: number | null;
+  accountBalanceEstimated?: number | null;
   siteName?: string | null;
   siteUrl?: string | null;
   errorMessage?: string | null;
@@ -171,6 +172,13 @@ function formatCompactNumber(value: number, digits = 6) {
 function formatAccountBalance(value?: number | null) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
   return `$${value.toFixed(2)}`;
+}
+
+function resolveAccountBalanceForLog(log: ProxyLogRenderItem) {
+  if (typeof log.accountBalanceEstimated === 'number' && Number.isFinite(log.accountBalanceEstimated)) {
+    return log.accountBalanceEstimated;
+  }
+  return log.accountBalance;
 }
 
 function formatPerMillionPrice(value: number) {
@@ -1143,7 +1151,7 @@ export default function ProxyLogs() {
                     </div>
                     <div className="mobile-summary-metric">
                       <div className="mobile-summary-metric-label">余额</div>
-                      <div className="mobile-summary-metric-value">{formatAccountBalance(log.accountBalance)}</div>
+                      <div className="mobile-summary-metric-value">{formatAccountBalance(resolveAccountBalanceForLog(log))}</div>
                     </div>
                     <div className="mobile-summary-metric">
                       <div className="mobile-summary-metric-label">缓存节省</div>
@@ -1278,7 +1286,7 @@ export default function ProxyLogs() {
                         {typeof log.estimatedCost === 'number' ? `$${log.estimatedCost.toFixed(6)}` : '-'}
                       </td>
                       <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
-                        {formatAccountBalance(log.accountBalance)}
+                        {formatAccountBalance(resolveAccountBalanceForLog(log))}
                       </td>
                       <td style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: 'var(--color-text-secondary)' }}>
                         {typeof log.cacheSavedCost === 'number' && log.cacheSavedCost > 0 ? `$${log.cacheSavedCost.toFixed(6)}` : '-'}
@@ -1318,7 +1326,7 @@ export default function ProxyLogs() {
                                         <>
                                           ，站点: <strong style={{ color: 'var(--color-text-primary)' }}>{resolveProxyLogSiteDetailLabel(detailLog)}</strong>
                                           ，账号: <strong style={{ color: 'var(--color-text-primary)' }}>{resolveProxyLogAccountDetailLabel(detailLog)}</strong>
-                                          ，余额: <strong style={{ color: 'var(--color-text-primary)' }}>{formatAccountBalance(detailLog.accountBalance)}</strong>
+                                          ，余额: <strong style={{ color: 'var(--color-text-primary)' }}>{formatAccountBalance(resolveAccountBalanceForLog(detailLog))}</strong>
                                         </>
                                       )}
                                       {isNonGenerationSuccess(detailLog) && (

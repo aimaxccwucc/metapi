@@ -1038,6 +1038,7 @@ export type ProxyLogListItem = {
   retryCount: number;
   accountId?: number | null;
   accountBalance?: number | null;
+  accountBalanceEstimated?: number | null;
   siteId?: number | null;
   username?: string | null;
   siteName?: string | null;
