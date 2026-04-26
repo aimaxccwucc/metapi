@@ -79,6 +79,9 @@ const RETRYABLE_CHANNEL_LOCAL_PATTERNS: RegExp[] = [
   /unknown\s+parameter:\s*['"]tool_choice\.function['"]?/i,
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]\.name['"]?/i,
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]/i,
+  /unknown\s+variant\s+`developer`/i,
+  /expected\s+`user`\s+or\s+`assistant`/i,
+  /failed\s+to\s+deserialize.*messages\[\d+\]\.role/i,
 ];
 
 const NON_RETRYABLE_REQUEST_PATTERNS: RegExp[] = [
@@ -100,6 +103,9 @@ const RETRYABLE_UPSTREAM_COMPATIBILITY_400_PATTERNS: RegExp[] = [
   /blocked_invalid_request/i,
   /unknown\s+parameter:\s*['"]tool_choice\.function['"]?/i,
   /missing\s+required\s+parameter:\s*['"]?input\[\d+\]\.name['"]?/i,
+  /unknown\s+variant\s+`developer`/i,
+  /expected\s+`user`\s+or\s+`assistant`/i,
+  /failed\s+to\s+deserialize.*messages\[\d+\]\.role/i,
 ];
 
 const RETRYABLE_CHANNEL_LOCAL_404_PATTERNS: RegExp[] = [
@@ -124,6 +130,9 @@ const INVALID_CHANNEL_PATTERNS: RegExp[] = [
   /no\s+tool\s+output\s+found\s+for\s+function\s+call/i,
   /blocked_invalid_request/i,
   /unknown\s+parameter:\s*['"]tool_choice\.function['"]?/i,
+  /unknown\s+variant\s+`developer`/i,
+  /expected\s+`user`\s+or\s+`assistant`/i,
+  /failed\s+to\s+deserialize.*messages\[\d+\]\.role/i,
 ];
 
 const SITE_AVOID_INVALID_CHANNEL_PATTERNS: RegExp[] = [
@@ -138,6 +147,9 @@ const SITE_AVOID_INVALID_CHANNEL_PATTERNS: RegExp[] = [
   /all\s+credentials\s+for\s+model/i,
   /\bbad_response_status_code\b/i,
   /bad\s+response\s+status\s+code\s+400/i,
+  /unknown\s+variant\s+`developer`/i,
+  /expected\s+`user`\s+or\s+`assistant`/i,
+  /failed\s+to\s+deserialize.*messages\[\d+\]\.role/i,
 ];
 
 const UPSTREAM_GROUP_EMPTY_PATTERNS: RegExp[] = [
