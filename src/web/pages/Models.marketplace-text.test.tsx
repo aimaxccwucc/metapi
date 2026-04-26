@@ -726,6 +726,61 @@ describe('Models marketplace text', () => {
     }
   });
 
+
+  it('shows inconclusive marketplace probes as 未确认 instead of 不可用', async () => {
+    apiMock.testMarketplaceModelAvailability.mockResolvedValue({
+      available: false,
+      reason: '模型已在列表中，实时探测未得出确定结论（chat）：chat:200 empty content',
+      probeClassification: 'inconclusive',
+      detectionMethod: 'realtime_probe',
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const cards = root!.root.findAll((node) => (
+        node.type === 'div'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('model-card')
+        && typeof node.props.onClick === 'function'
+      ));
+      expect(cards.length).toBeGreaterThan(0);
+
+      await act(async () => {
+        cards[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const checkButtons = root!.root.findAll((node) => (
+        node.type === 'button'
+        && collectText(node).includes('检测')
+      ));
+      expect(checkButtons.length).toBeGreaterThan(0);
+
+      await act(async () => {
+        await checkButtons[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root!.root);
+      expect(text).toContain('未确认');
+      expect(text).toContain('chat:200 empty content');
+    } finally {
+      await unmountRoot(root);
+    }
+  });
+
   it('keeps diagnosis actions aligned across card and table detail views after auto key creation', async () => {
     apiMock.testMarketplaceModelAvailability.mockResolvedValue({
       available: true,

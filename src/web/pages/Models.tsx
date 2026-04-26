@@ -77,7 +77,7 @@ interface ModelsMarketplaceResponse {
 }
 
 type AvailabilityCheckState = {
-  status: 'available' | 'unavailable' | 'error';
+  status: 'available' | 'unavailable' | 'inconclusive' | 'error';
   message: string;
   detail?: string | null;
   latencyMs?: number;
@@ -632,11 +632,19 @@ export default function Models() {
           </button>
           {check ? (
             <span
-              className={`badge ${check.status === 'available' ? 'badge-success' : (check.status === 'unavailable' ? 'badge-warning' : 'badge-error')}`}
+              className={`badge ${check.status === 'available'
+                ? 'badge-success'
+                : (check.status === 'unavailable'
+                  ? 'badge-warning'
+                  : (check.status === 'inconclusive' ? 'badge-muted' : 'badge-error'))}`}
               style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}
               title={check.message}
             >
-              {check.status === 'available' ? tr('可用') : (check.status === 'unavailable' ? tr('不可用') : tr('失败'))}
+              {check.status === 'available'
+                ? tr('可用')
+                : (check.status === 'unavailable'
+                  ? tr('不可用')
+                  : (check.status === 'inconclusive' ? tr('未确认') : tr('失败')))}
               {check.latencyMs != null ? ` ${check.latencyMs}ms` : ''}
             </span>
           ) : null}
@@ -797,17 +805,23 @@ export default function Models() {
         autoKeyTokenId?: number | null;
       };
       const available = res?.available === true;
+      const probeClassification = typeof res?.probeClassification === 'string' ? res.probeClassification : null;
+      const status: AvailabilityCheckState['status'] = available
+        ? 'available'
+        : (probeClassification === 'credential' || probeClassification === 'model_unavailable'
+          ? 'unavailable'
+          : 'inconclusive');
       const state: AvailabilityCheckState = {
-        status: available ? 'available' : 'unavailable',
+        status,
         message: summarizeAvailabilityMessage({
           available,
           reason: res?.reason,
-          probeClassification: res?.probeClassification,
+          probeClassification,
           probeEndpoint: res?.probeEndpoint,
         }),
         detail: buildAvailabilityDetail({
           reason: res?.reason,
-          probeClassification: res?.probeClassification,
+          probeClassification,
           probeEndpoint: res?.probeEndpoint,
           detectionMethod: typeof res?.detectionMethod === 'string' ? res.detectionMethod : null,
           autoKeyCreated: res?.autoKeyCreated === true,
@@ -816,7 +830,7 @@ export default function Models() {
         }),
         latencyMs: Number.isFinite(res?.latencyMs as number) ? Number(res?.latencyMs) : undefined,
         probeEndpoint: typeof res?.probeEndpoint === 'string' ? res.probeEndpoint : null,
-        probeClassification: typeof res?.probeClassification === 'string' ? res.probeClassification : null,
+        probeClassification,
         detectionMethod: typeof res?.detectionMethod === 'string' ? res.detectionMethod : null,
         autoKeyCreated: res?.autoKeyCreated === true,
         autoKeyName: typeof res?.autoKeyName === 'string' ? res.autoKeyName : null,
