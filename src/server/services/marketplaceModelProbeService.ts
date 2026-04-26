@@ -13,7 +13,8 @@ const MARKETPLACE_MODEL_TEST_TIMEOUT_MS = 90_000;
 const MARKETPLACE_AUTO_KEY_TIMEOUT_MS = 15_000;
 const MARKETPLACE_MODEL_PROBE_TIMEOUT_MS = 30_000;
 const LOCAL_PROXY_CANARY_TIMEOUT_MS = 20_000;
-const DEFAULT_PROBE_PROMPT = 'Respond with exactly one sentence describing the weather today.';
+const DEFAULT_PROBE_PROMPT = 'OK';
+const FALLBACK_PROBE_PROMPTS = ['ping'];
 const DEFAULT_PROBE_MAX_OUTPUT_TOKENS = 8;
 
 type AccountRow = typeof schema.accounts.$inferSelect;
@@ -153,6 +154,16 @@ export function classifyProbeFailureMessage(message: string): MarketplaceProbeCl
     return 'credential';
   }
   return 'inconclusive';
+}
+
+function isProbeModerationBlock(message: string): boolean {
+  return /moderation|content\s*filter|safety|blocked\s+by|hashlinear_model|内容审核|安全策略|命中审核/i.test(String(message || ''));
+}
+
+function buildProbePromptAttempts(prompt?: string | null): string[] {
+  const normalized = String(prompt || '').trim();
+  if (normalized) return [normalized];
+  return [DEFAULT_PROBE_PROMPT, ...FALLBACK_PROBE_PROMPTS];
 }
 
 function resolveModelCredential(
@@ -448,75 +459,81 @@ export async function probeModelAvailabilityViaRealtimeCall(input: {
 }): Promise<MarketplaceProbeResult> {
   const { fetch } = await import('undici');
   const endpointOrder = buildProbeEndpoints(input.platform);
+  const promptAttempts = buildProbePromptAttempts(input.prompt);
   const attemptMessages: string[] = [];
 
   for (const endpoint of endpointOrder) {
-    const probe = buildProbeRequest(input.baseUrl, input.modelName, endpoint, {
-      prompt: input.prompt,
-      maxOutputTokens: input.maxOutputTokens,
-    });
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Accept: 'application/json,text/event-stream,text/plain,*/*',
-    };
-    if (endpoint === 'messages') {
-      headers['x-api-key'] = input.credential;
-      headers['anthropic-version'] = '2023-06-01';
-    } else {
-      headers.Authorization = `Bearer ${input.credential}`;
-    }
+    for (const prompt of promptAttempts) {
+      const probe = buildProbeRequest(input.baseUrl, input.modelName, endpoint, {
+        prompt,
+        maxOutputTokens: input.maxOutputTokens,
+      });
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Accept: 'application/json,text/event-stream,text/plain,*/*',
+      };
+      if (endpoint === 'messages') {
+        headers['x-api-key'] = input.credential;
+        headers['anthropic-version'] = '2023-06-01';
+      } else {
+        headers.Authorization = `Bearer ${input.credential}`;
+      }
 
-    try {
-      const response = await fetch(
-        probe.url,
-        await withSiteProxyRequestInit(probe.url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(probe.body),
-          signal: AbortSignal.timeout(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS),
-        }),
-      );
+      try {
+        const response = await fetch(
+          probe.url,
+          await withSiteProxyRequestInit(probe.url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(probe.body),
+            signal: AbortSignal.timeout(MARKETPLACE_MODEL_PROBE_TIMEOUT_MS),
+          }),
+        );
 
-      const responseText = await response.text();
+        const responseText = await response.text();
 
-      if (response.ok) {
-        if (probeResponseHasOutput(responseText)) {
+        if (response.ok) {
+          if (probeResponseHasOutput(responseText)) {
+            return {
+              available: true,
+              reason: `probe succeeded via ${endpoint} (HTTP ${response.status})`,
+              checkedUrl: probe.url,
+              statusCode: response.status,
+              endpoint,
+              classification: 'supported',
+            };
+          }
+
+          attemptMessages.push(`${endpoint}:${response.status} empty content`);
+          continue;
+        }
+
+        const summarized = summarizeProbeError(responseText) || `HTTP ${response.status}`;
+        const classification = classifyProbeFailureMessage(summarized);
+        if (classification === 'model_unavailable' || classification === 'credential') {
           return {
-            available: true,
-            reason: `probe succeeded via ${endpoint} (HTTP ${response.status})`,
+            available: false,
+            reason: `probe rejected model via ${endpoint}: ${summarized}`,
             checkedUrl: probe.url,
             statusCode: response.status,
             endpoint,
-            classification: 'supported',
+            classification,
           };
         }
 
-        attemptMessages.push(`${endpoint}:${response.status} empty content`);
-        continue;
+        attemptMessages.push(`${endpoint}:${response.status} ${summarized}`);
+        if (isProbeModerationBlock(summarized)) continue;
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error || 'unknown error');
+        attemptMessages.push(`${endpoint}: ${message}`);
+        break;
       }
-
-      const summarized = summarizeProbeError(responseText) || `HTTP ${response.status}`;
-      const classification = classifyProbeFailureMessage(summarized);
-      if (classification === 'model_unavailable' || classification === 'credential') {
-        return {
-          available: false,
-          reason: `probe rejected model via ${endpoint}: ${summarized}`,
-          checkedUrl: probe.url,
-          statusCode: response.status,
-          endpoint,
-          classification,
-        };
-      }
-
-      attemptMessages.push(`${endpoint}:${response.status} ${summarized}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error || 'unknown error');
-      attemptMessages.push(`${endpoint}: ${message}`);
     }
   }
 
   const geminiProbe = buildGeminiNativeProbeRequest(input.baseUrl, input.modelName, {
-    prompt: input.prompt,
+    prompt: promptAttempts[0],
     maxOutputTokens: input.maxOutputTokens,
   });
   try {
@@ -586,74 +603,92 @@ export async function probeModelAvailabilityViaLocalProxyCanary(input: {
   maxOutputTokens?: number | null;
 }): Promise<MarketplaceProbeResult> {
   const { fetch } = await import('undici');
-  const probe = buildLocalProxyCanaryRequest(input.modelName, {
-    prompt: input.prompt,
-    maxOutputTokens: input.maxOutputTokens,
-  });
+  const promptAttempts = buildProbePromptAttempts(input.prompt);
 
-  try {
-    const response = await fetch(probe.url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.proxyToken}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json,text/event-stream,text/plain,*/*',
-        ...(typeof input.forcedChannelId === 'number' && input.forcedChannelId > 0
-          ? {
-            'x-metapi-tester-request': '1',
-            'x-metapi-tester-forced-channel-id': String(input.forcedChannelId),
-          }
-          : {}),
-      },
-      body: JSON.stringify(probe.body),
-      signal: AbortSignal.timeout(LOCAL_PROXY_CANARY_TIMEOUT_MS),
+  for (const prompt of promptAttempts) {
+    const probe = buildLocalProxyCanaryRequest(input.modelName, {
+      prompt,
+      maxOutputTokens: input.maxOutputTokens,
     });
 
-    const responseText = await response.text();
+    try {
+      const response = await fetch(probe.url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.proxyToken}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json,text/event-stream,text/plain,*/*',
+          ...(typeof input.forcedChannelId === 'number' && input.forcedChannelId > 0
+            ? {
+              'x-metapi-tester-request': '1',
+              'x-metapi-tester-forced-channel-id': String(input.forcedChannelId),
+            }
+            : {}),
+        },
+        body: JSON.stringify(probe.body),
+        signal: AbortSignal.timeout(LOCAL_PROXY_CANARY_TIMEOUT_MS),
+      });
 
-    if (response.ok) {
-      if (probeResponseHasOutput(responseText)) {
+      const responseText = await response.text();
+
+      if (response.ok) {
+        if (probeResponseHasOutput(responseText)) {
+          return {
+            available: true,
+            reason: `probe succeeded via proxy-chat (HTTP ${response.status})`,
+            checkedUrl: probe.url,
+            statusCode: response.status,
+            endpoint: 'proxy-chat',
+            classification: 'supported',
+          };
+        }
+
         return {
-          available: true,
-          reason: `probe succeeded via proxy-chat (HTTP ${response.status})`,
+          available: null,
+          reason: 'proxy-chat:200 empty content',
           checkedUrl: probe.url,
           statusCode: response.status,
           endpoint: 'proxy-chat',
-          classification: 'supported',
+          classification: 'inconclusive',
         };
       }
 
+      const summarized = summarizeProbeError(responseText) || `HTTP ${response.status}`;
+      const classification = classifyProbeFailureMessage(summarized);
+      if (isProbeModerationBlock(summarized)) continue;
       return {
-        available: null,
-        reason: 'proxy-chat:200 empty content',
+        available: classification === 'model_unavailable' || classification === 'credential' ? false : null,
+        reason: `proxy-chat:${response.status} ${summarized}`,
         checkedUrl: probe.url,
         statusCode: response.status,
         endpoint: 'proxy-chat',
-        classification: 'inconclusive',
+        classification,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || 'unknown error');
+      return {
+        available: null,
+        reason: `proxy-chat: ${message}`,
+        checkedUrl: probe.url,
+        statusCode: null,
+        endpoint: 'proxy-chat',
+        classification: classifyProbeFailureMessage(message),
       };
     }
-
-    const summarized = summarizeProbeError(responseText) || `HTTP ${response.status}`;
-    const classification = classifyProbeFailureMessage(summarized);
-    return {
-      available: classification === 'model_unavailable' || classification === 'credential' ? false : null,
-      reason: `proxy-chat:${response.status} ${summarized}`,
-      checkedUrl: probe.url,
-      statusCode: response.status,
-      endpoint: 'proxy-chat',
-      classification,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error || 'unknown error');
-    return {
-      available: null,
-      reason: `proxy-chat: ${message}`,
-      checkedUrl: probe.url,
-      statusCode: null,
-      endpoint: 'proxy-chat',
-      classification: classifyProbeFailureMessage(message),
-    };
   }
+
+  const fallbackProbe = buildLocalProxyCanaryRequest(input.modelName, {
+    prompt: promptAttempts[0],
+    maxOutputTokens: input.maxOutputTokens,
+  });
+  return {
+    available: null,
+    reason: 'proxy-chat: moderation blocked probe prompts',
+    checkedUrl: fallbackProbe.url,
+    statusCode: null,
+    endpoint: 'proxy-chat',
+    classification: 'inconclusive',
+  };
 }
 
 function canonicalModelAlias(value: string): string {

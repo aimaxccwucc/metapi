@@ -335,6 +335,68 @@ describe('/api/models/marketplace', () => {
     });
   });
 
+  it('retries realtime probe with a fallback prompt when smart moderation blocks the canary', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'moderation-retry-site',
+      url: 'https://moderation-retry.example.com',
+      platform: 'new-api',
+      status: 'active',
+      apiKey: 'sk-moderation-retry',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'deepseek-user',
+      accessToken: 'session-token',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'DeepSeek-v4-pro',
+      available: true,
+      latencyMs: 180,
+    }).run();
+
+    getModelsMock.mockResolvedValue(['DeepSeek-v4-pro']);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'Smart moderation blocked by hashlinear_model (confidence: 0.414)' },
+      }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'ok',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'pong' }, finish_reason: 'stop' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/models/marketplace/test',
+      payload: {
+        modelName: 'DeepSeek-v4-pro',
+        accountId: account.id,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      available: true,
+      probeEndpoint: 'chat',
+      probeClassification: 'supported',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body || '{}'));
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body || '{}'));
+    expect(firstBody.messages[0].content).toBe('OK');
+    expect(secondBody.messages[0].content).toBe('ping');
+  });
+
   it('uses route channel token credential when probing a route and applies governance', async () => {
     const tokensRoutesModule = await import('./tokens.js');
     const governanceModule = await import('../../services/routingGovernanceService.js');
