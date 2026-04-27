@@ -1921,7 +1921,10 @@ export function serializeFinalResponse(
   };
 }
 
-export function buildSyntheticOpenAiChunks(normalized: NormalizedFinalResponse): Array<Record<string, unknown>> {
+export function buildSyntheticOpenAiChunks(
+  normalized: NormalizedFinalResponse,
+  usage?: { promptTokens: number; completionTokens: number; totalTokens: number },
+): Array<Record<string, unknown>> {
   const toolCalls = Array.isArray(normalized.toolCalls) ? normalized.toolCalls : [];
   const finishReason = (
     toolCalls.length > 0
@@ -1959,7 +1962,7 @@ export function buildSyntheticOpenAiChunks(normalized: NormalizedFinalResponse):
     }],
   };
 
-  const endChunk = {
+  const endChunk: Record<string, unknown> = {
     id: normalized.id,
     object: 'chat.completion.chunk',
     created: normalized.created,
@@ -1970,6 +1973,14 @@ export function buildSyntheticOpenAiChunks(normalized: NormalizedFinalResponse):
       finish_reason: finishReason,
     }],
   };
+
+  if (usage) {
+    endChunk.usage = {
+      prompt_tokens: usage.promptTokens,
+      completion_tokens: usage.completionTokens,
+      total_tokens: usage.totalTokens,
+    };
+  }
 
   return [startChunk, endChunk];
 }

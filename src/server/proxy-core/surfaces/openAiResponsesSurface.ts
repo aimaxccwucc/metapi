@@ -758,6 +758,20 @@ export async function handleOpenAiResponsesSurfaceRequest(
 
         if (isStream) {
           const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
+          let downstreamKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
+          const stopDownstreamKeepAlive = () => {
+            if (downstreamKeepAliveTimer) {
+              clearInterval(downstreamKeepAliveTimer);
+              downstreamKeepAliveTimer = null;
+            }
+          };
+          const startDownstreamKeepAlive = () => {
+            if (downstreamKeepAliveTimer || config.downstreamSseKeepAliveMs <= 0) return;
+            downstreamKeepAliveTimer = setInterval(() => {
+              if (!reply.raw.writableEnded) reply.raw.write(": keep-alive\n\n");
+            }, config.downstreamSseKeepAliveMs);
+            downstreamKeepAliveTimer.unref?.();
+          };
           const startSseResponse = () => {
             reply.hijack();
             reply.raw.statusCode = 200;
@@ -765,6 +779,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
             reply.raw.setHeader('Connection', 'keep-alive');
             reply.raw.setHeader('X-Accel-Buffering', 'no');
+            startDownstreamKeepAlive();
           };
 
           let parsedUsage: UsageSummary = {
@@ -800,10 +815,15 @@ export async function handleOpenAiResponsesSurfaceRequest(
             const rawText = await readRuntimeResponseText(upstream);
             if (looksLikeResponsesSseText(rawText)) {
               startSseResponse();
-              const streamResult = await streamSession.run(
-                createSingleChunkStreamReader(rawText),
-                reply.raw,
-              );
+              let streamResult;
+              try {
+                streamResult = await streamSession.run(
+                  createSingleChunkStreamReader(rawText),
+                  reply.raw,
+                );
+              } finally {
+                stopDownstreamKeepAlive();
+              }
               const latency = Date.now() - startTime;
               if (streamResult.status === 'failed') {
                 if (!isTesterProbe) {
@@ -903,8 +923,35 @@ export async function handleOpenAiResponsesSurfaceRequest(
               };
             }
 
+            try {
+              const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+                site: selected.site,
+                account: selected.account,
+                tokenValue: selected.tokenValue || '',
+                tokenName: selected.tokenName,
+                modelName: selected.actualModel || requestedModel,
+                requestStartedAtMs: startTime,
+                requestEndedAtMs: startTime + latency,
+                localLatencyMs: latency,
+                usage: {
+                  promptTokens: parsedUsage.promptTokens,
+                  completionTokens: parsedUsage.completionTokens,
+                  totalTokens: parsedUsage.totalTokens,
+                },
+              });
+              parsedUsage = mergeProxyUsage(parsedUsage, {
+                ...parsedUsage,
+                promptTokens: resolvedUsage.promptTokens,
+                completionTokens: resolvedUsage.completionTokens,
+                totalTokens: resolvedUsage.totalTokens,
+              });
+            } catch (error) {
+              console.error('[responses] pre-response usage fallback failed:', error);
+            }
+
             startSseResponse();
             const streamResult = streamSession.consumeUpstreamFinalPayload(upstreamData, rawText, reply.raw);
+            stopDownstreamKeepAlive();
             if (streamResult.status === 'failed') {
               await tokenRouter.recordFailure(selected.channel.id, {
                 status: 502,
@@ -961,7 +1008,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
               },
             }
             : baseReader;
-          const streamResult = await streamSession.run(reader ? wrapReaderWithIdleTimeout(reader) : reader, reply.raw);
+          let streamResult;
+          try {
+            streamResult = await streamSession.run(reader ? wrapReaderWithIdleTimeout(reader) : reader, reply.raw);
+          } finally {
+            stopDownstreamKeepAlive();
+          }
           rawText += decoder.decode();
 
           const latency = Date.now() - startTime;
@@ -1027,7 +1079,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         }
 
         const latency = Date.now() - startTime;
-        const parsedUsage = parseProxyUsage(upstreamData);
+        let parsedUsage = parseProxyUsage(upstreamData);
         const failure = detectProxyFailure({ rawText, usage: parsedUsage });
         if (failure) {
             if (!isTesterProbe) {
@@ -1079,6 +1131,40 @@ export async function handleOpenAiResponsesSurfaceRequest(
             status: failure.status,
             rawErrorText: failure.reason,
           };
+        }
+
+        let resolvedUsage: Awaited<ReturnType<typeof resolveProxyUsageWithSelfLogFallback>> = {
+          promptTokens: parsedUsage.promptTokens,
+          completionTokens: parsedUsage.completionTokens,
+          totalTokens: parsedUsage.totalTokens,
+          recoveredFromSelfLog: false,
+          estimatedCostFromQuota: 0,
+          selfLogBillingMeta: null,
+        };
+        try {
+          resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+            site: selected.site,
+            account: selected.account,
+            tokenValue: selected.tokenValue || '',
+            tokenName: selected.tokenName,
+            modelName: selected.actualModel || requestedModel,
+            requestStartedAtMs: startTime,
+            requestEndedAtMs: startTime + latency,
+            localLatencyMs: latency,
+            usage: {
+              promptTokens: parsedUsage.promptTokens,
+              completionTokens: parsedUsage.completionTokens,
+              totalTokens: parsedUsage.totalTokens,
+            },
+          });
+          parsedUsage = mergeProxyUsage(parsedUsage, {
+            ...parsedUsage,
+            promptTokens: resolvedUsage.promptTokens,
+            completionTokens: resolvedUsage.completionTokens,
+            totalTokens: resolvedUsage.totalTokens,
+          });
+        } catch (error) {
+          console.error('[responses] pre-response usage fallback failed:', error);
         }
 
         const normalized = openAiResponsesTransformer.transformFinalResponse(
@@ -1147,21 +1233,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
             rawErrorText: downstreamFailure.reason,
           };
         }
-        const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
-          site: selected.site,
-          account: selected.account,
-          tokenValue: selected.tokenValue || '',
-          tokenName: selected.tokenName,
-          modelName: selected.actualModel || requestedModel,
-          requestStartedAtMs: startTime,
-          requestEndedAtMs: startTime + latency,
-          localLatencyMs: latency,
-          usage: {
-            promptTokens: parsedUsage.promptTokens,
-            completionTokens: parsedUsage.completionTokens,
-            totalTokens: parsedUsage.totalTokens,
-          },
-        });
         const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
           site: selected.site,
           account: selected.account,

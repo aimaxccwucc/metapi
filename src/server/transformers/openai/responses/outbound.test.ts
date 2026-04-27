@@ -394,6 +394,55 @@ describe('serializeResponsesFinalPayload', () => {
     ]);
   });
 
+  it('injects resolved usage into native response payloads', () => {
+    const upstreamPayload = {
+      id: 'resp_native_usage',
+      object: 'response',
+      created: 1700000000,
+      status: 'completed',
+      model: 'gpt-5',
+      output: [],
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+      },
+    };
+
+    const payload = serializeResponsesFinalPayload({
+      upstreamPayload,
+      normalized: {
+        id: 'resp_native_usage',
+        model: 'gpt-5',
+        created: 1700000000,
+        content: '',
+        reasoningContent: '',
+        finishReason: 'stop',
+        toolCalls: [],
+      },
+      usage: {
+        promptTokens: 55,
+        completionTokens: 8,
+        totalTokens: 63,
+      },
+      serializationMode: 'response',
+    });
+
+    expect(payload).toEqual({
+      ...upstreamPayload,
+      usage: {
+        input_tokens: 55,
+        output_tokens: 8,
+        total_tokens: 63,
+      },
+    });
+    expect(upstreamPayload.usage).toEqual({
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+    });
+  });
+
   it('emits encrypted-only reasoning items when summary text is empty', () => {
     const payload = serializeResponsesFinalPayload({
       upstreamPayload: {

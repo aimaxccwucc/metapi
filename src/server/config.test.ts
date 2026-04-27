@@ -59,6 +59,7 @@ describe('buildConfig', () => {
     expect(config.upstreamStreamFirstByteTimeoutMs).toBe(45_000);
     expect(config.upstreamRequestBudgetMs).toBe(120_000);
     expect(config.upstreamStreamIdleTimeoutMs).toBe(180_000);
+    expect(config.downstreamSseKeepAliveMs).toBe(25_000);
     expect(config.onDemandModelRefreshCooldownMs).toBe(15_000);
     expect(config.autoRouteProbeThrottleMs).toBe(1_800_000);
     expect(config.routingAutoRecoveryRecheckMs).toBe(7_200_000);
@@ -91,6 +92,7 @@ describe('buildConfig', () => {
       UPSTREAM_STREAM_FIRST_BYTE_TIMEOUT_MS: '9000',
       UPSTREAM_REQUEST_BUDGET_MS: '45000',
       UPSTREAM_STREAM_IDLE_TIMEOUT_MS: '12000',
+      DOWNSTREAM_SSE_KEEP_ALIVE_MS: '5000',
       ON_DEMAND_MODEL_REFRESH_COOLDOWN_MS: '22000',
       AUTO_ROUTE_PROBE_THROTTLE_MS: '2700000',
       ROUTING_AUTO_RECOVERY_RECHECK_MS: '10800000',
@@ -112,6 +114,7 @@ describe('buildConfig', () => {
     expect(config.upstreamStreamFirstByteTimeoutMs).toBe(9_000);
     expect(config.upstreamRequestBudgetMs).toBe(45_000);
     expect(config.upstreamStreamIdleTimeoutMs).toBe(12_000);
+    expect(config.downstreamSseKeepAliveMs).toBe(5_000);
     expect(config.onDemandModelRefreshCooldownMs).toBe(22_000);
     expect(config.autoRouteProbeThrottleMs).toBe(2_700_000);
     expect(config.routingAutoRecoveryRecheckMs).toBe(10_800_000);

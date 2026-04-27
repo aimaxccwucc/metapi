@@ -692,6 +692,20 @@ export async function handleChatSurfaceRequest(
 
         if (isStream) {
           const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
+          let downstreamKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
+          const stopDownstreamKeepAlive = () => {
+            if (downstreamKeepAliveTimer) {
+              clearInterval(downstreamKeepAliveTimer);
+              downstreamKeepAliveTimer = null;
+            }
+          };
+          const startDownstreamKeepAlive = () => {
+            if (downstreamKeepAliveTimer || config.downstreamSseKeepAliveMs <= 0) return;
+            downstreamKeepAliveTimer = setInterval(() => {
+              if (!reply.raw.writableEnded) reply.raw.write(": keep-alive\n\n");
+            }, config.downstreamSseKeepAliveMs);
+            downstreamKeepAliveTimer.unref?.();
+          };
           const startSseResponse = () => {
             reply.hijack();
             reply.raw.statusCode = 200;
@@ -699,6 +713,7 @@ export async function handleChatSurfaceRequest(
             reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
             reply.raw.setHeader('Connection', 'keep-alive');
             reply.raw.setHeader('X-Accel-Buffering', 'no');
+            startDownstreamKeepAlive();
           };
 
           let parsedUsage: ReturnType<typeof parseProxyUsage> = {
@@ -718,6 +733,7 @@ export async function handleChatSurfaceRequest(
             downstreamFormat,
             modelName,
             successfulUpstreamPath,
+            getUsage: () => parsedUsage,
             onParsedPayload: (payload) => {
               if (payload && typeof payload === 'object') {
                 parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(payload));
@@ -735,10 +751,15 @@ export async function handleChatSurfaceRequest(
             rawText = fallbackText;
             if (looksLikeResponsesSseText(fallbackText)) {
               startSseResponse();
-              const streamResult = await streamSession.run(
-                createSingleChunkStreamReader(fallbackText),
-                reply.raw,
-              );
+              let streamResult;
+              try {
+                streamResult = await streamSession.run(
+                  createSingleChunkStreamReader(fallbackText),
+                  reply.raw,
+                );
+              } finally {
+                stopDownstreamKeepAlive();
+              }
               if (streamResult.collectedToolCalls && streamResult.collectedToolCalls.length > 0) {
                 lastStreamResultToolCalls = streamResult.collectedToolCalls;
               }
@@ -837,8 +858,36 @@ export async function handleChatSurfaceRequest(
               };
               }
 
+              const latency = Date.now() - startTime;
+              try {
+                const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+                  site: selected.site,
+                  account: selected.account,
+                  tokenValue: selected.tokenValue || '',
+                  tokenName: selected.tokenName,
+                  modelName,
+                  requestStartedAtMs: startTime,
+                  requestEndedAtMs: startTime + latency,
+                  localLatencyMs: latency,
+                  usage: {
+                    promptTokens: parsedUsage.promptTokens,
+                    completionTokens: parsedUsage.completionTokens,
+                    totalTokens: parsedUsage.totalTokens,
+                  },
+                });
+                parsedUsage = mergeProxyUsage(parsedUsage, {
+                  ...parsedUsage,
+                  promptTokens: resolvedUsage.promptTokens,
+                  completionTokens: resolvedUsage.completionTokens,
+                  totalTokens: resolvedUsage.totalTokens,
+                });
+              } catch (error) {
+                console.error('[chat] pre-response usage fallback failed:', error);
+              }
+
               startSseResponse();
               const streamResult = streamSession.consumeUpstreamFinalPayload(fallbackData, fallbackText, reply.raw);
+              stopDownstreamKeepAlive();
               if (streamResult.status === 'failed') {
                 const latency = Date.now() - startTime;
                 await tokenRouter.recordFailure(selected.channel.id, {
@@ -891,7 +940,12 @@ export async function handleChatSurfaceRequest(
                 },
               }
               : baseReader;
-            const streamResult = await streamSession.run(reader ? wrapReaderWithIdleTimeout(reader) : reader, reply.raw);
+            let streamResult;
+            try {
+              streamResult = await streamSession.run(reader ? wrapReaderWithIdleTimeout(reader) : reader, reply.raw);
+            } finally {
+              stopDownstreamKeepAlive();
+            }
             rawText += decoder.decode();
             if (streamResult.collectedToolCalls && streamResult.collectedToolCalls.length > 0) {
               lastStreamResultToolCalls = streamResult.collectedToolCalls;
@@ -940,21 +994,33 @@ export async function handleChatSurfaceRequest(
           if (lastStreamResultToolCalls && lastStreamResultToolCalls.length > 0 && clientContext?.clientKind) {
             rememberCodexStandaloneToolCalls(codexSessionCacheKey, lastStreamResultToolCalls);
           }
-          const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
-            site: selected.site,
-            account: selected.account,
-            tokenValue: selected.tokenValue || '',
-            tokenName: selected.tokenName,
-            modelName,
-            requestStartedAtMs: startTime,
-            requestEndedAtMs: startTime + latency,
-            localLatencyMs: latency,
-            usage: {
-              promptTokens: parsedUsage.promptTokens,
-              completionTokens: parsedUsage.completionTokens,
-              totalTokens: parsedUsage.totalTokens,
-            },
-          });
+          let resolvedUsage: Awaited<ReturnType<typeof resolveProxyUsageWithSelfLogFallback>> = {
+            promptTokens: parsedUsage.promptTokens,
+            completionTokens: parsedUsage.completionTokens,
+            totalTokens: parsedUsage.totalTokens,
+            recoveredFromSelfLog: false,
+            estimatedCostFromQuota: 0,
+            selfLogBillingMeta: null,
+          };
+          try {
+            resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+              site: selected.site,
+              account: selected.account,
+              tokenValue: selected.tokenValue || '',
+              tokenName: selected.tokenName,
+              modelName,
+              requestStartedAtMs: startTime,
+              requestEndedAtMs: startTime + latency,
+              localLatencyMs: latency,
+              usage: {
+                promptTokens: parsedUsage.promptTokens,
+                completionTokens: parsedUsage.completionTokens,
+                totalTokens: parsedUsage.totalTokens,
+              },
+            });
+          } catch (error) {
+            console.error('[chat] post-stream usage fallback failed:', error);
+          }
           const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
             site: selected.site,
             account: selected.account,
@@ -1025,7 +1091,7 @@ export async function handleChatSurfaceRequest(
         }
 
         const latency = Date.now() - startTime;
-        const parsedUsage = parseProxyUsage(upstreamData);
+        let parsedUsage = parseProxyUsage(upstreamData);
         const failure = detectProxyFailure({ rawText, usage: parsedUsage });
         if (failure) {
           if (!isTesterProbe) {
@@ -1078,6 +1144,40 @@ export async function handleChatSurfaceRequest(
             status: failure.status,
             rawErrorText: failureMessage,
           };
+        }
+
+        let resolvedUsage: Awaited<ReturnType<typeof resolveProxyUsageWithSelfLogFallback>> = {
+          promptTokens: parsedUsage.promptTokens,
+          completionTokens: parsedUsage.completionTokens,
+          totalTokens: parsedUsage.totalTokens,
+          recoveredFromSelfLog: false,
+          estimatedCostFromQuota: 0,
+          selfLogBillingMeta: null,
+        };
+        try {
+          resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+            site: selected.site,
+            account: selected.account,
+            tokenValue: selected.tokenValue || '',
+            tokenName: selected.tokenName,
+            modelName,
+            requestStartedAtMs: startTime,
+            requestEndedAtMs: startTime + latency,
+            localLatencyMs: latency,
+            usage: {
+              promptTokens: parsedUsage.promptTokens,
+              completionTokens: parsedUsage.completionTokens,
+              totalTokens: parsedUsage.totalTokens,
+            },
+          });
+          parsedUsage = mergeProxyUsage(parsedUsage, {
+            ...parsedUsage,
+            promptTokens: resolvedUsage.promptTokens,
+            completionTokens: resolvedUsage.completionTokens,
+            totalTokens: resolvedUsage.totalTokens,
+          });
+        } catch (error) {
+          console.error('[chat] pre-response usage fallback failed:', error);
         }
 
         const normalizedFinal = downstreamTransformer.transformFinalResponse(upstreamData, modelName, rawText);
@@ -1138,21 +1238,6 @@ export async function handleChatSurfaceRequest(
             rawErrorText: failureMessage,
           };
         }
-        const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
-          site: selected.site,
-          account: selected.account,
-          tokenValue: selected.tokenValue || '',
-          tokenName: selected.tokenName,
-          modelName,
-          requestStartedAtMs: startTime,
-          requestEndedAtMs: startTime + latency,
-          localLatencyMs: latency,
-          usage: {
-            promptTokens: parsedUsage.promptTokens,
-            completionTokens: parsedUsage.completionTokens,
-            totalTokens: parsedUsage.totalTokens,
-          },
-        });
         const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
           site: selected.site,
           account: selected.account,

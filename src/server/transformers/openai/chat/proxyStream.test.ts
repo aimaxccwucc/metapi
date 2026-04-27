@@ -14,6 +14,59 @@ function createFailingReader(message: string) {
   };
 }
 describe('createChatProxyStreamSession', () => {
+  it('includes resolved usage when synthesizing a stream from a final payload', () => {
+    const lines: string[] = [];
+    let ended = false;
+    const session = createChatProxyStreamSession({
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.4',
+      successfulUpstreamPath: '/v1/chat/completions',
+      getUsage: () => ({
+        promptTokens: 11,
+        completionTokens: 7,
+        totalTokens: 18,
+      }),
+      writeLines(nextLines) {
+        lines.push(...nextLines);
+      },
+      writeRaw(chunk) {
+        lines.push(chunk);
+      },
+    });
+
+    const result = session.consumeUpstreamFinalPayload({
+      id: 'chatcmpl-final-json',
+      object: 'chat.completion',
+      created: 1706000000,
+      model: 'gpt-5.4',
+      choices: [{
+        index: 0,
+        finish_reason: 'stop',
+        message: {
+          role: 'assistant',
+          content: 'hello',
+        },
+      }],
+    }, '', {
+      end() {
+        ended = true;
+      },
+    });
+
+    expect(result.status).toBe('completed');
+    expect(ended).toBe(true);
+    const payloads = lines
+      .filter((line) => line.startsWith('data: ') && line.trim() !== 'data: [DONE]')
+      .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>);
+    expect(payloads[payloads.length - 1]).toMatchObject({
+      usage: {
+        prompt_tokens: 11,
+        completion_tokens: 7,
+        total_tokens: 18,
+      },
+    });
+  });
+
   it('marks upstream reader errors as upstream_error termination', async () => {
     const lines: string[] = [];
     let ended = false;

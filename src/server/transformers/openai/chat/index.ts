@@ -116,8 +116,8 @@ export const openAiChatTransformer = {
       .buildSyntheticChunks(normalizedFinal)
       .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`);
   },
-  buildSyntheticChunks(normalized: NormalizedFinalResponse) {
-    return openAiChatOutbound.buildSyntheticChunks(normalized);
+  buildSyntheticChunks(normalized: NormalizedFinalResponse, usage?: Parameters<typeof openAiChatOutbound.buildSyntheticChunks>[1]) {
+    return openAiChatOutbound.buildSyntheticChunks(normalized, usage);
   },
   pullSseEvents(buffer: string) {
     return openAiChatStream.pullSseEvents(buffer);

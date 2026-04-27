@@ -372,6 +372,38 @@ describe('openAiChatTransformer.outbound', () => {
 });
 
 describe('openAiChatTransformer.stream', () => {
+  it('adds usage to synthetic final stream chunks when provided', () => {
+    const normalized = openAiChatTransformer.transformFinalResponse({
+      id: 'chatcmpl-synthetic-usage',
+      model: 'gpt-5',
+      created: 123,
+      choices: [{
+        index: 0,
+        finish_reason: 'stop',
+        message: {
+          role: 'assistant',
+          content: 'hello',
+        },
+      }],
+    }, 'gpt-5');
+
+    const payloads = parseSsePayloads(
+      openAiChatTransformer.buildSyntheticChunks(normalized, {
+        promptTokens: 11,
+        completionTokens: 7,
+        totalTokens: 18,
+      }).map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`),
+    );
+
+    expect(payloads[payloads.length - 1]).toMatchObject({
+      usage: {
+        prompt_tokens: 11,
+        completion_tokens: 7,
+        total_tokens: 18,
+      },
+    });
+  });
+
   it('preserves annotations, citations, and usage payload on serialized stream chunks', () => {
     const context = openAiChatTransformer.createStreamContext('gpt-5');
     const event = openAiChatTransformer.transformStreamEvent({

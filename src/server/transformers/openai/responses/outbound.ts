@@ -319,7 +319,10 @@ export function serializeResponsesFinalPayload(input: {
       return upstreamPayload;
     }
     if (serializationMode === 'response' && upstreamPayload.object === 'response') {
-      return upstreamPayload;
+      return {
+        ...cloneJson(upstreamPayload),
+        usage: buildResponsesUsagePayload(usage, extractSyntheticUsageDetails(upstreamPayload)),
+      };
     }
   }
 

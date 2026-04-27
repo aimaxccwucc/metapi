@@ -139,6 +139,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     upstreamStreamFirstByteTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_STREAM_FIRST_BYTE_TIMEOUT_MS, 45_000))),
     upstreamRequestBudgetMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_REQUEST_BUDGET_MS, 120_000))),
     upstreamStreamIdleTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS, 180_000))),
+    downstreamSseKeepAliveMs: Math.max(0, Math.trunc(parseNumber(env.DOWNSTREAM_SSE_KEEP_ALIVE_MS, 25_000))),
     proxyFirstByteTimeoutSec: Math.max(0, Math.trunc(parseNumber(env.PROXY_FIRST_BYTE_TIMEOUT_SEC, 0))),
     proxyMaxChannelAttempts: Math.max(1, Math.trunc(parseNumber(env.PROXY_MAX_CHANNEL_ATTEMPTS, 3))),
     proxyStickySessionEnabled: parseBoolean(env.PROXY_STICKY_SESSION_ENABLED, true),

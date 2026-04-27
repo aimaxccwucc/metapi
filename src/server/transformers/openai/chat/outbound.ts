@@ -115,7 +115,7 @@ export const openAiChatOutbound = {
 
     return payload;
   },
-  buildSyntheticChunks(normalized: NormalizedFinalResponse) {
+  buildSyntheticChunks(normalized: NormalizedFinalResponse, usage?: unknown) {
     const chatNormalized = normalized as OpenAiChatNormalizedFinalResponse;
     const choices = Array.isArray(chatNormalized.choices) && chatNormalized.choices.length > 0
       ? chatNormalized.choices
@@ -166,7 +166,10 @@ export const openAiChatOutbound = {
           })).sort((left, right) => left.index - right.index),
         },
       ]
-      : buildSyntheticOpenAiChunks(normalized);
+      : buildSyntheticOpenAiChunks(
+        normalized,
+        usage as { promptTokens: number; completionTokens: number; totalTokens: number } | undefined,
+      );
     if (chunks.length <= 0) return chunks;
 
     if (Array.isArray(chatNormalized.citations) && chatNormalized.citations.length > 0) {

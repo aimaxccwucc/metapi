@@ -16,6 +16,7 @@ type ChatProxyStreamSessionInput = {
   downstreamFormat: DownstreamFormat;
   modelName: string;
   successfulUpstreamPath: string;
+  getUsage?: () => { promptTokens: number; completionTokens: number; totalTokens: number };
   onParsedPayload?: (payload: unknown) => void;
   writeLines: (lines: string[]) => void;
   writeRaw: (chunk: string) => void;
@@ -281,7 +282,7 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         streamContext.created = normalizedFinal.created;
         input.writeLines(
           openAiChatOutbound
-            .buildSyntheticChunks(normalizedFinal)
+            .buildSyntheticChunks(normalizedFinal, input.getUsage?.())
             .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`),
         );
         if (terminalResult.status !== 'failed' && Array.isArray(normalizedFinal.toolCalls) && normalizedFinal.toolCalls.length > 0) {
