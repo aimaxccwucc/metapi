@@ -95,6 +95,92 @@ describe('createChatProxyStreamSession', () => {
     expect(result.errorMessage).toContain('socket reset');
   });
 
+
+  it('gracefully finalizes openai chat streams after reader errors when meaningful output was already sent', async () => {
+    const lines: string[] = [];
+    const encoder = new TextEncoder();
+    const session = createChatProxyStreamSession({
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.4',
+      successfulUpstreamPath: '/v1/responses',
+      writeLines(nextLines) {
+        lines.push(...nextLines);
+      },
+      writeRaw(chunk) {
+        lines.push(chunk);
+      },
+    });
+
+    const chunks = [
+      'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_reader_error_chat","model":"gpt-5.4","created_at":1706000000,"status":"in_progress","output":[]}}\n\n',
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","output_index":0,"delta":"hello"}\n\n',
+    ].map((chunk) => encoder.encode(chunk));
+    let readIndex = 0;
+    const result = await session.run({
+      async read() {
+        if (readIndex < chunks.length) {
+          return { done: false, value: chunks[readIndex++] };
+        }
+        throw new Error('socket reset');
+      },
+      async cancel() {
+        return undefined;
+      },
+      releaseLock() {},
+    }, {
+      end() {},
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.terminationReason).toBe('completed');
+    const output = lines.join('');
+    const matches = output.match(/"content":"hello"/g) || [];
+    expect(matches.length).toBe(1);
+    expect(output).toContain('[DONE]');
+    expect(output).not.toContain('response.failed');
+  });
+
+  it('gracefully finalizes openai chat streams after trailing buffered data when meaningful output was already sent', async () => {
+    const lines: string[] = [];
+    const encoder = new TextEncoder();
+    const session = createChatProxyStreamSession({
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.4',
+      successfulUpstreamPath: '/v1/responses',
+      writeLines(nextLines) {
+        lines.push(...nextLines);
+      },
+      writeRaw(chunk) {
+        lines.push(chunk);
+      },
+    });
+
+    const chunks = [
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","output_index":0,"delta":"hello"}\n',
+    ].map((chunk) => encoder.encode(chunk));
+    let readIndex = 0;
+    const result = await session.run({
+      async read() {
+        if (readIndex >= chunks.length) return { done: true };
+        return { done: false, value: chunks[readIndex++] };
+      },
+      async cancel() {
+        return undefined;
+      },
+      releaseLock() {},
+    }, {
+      end() {},
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.terminationReason).toBe('completed');
+    const output = lines.join('');
+    const matches = output.match(/"content":"hello"/g) || [];
+    expect(matches.length).toBe(1);
+    expect(output).toContain('[DONE]');
+    expect(output).not.toContain('response.failed');
+  });
+
   it('does not duplicate responses text when terminal done events replay full content', async () => {
     const lines: string[] = [];
     const encoder = new TextEncoder();

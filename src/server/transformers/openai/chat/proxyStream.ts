@@ -257,6 +257,11 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     return claudeContext.doneSent;
   };
 
+  const canGracefullyFinalizeTruncatedStream = () => (
+    terminalResult.status !== 'failed'
+    && hasMeaningfulOutput
+  );
+
   return {
     consumeUpstreamFinalPayload(payload: unknown, fallbackText: string, response?: ResponseSink): ChatProxyStreamResult {
       if (payload && typeof payload === 'object') {
@@ -322,17 +327,25 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
       });
       const lifecycleSummary = await lifecycle.run();
       if (lifecycleSummary.reason === 'reader_error') {
-        terminalResult = {
-          status: 'failed',
-          errorMessage: `[stream:upstream_error] ${lifecycleSummary.readerErrorMessage || 'upstream stream reader error'}`,
-          terminationReason: 'upstream_error',
-        };
+        if (canGracefullyFinalizeTruncatedStream()) {
+          finalize();
+        } else {
+          terminalResult = {
+            status: 'failed',
+            errorMessage: `[stream:upstream_error] ${lifecycleSummary.readerErrorMessage || 'upstream stream reader error'}`,
+            terminationReason: 'upstream_error',
+          };
+        }
       } else if (lifecycleSummary.reason === 'eof_with_trailing_buffer') {
-        terminalResult = {
-          status: 'failed',
-          errorMessage: '[stream:truncated] upstream stream ended with trailing buffered data',
-          terminationReason: 'truncated',
-        };
+        if (canGracefullyFinalizeTruncatedStream()) {
+          finalize();
+        } else {
+          terminalResult = {
+            status: 'failed',
+            errorMessage: '[stream:truncated] upstream stream ended with trailing buffered data',
+            terminationReason: 'truncated',
+          };
+        }
       } else if (terminalResult.errorMessage && !terminalResult.errorMessage.startsWith('[stream:')) {
         terminalResult.errorMessage = `[stream:${terminalResult.terminationReason}] ${terminalResult.errorMessage}`;
       }
