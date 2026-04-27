@@ -23,6 +23,7 @@ STABLE_CHECK_INTERVAL="${STABLE_CHECK_INTERVAL:-5}"
 BACKUP_KEEP_COUNT="${BACKUP_KEEP_COUNT:-2}"
 CHAT_SMOKE_MODELS="${CHAT_SMOKE_MODELS:-gpt-5.4,glm-5.1}"
 CHAT_SMOKE_MAX_TIME="${CHAT_SMOKE_MAX_TIME:-25}"
+HEALTH_CURL_NO_PROXY="${HEALTH_CURL_NO_PROXY:-*}"
 
 # Image tag used by scripts/dev/deploy-prod-local.sh
 IMAGE_TAG="${IMAGE_TAG:-metapi-local:latest}"
@@ -139,7 +140,7 @@ health_check() {
   local url="$1"
   local name="$2"
   echo "[check] $name: $url"
-  if curl -fsS -I --connect-timeout 5 --max-time 20 "$url" | sed -n '1,6p'; then
+  if curl --noproxy "$HEALTH_CURL_NO_PROXY" -fsS -I --connect-timeout 5 --max-time 20 "$url" | sed -n '1,6p'; then
     return 0
   fi
 
@@ -147,7 +148,7 @@ health_check() {
   # for hostnames, but avoid forcing IPv4 on IPv6 literals like http://[::1]/.
   if [[ "$url" != http://[* && "$url" != https://[* ]]; then
     echo "[check] $name retry with IPv4"
-    curl -4 -fsS -I --connect-timeout 5 --max-time 20 "$url" | sed -n '1,6p'
+    curl --noproxy "$HEALTH_CURL_NO_PROXY" -4 -fsS -I --connect-timeout 5 --max-time 20 "$url" | sed -n '1,6p'
     return 0
   fi
 
@@ -305,9 +306,9 @@ rollback() {
 
   # Best-effort: pin compose to an immutable rollback tag first.
   if [ -n "$ROLLBACK_IMAGE_TAG" ]; then
-    sed -i "s|^\([[:space:]]*image:[[:space:]]*\).*|\1$ROLLBACK_IMAGE_TAG|" "$DEPLOY_DIR/docker-compose.yml" || true
+    sed -i "/^[[:space:]]*$SERVICE_NAME:[[:space:]]*$/,/^[[:space:]]*[A-Za-z0-9_.-]\+:[[:space:]]*$/ s|^\([[:space:]]*image:[[:space:]]*\).*|\1$ROLLBACK_IMAGE_TAG|" "$DEPLOY_DIR/docker-compose.yml" || true
   elif [ -n "$OLD_IMAGE_REF" ]; then
-    sed -i "s|^\([[:space:]]*image:[[:space:]]*\).*|\1$OLD_IMAGE_REF|" "$DEPLOY_DIR/docker-compose.yml" || true
+    sed -i "/^[[:space:]]*$SERVICE_NAME:[[:space:]]*$/,/^[[:space:]]*[A-Za-z0-9_.-]\+:[[:space:]]*$/ s|^\([[:space:]]*image:[[:space:]]*\).*|\1$OLD_IMAGE_REF|" "$DEPLOY_DIR/docker-compose.yml" || true
   fi
 
   cd "$DEPLOY_DIR"

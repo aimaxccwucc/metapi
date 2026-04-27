@@ -103,7 +103,7 @@ echo "Built images: $IMAGE_TAG and $STAMP_TAG"
 
 echo "[4/6] Ensure compose uses local image"
 if ! grep -q "image: $IMAGE_TAG" "$DEPLOY_DIR/docker-compose.yml"; then
-  sed -i "s|^\([[:space:]]*image:[[:space:]]*\).*|\1$IMAGE_TAG|" "$DEPLOY_DIR/docker-compose.yml"
+  sed -i "/^[[:space:]]*metapi:[[:space:]]*$/,/^[[:space:]]*[A-Za-z0-9_.-]\+:[[:space:]]*$/ s|^\([[:space:]]*image:[[:space:]]*\).*|\1$IMAGE_TAG|" "$DEPLOY_DIR/docker-compose.yml"
 fi
 
 echo "[5/6] Recreate metapi container"
@@ -117,8 +117,8 @@ else
   echo "[6/6] Quick health checks"
   sleep 2
   docker compose ps metapi
-  curl -fsS -I --max-time 15 http://127.0.0.1:4000/ | sed -n '1,6p'
-  curl -fsS -I --max-time 20 https://metapi.808039.xyz/sites | sed -n '1,8p'
+  curl --noproxy '*' -fsS -I --max-time 15 http://127.0.0.1:4000/ | sed -n '1,6p'
+  curl --noproxy '*' -fsS -I --max-time 20 https://metapi.808039.xyz/sites | sed -n '1,8p'
 fi
 
 echo "Deploy done"
