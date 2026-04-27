@@ -11,7 +11,6 @@ type ProxyStreamReader = {
 
 type ProxyStreamLifecycleInput<TEvent> = {
   reader: ProxyStreamReader | null | undefined;
-  response: { end(): void };
   pullEvents(buffer: string): PulledEventBatch<TEvent>;
   handleEvent(event: TEvent): Promise<boolean | void> | boolean | void;
   onEof?: () => Promise<void> | void;
@@ -52,11 +51,7 @@ export function createProxyStreamLifecycle<TEvent>(input: ProxyStreamLifecycleIn
     async run(): Promise<ProxyStreamLifecycleSummary> {
       const reader = input.reader;
       if (!reader) {
-        try {
-          await input.onEof?.();
-        } finally {
-          input.response.end();
-        }
+        await input.onEof?.();
         return {
           reason: 'completed',
           readerErrorMessage: null,
@@ -123,7 +118,6 @@ export function createProxyStreamLifecycle<TEvent>(input: ProxyStreamLifecycleIn
         };
       } finally {
         reader.releaseLock();
-        input.response.end();
       }
     },
   };

@@ -320,52 +320,55 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     async run(reader: StreamReader | null | undefined, response: ResponseSink): Promise<ChatProxyStreamResult> {
       const lifecycle = createProxyStreamLifecycle<ParsedSseEvent>({
         reader,
-        response,
         pullEvents: (buffer) => downstreamTransformer.pullSseEvents(buffer),
         handleEvent: handleEventBlock,
         onEof: finalize,
       });
-      const lifecycleSummary = await lifecycle.run();
-      if (lifecycleSummary.reason === 'reader_error') {
-        if (canGracefullyFinalizeTruncatedStream()) {
-          finalize();
-        } else {
-          terminalResult = {
-            status: 'failed',
-            errorMessage: `[stream:upstream_error] ${lifecycleSummary.readerErrorMessage || 'upstream stream reader error'}`,
-            terminationReason: 'upstream_error',
-          };
+      try {
+        const lifecycleSummary = await lifecycle.run();
+        if (lifecycleSummary.reason === 'reader_error') {
+          if (canGracefullyFinalizeTruncatedStream()) {
+            finalize();
+          } else {
+            terminalResult = {
+              status: 'failed',
+              errorMessage: `[stream:upstream_error] ${lifecycleSummary.readerErrorMessage || 'upstream stream reader error'}`,
+              terminationReason: 'upstream_error',
+            };
+          }
+        } else if (lifecycleSummary.reason === 'eof_with_trailing_buffer') {
+          if (canGracefullyFinalizeTruncatedStream()) {
+            finalize();
+          } else {
+            terminalResult = {
+              status: 'failed',
+              errorMessage: '[stream:truncated] upstream stream ended with trailing buffered data',
+              terminationReason: 'truncated',
+            };
+          }
+        } else if (terminalResult.errorMessage && !terminalResult.errorMessage.startsWith('[stream:')) {
+          terminalResult.errorMessage = `[stream:${terminalResult.terminationReason}] ${terminalResult.errorMessage}`;
         }
-      } else if (lifecycleSummary.reason === 'eof_with_trailing_buffer') {
-        if (canGracefullyFinalizeTruncatedStream()) {
-          finalize();
-        } else {
-          terminalResult = {
-            status: 'failed',
-            errorMessage: '[stream:truncated] upstream stream ended with trailing buffered data',
-            terminationReason: 'truncated',
-          };
+        if (chatAggregateState && terminalResult.status !== 'failed') {
+          const primaryChoice = Array.from(chatAggregateState.choices.values())
+            .sort((a, b) => a.index - b.index)[0];
+          if (primaryChoice?.toolCalls.length > 0) {
+            terminalResult = {
+              ...terminalResult,
+              collectedToolCalls: primaryChoice.toolCalls
+                .filter((tc) => tc.id && tc.name)
+                .map((tc) => ({
+                  id: tc.id,
+                  type: 'function' as const,
+                  function: { name: tc.name, arguments: tc.arguments },
+                })),
+            };
+          }
         }
-      } else if (terminalResult.errorMessage && !terminalResult.errorMessage.startsWith('[stream:')) {
-        terminalResult.errorMessage = `[stream:${terminalResult.terminationReason}] ${terminalResult.errorMessage}`;
+        return terminalResult;
+      } finally {
+        response.end();
       }
-      if (chatAggregateState && terminalResult.status !== 'failed') {
-        const primaryChoice = Array.from(chatAggregateState.choices.values())
-          .sort((a, b) => a.index - b.index)[0];
-        if (primaryChoice?.toolCalls.length > 0) {
-          terminalResult = {
-            ...terminalResult,
-            collectedToolCalls: primaryChoice.toolCalls
-              .filter((tc) => tc.id && tc.name)
-              .map((tc) => ({
-                id: tc.id,
-                type: 'function' as const,
-                function: { name: tc.name, arguments: tc.arguments },
-              })),
-          };
-        }
-      }
-      return terminalResult;
     },
   };
 }

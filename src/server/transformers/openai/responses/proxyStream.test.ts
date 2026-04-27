@@ -57,6 +57,7 @@ describe('createResponsesProxyStreamSession', () => {
   });
 
   it('gracefully finalizes native responses streams with meaningful output when the reader errors before response.completed', async () => {
+    const events: string[] = [];
     const lines: string[] = [];
     const usage = {
       promptTokens: 5,
@@ -73,8 +74,11 @@ describe('createResponsesProxyStreamSession', () => {
       getUsage: () => usage,
       writeLines: (nextLines) => {
         lines.push(...nextLines);
+        events.push(...nextLines);
       },
-      writeRaw: () => {},
+      writeRaw: (chunk) => {
+        events.push(chunk);
+      },
     });
 
     const chunks = [
@@ -95,7 +99,9 @@ describe('createResponsesProxyStreamSession', () => {
       },
       releaseLock() {},
     }, {
-      end() {},
+      end() {
+        events.push('[end]');
+      },
     });
 
     expect(result).toEqual({
@@ -109,6 +115,12 @@ describe('createResponsesProxyStreamSession', () => {
     expect(output).toContain('"output_text":"partial"');
     expect(output).toContain('data: [DONE]');
     expect(output).not.toContain('event: response.failed');
+    const completedIndex = events.findIndex((event) => event.includes('event: response.completed'));
+    const doneIndex = events.findIndex((event) => event.includes('data: [DONE]'));
+    const endIndex = events.indexOf('[end]');
+    expect(completedIndex).toBeGreaterThanOrEqual(0);
+    expect(doneIndex).toBeGreaterThan(completedIndex);
+    expect(endIndex).toBeGreaterThan(doneIndex);
   });
 
   it('serializes non-SSE fallback payloads into canonical responses SSE closeout events', () => {

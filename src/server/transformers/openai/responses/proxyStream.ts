@@ -322,44 +322,47 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
     async run(reader: StreamReader | null | undefined, response: ResponseSink): Promise<ResponsesProxyStreamResult> {
       const lifecycle = createProxyStreamLifecycle<ParsedSseEvent>({
         reader,
-        response,
         pullEvents: (buffer) => openAiResponsesStream.pullSseEvents(buffer),
         handleEvent: handleEventBlock,
         onEof: closeOut,
       });
-      const lifecycleSummary = await lifecycle.run();
-      if (terminalResult.status !== 'failed') {
-        if (lifecycleSummary.reason === 'reader_error') {
-          if (shouldGracefullyFinalizeTruncatedStream({
-            requiresExplicitTerminalEvent,
-            state: responsesState,
-          })) {
-            finalize();
-            return terminalResult;
+      try {
+        const lifecycleSummary = await lifecycle.run();
+        if (terminalResult.status !== 'failed') {
+          if (lifecycleSummary.reason === 'reader_error') {
+            if (shouldGracefullyFinalizeTruncatedStream({
+              requiresExplicitTerminalEvent,
+              state: responsesState,
+            })) {
+              finalize();
+              return terminalResult;
+            }
+            terminalResult = {
+              status: 'failed',
+              errorMessage: `[stream:upstream_error] ${lifecycleSummary.readerErrorMessage || 'upstream stream reader error'}`,
+              terminationReason: 'upstream_error',
+            };
+          } else if (lifecycleSummary.reason === 'eof_with_trailing_buffer') {
+            if (shouldGracefullyFinalizeTruncatedStream({
+              requiresExplicitTerminalEvent,
+              state: responsesState,
+            })) {
+              finalize();
+              return terminalResult;
+            }
+            terminalResult = {
+              status: 'failed',
+              errorMessage: '[stream:truncated] stream closed before response.completed',
+              terminationReason: 'truncated',
+            };
           }
-          terminalResult = {
-            status: 'failed',
-            errorMessage: `[stream:upstream_error] ${lifecycleSummary.readerErrorMessage || 'upstream stream reader error'}`,
-            terminationReason: 'upstream_error',
-          };
-        } else if (lifecycleSummary.reason === 'eof_with_trailing_buffer') {
-          if (shouldGracefullyFinalizeTruncatedStream({
-            requiresExplicitTerminalEvent,
-            state: responsesState,
-          })) {
-            finalize();
-            return terminalResult;
-          }
-          terminalResult = {
-            status: 'failed',
-            errorMessage: '[stream:truncated] stream closed before response.completed',
-            terminationReason: 'truncated',
-          };
+        } else if (terminalResult.errorMessage && !terminalResult.errorMessage.startsWith('[stream:')) {
+          terminalResult.errorMessage = `[stream:${terminalResult.terminationReason}] ${terminalResult.errorMessage}`;
         }
-      } else if (terminalResult.errorMessage && !terminalResult.errorMessage.startsWith('[stream:')) {
-        terminalResult.errorMessage = `[stream:${terminalResult.terminationReason}] ${terminalResult.errorMessage}`;
+        return terminalResult;
+      } finally {
+        response.end();
       }
-      return terminalResult;
     },
   };
 }

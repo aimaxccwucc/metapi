@@ -97,6 +97,7 @@ describe('createChatProxyStreamSession', () => {
 
 
   it('gracefully finalizes openai chat streams after reader errors when meaningful output was already sent', async () => {
+    const events: string[] = [];
     const lines: string[] = [];
     const encoder = new TextEncoder();
     const session = createChatProxyStreamSession({
@@ -105,9 +106,11 @@ describe('createChatProxyStreamSession', () => {
       successfulUpstreamPath: '/v1/responses',
       writeLines(nextLines) {
         lines.push(...nextLines);
+        events.push(...nextLines);
       },
       writeRaw(chunk) {
         lines.push(chunk);
+        events.push(chunk);
       },
     });
 
@@ -128,7 +131,9 @@ describe('createChatProxyStreamSession', () => {
       },
       releaseLock() {},
     }, {
-      end() {},
+      end() {
+        events.push('[end]');
+      },
     });
 
     expect(result.status).toBe('completed');
@@ -138,6 +143,10 @@ describe('createChatProxyStreamSession', () => {
     expect(matches.length).toBe(1);
     expect(output).toContain('[DONE]');
     expect(output).not.toContain('response.failed');
+    const doneIndex = events.findIndex((event) => event.includes('[DONE]'));
+    const endIndex = events.indexOf('[end]');
+    expect(doneIndex).toBeGreaterThanOrEqual(0);
+    expect(endIndex).toBeGreaterThan(doneIndex);
   });
 
   it('gracefully finalizes openai chat streams after trailing buffered data when meaningful output was already sent', async () => {
