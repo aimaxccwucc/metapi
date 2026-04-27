@@ -190,6 +190,65 @@ describe('createChatProxyStreamSession', () => {
     expect(output).not.toContain('response.failed');
   });
 
+
+  it('does not fail empty visible chat streams when upstream reports completion usage', async () => {
+    const lines: string[] = [];
+    const encoder = new TextEncoder();
+    let parsedUsage = {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    const session = createChatProxyStreamSession({
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.5',
+      successfulUpstreamPath: '/v1/chat/completions',
+      getUsage: () => parsedUsage,
+      onParsedPayload(payload) {
+        if (!payload || typeof payload !== 'object') return;
+        const usage = (payload as any).usage;
+        if (!usage || typeof usage !== 'object') return;
+        parsedUsage = {
+          promptTokens: Number(usage.prompt_tokens || 0),
+          completionTokens: Number(usage.completion_tokens || 0),
+          totalTokens: Number(usage.total_tokens || 0),
+        };
+      },
+      writeLines(nextLines) {
+        lines.push(...nextLines);
+      },
+      writeRaw(chunk) {
+        lines.push(chunk);
+      },
+    });
+
+    const chunks = [
+      'data: {"id":"chatcmpl_usage_only","object":"chat.completion.chunk","created":1706000000,"model":"gpt-5.5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":146390,"completion_tokens":4,"total_tokens":146394}}\n\n',
+      'data: [DONE]\n\n',
+    ].map((chunk) => encoder.encode(chunk));
+    let readIndex = 0;
+    const result = await session.run({
+      async read() {
+        if (readIndex >= chunks.length) return { done: true };
+        return { done: false, value: chunks[readIndex++] };
+      },
+      async cancel() {
+        return undefined;
+      },
+      releaseLock() {},
+    }, {
+      end() {},
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.terminationReason).toBe('completed');
+    const output = lines.join('');
+    expect(output).toContain('[DONE]');
+    expect(output).toContain('"completion_tokens":4');
+    expect(output).not.toContain('response.failed');
+    expect(output).not.toContain('Upstream returned empty content');
+  });
+
   it('does not duplicate responses text when terminal done events replay full content', async () => {
     const lines: string[] = [];
     const encoder = new TextEncoder();

@@ -148,22 +148,6 @@ function hasCompletionContentFromPayload(payload: unknown): boolean {
   return false;
 }
 
-function hasTerminalCompletionSignal(payload: unknown): boolean {
-  if (!isRecord(payload)) return false;
-  const obj: any = payload;
-
-  if (Array.isArray(obj?.choices)) {
-    return obj.choices.some((choice: any) => hasNonEmptyString(choice?.finish_reason) && choice.finish_reason !== 'tool_calls');
-  }
-
-  if (hasNonEmptyString(obj?.finish_reason) && obj.finish_reason !== 'tool_calls') return true;
-  if (hasNonEmptyString(obj?.status) && String(obj.status).toLowerCase() === 'completed') return true;
-  if (isRecord(obj?.response) && hasNonEmptyString(obj.response?.status) && String(obj.response.status).toLowerCase() === 'completed') {
-    return true;
-  }
-
-  return false;
-}
 
 function detectHasUpstreamOutput(rawText: string): boolean {
   const text = typeof rawText === 'string' ? rawText : '';
@@ -223,22 +207,7 @@ export function detectProxyFailure(input: {
   if (config.proxyEmptyContentFailEnabled) {
     const completionTokens = toNonNegativeInt(input.usage?.completionTokens ?? input.completionTokens);
     const hasOutput = detectHasUpstreamOutput(rawText);
-    const hasTerminalSignal = (() => {
-      try {
-        return hasTerminalCompletionSignal(JSON.parse(rawText));
-      } catch {
-        return false;
-      }
-    })();
-
     if (!hasOutput && completionTokens <= 0) {
-      return {
-        status: 502,
-        reason: 'Upstream returned empty content',
-      };
-    }
-
-    if (!hasOutput && hasTerminalSignal) {
       return {
         status: 502,
         reason: 'Upstream returned empty content',

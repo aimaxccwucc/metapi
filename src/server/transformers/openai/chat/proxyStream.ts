@@ -107,11 +107,17 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     };
   };
 
+  const hasResolvedCompletionUsage = () => {
+    const usage = input.getUsage?.();
+    return !!usage && usage.completionTokens > 0;
+  };
+
   const finalizeAsEmptyContentFailure = () => {
     if (
       input.downstreamFormat !== 'openai'
       || terminalResult.status === 'failed'
       || hasMeaningfulOutput
+      || hasResolvedCompletionUsage()
       || !config.proxyEmptyContentFailEnabled
     ) {
       return false;
