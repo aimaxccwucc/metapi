@@ -52,6 +52,16 @@ function normalizeFirstScalar(value: unknown): number | string | null {
   return null;
 }
 
+async function executeScalarQuery(db: any, dbType: DbType, querySql: ReturnType<typeof sql>): Promise<unknown> {
+  if (typeof db.execute === 'function') {
+    return await db.execute(querySql);
+  }
+  if (dbType === 'sqlite' && typeof db.get === 'function') {
+    return await db.get(querySql);
+  }
+  throw new Error('database client does not expose execute/get query method');
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.dbType) process.env.DB_TYPE = options.dbType;
@@ -75,23 +85,25 @@ async function main() {
       console.log('[db-smoke] dbUrl=(empty, using default sqlite path)');
     }
 
-    const pingRows = await db.execute(sql`select 1 as ok`);
+    const pingRows = await executeScalarQuery(db, dbType, sql`select 1 as ok`);
     const pingScalar = normalizeFirstScalar(pingRows);
     if (Number(pingScalar) !== 1) {
       throw new Error(`unexpected ping result: ${JSON.stringify(pingRows)}`);
     }
     console.log('[db-smoke] ping ok');
 
-    const txRows = await db.transaction(async (tx: any) => tx.execute(sql`select 1 as ok`));
+    const txRows = await db.transaction(async (tx: any) => executeScalarQuery(tx, dbType, sql`select 1 as ok`));
     const txScalar = normalizeFirstScalar(txRows);
     if (Number(txScalar) !== 1) {
       throw new Error(`unexpected transaction ping result: ${JSON.stringify(txRows)}`);
     }
     console.log('[db-smoke] transaction ok');
 
-    const versionRows = dbType === 'sqlite'
-      ? await db.execute(sql`select sqlite_version() as v`)
-      : await db.execute(sql`select version() as v`);
+    const versionRows = await executeScalarQuery(
+      db,
+      dbType,
+      dbType === 'sqlite' ? sql`select sqlite_version() as v` : sql`select version() as v`,
+    );
     const version = normalizeFirstScalar(versionRows);
     if (typeof version !== 'string' || version.trim().length === 0) {
       throw new Error(`failed to read server version: ${JSON.stringify(versionRows)}`);

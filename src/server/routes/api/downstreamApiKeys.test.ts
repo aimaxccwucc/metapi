@@ -528,7 +528,7 @@ describe('downstream api keys routes', () => {
     expect(updateRes.statusCode).toBe(400);
     expect(updateRes.json()).toMatchObject({
       success: false,
-      message: 'siteWeightMultipliers 包含不存在的站点: 999',
+      message: '站点策略包含不存在的站点: 999',
     });
 
     const filteredSummaryRes = await app.inject({

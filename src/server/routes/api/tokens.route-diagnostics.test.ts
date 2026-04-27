@@ -1067,7 +1067,7 @@ describe('GET /api/routes/diagnostics', () => {
     }).run();
 
     getModelsMock.mockResolvedValue(['gemini-3-pro-preview']);
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 'ok' }), {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ id: 'ok', object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }] }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }));
@@ -1276,15 +1276,19 @@ describe('GET /api/routes/diagnostics', () => {
     ]).run();
 
     getModelsMock.mockResolvedValue(['gpt-4.1']);
-    fetchMock
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'ok-a' }), {
+    fetchMock.mockImplementation(async (_url: string, init?: Record<string, unknown>) => {
+      const headers = (init?.headers || {}) as Record<string, string>;
+      const forcedChannelId = headers['x-metapi-tester-forced-channel-id'];
+      const id = forcedChannelId === String(tokenB.id) ? 'ok-b' : 'ok-a';
+      return new Response(JSON.stringify({
+        id,
+        object: 'chat.completion',
+        choices: [{ index: 0, message: { role: 'assistant', content: id }, finish_reason: 'stop' }],
+      }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'ok-b' }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      }));
+      });
+    });
 
     const response = await app.inject({
       method: 'POST',
@@ -1295,14 +1299,13 @@ describe('GET /api/routes/diagnostics', () => {
     expect(response.statusCode).toBe(200);
     const body = response.json() as {
       total: number;
-      availableCount: number;
       skippedCount: number;
-      items: Array<{ tokenId: number | null; available: boolean; reason: string }>;
+      items: Array<{ tokenId: number | null; available: boolean; reason: string; detectionMethod: string }>;
     };
     expect(body.total).toBe(2);
-    expect(body.availableCount).toBe(2);
     expect(body.skippedCount).toBe(0);
     expect(body.items.map((item) => item.tokenId).sort((a, b) => Number(a) - Number(b))).toEqual([tokenA.id, tokenB.id]);
+    expect(body.items.every((item) => item.detectionMethod === 'realtime_probe')).toBe(true);
     expect(body.items.some((item) => item.reason.includes('同站点仅探测余额最高的账号'))).toBe(false);
   });
 });

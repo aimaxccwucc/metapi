@@ -29,6 +29,7 @@ import {
   normalizeSiteAutoCheckinPolicy,
 } from './siteAutoCheckinService.js';
 import { resolveSiteAutoCheckinSkip } from './siteLifecycleService.js';
+import { syncCheckinStateForAccount } from './operationalOptimizationService.js';
 
 export function isSchedulableCheckinAccountStatus(status?: string | null): boolean {
   return status === 'active' || status === 'expired';
@@ -118,6 +119,21 @@ async function persistSkippedCheckin(
     })
     .where(eq(schema.accounts.id, account.id))
     .run();
+
+  await syncCheckinStateForAccount({
+    account,
+    site,
+    status: resolution.checkinSnapshotStatus,
+    reasonCode: resolution.code,
+    message: resolution.logMessage,
+    retryable: resolution.retryable,
+    requiresManual: resolution.requiresManual,
+    unsupported: resolution.unsupported,
+    lastAttemptAt: snapshotNow,
+    lastSuccessAt: extractCheckinSnapshot(account.extraConfig)?.lastSuccessAt ?? null,
+    nextRetryAt: null,
+    scheduleMode: options?.scheduleMode === 'interval' ? 'interval' : 'cron',
+  });
 
   if (!options?.skipEvent) {
     await db.insert(schema.events).values({
@@ -344,6 +360,21 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
         .where(eq(schema.accounts.id, accountId))
         .run();
     }
+    await syncCheckinStateForAccount({
+      account,
+      site,
+      status: resolution.checkinSnapshotStatus,
+      reasonCode: resolution.code,
+      message: resolution.logMessage,
+      retryable: resolution.retryable,
+      requiresManual: resolution.requiresManual,
+      unsupported: resolution.unsupported,
+      lastAttemptAt: snapshotNow,
+      lastSuccessAt,
+      nextRetryAt: null,
+      lastReloginStatus: activeAccessToken !== account.accessToken ? 'success' : null,
+      scheduleMode: options?.scheduleMode === 'interval' ? 'interval' : 'cron',
+    });
   } else {
     const nextRetryAt = resolution.retryable
       ? new Date(Date.now() + (options?.scheduleMode === 'interval' ? 60 * 60 * 1000 : 30 * 60 * 1000)).toISOString()
@@ -371,6 +402,21 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       })
       .where(eq(schema.accounts.id, accountId))
       .run();
+    await syncCheckinStateForAccount({
+      account,
+      site,
+      status: resolution.checkinSnapshotStatus,
+      reasonCode: resolution.code,
+      message: resolution.logMessage,
+      retryable: resolution.retryable,
+      requiresManual: resolution.requiresManual,
+      unsupported: resolution.unsupported,
+      lastAttemptAt: snapshotNow,
+      lastSuccessAt: extractCheckinSnapshot(account.extraConfig)?.lastSuccessAt ?? null,
+      nextRetryAt,
+      lastReloginStatus: activeAccessToken !== account.accessToken ? 'success' : null,
+      scheduleMode: options?.scheduleMode === 'interval' ? 'interval' : 'cron',
+    });
   }
 
   const createdAt = formatUtcSqlDateTime(new Date());

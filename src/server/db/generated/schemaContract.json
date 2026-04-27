@@ -246,6 +246,112 @@
         }
       }
     },
+    "checkin_states": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "account_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "status": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'unknown'",
+          "primaryKey": false
+        },
+        "reason_code": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "message": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "retryable": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "requires_manual": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "unsupported": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "consecutive_failures": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "last_attempt_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_success_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "next_retry_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_relogin_status": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "schedule_mode": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "downstream_api_keys": {
       "columns": {
         "id": {
@@ -470,6 +576,82 @@
           "logicalType": "boolean",
           "notNull": false,
           "defaultValue": "false",
+          "primaryKey": false
+        }
+      }
+    },
+    "model_capability_profiles": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "model_name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "endpoint_types": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "supports_tools": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "supports_vision": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "supports_files": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "supports_reasoning": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "supports_streaming": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "1",
+          "primaryKey": false
+        },
+        "source": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'heuristic'",
+          "primaryKey": false
+        },
+        "confidence": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'medium'",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
           "primaryKey": false
         }
       }
@@ -1282,6 +1464,176 @@
         }
       }
     },
+    "site_profiles": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "platform": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'unknown'",
+          "primaryKey": false
+        },
+        "credential_mode": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'mixed'",
+          "primaryKey": false
+        },
+        "supports_admin_api": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "supports_checkin": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "waf_profile": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'unknown'",
+          "primaryKey": false
+        },
+        "model_discovery_source": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'account_models'",
+          "primaryKey": false
+        },
+        "onboarding_score": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "operational_score": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "0",
+          "primaryKey": false
+        },
+        "last_detected_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "profile_json": {
+          "logicalType": "json",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
+    "site_protocol_profiles": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "preferred_endpoint": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "verified_endpoints": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "fallback_endpoints": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "probe_model_name": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_success_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "last_failure_code": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "cooldown_until": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "source": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'derived'",
+          "primaryKey": false
+        },
+        "profile_version": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": "1",
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        },
+        "created_at": {
+          "logicalType": "datetime",
+          "notNull": true,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "sites": {
       "columns": {
         "id": {
@@ -1736,6 +2088,41 @@
       "unique": false
     },
     {
+      "name": "checkin_states_account_unique",
+      "table": "checkin_states",
+      "columns": [
+        "account_id"
+      ],
+      "unique": true
+    },
+    {
+      "name": "checkin_states_manual_idx",
+      "table": "checkin_states",
+      "columns": [
+        "requires_manual",
+        "updated_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "checkin_states_site_status_idx",
+      "table": "checkin_states",
+      "columns": [
+        "site_id",
+        "status"
+      ],
+      "unique": false
+    },
+    {
+      "name": "checkin_states_status_retry_idx",
+      "table": "checkin_states",
+      "columns": [
+        "status",
+        "next_retry_at"
+      ],
+      "unique": false
+    },
+    {
       "name": "downstream_api_keys_enabled_idx",
       "table": "downstream_api_keys",
       "columns": [
@@ -1816,6 +2203,30 @@
       "table": "model_availability",
       "columns": [
         "model_name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_capability_profiles_model_unique",
+      "table": "model_capability_profiles",
+      "columns": [
+        "model_name"
+      ],
+      "unique": true
+    },
+    {
+      "name": "model_capability_profiles_tools_idx",
+      "table": "model_capability_profiles",
+      "columns": [
+        "supports_tools"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_capability_profiles_vision_idx",
+      "table": "model_capability_profiles",
+      "columns": [
+        "supports_vision"
       ],
       "unique": false
     },
@@ -2105,6 +2516,54 @@
       "unique": true
     },
     {
+      "name": "site_profiles_operational_score_idx",
+      "table": "site_profiles",
+      "columns": [
+        "operational_score"
+      ],
+      "unique": false
+    },
+    {
+      "name": "site_profiles_platform_idx",
+      "table": "site_profiles",
+      "columns": [
+        "platform"
+      ],
+      "unique": false
+    },
+    {
+      "name": "site_profiles_site_unique",
+      "table": "site_profiles",
+      "columns": [
+        "site_id"
+      ],
+      "unique": true
+    },
+    {
+      "name": "site_protocol_profiles_cooldown_idx",
+      "table": "site_protocol_profiles",
+      "columns": [
+        "cooldown_until"
+      ],
+      "unique": false
+    },
+    {
+      "name": "site_protocol_profiles_preferred_idx",
+      "table": "site_protocol_profiles",
+      "columns": [
+        "preferred_endpoint"
+      ],
+      "unique": false
+    },
+    {
+      "name": "site_protocol_profiles_site_unique",
+      "table": "site_protocol_profiles",
+      "columns": [
+        "site_id"
+      ],
+      "unique": true
+    },
+    {
       "name": "sites_auto_checkin_policy_idx",
       "table": "sites",
       "columns": [
@@ -2218,6 +2677,13 @@
   ],
   "uniques": [
     {
+      "name": "checkin_states_account_unique",
+      "table": "checkin_states",
+      "columns": [
+        "account_id"
+      ]
+    },
+    {
       "name": "downstream_api_keys_key_unique",
       "table": "downstream_api_keys",
       "columns": [
@@ -2229,6 +2695,13 @@
       "table": "model_availability",
       "columns": [
         "account_id",
+        "model_name"
+      ]
+    },
+    {
+      "name": "model_capability_profiles_model_unique",
+      "table": "model_capability_profiles",
+      "columns": [
         "model_name"
       ]
     },
@@ -2287,6 +2760,20 @@
       ]
     },
     {
+      "name": "site_profiles_site_unique",
+      "table": "site_profiles",
+      "columns": [
+        "site_id"
+      ]
+    },
+    {
+      "name": "site_protocol_profiles_site_unique",
+      "table": "site_protocol_profiles",
+      "columns": [
+        "site_id"
+      ]
+    },
+    {
       "name": "sites_platform_url_unique",
       "table": "sites",
       "columns": [
@@ -2341,6 +2828,28 @@
         "account_id"
       ],
       "referencedTable": "accounts",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "checkin_states",
+      "columns": [
+        "account_id"
+      ],
+      "referencedTable": "accounts",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "checkin_states",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
       "referencedColumns": [
         "id"
       ],
@@ -2425,6 +2934,28 @@
     },
     {
       "table": "site_disabled_models",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "site_profiles",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "site_protocol_profiles",
       "columns": [
         "site_id"
       ],

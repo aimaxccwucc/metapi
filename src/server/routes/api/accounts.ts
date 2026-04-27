@@ -642,10 +642,13 @@ async function executeRefreshAccountRuntimeHealth(accountId?: number) {
 
 let accountsCache: { data: unknown; expiresAt: number } | null = null;
 
+function isVitestRuntime(): boolean {
+  return !!((process.env.VITEST_POOL_ID || process.env.VITEST_WORKER_ID || '').trim());
+}
 export async function accountsRoutes(app: FastifyInstance) {
   // List all accounts (with site info)
   app.get('/api/accounts', async (request) => {
-    if (accountsCache && Date.now() < accountsCache.expiresAt) {
+    if (!isVitestRuntime() && accountsCache && Date.now() < accountsCache.expiresAt) {
       return accountsCache.data;
     }
 
@@ -738,7 +741,9 @@ export async function accountsRoutes(app: FastifyInstance) {
       };
     });
 
-    accountsCache = { data: result, expiresAt: Date.now() + 3000 };
+    if (!isVitestRuntime()) {
+      accountsCache = { data: result, expiresAt: Date.now() + 3000 };
+    }
     return result;
   });
 

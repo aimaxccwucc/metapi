@@ -21,6 +21,7 @@ import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { oauthRoutes } from './routes/api/oauth.js';
 import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
 import { diagnosticsRoutes } from './routes/api/diagnostics.js';
+import { optimizationRoutes } from './routes/api/optimization.js';
 import { systemRoutes } from './routes/system.js';
 import { proxyRoutes } from './routes/proxy/router.js';
 import { registerCustomRoutes } from './custom/register.js';
@@ -54,6 +55,7 @@ import {
   ensureProxyLogClientColumns,
   ensureProxyLogDownstreamApiKeyIdColumn,
   ensureProxyLogBillingDetailsColumn,
+  ensureOperationalOptimizationCompatibilityTables,
   ensureResponseCacheTable,
   ensureRouteGroupingCompatibilityColumns,
   ensureSiteCompatibilityColumns,
@@ -360,6 +362,7 @@ try {
   await ensureProxyLogCacheColumns();
   await ensureProxyLogClientColumns();
   await ensureProxyLogDownstreamApiKeyIdColumn();
+  await ensureOperationalOptimizationCompatibilityTables();
   if (config.responseCacheEnabled) {
     try {
       if (!await ensureResponseCacheTable()) {
@@ -424,6 +427,7 @@ await app.register(monitorRoutes);
 await app.register(downstreamApiKeysRoutes);
 await app.register(oauthRoutes);
 await app.register(diagnosticsRoutes);
+await app.register(optimizationRoutes);
 await app.register(registerCustomRoutes);
 
 // Register OpenAI-compatible proxy routes

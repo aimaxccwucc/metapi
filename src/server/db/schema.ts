@@ -104,6 +104,91 @@ export const checkinLogs = sqliteTable('checkin_logs', {
   statusIdx: index('checkin_logs_status_idx').on(table.status),
 }));
 
+export const checkinStates = sqliteTable('checkin_states', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  status: text('status').notNull().default('unknown'),
+  reasonCode: text('reason_code'),
+  message: text('message'),
+  retryable: integer('retryable', { mode: 'boolean' }).notNull().default(false),
+  requiresManual: integer('requires_manual', { mode: 'boolean' }).notNull().default(false),
+  unsupported: integer('unsupported', { mode: 'boolean' }).notNull().default(false),
+  consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+  lastAttemptAt: text('last_attempt_at'),
+  lastSuccessAt: text('last_success_at'),
+  nextRetryAt: text('next_retry_at'),
+  lastReloginStatus: text('last_relogin_status'),
+  scheduleMode: text('schedule_mode'),
+  updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+  createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+}, (table) => ({
+  accountUnique: uniqueIndex('checkin_states_account_unique').on(table.accountId),
+  siteStatusIdx: index('checkin_states_site_status_idx').on(table.siteId, table.status),
+  statusRetryIdx: index('checkin_states_status_retry_idx').on(table.status, table.nextRetryAt),
+  manualIdx: index('checkin_states_manual_idx').on(table.requiresManual, table.updatedAt),
+}));
+
+export const siteProfiles = sqliteTable('site_profiles', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  platform: text('platform').notNull().default('unknown'),
+  credentialMode: text('credential_mode').notNull().default('mixed'),
+  supportsAdminApi: integer('supports_admin_api', { mode: 'boolean' }).notNull().default(false),
+  supportsCheckin: integer('supports_checkin', { mode: 'boolean' }).notNull().default(false),
+  wafProfile: text('waf_profile').notNull().default('unknown'),
+  modelDiscoverySource: text('model_discovery_source').notNull().default('account_models'),
+  onboardingScore: integer('onboarding_score').notNull().default(0),
+  operationalScore: integer('operational_score').notNull().default(0),
+  lastDetectedAt: text('last_detected_at'),
+  profileJson: text('profile_json'),
+  updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+  createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+}, (table) => ({
+  siteUnique: uniqueIndex('site_profiles_site_unique').on(table.siteId),
+  scoreIdx: index('site_profiles_operational_score_idx').on(table.operationalScore),
+  platformIdx: index('site_profiles_platform_idx').on(table.platform),
+}));
+
+export const siteProtocolProfiles = sqliteTable('site_protocol_profiles', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  preferredEndpoint: text('preferred_endpoint'),
+  verifiedEndpoints: text('verified_endpoints'),
+  fallbackEndpoints: text('fallback_endpoints'),
+  probeModelName: text('probe_model_name'),
+  lastSuccessAt: text('last_success_at'),
+  lastFailureCode: text('last_failure_code'),
+  cooldownUntil: text('cooldown_until'),
+  source: text('source').notNull().default('derived'),
+  profileVersion: integer('profile_version').notNull().default(1),
+  updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+  createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+}, (table) => ({
+  siteUnique: uniqueIndex('site_protocol_profiles_site_unique').on(table.siteId),
+  preferredIdx: index('site_protocol_profiles_preferred_idx').on(table.preferredEndpoint),
+  cooldownIdx: index('site_protocol_profiles_cooldown_idx').on(table.cooldownUntil),
+}));
+
+export const modelCapabilityProfiles = sqliteTable('model_capability_profiles', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  modelName: text('model_name').notNull(),
+  endpointTypes: text('endpoint_types'),
+  supportsTools: integer('supports_tools', { mode: 'boolean' }).notNull().default(false),
+  supportsVision: integer('supports_vision', { mode: 'boolean' }).notNull().default(false),
+  supportsFiles: integer('supports_files', { mode: 'boolean' }).notNull().default(false),
+  supportsReasoning: integer('supports_reasoning', { mode: 'boolean' }).notNull().default(false),
+  supportsStreaming: integer('supports_streaming', { mode: 'boolean' }).notNull().default(true),
+  source: text('source').notNull().default('heuristic'),
+  confidence: text('confidence').notNull().default('medium'),
+  updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+  createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+}, (table) => ({
+  modelUnique: uniqueIndex('model_capability_profiles_model_unique').on(table.modelName),
+  toolsIdx: index('model_capability_profiles_tools_idx').on(table.supportsTools),
+  visionIdx: index('model_capability_profiles_vision_idx').on(table.supportsVision),
+}));
+
 export const modelAvailability = sqliteTable('model_availability', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),

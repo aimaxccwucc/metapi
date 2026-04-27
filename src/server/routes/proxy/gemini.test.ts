@@ -1313,13 +1313,13 @@ describe('gemini native proxy routes', () => {
       supportedModels: ['gemini-2.5-flash'],
       allowedRouteIds: [],
       siteWeightMultipliers: {},
-      stickySessionKey: expect.any(String),
+      stickySessionKey: null,
     }));
     expect(isModelAllowedByPolicyOrAllowedRoutesMock).toHaveBeenCalledWith('gemini-2.0-flash', expect.objectContaining({
       supportedModels: ['gemini-2.5-flash'],
       allowedRouteIds: [],
       siteWeightMultipliers: {},
-      stickySessionKey: expect.any(String),
+      stickySessionKey: null,
     }));
   });
 

@@ -619,6 +619,95 @@ export type RouteDiagnosticsResponse = {
   };
 };
 
+export type OperationalOptimizationOverview = {
+  success: true;
+  generatedAt: string;
+  scores: {
+    usability: number;
+    stability: number;
+    speed: number;
+    tokenSavings: number;
+    overall: number;
+  };
+  counts: {
+    sites: number;
+    activeSites: number;
+    siteProfiles: number;
+    protocolProfiles: number;
+    accounts: number;
+    activeAccounts: number;
+    checkinStates: number;
+    checkinAttention: number;
+    modelCapabilities: number;
+    governanceSuppressed: number;
+    governanceProbing: number;
+    responseCacheHits: number;
+    responseCacheMisses: number;
+  };
+  policies: {
+    responseCache: {
+      enabled: boolean;
+      ttlMs: number;
+      maxRows: number;
+      staleIfErrorMs: number;
+      deterministicOnly: boolean;
+    };
+    retryBudget: {
+      requestBudgetMs: number;
+      maxRetries: number;
+      maxChannelAttempts: number;
+      honorRetryAfter: boolean;
+      failFastOnKnownBadEndpoint: boolean;
+    };
+  };
+  topSites: Array<{
+    siteId: number;
+    name: string;
+    platform: string;
+    operationalScore: number;
+    onboardingScore: number;
+    accountCount: number;
+    activeAccountCount: number;
+    checkinAttention: number;
+    routeGovernanceCount: number;
+    protocolPreferredEndpoint: string | null;
+  }>;
+  attention: Array<{
+    type: 'site' | 'account' | 'route' | 'gateway';
+    severity: 'info' | 'warning' | 'error';
+    title: string;
+    detail: string;
+    action: string;
+    targetId?: number;
+  }>;
+  optimizationItems: Array<{
+    id: string;
+    title: string;
+    area: string;
+    status: 'ready' | 'attention' | 'missing';
+    evidence: string;
+    action: string;
+  }>;
+  metrics: {
+    responseCache: {
+      ready: boolean;
+      savedTokens: number;
+      savedCost: number;
+      hits: number;
+      staleHits: number;
+      misses: number;
+      [key: string]: unknown;
+    };
+    retryBackoff: {
+      totalMs: number;
+      count: number;
+      retryAfterHonoredCount: number;
+      budgetExhaustedCount: number;
+      [key: string]: unknown;
+    };
+  };
+};
+
 export type ProxyDebugTraceItem = {
   at: string;
   kind: string;
@@ -1369,6 +1458,15 @@ export const api = {
   }),
   getRouteDiagnostics: (limit?: number) =>
     request(`/api/routes/diagnostics${buildQueryString({ limit: typeof limit === 'number' ? Math.trunc(limit) : undefined })}`) as Promise<RouteDiagnosticsResponse>,
+  getOptimizationOverview: () => request('/api/optimization/overview') as Promise<OperationalOptimizationOverview>,
+  getOptimizationDiagnosticsText: () => request('/api/optimization/diagnostics-text') as Promise<{ success: true; text: string }>,
+  syncOptimizationProfiles: () => request('/api/optimization/sync', { method: 'POST' }) as Promise<{ success: true; queued: boolean; reused: boolean; jobId: string; status: string }>,
+  runOptimizationRecoveryPass: (data?: { limit?: number; includeProbing?: boolean }) =>
+    request('/api/optimization/recovery-pass', { method: 'POST', body: JSON.stringify(data || {}) }) as Promise<RouteGovernanceRecoveryPassResponse>,
+  updateOptimizationPolicies: (data: {
+    responseCache?: Partial<OperationalOptimizationOverview['policies']['responseCache']>;
+    retryBudget?: Partial<OperationalOptimizationOverview['policies']['retryBudget']>;
+  }) => request('/api/optimization/policies', { method: 'PUT', body: JSON.stringify(data) }) as Promise<{ success: true; policies: OperationalOptimizationOverview['policies'] }>,
 
   // Stats
   getDashboard: () => request('/api/stats/dashboard'),

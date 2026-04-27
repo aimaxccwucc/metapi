@@ -9,6 +9,10 @@ import { ensureSiteSchemaCompatibility, type SiteSchemaInspector } from './siteS
 import { ensureRouteGroupingSchemaCompatibility } from './routeGroupingSchemaCompatibility.js';
 import { ensureProxyFileSchemaCompatibility } from './proxyFileSchemaCompatibility.js';
 import { ensureTokenCoverageAutoprovisionSchemaCompatibility } from './tokenCoverageAutoprovisionSchemaCompatibility.js';
+import {
+  ensureOperationalOptimizationSchemaCompatibility,
+  ensureOperationalOptimizationSqliteSchemaSync,
+} from './operationalOptimizationSchemaCompatibility.js';
 import { executeLegacyCompat, executeLegacyCompatSync } from './legacySchemaCompat.js';
 import { config } from '../config.js';
 import { ensureRuntimeDatabaseReady } from '../runtimeDatabaseBootstrap.js';
@@ -38,6 +42,10 @@ const TABLES_WITH_NUMERIC_ID = new Set([
   'events',
   'routing_governance_states',
   'token_coverage_autoprovision_states',
+  'checkin_states',
+  'site_profiles',
+  'site_protocol_profiles',
+  'model_capability_profiles',
 ]);
 
 export let runtimeDbDialect: RuntimeDbDialect = config.dbType;
@@ -513,6 +521,12 @@ export async function ensureTokenCoverageAutoprovisionCompatibilityColumns(): Pr
   const inspector = createRuntimeSchemaInspector();
   if (!inspector) return;
   await ensureTokenCoverageAutoprovisionSchemaCompatibility(inspector);
+}
+
+export async function ensureOperationalOptimizationCompatibilityTables(): Promise<void> {
+  const inspector = createRuntimeSchemaInspector();
+  if (!inspector) return;
+  await ensureOperationalOptimizationSchemaCompatibility(inspector);
 }
 
 export async function ensureResponseCacheTable(): Promise<boolean> {
@@ -1442,6 +1456,10 @@ function initSqliteDb() {
   ensureProxyLogClientSchema();
   ensureProxyVideoTaskSchema();
   ensureProxyFileSchema();
+  ensureOperationalOptimizationSqliteSchemaSync({
+    tableExists,
+    execute: execSqliteStatement,
+  });
 
   const rawDb = drizzleSqliteProxy(
     (sqlText, params, method) => sqliteProxyQuery(sqlText, params, method as SqlMethod),

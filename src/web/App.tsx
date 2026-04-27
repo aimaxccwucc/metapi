@@ -52,6 +52,7 @@ const Monitors = lazy(() => import('./pages/Monitors.js'));
 const OAuthManagement = lazy(() => import('./pages/OAuthManagement.js'));
 const SiteAnnouncements = lazy(() => import('./pages/SiteAnnouncements.js'));
 const CredentialDiagnostics = lazy(() => import('./pages/CredentialDiagnostics.js'));
+const OptimizationWorkbench = lazy(() => import('./pages/OptimizationWorkbench.js'));
 
 const routePreloaders = {
   '/': () => import('./pages/Dashboard.js'),
@@ -68,6 +69,7 @@ const routePreloaders = {
   '/monitors': () => import('./pages/Monitors.js'),
   '/diagnostics': () => import('./pages/CredentialDiagnostics.js'),
   '/credential-diagnostics': () => import('./pages/CredentialDiagnostics.js'),
+  '/optimization': () => import('./pages/OptimizationWorkbench.js'),
   '/settings': () => import('./pages/Settings.js'),
   '/downstream-keys': () => import('./pages/DownstreamKeys.js'),
   '/events': () => import('./pages/ProgramLogs.js'),
@@ -510,6 +512,7 @@ export const sidebarGroups = [
       { to: '/site-announcements', label: '站点公告', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M7 8h10M7 12h10M7 16h6M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" /></svg> },
       { to: '/accounts', label: '连接管理', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg> },
       { to: '/diagnostics', label: '接入诊断', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 17v-2a4 4 0 018 0v2m-4-6a3 3 0 100-6 3 3 0 000 6zm8 3h-2m-14 0H3m15.364-6.364l-1.414 1.414M7.05 15.95l-1.414 1.414m0-10.728l1.414 1.414m10.9 10.9l1.414 1.414" /></svg> },
+      { to: '/optimization', label: '优化工作台', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 13a8 8 0 0116 0m-8-8v4m4.95-1.95l-2.829 2.829M19 13h-4m-6 0H5m4.879-3.121L7.05 7.05M12 13l3 3m-7 3h8" /></svg> },
       { to: '/oauth', label: 'OAuth 管理', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 7a3 3 0 106 0 3 3 0 00-6 0zM3 17a3 3 0 106 0 3 3 0 00-6 0zM15 17a3 3 0 106 0 3 3 0 00-6 0zM6 14V10m0 0a3 3 0 113-3m-3 3a3 3 0 003 3h6" /></svg> },
       { to: '/downstream-keys', label: '下游密钥', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M15 7a4 4 0 11-8 0 4 4 0 018 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M7 21a6 6 0 0110.8-3.6M15.5 18.5l2-2m0 0l2 2m-2-2V21" /></svg> },
       { to: '/checkin', label: '签到记录', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg> },
@@ -626,6 +629,7 @@ const AppMainContent = memo(function AppMainContent({
               <Route path="/site-announcements" element={<SiteAnnouncements />} />
               <Route path="/accounts" element={<Accounts />} />
               <Route path="/diagnostics" element={<CredentialDiagnostics />} />
+              <Route path="/optimization" element={<OptimizationWorkbench />} />
               <Route path="/oauth" element={<OAuthManagement />} />
               <Route path="/tokens" element={<Tokens />} />
               <Route path="/checkin" element={<CheckinLog />} />
@@ -864,7 +868,7 @@ function AppShell() {
     const iosDevice = isIosDevice();
 
     if (iosDevice && !iosDismissed) {
-      setInstallBanner({ mode: 'ios_hint', visible: true });
+      setInstallBanner((prev) => (prev.visible && prev.mode === 'ios_hint' ? prev : { mode: 'ios_hint', visible: true }));
     }
 
     const handleBeforeInstallPrompt = (event: Event) => {

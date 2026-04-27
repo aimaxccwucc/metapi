@@ -108,6 +108,10 @@ describe('database schema parity', () => {
     const postgresUpgrade = readFileSync(resolve(generatedDir, 'postgres.upgrade.sql'), 'utf8');
 
     expect(contract.tables.response_cache?.columns.estimated_cost?.logicalType).toBe('real');
+    expect(contract.tables.checkin_states?.columns.status?.logicalType).toBe('text');
+    expect(contract.tables.site_profiles?.columns.operational_score?.logicalType).toBe('integer');
+    expect(contract.tables.site_protocol_profiles?.columns.preferred_endpoint?.logicalType).toBe('text');
+    expect(contract.tables.model_capability_profiles?.columns.supports_tools?.logicalType).toBe('integer');
     expect(contract.tables.response_cache?.columns.hit_count?.logicalType).toBe('integer');
     expect(contract.tables.routing_governance_states?.columns.reason_code?.logicalType).toBe('text');
     expect(contract.tables.token_routes?.columns.probe_policy?.logicalType).toBe('text');
@@ -120,7 +124,8 @@ describe('database schema parity', () => {
     expect(mysqlBootstrap).toContain('CREATE UNIQUE INDEX `response_cache_key_idx`');
     expect(mysqlBootstrap).toContain('CREATE TABLE IF NOT EXISTS `routing_governance_states`');
     expect(
-      mysqlUpgrade.includes('CREATE TABLE IF NOT EXISTS `routing_governance_states`')
+      mysqlUpgrade.includes('CREATE TABLE IF NOT EXISTS `site_profiles`')
+      || mysqlUpgrade.includes('CREATE TABLE IF NOT EXISTS `routing_governance_states`')
       || mysqlUpgrade.includes('ALTER TABLE `proxy_logs` ADD COLUMN `cache_status`')
       || mysqlUpgrade.includes('ALTER TABLE `token_routes` ADD COLUMN `probe_policy`')
       || mysqlUpgrade.includes('ALTER TABLE `sites` ADD COLUMN `auto_checkin_policy`')
@@ -133,7 +138,8 @@ describe('database schema parity', () => {
     expect(postgresBootstrap).toContain('CREATE UNIQUE INDEX "response_cache_key_idx"');
     expect(postgresBootstrap).toContain('CREATE TABLE IF NOT EXISTS "routing_governance_states"');
     expect(
-      postgresUpgrade.includes('CREATE TABLE IF NOT EXISTS "routing_governance_states"')
+      postgresUpgrade.includes('CREATE TABLE IF NOT EXISTS "site_profiles"')
+      || postgresUpgrade.includes('CREATE TABLE IF NOT EXISTS "routing_governance_states"')
       || postgresUpgrade.includes('ALTER TABLE "proxy_logs" ADD COLUMN "cache_status"')
       || postgresUpgrade.includes('ALTER TABLE "token_routes" ADD COLUMN "probe_policy"')
       || postgresUpgrade.includes('ALTER TABLE "sites" ADD COLUMN "auto_checkin_policy"')

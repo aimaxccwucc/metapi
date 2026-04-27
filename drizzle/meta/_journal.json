@@ -176,6 +176,13 @@
       "when": 1777084866249,
       "tag": "0025_downstream_key_exclusions",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1777300000000,
+      "tag": "0026_operational_optimization_profiles",
+      "breakpoints": true
     }
   ]
 }
