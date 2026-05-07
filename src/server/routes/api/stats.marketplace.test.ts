@@ -161,6 +161,98 @@ describe('/api/models/marketplace', () => {
     });
   });
 
+  it('returns site-specific pricing ratios for the same marketplace model', async () => {
+    const siteA = await db.insert(schema.sites).values({
+      name: 'pricing-site-a',
+      url: 'https://pricing-site-a.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+    const siteB = await db.insert(schema.sites).values({
+      name: 'pricing-site-b',
+      url: 'https://pricing-site-b.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: siteA.id,
+      username: 'pricing-a',
+      accessToken: 'session-a',
+      status: 'active',
+    }).returning().get();
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: siteB.id,
+      username: 'pricing-b',
+      accessToken: 'session-b',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values([
+      {
+        accountId: accountA.id,
+        modelName: 'gpt-priced',
+        available: true,
+      },
+      {
+        accountId: accountB.id,
+        modelName: 'gpt-priced',
+        available: true,
+      },
+    ]).run();
+
+    fetchMock.mockImplementation(async (url: string) => {
+      const modelRatio = url.includes('pricing-site-a') ? 2 : 5;
+      const groupRatio = url.includes('pricing-site-a')
+        ? { default: 1, vip: 0.5 }
+        : { default: 3, vip: 2 };
+      return new Response(JSON.stringify({
+        data: [
+          {
+            model_name: 'gpt-priced',
+            quota_type: 0,
+            model_ratio: modelRatio,
+            completion_ratio: 2,
+            enable_groups: ['default', 'vip'],
+          },
+        ],
+        group_ratio: groupRatio,
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/models/marketplace?includePricing=1',
+    });
+
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    const model = json.models.find((item: any) => item.name === 'gpt-priced');
+    expect(model).toBeTruthy();
+    expect(model.pricingSources).toHaveLength(2);
+    expect(model.pricingSources).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        siteName: 'pricing-site-a',
+        groupRatio: { default: 1, vip: 0.5 },
+        groupPricing: expect.objectContaining({
+          default: expect.objectContaining({ inputPerMillion: 4, outputPerMillion: 8 }),
+          vip: expect.objectContaining({ inputPerMillion: 2, outputPerMillion: 4 }),
+        }),
+      }),
+      expect.objectContaining({
+        siteName: 'pricing-site-b',
+        groupRatio: { default: 3, vip: 2 },
+        groupPricing: expect.objectContaining({
+          default: expect.objectContaining({ inputPerMillion: 30, outputPerMillion: 60 }),
+          vip: expect.objectContaining({ inputPerMillion: 20, outputPerMillion: 40 }),
+        }),
+      }),
+    ]));
+  });
+
   it('tests marketplace model availability and auto-creates a scoped key when needed', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'probe-site',

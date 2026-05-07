@@ -368,6 +368,7 @@ describe('Models marketplace text', () => {
               username: 'user-a',
               ownerBy: null,
               enableGroups: [],
+              groupRatio: { default: 0.5 },
               groupPricing: {
                 default: {
                   quotaType: 0,
@@ -383,6 +384,7 @@ describe('Models marketplace text', () => {
               username: 'user-b',
               ownerBy: null,
               enableGroups: [],
+              groupRatio: { default: 3 },
               groupPricing: {
                 default: {
                   quotaType: 0,
@@ -470,9 +472,11 @@ describe('Models marketplace text', () => {
       expect(expandedText).toContain('站点 A');
       expect(expandedText).toContain('user-a');
       expect(expandedText).toContain('token-a-1');
+      expect(expandedText).toContain('0.5x');
       expect(expandedText).not.toContain('站点 B');
       expect(expandedText).not.toContain('user-b');
       expect(expandedText).not.toContain('token-b-1');
+      expect(expandedText).not.toContain('3x');
     } finally {
       await unmountRoot(root);
     }
@@ -954,6 +958,155 @@ describe('Models marketplace text', () => {
       expect(collectText(codeNodes[0]!)).toContain('gpt-high');
       expect(collectText(root!.root)).toContain('$15.00');
       expect(collectText(root!.root)).toContain('$3.00');
+    } finally {
+      await unmountRoot(root);
+    }
+  });
+
+  it('shows per-site pricing and sorts by the lowest site-specific price', async () => {
+    apiMock.getModelsMarketplace.mockResolvedValue({
+      models: [
+        {
+          name: 'expensive-model',
+          accountCount: 1,
+          tokenCount: 1,
+          avgLatency: 200,
+          successRate: 99,
+          balance: 0,
+          description: 'priced',
+          tags: ['chat'],
+          supportedEndpointTypes: ['openai'],
+          pricingSources: [
+            {
+              siteId: 1,
+              siteName: 'expensive-site',
+              accountId: 1,
+              username: 'expensive-user',
+              ownerBy: null,
+              enableGroups: ['default'],
+              groupRatio: { default: 4 },
+              groupPricing: {
+                default: {
+                  quotaType: 0,
+                  inputPerMillion: 8,
+                  outputPerMillion: 12,
+                },
+              },
+            },
+          ],
+          accounts: [
+            {
+              id: 1,
+              site: 'expensive-site',
+              username: 'expensive-user',
+              latency: 200,
+              balance: 3,
+              tokens: [{ id: 1, name: 'default', isDefault: true }],
+            },
+          ],
+        },
+        {
+          name: 'cheap-model',
+          accountCount: 1,
+          tokenCount: 1,
+          avgLatency: 200,
+          successRate: 99,
+          balance: 0,
+          description: 'priced',
+          tags: ['chat'],
+          supportedEndpointTypes: ['openai'],
+          pricingSources: [
+            {
+              siteId: 2,
+              siteName: 'cheap-site',
+              accountId: 2,
+              username: 'cheap-user',
+              ownerBy: null,
+              enableGroups: ['default', 'vip'],
+              groupRatio: { default: 1, vip: 0.25 },
+              groupPricing: {
+                default: {
+                  quotaType: 0,
+                  inputPerMillion: 2,
+                  outputPerMillion: 3,
+                },
+                vip: {
+                  quotaType: 0,
+                  inputPerMillion: 0.5,
+                  outputPerMillion: 0.75,
+                },
+              },
+            },
+          ],
+          accounts: [
+            {
+              id: 2,
+              site: 'cheap-site',
+              username: 'cheap-user',
+              latency: 200,
+              balance: 15,
+              tokens: [{ id: 2, name: 'default', isDefault: true }],
+            },
+          ],
+        },
+      ],
+    });
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const tableToggle = root!.root.find((node) => (
+        node.type === 'button'
+        && node.props['aria-label'] === '表格视图'
+      ));
+
+      await act(async () => {
+        tableToggle.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const priceHeader = root!.root.find((node) => (
+        node.type === 'th'
+        && collectText(node).includes('价格')
+        && typeof node.props.onClick === 'function'
+      ));
+
+      await act(async () => {
+        priceHeader.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const codeNodes = root!.root.findAll((node) => node.type === 'code');
+      expect(collectText(codeNodes[0]!)).toContain('cheap-model');
+      expect(collectText(root!.root)).toContain('$1.2500 / 1M');
+      expect(collectText(root!.root)).toContain('$20.0000 / 1M');
+
+      await act(async () => {
+        codeNodes[0]!.parent?.parent?.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const tableText = collectText(root!.root);
+      expect(tableText).toContain('cheap-site');
+      expect(tableText).toContain('最低参考价');
+      expect(tableText).toContain('vip');
+      expect(tableText).toContain('0.25x');
+      expect(tableText).toContain('0.5/0.75 USD / 1M');
+      expect(tableText).toContain('default');
+      expect(tableText).toContain('1x');
+      expect(tableText).toContain('2/3 USD / 1M');
+      expect(tableText).toContain('排序值 $1.2500 / 1M');
     } finally {
       await unmountRoot(root);
     }

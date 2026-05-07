@@ -4620,6 +4620,163 @@ textarea {
   animation: fade-in 0.2s ease both;
 }
 
+.marketplace-pricing-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.marketplace-pricing-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-success) 22%, var(--color-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-success) 7%, var(--color-bg));
+}
+
+.marketplace-pricing-summary-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.marketplace-pricing-summary-main span,
+.marketplace-pricing-summary-main small,
+.marketplace-pricing-summary-meta {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.marketplace-pricing-summary-main strong {
+  color: var(--color-text-primary);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.marketplace-pricing-summary-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.marketplace-pricing-summary-meta span {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border-light);
+}
+
+.marketplace-pricing-source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.marketplace-pricing-source {
+  min-width: 0;
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-bg) 94%, var(--color-primary-light));
+  padding: 10px;
+}
+
+.marketplace-pricing-source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  min-width: 0;
+}
+
+.marketplace-pricing-source-head > span {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.marketplace-pricing-groups {
+  display: grid;
+  gap: 7px;
+}
+
+.marketplace-pricing-group {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 7px;
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg);
+}
+
+.marketplace-pricing-group.is-best {
+  border-color: color-mix(in srgb, var(--color-success) 36%, var(--color-border));
+  box-shadow: inset 3px 0 0 var(--color-success);
+}
+
+.marketplace-pricing-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.marketplace-pricing-group-name {
+  color: var(--color-text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.marketplace-pricing-ratio,
+.marketplace-pricing-best {
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.marketplace-pricing-ratio {
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.marketplace-pricing-best {
+  color: var(--color-success);
+  background: color-mix(in srgb, var(--color-success) 12%, var(--color-bg));
+}
+
+.marketplace-pricing-value {
+  color: var(--color-text-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.marketplace-pricing-sort-value {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+[data-theme="dark"] .marketplace-pricing-source,
+[data-theme="dark"] .marketplace-pricing-group,
+[data-theme="dark"] .marketplace-pricing-summary-meta span {
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .anim-collapse {
   display: grid;
   grid-template-rows: 0fr;

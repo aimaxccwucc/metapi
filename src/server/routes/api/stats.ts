@@ -1071,6 +1071,7 @@ export async function statsRoutes(app: FastifyInstance) {
         username: string | null;
         ownerBy: string | null;
         enableGroups: string[];
+        groupRatio: Record<string, number>;
         groupPricing: Record<string, {
           quotaType: number;
           inputPerMillion?: number;
@@ -1143,6 +1144,7 @@ export async function statsRoutes(app: FastifyInstance) {
             username: result.account.username,
             ownerBy: model.ownerBy,
             enableGroups: model.enableGroups,
+            groupRatio: result.catalog.groupRatio,
             groupPricing: model.groupPricing,
           });
         }

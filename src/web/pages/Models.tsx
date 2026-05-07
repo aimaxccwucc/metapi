@@ -12,7 +12,7 @@ import { mergeMarketplaceMetadata, shouldHydrateMarketplaceMetadata } from './he
 import { getInitialVisibleCount, getNextVisibleCount } from './helpers/progressiveRender.js';
 import { tr } from '../i18n.js';
 
-type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate' | 'balance';
+type SortColumn = 'name' | 'accountCount' | 'tokenCount' | 'avgLatency' | 'successRate' | 'balance' | 'price';
 type ViewMode = 'card' | 'table';
 type AccountDetailSortColumn = 'site' | 'username' | 'latency' | 'balance';
 const MODEL_RENDER_CHUNK = 40;
@@ -39,6 +39,7 @@ interface ModelPricingSource {
   username: string | null;
   ownerBy: string | null;
   enableGroups: string[];
+  groupRatio?: Record<string, number>;
   groupPricing: Record<string, ModelGroupPricing>;
 }
 
@@ -144,6 +145,171 @@ function renderGroupPricingValue(pricing: ModelGroupPricing): string {
   }
 
   return `${pricing.perCallTotal ?? 0} USD / call`;
+}
+
+function finiteNumberOrNull(value: unknown): number | null {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function getPricingSortCost(pricing: ModelGroupPricing): number | null {
+  if (pricing.quotaType === 0) {
+    const input = finiteNumberOrNull(pricing.inputPerMillion) ?? 0;
+    const output = finiteNumberOrNull(pricing.outputPerMillion) ?? 0;
+    const total = input + output;
+    return total > 0 ? total : null;
+  }
+
+  const total = finiteNumberOrNull(pricing.perCallTotal);
+  if (total != null && total > 0) return total;
+  const input = finiteNumberOrNull(pricing.perCallInput) ?? 0;
+  const output = finiteNumberOrNull(pricing.perCallOutput) ?? 0;
+  const fallbackTotal = input + output;
+  return fallbackTotal > 0 ? fallbackTotal : null;
+}
+
+type ModelPriceSummary = {
+  sortCost: number;
+  label: string;
+  detail: string;
+  sourceLabel: string;
+  groupLabel: string;
+  groupRatio: number | null;
+  groupCount: number;
+  sourceCount: number;
+  siteId: number;
+  accountId: number;
+};
+
+function summarizeModelPrice(model: Pick<ModelRow, 'pricingSources'>): ModelPriceSummary | null {
+  let best: {
+    source: ModelPricingSource;
+    group: string;
+    pricing: ModelGroupPricing;
+    sortCost: number;
+  } | null = null;
+  const groups = new Set<string>();
+  const sources = new Set<string>();
+
+  for (const source of model.pricingSources || []) {
+    sources.add(`${source.siteId}:${source.accountId}`);
+    for (const [group, pricing] of Object.entries(source.groupPricing || {})) {
+      groups.add(group);
+      const sortCost = getPricingSortCost(pricing);
+      if (sortCost == null) continue;
+      if (!best || sortCost < best.sortCost) {
+        best = { source, group, pricing, sortCost };
+      }
+    }
+  }
+
+  if (!best) return null;
+
+  const ratio = finiteNumberOrNull(best.source.groupRatio?.[best.group]);
+  const ratioText = ratio != null ? `，倍率 ${ratio}x` : '';
+  const sourceLabel = best.source.username
+    ? `${best.source.siteName} / ${best.source.username}`
+    : best.source.siteName;
+
+  if (best.pricing.quotaType === 0) {
+    const input = finiteNumberOrNull(best.pricing.inputPerMillion) ?? 0;
+    const output = finiteNumberOrNull(best.pricing.outputPerMillion) ?? 0;
+    return {
+      sortCost: best.sortCost,
+      label: `$${best.sortCost.toFixed(4)} / 1M`,
+      detail: `输入 $${input.toFixed(4)} / 输出 $${output.toFixed(4)} / 1M`,
+      sourceLabel,
+      groupLabel: best.group,
+      groupRatio: ratio,
+      groupCount: groups.size,
+      sourceCount: sources.size,
+      siteId: best.source.siteId,
+      accountId: best.source.accountId,
+    };
+  }
+
+  return {
+    sortCost: best.sortCost,
+    label: `$${best.sortCost.toFixed(4)} / call`,
+    detail: `${renderGroupPricingValue(best.pricing)}${ratioText}`,
+    sourceLabel,
+    groupLabel: best.group,
+    groupRatio: ratio,
+    groupCount: groups.size,
+    sourceCount: sources.size,
+    siteId: best.source.siteId,
+    accountId: best.source.accountId,
+  };
+}
+
+function formatPriceSortLabel(pricing: ModelGroupPricing, sortCost: number): string {
+  return pricing.quotaType === 0
+    ? `$${sortCost.toFixed(4)} / 1M`
+    : `$${sortCost.toFixed(4)} / call`;
+}
+
+function renderPricingPanel(
+  model: Pick<ModelRow, 'pricingSources'>,
+  priceSummary: ModelPriceSummary | null,
+  metadataHydrating: boolean,
+) {
+  if (model.pricingSources.length <= 0) {
+    return (
+      <span className="badge badge-muted">{metadataHydrating ? tr('正在加载价格元数据...') : tr('暂无价格元数据')}</span>
+    );
+  }
+
+  return (
+    <div className="marketplace-pricing-panel">
+      {priceSummary ? (
+        <div className="marketplace-pricing-summary">
+          <div className="marketplace-pricing-summary-main">
+            <span>{tr('最低参考价')}</span>
+            <strong>{priceSummary.label}</strong>
+            <small>{priceSummary.sourceLabel} · {priceSummary.groupLabel}{priceSummary.groupRatio != null ? ` · ${priceSummary.groupRatio}x` : ''}</small>
+          </div>
+          <div className="marketplace-pricing-summary-meta">
+            <span>{priceSummary.sourceCount} {tr('个价格源')}</span>
+            <span>{priceSummary.groupCount} {tr('个分组')}</span>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="marketplace-pricing-source-grid">
+        {model.pricingSources.map((source) => (
+          <div key={`${source.siteId}-${source.accountId}`} className="marketplace-pricing-source">
+            <div className="marketplace-pricing-source-head">
+              <SiteBadgeLink siteId={source.siteId} siteName={source.siteName} badgeStyle={{ fontSize: 11 }} />
+              <span>{source.username || `ID:${source.accountId}`}</span>
+            </div>
+            <div className="marketplace-pricing-groups">
+              {Object.entries(source.groupPricing).map(([group, pricing]) => {
+                const sortCost = getPricingSortCost(pricing);
+                const isBest = !!priceSummary
+                  && priceSummary.siteId === source.siteId
+                  && priceSummary.accountId === source.accountId
+                  && priceSummary.groupLabel === group;
+                const ratio = finiteNumberOrNull(source.groupRatio?.[group]);
+                return (
+                  <div key={group} className={`marketplace-pricing-group ${isBest ? 'is-best' : ''}`.trim()}>
+                    <div className="marketplace-pricing-group-head">
+                      <span className="marketplace-pricing-group-name">{group}</span>
+                      {ratio != null ? <span className="marketplace-pricing-ratio">{ratio}x</span> : null}
+                      {isBest ? <span className="marketplace-pricing-best">{tr('最低')}</span> : null}
+                    </div>
+                    <div className="marketplace-pricing-value">{renderGroupPricingValue(pricing)}</div>
+                    {sortCost != null ? (
+                      <div className="marketplace-pricing-sort-value">{tr('排序值')} {formatPriceSortLabel(pricing, sortCost)}</div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function summarizeAvailabilityMessage(input: {
@@ -271,6 +437,11 @@ function compareModels(a: ModelRow, b: ModelRow, sortBy: SortColumn, sortDir: 'a
         return sortDir === 'asc' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
       }
       return model.avgLatency;
+    }
+    if (sortBy === 'price') {
+      const summary = summarizeModelPrice(model);
+      if (!summary) return sortDir === 'asc' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+      return summary.sortCost;
     }
     return model[sortBy] ?? 0;
   };
@@ -431,6 +602,12 @@ export default function Models() {
     const q = new URLSearchParams(location.search).get('q') || '';
     setSearch(q);
   }, [location.search]);
+
+  useEffect(() => {
+    if (sortBy !== 'price') return;
+    if (metadataHydrating || !shouldHydrateMarketplaceMetadata(data.models)) return;
+    void hydrateMarketplaceMetadata(data.models);
+  }, [data.models, hydrateMarketplaceMetadata, metadataHydrating, sortBy]);
 
   /* ---- derived: brand list ---- */
   const brandList = useMemo(() => {
@@ -734,7 +911,7 @@ export default function Models() {
       return;
     }
     setSortBy(nextSortBy);
-    setSortDir(nextSortBy === 'name' ? 'asc' : 'desc');
+    setSortDir(nextSortBy === 'name' || nextSortBy === 'price' ? 'asc' : 'desc');
   };
 
   const accountModelKey = (modelName: string, accountId: number) => `${modelName}::${accountId}`;
@@ -976,6 +1153,7 @@ export default function Models() {
           { key: 'tokenCount' as SortColumn, label: tr('令牌数') },
           { key: 'avgLatency' as SortColumn, label: tr('延迟') },
           { key: 'successRate' as SortColumn, label: tr('成功率') },
+          { key: 'price' as SortColumn, label: tr('最低价格') },
           { key: 'name' as SortColumn, label: tr('名称') },
         ].map(opt => (
           <div
@@ -986,7 +1164,7 @@ export default function Models() {
                 setSortDir(d => d === 'asc' ? 'desc' : 'asc');
               } else {
                 setSortBy(opt.key);
-                setSortDir(opt.key === 'name' ? 'asc' : 'desc');
+                setSortDir(opt.key === 'name' || opt.key === 'price' ? 'asc' : 'desc');
               }
             }}
           >
@@ -1170,6 +1348,7 @@ export default function Models() {
           <div>
             {renderedModels.map((m) => {
               const isExpanded = expanded === m.name;
+              const priceSummary = summarizeModelPrice(m);
               return (
               <div key={m.name} className="model-card" onClick={() => setExpanded(isExpanded ? null : m.name)}>
                 <div className="model-card-header">
@@ -1198,6 +1377,15 @@ export default function Models() {
                         data-tooltip={tr('成功率')}
                       >
                         {tr('成功率')} {m.successRate != null ? `${m.successRate}%` : '—'}
+                      </span>
+                      <span
+                        className={`badge ${priceSummary ? 'badge-info' : 'badge-muted'}`}
+                        style={{ fontVariantNumeric: 'tabular-nums' }}
+                        data-tooltip={priceSummary
+                          ? `${priceSummary.sourceLabel} · ${priceSummary.groupLabel} · ${priceSummary.detail}${priceSummary.groupRatio != null ? ` · ${priceSummary.groupRatio}x` : ''}`
+                          : tr('暂无价格元数据')}
+                      >
+                        {tr('最低价')} {priceSummary ? priceSummary.label : '—'}
                       </span>
                     </div>
                   </div>
@@ -1238,6 +1426,9 @@ export default function Models() {
                   {isKnownLatency(m.avgLatency) && m.avgLatency <= 500 && (
                     <span className="model-tag model-tag-purple">{tr('低延迟')}</span>
                   )}
+                  {priceSummary && (
+                    <span className="model-tag model-tag-green">{tr('低价')} · {priceSummary.groupLabel}</span>
+                  )}
                 </div>
 
                 {/* Expand: Account Details */}
@@ -1269,29 +1460,7 @@ export default function Models() {
 
                       <div className="card" style={{ padding: 10 }}>
                         <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('分组计费')}</div>
-                        {m.pricingSources.length > 0 ? (
-                          <div style={{ display: 'grid', gap: 8 }}>
-                            {m.pricingSources.map((source) => (
-                              <div
-                                key={`${source.siteId}-${source.accountId}`}
-                                style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 8 }}
-                              >
-                                <div style={{ fontSize: 12, marginBottom: 6 }}>
-                                  <SiteBadgeLink siteId={source.siteId} siteName={source.siteName} badgeStyle={{ fontSize: 11 }} /> · {source.username || `ID:${source.accountId}`}
-                                </div>
-                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                  {Object.entries(source.groupPricing).map(([group, pricing]) => (
-                                    <span key={group} className="badge badge-info">
-                                      {group}: {renderGroupPricingValue(pricing)}
-                                    </span>
-                                  ))}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="badge badge-muted">{metadataHydrating ? tr('正在加载价格元数据...') : tr('暂无价格元数据')}</span>
-                        )}
+                        {renderPricingPanel(m, priceSummary, metadataHydrating)}
                       </div>
                     </div>
 
@@ -1416,6 +1585,9 @@ export default function Models() {
                   <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('successRate')}>
                     {tr('成功率')} {sortBy === 'successRate' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
+                  <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('price')}>
+                    {tr('价格')} {sortBy === 'price' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </th>
                   <th style={{ cursor: 'pointer' }} onClick={() => toggleSort('balance')}>
                     {tr('余额')} {sortBy === 'balance' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </th>
@@ -1425,6 +1597,7 @@ export default function Models() {
               <tbody>
                 {renderedModels.map((m) => {
                   const isExpanded = expanded === m.name;
+                  const priceSummary = summarizeModelPrice(m);
                   return (
                   <React.Fragment key={m.name}>
                     <tr onClick={() => setExpanded(isExpanded ? null : m.name)} style={{ cursor: 'pointer' }}>
@@ -1454,6 +1627,17 @@ export default function Models() {
                           {m.successRate != null ? `${m.successRate}%` : '—'}
                         </span>
                       </td>
+                      <td>
+                        <span
+                          className={`badge ${priceSummary ? 'badge-info' : 'badge-muted'}`}
+                          style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums' }}
+                          title={priceSummary
+                            ? `${priceSummary.sourceLabel} · ${priceSummary.groupLabel} · ${priceSummary.detail}${priceSummary.groupRatio != null ? ` · ${priceSummary.groupRatio}x` : ''}`
+                            : tr('暂无价格元数据')}
+                        >
+                          {priceSummary ? priceSummary.label : '—'}
+                        </span>
+                      </td>
                       <td style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>${m.balance.toFixed(2)}</td>
                       <td onClick={e => e.stopPropagation()}>
                         <button className="model-card-action-btn" data-tooltip={tr('复制')} aria-label={tr('复制')} onClick={() => copyName(m.name)}>
@@ -1467,7 +1651,7 @@ export default function Models() {
                     </tr>
                     {isExpanded ? (
                     <tr className="log-detail-row">
-                      <td colSpan={8} style={{ padding: 0 }}>
+                      <td colSpan={9} style={{ padding: 0 }}>
                         <div className="anim-collapse is-open">
                           <div className="anim-collapse-inner">
                             <div style={{ padding: '12px 16px 12px 54px' }}>
@@ -1495,29 +1679,7 @@ export default function Models() {
 
                               <div className="card" style={{ padding: 10 }}>
                                 <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>{tr('分组计费')}</div>
-                                {m.pricingSources.length > 0 ? (
-                                  <div style={{ display: 'grid', gap: 8 }}>
-                                    {m.pricingSources.map((source) => (
-                                      <div
-                                        key={`${source.siteId}-${source.accountId}`}
-                                        style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 8 }}
-                                      >
-                                        <div style={{ fontSize: 12, marginBottom: 6 }}>
-                                          <SiteBadgeLink siteId={source.siteId} siteName={source.siteName} badgeStyle={{ fontSize: 11 }} /> · {source.username || `ID:${source.accountId}`}
-                                        </div>
-                                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                          {Object.entries(source.groupPricing).map(([group, pricing]) => (
-                                            <span key={group} className="badge badge-info">
-                                              {group}: {renderGroupPricingValue(pricing)}
-                                            </span>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <span className="badge badge-muted">{metadataHydrating ? tr('正在加载价格元数据...') : tr('暂无价格元数据')}</span>
-                                )}
+                                {renderPricingPanel(m, priceSummary, metadataHydrating)}
                               </div>
                             </div>
 

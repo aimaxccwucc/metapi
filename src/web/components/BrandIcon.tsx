@@ -25,6 +25,9 @@ const LEGACY_ICON_ALIASES: Record<string, string> = {
   'zhipu.color': 'zhipu-color',
   'azure': 'microsoft-color',
   'bytedance-brand-color': 'bytedance-color',
+  'baichuan': 'baichuan-color',
+  'perplexity': 'perplexity-color',
+  'together': 'together-color',
 };
 
 export function useIconCdn() {
@@ -195,6 +198,18 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
     match: (context) => includesAny(context, ['glm', 'chatglm', 'codegeex', 'cogview', 'cogvideo']),
   },
   {
+    name: 'Together AI',
+    icon: 'together-color',
+    color: 'linear-gradient(135deg, #111827, #2563eb)',
+    match: (context) => includesAny(context, ['together/']),
+  },
+  {
+    name: 'Cerebras',
+    icon: 'cerebras-color',
+    color: 'linear-gradient(135deg, #ef4444, #111827)',
+    match: (context) => includesAny(context, ['cerebras']),
+  },
+  {
     name: 'Meta',
     icon: 'meta-color',
     color: 'linear-gradient(135deg, #0668E1, #1877f2)',
@@ -228,6 +243,30 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
     match: (context) => includesAny(context, ['ernie', 'eb-']),
   },
   {
+    name: '百川智能',
+    icon: 'baichuan-color',
+    color: 'linear-gradient(135deg, #1455ff, #2dd4bf)',
+    match: (context) => includesAny(context, ['baichuan']),
+  },
+  {
+    name: '商汤日日新',
+    icon: 'sensetime-color',
+    color: 'linear-gradient(135deg, #0f62fe, #8b5cf6)',
+    match: (context) => includesAny(context, ['sensechat', 'sensenova', 'sensecore', 'sensetime']),
+  },
+  {
+    name: '360 智脑',
+    icon: '360-color',
+    color: 'linear-gradient(135deg, #18a058, #36d399)',
+    match: (context) => includesAny(context, ['360gpt', '360zhinao']) || startsWithAny(context, ['360-']),
+  },
+  {
+    name: '天工',
+    icon: 'skywork-color',
+    color: 'linear-gradient(135deg, #0ea5e9, #22c55e)',
+    match: (context) => includesAny(context, ['skywork']),
+  },
+  {
     name: '讯飞星火',
     icon: 'spark-color',
     color: 'linear-gradient(135deg, #0070f3, #00d4ff)',
@@ -238,6 +277,12 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
     icon: 'hunyuan-color',
     color: 'linear-gradient(135deg, #00b7ff, #0052d9)',
     match: (context) => includesAny(context, ['hunyuan', 'tencent-hunyuan']),
+  },
+  {
+    name: '小米',
+    icon: 'xiaomi-color',
+    color: 'linear-gradient(135deg, #ff6900, #ff8f1f)',
+    match: (context) => includesAny(context, ['xiaomi', 'mi-', 'mimo']) || hasExactSegment(context, ['mi']),
   },
   {
     name: '豆包',
@@ -294,6 +339,30 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
     ),
   },
   {
+    name: 'Perplexity',
+    icon: 'perplexity-color',
+    color: 'linear-gradient(135deg, #20b8cd, #20808d)',
+    match: (context) => includesAny(context, ['perplexity', 'sonar']),
+  },
+  {
+    name: 'AI21',
+    icon: 'ai21-color',
+    color: 'linear-gradient(135deg, #7c3aed, #db2777)',
+    match: (context) => includesAny(context, ['ai21', 'jamba', 'jurassic']),
+  },
+  {
+    name: 'Reka',
+    icon: 'reka-color',
+    color: 'linear-gradient(135deg, #0891b2, #4f46e5)',
+    match: (context) => includesAny(context, ['reka']),
+  },
+  {
+    name: '快手可灵',
+    icon: 'kuaishou-color',
+    color: 'linear-gradient(135deg, #ff4906, #ff8a00)',
+    match: (context) => includesAny(context, ['kling', 'kolors', 'kwai', 'kwaipilot']),
+  },
+  {
     name: 'IBM',
     icon: 'ibm',
     color: 'linear-gradient(135deg, #0f62fe, #4589ff)',
@@ -309,7 +378,7 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
     name: 'ByteDance',
     icon: 'bytedance-color',
     color: 'linear-gradient(135deg, #325ab4, #0f66ff)',
-    match: (context) => includesAny(context, ['bytedance', 'seed-oss', 'kolors', 'kwai', 'kwaipilot']) || startsWithAny(context, ['wan-', 'kat-']),
+    match: (context) => includesAny(context, ['bytedance', 'seed-oss']) || startsWithAny(context, ['wan-', 'kat-']),
   },
   {
     name: 'InternLM',

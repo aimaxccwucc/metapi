@@ -32,6 +32,8 @@ describe('getBrand', () => {
     expect(getBrand('stablediffusion3.5-l')).toMatchObject({ name: 'Stability', icon: expect.any(String) });
     expect(getBrand('sd3-medium')).toMatchObject({ name: 'Stability', icon: expect.any(String) });
     expect(getBrand('tencent-hunyuanvideo-hd')).toMatchObject({ name: '腾讯混元', icon: expect.any(String) });
+    expect(getBrand('xiaomi/mi-moe-7b')).toMatchObject({ name: '小米', icon: expect.any(String) });
+    expect(getBrand('mimo-vl-7b')).toMatchObject({ name: '小米', icon: expect.any(String) });
     expect(getBrand('mini2.1')).toMatchObject({ name: 'MiniMax', icon: expect.any(String) });
     expect(getBrand('stepfun-ai/step3')).toMatchObject({ name: '阶跃星辰', icon: expect.any(String) });
   });
@@ -45,6 +47,19 @@ describe('getBrand', () => {
     expect(getBrand('mj_turbo')).toMatchObject({ name: 'Midjourney', icon: expect.any(String) });
     expect(getBrand('deepl-zh-en')).toMatchObject({ name: 'DeepL', icon: expect.any(String) });
     expect(getBrand('jina-embeddings-v3')).toMatchObject({ name: 'Jina AI', icon: expect.any(String) });
+  });
+
+  it('detects additional common marketplace brands', () => {
+    expect(getBrand('baichuan2-13b-chat')).toMatchObject({ name: '百川智能', icon: expect.any(String) });
+    expect(getBrand('sensechat-5')).toMatchObject({ name: '商汤日日新', icon: expect.any(String) });
+    expect(getBrand('360gpt-pro')).toMatchObject({ name: '360 智脑', icon: expect.any(String) });
+    expect(getBrand('skywork-o1-open')).toMatchObject({ name: '天工', icon: expect.any(String) });
+    expect(getBrand('perplexity/sonar-pro')).toMatchObject({ name: 'Perplexity', icon: expect.any(String) });
+    expect(getBrand('cerebras/llama3.1-8b')).toMatchObject({ name: 'Cerebras', icon: expect.any(String) });
+    expect(getBrand('ai21/jamba-large')).toMatchObject({ name: 'AI21', icon: expect.any(String) });
+    expect(getBrand('reka-core')).toMatchObject({ name: 'Reka', icon: expect.any(String) });
+    expect(getBrand('together/meta-llama')).toMatchObject({ name: 'Together AI', icon: expect.any(String) });
+    expect(getBrand('kling-v1')).toMatchObject({ name: '快手可灵', icon: expect.any(String) });
   });
 
   it('returns null for unknown model names', () => {
