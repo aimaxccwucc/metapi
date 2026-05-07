@@ -62,6 +62,31 @@ describe('getBrand', () => {
     expect(getBrand('kling-v1')).toMatchObject({ name: '快手可灵', icon: expect.any(String) });
   });
 
+  it('detects upstream marketplace brand additions', () => {
+    expect(getBrand('openrouter/openrouter-auto')).toMatchObject({ name: 'OpenRouter', icon: expect.any(String) });
+    expect(getBrand('groq/compound-beta')).toMatchObject({ name: 'Groq', icon: expect.any(String) });
+    expect(getBrand('deepinfra/deepinfra-chat')).toMatchObject({ name: 'DeepInfra', icon: expect.any(String) });
+    expect(getBrand('fireworks-ai/firefunction-v2')).toMatchObject({ name: 'Fireworks', icon: expect.any(String) });
+    expect(getBrand('replicate/recraft-v3')).toMatchObject({ name: 'Replicate', icon: expect.any(String) });
+    expect(getBrand('jamba-1.5-mini')).toMatchObject({ name: 'AI21', icon: expect.any(String) });
+    expect(getBrand('bedrock/us.amazon.nova-pro-v1:0')).toMatchObject({ name: 'Amazon Nova', icon: expect.any(String) });
+    expect(getBrand('dashscope/wanx2.1-t2i-turbo')).toMatchObject({ name: '百炼', icon: expect.any(String) });
+    expect(getBrand('relace/relace-search')).toMatchObject({ name: 'Relace', icon: expect.any(String) });
+    expect(getBrand('arcee-ai/trinity-mini')).toMatchObject({ name: 'Arcee', icon: expect.any(String) });
+    expect(getBrand('aion-labs/aion-2.0')).toMatchObject({ name: 'AionLabs', icon: expect.any(String) });
+    expect(getBrand('allenai/olmo-3-32b-think')).toMatchObject({ name: 'AI2', icon: expect.any(String) });
+    expect(getBrand('deepcogito/cogito-v2.1-671b')).toMatchObject({ name: 'DeepCogito', icon: expect.any(String) });
+    expect(getBrand('essentialai/rnj-1-instruct')).toMatchObject({ name: 'Essential AI', icon: expect.any(String) });
+    expect(getBrand('inflection/inflection-3-pi')).toMatchObject({ name: 'Inflection', icon: expect.any(String) });
+    expect(getBrand('liquid/lfm-2-24b-a2b')).toMatchObject({ name: 'Liquid AI', icon: expect.any(String) });
+    expect(getBrand('LongCat-Flash-Lite')).toMatchObject({ name: 'LongCat', icon: expect.any(String) });
+    expect(getBrand('morph/morph-v3-fast')).toMatchObject({ name: 'Morph', icon: expect.any(String) });
+    expect(getBrand('nousresearch/hermes-4-70b')).toMatchObject({ name: 'Nous Research', icon: expect.any(String) });
+    expect(getBrand('inception/mercury')).toMatchObject({ name: 'Inception', icon: expect.any(String) });
+    expect(getBrand('upstage/solar-pro-3')).toMatchObject({ name: 'Upstage', icon: expect.any(String) });
+    expect(getBrand('2zai')).toMatchObject({ name: 'Z.ai', icon: expect.any(String) });
+  });
+
   it('returns null for unknown model names', () => {
     expect(getBrand('totally-unknown-model')).toBeNull();
   });

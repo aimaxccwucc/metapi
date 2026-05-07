@@ -33,6 +33,7 @@ import { extractClientIp, isIpAllowed } from '../../middleware/auth.js';
 import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyRequestInit } from '../../services/siteProxy.js';
 import { normalizeLogCleanupRetentionDays } from '../../services/logCleanupService.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
+import { normalizePayloadRulesConfig } from '../../services/payloadRules.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
@@ -78,6 +79,7 @@ interface RuntimeSettingsBody {
   routingWeights?: Partial<RoutingWeights>;
   proxyErrorKeywords?: string[] | string;
   proxyEmptyContentFailEnabled?: boolean;
+  payloadRules?: unknown;
 }
 
 interface DatabaseMigrationBody {
@@ -449,6 +451,10 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       }
       return;
     }
+    case 'payload_rules': {
+      config.payloadRules = normalizePayloadRulesConfig(value);
+      return;
+    }
     case 'webhook_url': {
       if (typeof value !== 'string') return;
       config.webhookUrl = value.trim();
@@ -620,6 +626,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     proxyDebugTraceMaxEntries: config.proxyDebugTraceMaxEntries,
     proxyErrorKeywords: config.proxyErrorKeywords,
     proxyEmptyContentFailEnabled: config.proxyEmptyContentFailEnabled,
+    payloadRules: config.payloadRules,
     proxyTokenMasked: maskSecret(config.proxyToken),
   };
 }
@@ -1081,6 +1088,15 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.proxyEmptyContentFailEnabled = nextValue;
       upsertSetting('proxy_empty_content_fail_enabled', config.proxyEmptyContentFailEnabled);
+    }
+
+    if (body.payloadRules !== undefined) {
+      const nextPayloadRules = normalizePayloadRulesConfig(body.payloadRules);
+      if (JSON.stringify(nextPayloadRules) !== JSON.stringify(config.payloadRules)) {
+        changedLabels.push('请求载荷规则');
+      }
+      config.payloadRules = nextPayloadRules;
+      upsertSetting('payload_rules', config.payloadRules);
     }
 
     if (body.webhookUrl !== undefined) {

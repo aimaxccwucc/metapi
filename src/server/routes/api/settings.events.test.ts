@@ -54,6 +54,13 @@ describe('settings and auth events', () => {
     config.globalAllowedModels = [];
     config.proxyDebugTraceEnabled = false;
     config.proxyDebugTraceMaxEntries = 300;
+    config.payloadRules = {
+      default: [],
+      defaultRaw: [],
+      override: [],
+      overrideRaw: [],
+      filter: [],
+    };
     config.logCleanupConfigured = false;
     config.logCleanupCron = '0 6 * * *';
     config.logCleanupUsageLogsEnabled = false;
@@ -142,6 +149,44 @@ describe('settings and auth events', () => {
     expect(getResponse.statusCode).toBe(200);
     const runtime = getResponse.json() as { siteHealthRefreshCron?: string };
     expect(runtime.siteHealthRefreshCron).toBe('*/30 * * * *');
+  });
+
+  it('persists and returns payload rules from runtime settings', async () => {
+    const payloadRules = {
+      default: [
+        {
+          models: [{ name: 'gpt-*', protocol: 'openai' }],
+          params: { temperature: 0.7 },
+        },
+      ],
+      filter: [
+        {
+          models: [{ name: 'claude-*', protocol: 'claude' }],
+          params: ['metadata.debug'],
+        },
+      ],
+    };
+
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: { payloadRules },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json();
+    expect(updated.payloadRules.default).toEqual(payloadRules.default);
+    expect(updated.payloadRules.filter).toEqual(payloadRules.filter);
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'payload_rules')).get();
+    expect(saved?.value).toBe(JSON.stringify(updated.payloadRules));
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    expect(getResponse.json().payloadRules.default).toEqual(payloadRules.default);
   });
 
   it('persists gateway runtime flags for downgrade/model whitelist/debug trace', async () => {

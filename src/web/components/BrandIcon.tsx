@@ -28,6 +28,9 @@ const LEGACY_ICON_ALIASES: Record<string, string> = {
   'baichuan': 'baichuan-color',
   'perplexity': 'perplexity-color',
   'together': 'together-color',
+  'ai21-brand-color': 'ai21-color',
+  'sensenova-brand-color': 'sensetime-color',
+  'together-brand-color': 'together-color',
 };
 
 export function useIconCdn() {
@@ -351,6 +354,18 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
     match: (context) => includesAny(context, ['ai21', 'jamba', 'jurassic']),
   },
   {
+    name: 'AI2',
+    icon: 'ai2-color',
+    color: 'linear-gradient(135deg, #0f766e, #14b8a6)',
+    match: (context) => includesAny(context, ['allenai', 'olmo']),
+  },
+  {
+    name: 'Amazon Nova',
+    icon: 'nova',
+    color: 'linear-gradient(135deg, #f59e0b, #f97316)',
+    match: (context) => includesAny(context, ['amazon/nova', 'amazon.nova', 'us.amazon.nova']) || startsWithAny(context, ['nova-']),
+  },
+  {
     name: 'Reka',
     icon: 'reka-color',
     color: 'linear-gradient(135deg, #0891b2, #4f46e5)',
@@ -403,6 +418,120 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
     icon: 'jina',
     color: 'linear-gradient(135deg, #111827, #4b5563)',
     match: (context) => includesAny(context, ['jina']),
+  },
+  {
+    name: 'OpenRouter',
+    icon: 'openrouter',
+    color: 'linear-gradient(135deg, #7c3aed, #2563eb)',
+    match: (context) => includesAny(context, ['openrouter']),
+  },
+  {
+    name: 'Groq',
+    icon: 'groq',
+    color: 'linear-gradient(135deg, #111827, #374151)',
+    match: (context) => includesAny(context, ['groq']),
+  },
+  {
+    name: 'DeepInfra',
+    icon: 'deepinfra-color',
+    color: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
+    match: (context) => includesAny(context, ['deepinfra']),
+  },
+  {
+    name: 'Fireworks',
+    icon: 'fireworks-color',
+    color: 'linear-gradient(135deg, #fb7185, #f97316)',
+    match: (context) => includesAny(context, ['fireworks-ai', 'fireworks']),
+  },
+  {
+    name: 'Replicate',
+    icon: 'replicate-brand',
+    color: 'linear-gradient(135deg, #111827, #6366f1)',
+    match: (context) => includesAny(context, ['replicate']),
+  },
+  {
+    name: 'Relace',
+    icon: 'relace',
+    color: 'linear-gradient(135deg, #7c3aed, #6366f1)',
+    match: (context) => includesAny(context, ['relace']),
+  },
+  {
+    name: 'Arcee',
+    icon: 'arcee-color',
+    color: 'linear-gradient(135deg, #2563eb, #60a5fa)',
+    match: (context) => includesAny(context, ['arcee-ai', 'arcee']),
+  },
+  {
+    name: 'AionLabs',
+    icon: 'aionlabs-color',
+    color: 'linear-gradient(135deg, #0f766e, #14b8a6)',
+    match: (context) => includesAny(context, ['aion-labs', 'aionlabs']),
+  },
+  {
+    name: 'DeepCogito',
+    icon: 'deepcogito-color',
+    color: 'linear-gradient(135deg, #2563eb, #7c3aed)',
+    match: (context) => includesAny(context, ['deepcogito']),
+  },
+  {
+    name: 'Essential AI',
+    icon: 'essentialai-color',
+    color: 'linear-gradient(135deg, #0f172a, #334155)',
+    match: (context) => includesAny(context, ['essentialai']),
+  },
+  {
+    name: 'Inception',
+    icon: 'inception',
+    color: 'linear-gradient(135deg, #7c3aed, #ec4899)',
+    match: (context) => includesAny(context, ['inception']),
+  },
+  {
+    name: 'Inflection',
+    icon: 'inflection',
+    color: 'linear-gradient(135deg, #1d4ed8, #2563eb)',
+    match: (context) => includesAny(context, ['inflection']),
+  },
+  {
+    name: 'Liquid AI',
+    icon: 'liquid',
+    color: 'linear-gradient(135deg, #0f172a, #475569)',
+    match: (context) => includesAny(context, ['liquid']) || startsWithAny(context, ['lfm-']),
+  },
+  {
+    name: 'LongCat',
+    icon: 'longcat-color',
+    color: 'linear-gradient(135deg, #f97316, #fb7185)',
+    match: (context) => includesAny(context, ['longcat']),
+  },
+  {
+    name: 'Morph',
+    icon: 'morph-color',
+    color: 'linear-gradient(135deg, #4f46e5, #8b5cf6)',
+    match: (context) => includesAny(context, ['morph/']) || startsWithAny(context, ['morph-']),
+  },
+  {
+    name: 'Nous Research',
+    icon: 'nousresearch',
+    color: 'linear-gradient(135deg, #111827, #4b5563)',
+    match: (context) => includesAny(context, ['nousresearch']),
+  },
+  {
+    name: 'Upstage',
+    icon: 'upstage-color',
+    color: 'linear-gradient(135deg, #2563eb, #14b8a6)',
+    match: (context) => includesAny(context, ['upstage']),
+  },
+  {
+    name: 'Z.ai',
+    icon: 'zai',
+    color: 'linear-gradient(135deg, #0f172a, #2563eb)',
+    match: (context) => startsWithAny(context, ['2zai', 'z-ai']),
+  },
+  {
+    name: '百炼',
+    icon: 'bailian-color',
+    color: 'linear-gradient(135deg, #7c3aed, #2563eb)',
+    match: (context) => includesAny(context, ['dashscope/', 'wanx']),
   },
 ];
 

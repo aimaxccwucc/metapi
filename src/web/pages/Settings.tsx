@@ -20,6 +20,7 @@ import { tr } from '../i18n.js';
 import { ROUTE_ICON_NONE_VALUE } from './token-routes/utils.js';
 import { generateDownstreamSkKey } from './helpers/generateDownstreamSkKey.js';
 import { getInitialVisibleCount, getNextVisibleCount } from './helpers/progressiveRender.js';
+import { PAYLOAD_RULE_PROTOCOL_OPTIONS } from './settings/payloadRuleProtocolOptions.js';
 
 const PROXY_TOKEN_PREFIX = 'sk-';
 const ROUTE_BRAND_ICON_PREFIX = 'brand:';
@@ -57,6 +58,7 @@ type RuntimeSettings = {
   proxyDebugTraceMaxEntries: number;
   proxyErrorKeywords: string[];
   proxyEmptyContentFailEnabled: boolean;
+  payloadRules: unknown;
   proxyTokenMasked?: string;
   adminIpAllowlist?: string[];
   currentAdminIp?: string;
@@ -231,10 +233,12 @@ export default function Settings() {
     proxyDebugTraceMaxEntries: 300,
     proxyErrorKeywords: [],
     proxyEmptyContentFailEnabled: false,
+    payloadRules: {},
   });
   const [proxyTokenSuffix, setProxyTokenSuffix] = useState('');
   const [proxyErrorKeywordsText, setProxyErrorKeywordsText] = useState('');
   const [globalAllowedModelsText, setGlobalAllowedModelsText] = useState('');
+  const [payloadRulesText, setPayloadRulesText] = useState('');
   const [maskedToken, setMaskedToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [savingSchedule, setSavingSchedule] = useState(false);
@@ -505,6 +509,7 @@ export default function Settings() {
           ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string')
           : [],
         proxyEmptyContentFailEnabled: !!runtimeInfo.proxyEmptyContentFailEnabled,
+        payloadRules: runtimeInfo.payloadRules || {},
         proxyTokenMasked: runtimeInfo.proxyTokenMasked || '',
         adminIpAllowlist: Array.isArray(runtimeInfo.adminIpAllowlist)
           ? runtimeInfo.adminIpAllowlist.filter((item: unknown) => typeof item === 'string')
@@ -516,6 +521,7 @@ export default function Settings() {
           ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string').join('\n')
           : '',
       );
+      setPayloadRulesText(JSON.stringify(runtimeInfo.payloadRules || {}, null, 2));
       setGlobalAllowedModelsText(
         Array.isArray(runtimeInfo.globalAllowedModels)
           ? runtimeInfo.globalAllowedModels.filter((item: unknown) => typeof item === 'string').join('\n')
@@ -685,6 +691,13 @@ export default function Settings() {
     try {
       const keywords = parseProxyErrorKeywords(proxyErrorKeywordsText);
       const globalAllowedModels = parseModelPatternList(globalAllowedModelsText);
+      let payloadRules: unknown = {};
+      try {
+        payloadRules = payloadRulesText.trim() ? JSON.parse(payloadRulesText) : {};
+      } catch {
+        toast.error('请求载荷规则 JSON 解析失败');
+        return;
+      }
       const res = await api.updateRuntimeSettings({
         disableCrossProtocolFallback: runtime.disableCrossProtocolFallback,
         globalAllowedModels,
@@ -692,6 +705,7 @@ export default function Settings() {
         proxyDebugTraceMaxEntries: runtime.proxyDebugTraceMaxEntries,
         proxyErrorKeywords: keywords,
         proxyEmptyContentFailEnabled: runtime.proxyEmptyContentFailEnabled,
+        payloadRules,
       });
       const nextKeywords = Array.isArray(res?.proxyErrorKeywords)
         ? res.proxyErrorKeywords
@@ -715,9 +729,11 @@ export default function Settings() {
         proxyEmptyContentFailEnabled: typeof res?.proxyEmptyContentFailEnabled === 'boolean'
           ? res.proxyEmptyContentFailEnabled
           : prev.proxyEmptyContentFailEnabled,
+        payloadRules: res?.payloadRules || payloadRules,
       }));
       setProxyErrorKeywordsText(nextKeywords.join('\n'));
       setGlobalAllowedModelsText(nextGlobalAllowedModels.join('\n'));
+      setPayloadRulesText(JSON.stringify(res?.payloadRules || payloadRules, null, 2));
       toast.success('代理失败规则已保存');
     } catch (err: any) {
       toast.error(err?.message || '保存失败');
@@ -1374,6 +1390,26 @@ export default function Settings() {
             />
             空内容（completion=0，即使 prompt 有 token 也算）判定失败
           </label>
+          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+            请求载荷规则 JSON，可按模型名与上游类型补默认值、覆盖字段或删除字段。
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+            {PAYLOAD_RULE_PROTOCOL_OPTIONS.filter((option) => option.value).map((option) => (
+              <span key={option.value} className="badge badge-muted">{option.label}</span>
+            ))}
+          </div>
+          <textarea
+            value={payloadRulesText}
+            onChange={(e) => setPayloadRulesText(e.target.value)}
+            placeholder={'{\n  "default": [\n    {"models": [{"name": "gpt-*", "protocol": "openai"}], "params": {"temperature": 0.7}}\n  ],\n  "filter": []\n}'}
+            style={{
+              ...inputStyle,
+              fontFamily: 'var(--font-mono)',
+              minHeight: 140,
+              resize: 'vertical',
+              marginBottom: 12,
+            }}
+          />
           <div>
             <button onClick={saveProxyFailureRules} disabled={savingProxyFailureRules} className="btn btn-primary">
               {savingProxyFailureRules ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存失败规则'}
