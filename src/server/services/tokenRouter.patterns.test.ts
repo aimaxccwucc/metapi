@@ -188,6 +188,25 @@ describe('TokenRouter patterns and model mapping', () => {
     expect(exposedModels).toContain('claude-opus-4-6');
   });
 
+  it('matches exact routes case-insensitively while preserving routed model casing', async () => {
+    await createRouteWithSingleChannel(
+      'deepseek-v4-pro',
+      undefined,
+      {
+        sourceModel: 'deepseek-v4-pro',
+      },
+    );
+    const router = new TokenRouter();
+
+    const selected = await router.selectChannel('DeepSeek-V4-Pro');
+    const decision = await router.explainSelection('DeepSeek-V4-Pro');
+
+    expect(selected).toBeTruthy();
+    expect(selected?.actualModel).toBe('deepseek-v4-pro');
+    expect(decision.matched).toBe(true);
+    expect(decision.actualModel).toBe('deepseek-v4-pro');
+  });
+
   it('prefers an exact route over a colliding group display-name alias', async () => {
     await createRouteWithSingleChannel(
       're:^claude-(opus|sonnet)-4-5$',

@@ -15,6 +15,12 @@ describe('filterRecentlyFailedCandidates', () => {
     expect(matchesModelPattern('aaaa', 're:^(a+)+$')).toBe(false);
   });
 
+  it('matches model patterns case-insensitively', () => {
+    expect(matchesModelPattern('DeepSeek-V4-Pro', 'deepseek-v4-pro')).toBe(true);
+    expect(matchesModelPattern('DeepSeek-V4-Pro', 'deepseek-*')).toBe(true);
+    expect(matchesModelPattern('DeepSeek-V4-Pro', 're:^deepseek-v4-pro$')).toBe(true);
+  });
+
   it('uses a stronger default recent-failure window', () => {
     const nowMs = Date.now();
     expect(isChannelRecentlyFailed({

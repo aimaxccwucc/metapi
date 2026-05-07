@@ -4266,17 +4266,19 @@ export function parseRegexModelPattern(pattern: string): RegExp | null {
 }
 
 export function matchesModelPattern(model: string, pattern: string): boolean {
+  const normalizedModel = (model || '').trim();
   const normalizedPattern = (pattern || '').trim();
+  if (!normalizedModel) return false;
   if (!normalizedPattern) return false;
 
-  if (normalizedPattern === model) return true;
+  if (normalizedPattern.toLowerCase() === normalizedModel.toLowerCase()) return true;
 
   if (isRegexModelPattern(normalizedPattern)) {
     const re = parseRegexModelPattern(normalizedPattern);
-    return !!re && re.test(model);
+    return !!re && (re.test(normalizedModel) || re.test(normalizedModel.toLowerCase()));
   }
 
-  return minimatch(model, normalizedPattern);
+  return minimatch(normalizedModel, normalizedPattern, { nocase: true });
 }
 
 function isExactRouteModelPattern(pattern: string): boolean {
@@ -4300,16 +4302,17 @@ function normalizeRouteDisplayName(displayName: string | null | undefined): stri
 
 function isRouteDisplayNameMatch(model: string, displayName: string | null | undefined): boolean {
   const alias = normalizeRouteDisplayName(displayName);
-  return !!alias && alias === model;
+  return !!alias && alias.toLowerCase() === (model || '').trim().toLowerCase();
 }
 
 function findPreferredRouteForModel(routes: RouteRow[], model: string): RouteRow | undefined {
+  const normalizedModel = (model || '').trim().toLowerCase();
   // explicit_group 按显示名命中时优先（e9628ae：覆盖/重定向旧的精确路由）
   return routes.find((route) => isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
     || routes.find((route) => (
       !isExplicitGroupRoute(route)
       && isExactRouteModelPattern(route.modelPattern)
-      && (route.modelPattern || '').trim() === model
+      && (route.modelPattern || '').trim().toLowerCase() === normalizedModel
     ))
     || routes.find((route) => !isExplicitGroupRoute(route) && isRouteDisplayNameMatch(model, route.displayName))
     || routes.find((route) => !isExplicitGroupRoute(route) && matchesModelPattern(model, route.modelPattern));
@@ -4471,7 +4474,8 @@ function resolveMappedModel(requestedModel: string, modelMapping?: string | null
   const entries = Object.entries(parsed as Record<string, unknown>)
     .filter(([, value]) => typeof value === 'string' && value.trim().length > 0) as Array<[string, string]>;
 
-  const exact = entries.find(([pattern]) => pattern === requestedModel);
+  const requestedModelKey = requestedModel.trim().toLowerCase();
+  const exact = entries.find(([pattern]) => pattern.trim().toLowerCase() === requestedModelKey);
   if (exact) return exact[1].trim();
 
   for (const [pattern, target] of entries) {
@@ -4516,6 +4520,9 @@ function resolveActualModelForSelectedChannel(
 ): string {
   const sourceModel = normalizeChannelSourceModel(channel.sourceModel);
   if (sourceModel && (channel.manualOverride === true || isRouteDisplayNameMatch(requestedModel, route.displayName))) {
+    return sourceModel;
+  }
+  if (sourceModel && isModelAliasEquivalent(sourceModel, mappedModel)) {
     return sourceModel;
   }
   return mappedModel;

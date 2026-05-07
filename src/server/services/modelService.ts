@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { fetch } from 'undici';
 import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { config } from '../config.js';
@@ -271,8 +271,20 @@ async function upsertTokenModelAvailabilityBatch(
   rows: Array<{ tokenId: number; modelName: string; available: boolean; latencyMs?: number | null; checkedAt: string }>,
 ): Promise<void> {
   if (rows.length === 0) return;
+  const tokenIds = Array.from(new Set(
+    rows.map((row) => row.tokenId).filter((tokenId) => Number.isFinite(tokenId) && tokenId > 0),
+  ));
+  if (tokenIds.length === 0) return;
+  const existingTokenRows = await db.select({ id: schema.accountTokens.id })
+    .from(schema.accountTokens)
+    .where(inArray(schema.accountTokens.id, tokenIds))
+    .all();
+  const existingTokenIds = new Set(existingTokenRows.map((row) => row.id));
+  const safeRows = rows.filter((row) => existingTokenIds.has(row.tokenId));
+  if (safeRows.length === 0) return;
+
   if (runtimeDbDialect === 'mysql') {
-    await (db.insert(schema.tokenModelAvailability).values(rows) as any).onDuplicateKeyUpdate({
+    await (db.insert(schema.tokenModelAvailability).values(safeRows) as any).onDuplicateKeyUpdate({
       set: {
         available: sql`VALUES(available)`,
         latencyMs: sql`VALUES(latency_ms)`,
@@ -282,7 +294,7 @@ async function upsertTokenModelAvailabilityBatch(
     return;
   }
 
-  await (db.insert(schema.tokenModelAvailability).values(rows) as any).onConflictDoUpdate({
+  await (db.insert(schema.tokenModelAvailability).values(safeRows) as any).onConflictDoUpdate({
     target: [schema.tokenModelAvailability.tokenId, schema.tokenModelAvailability.modelName],
     set: {
       available: sql`excluded.available`,
