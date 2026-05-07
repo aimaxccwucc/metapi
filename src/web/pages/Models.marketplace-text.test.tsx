@@ -1112,6 +1112,71 @@ describe('Models marketplace text', () => {
     }
   });
 
+  it('shows a retry control when pricing metadata hydration fails', async () => {
+    apiMock.getModelsMarketplace
+      .mockResolvedValueOnce({
+        models: [
+          {
+            name: 'gpt-4o',
+            accountCount: 1,
+            tokenCount: 1,
+            avgLatency: 320,
+            successRate: 98,
+            description: null,
+            tags: [],
+            supportedEndpointTypes: [],
+            pricingSources: [],
+            accounts: [
+              {
+                id: 1,
+                site: 'Demo Site',
+                username: 'tester',
+                latency: 320,
+                balance: 12.5,
+                tokens: [{ id: 1, name: 'default', isDefault: true }],
+              },
+            ],
+          },
+        ],
+      })
+      .mockRejectedValueOnce(new Error('请求超时（150s）'));
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const priceSortItem = root!.root.find((node) => (
+        node.type === 'div'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('filter-item')
+        && typeof node.props.onClick === 'function'
+        && collectText(node).includes('最低价格')
+      ));
+
+      await act(async () => {
+        priceSortItem.props.onClick();
+      });
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      const text = collectText(root!.root);
+      expect(text).toContain('价格元数据加载失败：请求超时（150s）');
+      expect(apiMock.getModelsMarketplace).toHaveBeenLastCalledWith({ includePricing: true });
+    } finally {
+      await unmountRoot(root);
+    }
+  });
+
 
   it('sorts expanded card details by latency and balance', async () => {
     apiMock.getModelsMarketplace.mockResolvedValue({

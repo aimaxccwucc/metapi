@@ -98,6 +98,23 @@ describe('api proxy test timeout handling', () => {
     await expect(promise).resolves.toMatchObject({ message: '请求超时（30s）' });
   });
 
+  it('keeps marketplace pricing hydration alive for slow first aggregation', async () => {
+    installPendingFetch();
+
+    let settled = false;
+    const promise = api.getModelsMarketplace({ includePricing: true })
+      .catch((error: Error) => error)
+      .finally(() => {
+        settled = true;
+      });
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(105_000);
+    await expect(promise).resolves.toMatchObject({ message: '请求超时（150s）' });
+  });
+
   it('times out replay hydration file-content fetches after 30 seconds', async () => {
     installPendingFetch();
 

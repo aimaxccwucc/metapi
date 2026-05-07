@@ -472,6 +472,8 @@ export default function Models() {
   const [filterCollapsed, setFilterCollapsed] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [metadataHydrating, setMetadataHydrating] = useState(false);
+  const [metadataHydrated, setMetadataHydrated] = useState(false);
+  const [metadataHydrationError, setMetadataHydrationError] = useState<string | null>(null);
   const [availabilityTesting, setAvailabilityTesting] = useState<Record<string, boolean>>({});
   const [availabilityChecks, setAvailabilityChecks] = useState<Record<string, AvailabilityCheckState>>({});
   const [expandedCheckDetails, setExpandedCheckDetails] = useState<Record<string, boolean>>({});
@@ -484,6 +486,7 @@ export default function Models() {
   const filterPanelPresence = useAnimatedVisibility(!isMobile && !filterCollapsed, 220);
   const latestPrimaryRequestRef = useRef(0);
   const latestMetadataRequestRef = useRef(0);
+  const metadataHydratedRef = useRef(false);
   const location = useLocation();
   const siteIdByName = useMemo(() => {
     const index = new Map<string, number>();
@@ -502,6 +505,9 @@ export default function Models() {
     const requestId = ++latestPrimaryRequestRef.current;
     latestMetadataRequestRef.current += 1;
     setMetadataHydrating(false);
+    metadataHydratedRef.current = false;
+    setMetadataHydrated(false);
+    setMetadataHydrationError(null);
     setLoading(true);
     try {
       const res = await api.getModelsMarketplace({
@@ -531,11 +537,13 @@ export default function Models() {
   }, [toast]);
 
   const hydrateMarketplaceMetadata = useCallback(async (baseModels: ModelRow[]) => {
-    if (!shouldHydrateMarketplaceMetadata(baseModels)) return;
+    if (baseModels.length <= 0) return;
+    if (metadataHydratedRef.current && !shouldHydrateMarketplaceMetadata(baseModels)) return;
 
     const metadataRequestId = ++latestMetadataRequestRef.current;
     const baseRequestId = latestPrimaryRequestRef.current;
     setMetadataHydrating(true);
+    setMetadataHydrationError(null);
     try {
       const res = await api.getModelsMarketplace({
         includePricing: true,
@@ -549,14 +557,21 @@ export default function Models() {
         models: mergeMarketplaceMetadata(current.models, detailed.models),
         meta: detailed.meta ?? current.meta,
       }));
-    } catch {
+      metadataHydratedRef.current = true;
+      setMetadataHydrated(true);
+    } catch (error: any) {
+      if (metadataRequestId !== latestMetadataRequestRef.current) return;
+      if (baseRequestId !== latestPrimaryRequestRef.current) return;
+      const message = error?.message || tr('价格元数据加载失败');
+      setMetadataHydrationError(message);
+      toast.error(`${tr('价格元数据加载失败')}：${message}`);
       // Keep the fast base list when metadata fetch fails.
     } finally {
       if (metadataRequestId === latestMetadataRequestRef.current) {
         setMetadataHydrating(false);
       }
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
     if (!isMobile) return;
@@ -605,9 +620,9 @@ export default function Models() {
 
   useEffect(() => {
     if (sortBy !== 'price') return;
-    if (metadataHydrating || !shouldHydrateMarketplaceMetadata(data.models)) return;
+    if (metadataHydrating || metadataHydrated || data.models.length <= 0) return;
     void hydrateMarketplaceMetadata(data.models);
-  }, [data.models, hydrateMarketplaceMetadata, metadataHydrating, sortBy]);
+  }, [data.models, hydrateMarketplaceMetadata, metadataHydrated, metadataHydrating, sortBy]);
 
   /* ---- derived: brand list ---- */
   const brandList = useMemo(() => {
@@ -1284,6 +1299,15 @@ export default function Models() {
               {metadataHydrating && (
                 <span className="badge badge-muted" style={{ fontSize: 11 }}>{tr('加载元数据中...')}</span>
               )}
+              {metadataHydrationError && !metadataHydrating && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ border: '1px solid var(--color-warning)', padding: '6px 12px', color: 'var(--color-warning)' }}
+                  onClick={() => void hydrateMarketplaceMetadata(data.models)}
+                >
+                  {tr('价格加载失败，重试')}
+                </button>
+              )}
               {!isMobile && (
                 <div className="view-toggle">
                   <button className={`view-toggle-btn ${viewMode === 'card' ? 'active' : ''}`} onClick={() => setViewMode('card')} data-tooltip={tr('卡片视图')} aria-label={tr('卡片视图')}>
@@ -1331,6 +1355,35 @@ export default function Models() {
             <span>{tr('平均延迟')} <b style={{ color: getMetricColor(avgLatency) }}>{formatLatency(avgLatency)}</b></span>
           </div>
         </div>
+
+        {metadataHydrationError && (
+          <div
+            className="model-marketplace-inline-alert"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              padding: '10px 12px',
+              marginBottom: 12,
+              border: '1px solid var(--color-warning)',
+              borderRadius: 8,
+              background: 'color-mix(in srgb, var(--color-warning) 10%, transparent)',
+              color: 'var(--color-text-primary)',
+              fontSize: 12,
+            }}
+          >
+            <span>{tr('价格元数据加载失败')}：{metadataHydrationError}</span>
+            <button
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-warning)', padding: '6px 12px', color: 'var(--color-warning)', flexShrink: 0 }}
+              disabled={metadataHydrating}
+              onClick={() => void hydrateMarketplaceMetadata(data.models)}
+            >
+              {tr('价格加载失败，重试')}
+            </button>
+          </div>
+        )}
 
         {/* Empty */}
         {detailModels.length === 0 ? (

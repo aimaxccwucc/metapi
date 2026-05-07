@@ -1652,7 +1652,8 @@ export const api = {
     if (options?.refresh) params.set('refresh', '1');
     if (options?.includePricing) params.set('includePricing', '1');
     const query = params.toString();
-    return request(`/api/models/marketplace${query ? `?${query}` : ''}`, { timeoutMs: options?.refresh ? 45_000 : 15_000 });
+    const timeoutMs = options?.includePricing ? 150_000 : (options?.refresh ? 45_000 : 15_000);
+    return request(`/api/models/marketplace${query ? `?${query}` : ''}`, { timeoutMs });
   },
   testMarketplaceModelAvailability: (data: { modelName: string; accountId?: number; siteName?: string; routeId?: number; channelId?: number }) =>
     request('/api/models/marketplace/test', {
