@@ -150,6 +150,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             downstreamPath,
             clientContext,
             downstreamApiKeyId,
+            downstreamPolicy,
           });
         }
       },

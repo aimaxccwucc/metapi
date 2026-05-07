@@ -486,6 +486,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             downstreamPath,
             clientContext,
             downstreamApiKeyId,
+            downstreamPolicy: policy,
           });
         }
         return reply.code(lastStatus).type(lastContentType).send(lastText);

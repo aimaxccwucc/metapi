@@ -5247,19 +5247,11 @@ export class TokenRouter {
         summary.push(`轮询最近失败避让 ${recentFailurePartition.avoided.length}`);
       }
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        summary.push('全部候选近期失败，当前避让中');
-        summary.push('本次未选出通道');
-        return {
-          requestedModel,
-          actualModel: mappedModel,
-          matched: true,
-          routeId: match.route.id,
-          modelPattern: match.route.modelPattern,
-          summary,
-          candidates,
-        };
+        summary.push('全部候选近期失败，启用半开探测');
       }
-      const recoveryCandidates = recentFailurePartition.preferred;
+      const recoveryCandidates = recentFailurePartition.preferred.length > 0
+        ? recentFailurePartition.preferred
+        : recentFailurePartition.avoided;
 
       const accountLeasePartition = partitionAccountSelectionLeases(recoveryCandidates, nowMs);
       if (accountLeasePartition.avoided.length > 0) {
@@ -5354,6 +5346,7 @@ export class TokenRouter {
     let degradedAcrossPriorityByRecentFailure = false;
     let selected: RouteChannelCandidate | null = null;
     let selectedPriority = 0;
+    const softAvoidedRecentFailureFallback: RouteChannelCandidate[] = [];
 
     for (const priority of sortedPriorities) {
       const rawLayer = availableByPriority.get(priority) ?? [];
@@ -5425,6 +5418,7 @@ export class TokenRouter {
       }
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
         degradedAcrossPriorityByRecentFailure = true;
+        softAvoidedRecentFailureFallback.push(...recentFailurePartition.avoided);
         summary.push(`优先级 P${priority}：全部候选近期失败，当前避让中`);
         continue;
       }
@@ -5546,6 +5540,70 @@ export class TokenRouter {
       }
       summary.push(layerSummaryParts.join('，'));
       break;
+    }
+
+    if (!selected && softAvoidedRecentFailureFallback.length > 0) {
+      const stickyLayer = preferStickySessionCandidates(
+        softAvoidedRecentFailureFallback,
+        downstreamPolicy.stickySessionKey,
+        nowMs,
+      );
+      const stickyCandidates = stickyLayer.preferred.length > 0
+        ? stickyLayer.preferred
+        : softAvoidedRecentFailureFallback;
+      const accountLeasePartition = partitionAccountSelectionLeases(stickyCandidates, nowMs, {
+        allowBusySingleCandidate: stickyLayer.stickyReason === 'reused',
+      });
+      if (accountLeasePartition.avoided.length > 0) {
+        for (const item of accountLeasePartition.avoided) {
+          const target = candidateMap.get(item.candidate.channel.id);
+          if (!target) continue;
+          target.avoidedByAccountLease = true;
+          target.reason = buildAccountRateLimitReason(item, nowMs);
+        }
+      }
+      const leasePartition = partitionChannelSelectionLeases(accountLeasePartition.preferred, nowMs);
+      if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
+        for (const item of leasePartition.avoided) {
+          const target = candidateMap.get(item.candidate.channel.id);
+          if (!target) continue;
+          target.avoidedByInflightLease = true;
+          target.reason = `通道忙碌中，优先避让（${resolveLeaseAvoidWindowSec(item.leaseUntil, nowMs)} 秒租约）`;
+        }
+      }
+      const fallbackCandidates = leasePartition.preferred.length > 0
+        ? leasePartition.preferred
+        : accountLeasePartition.preferred;
+      const selectionPools = buildCandidateSelectionPools(fallbackCandidates, mappedModel, nowMs);
+      const selectedPool = selectionPools.pools.find((pool) => pool.candidates.length > 0) ?? null;
+      if (selectedPool) {
+        const weighted = this.calculateWeightedSelection(
+          selectedPool.candidates,
+          (useChannelSourceModelForCost || sourceModelRuntimeRouting) ? runtimeModelResolver : mappedModel,
+          downstreamPolicy,
+          nowMs,
+          routeStrategy === 'stable_first' ? 'stable_first' : 'weighted',
+        );
+        for (const detail of weighted.details) {
+          const target = candidateMap.get(detail.candidate.channel.id);
+          if (!target) continue;
+          target.probability = Number((detail.probability * 100).toFixed(2));
+          target.reason = `最近失败半开探测；${detail.reason}`;
+        }
+        if (weighted.selected) {
+          selected = weighted.selected;
+          selectedPriority = weighted.selected.channel.priority ?? 0;
+          const fallbackSummaryParts = [`最近失败半开探测：候选 ${selectedPool.candidates.length}`];
+          if (leasePartition.preferred.length > 0 && leasePartition.avoided.length > 0) {
+            fallbackSummaryParts.push(`并发占用避让 ${leasePartition.avoided.length}`);
+          }
+          if (accountLeasePartition.avoided.length > 0) {
+            fallbackSummaryParts.push(`${buildAccountAvoidanceSummaryLabel(accountLeasePartition.avoided)} ${accountLeasePartition.avoided.length}`);
+          }
+          fallbackSummaryParts.push(describeCandidatePoolScope(selectedPool.scope).summaryLabel);
+          summary.push(fallbackSummaryParts.join('，'));
+        }
+      }
     }
 
     if (!selected) {
@@ -6067,10 +6125,9 @@ export class TokenRouter {
         ? stickyPreference.preferred
         : breakerFiltered.candidates;
       const recentFailurePartition = partitionRecentlyFailedCandidates(stickyCandidates, nowMs);
-      if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
-        return null;
-      }
-      const recoveryCandidates = recentFailurePartition.preferred;
+      const recoveryCandidates = recentFailurePartition.preferred.length > 0
+        ? recentFailurePartition.preferred
+        : recentFailurePartition.avoided;
       const accountLeasePartition = partitionAccountSelectionLeases(recoveryCandidates, nowMs);
       const accountLeaseCandidates = accountLeasePartition.preferred;
       const leasePartition = partitionChannelSelectionLeases(
@@ -6117,6 +6174,7 @@ export class TokenRouter {
     }
 
     const sortedPriorities = Array.from(layers.keys()).sort((a, b) => a - b);
+    const softAvoidedRecentFailureFallback: RouteChannelCandidate[] = [];
     for (const priority of sortedPriorities) {
       const rawLayer = layers.get(priority) ?? [];
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(rawLayer, runtimeModelResolver, nowMs);
@@ -6127,6 +6185,7 @@ export class TokenRouter {
       }
       const recentFailurePartition = partitionRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
       if (recentFailurePartition.preferred.length === 0 && recentFailurePartition.avoided.length > 0) {
+        softAvoidedRecentFailureFallback.push(...recentFailurePartition.avoided);
         continue;
       }
       const stickyLayer = preferStickySessionCandidates(
@@ -6205,6 +6264,72 @@ export class TokenRouter {
         tokenName: selected.token?.name || 'default',
         actualModel,
       };
+    }
+
+    if (softAvoidedRecentFailureFallback.length > 0) {
+      const stickyLayer = preferStickySessionCandidates(
+        softAvoidedRecentFailureFallback,
+        downstreamPolicy.stickySessionKey,
+        nowMs,
+      );
+      const stickyCandidates = stickyLayer.preferred.length > 0
+        ? stickyLayer.preferred
+        : softAvoidedRecentFailureFallback;
+      const accountLeasePartition = partitionAccountSelectionLeases(stickyCandidates, nowMs, {
+        allowBusySingleCandidate: stickyLayer.stickyReason === 'reused',
+      });
+      const leasePartition = partitionChannelSelectionLeases(accountLeasePartition.preferred, nowMs);
+      const fallbackCandidates = leasePartition.preferred.length > 0
+        ? leasePartition.preferred
+        : accountLeasePartition.preferred;
+      const selected = routeStrategy === 'stable_first'
+        ? this.selectWithModelCircuitGuard(
+          fallbackCandidates,
+          (items) => this.stableFirstSelect(
+            items,
+            runtimeModelResolver,
+            downstreamPolicy,
+            nowMs,
+          ),
+          runtimeModelResolver,
+          nowMs,
+          recordSelection,
+        )
+        : this.selectWithModelCircuitGuard(
+          fallbackCandidates,
+          (items) => this.weightedRandomSelect(
+            items,
+            runtimeModelResolver,
+            downstreamPolicy,
+            nowMs,
+          ),
+          runtimeModelResolver,
+          nowMs,
+          recordSelection,
+        );
+      if (selected) {
+        const tokenValue = this.resolveChannelTokenValue(selected);
+        if (tokenValue) {
+          if (routeStrategy === 'stable_first' && recordSelection) {
+            await this.recordChannelSelection(selected.channel.id);
+          }
+          if (recordSelection) {
+            const leaseMs = resolveChannelSelectionLeaseMs(selected);
+            reserveChannelSelectionLease(selected.channel.id, nowMs, leaseMs);
+            reserveAccountSelectionLease(selected, nowMs, leaseMs);
+            bindStickySessionToCandidate(downstreamPolicy.stickySessionKey, selected, nowMs, leaseMs);
+          }
+
+          const actualModel = resolveActualModelForSelectedChannel(requestedModel, match.route, mappedModel, selected.channel);
+
+          return {
+            ...selected,
+            tokenValue,
+            tokenName: selected.token?.name || 'default',
+            actualModel,
+          };
+        }
+      }
     }
 
     return null;

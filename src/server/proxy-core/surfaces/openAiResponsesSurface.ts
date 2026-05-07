@@ -341,6 +341,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           downstreamPath,
           clientContext,
           downstreamApiKeyId,
+          downstreamPolicy,
         });
       }
     },

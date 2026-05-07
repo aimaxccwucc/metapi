@@ -94,6 +94,7 @@ async function executeImageProxyRequest(params: {
           downstreamPath,
           clientContext,
           downstreamApiKeyId,
+          downstreamPolicy,
         });
       }
     },

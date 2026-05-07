@@ -103,6 +103,7 @@ export async function searchProxyRoute(app: FastifyInstance) {
             downstreamPath,
             clientContext,
             downstreamApiKeyId,
+            downstreamPolicy,
           });
         }
       },

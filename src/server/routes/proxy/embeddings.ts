@@ -77,6 +77,7 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
             downstreamPath,
             clientContext,
             downstreamApiKeyId,
+            downstreamPolicy,
           });
         }
       },

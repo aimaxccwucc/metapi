@@ -363,6 +363,7 @@ export async function handleChatSurfaceRequest(
           downstreamPath,
           clientContext,
           downstreamApiKeyId,
+          downstreamPolicy,
         });
       }
     },
@@ -1599,6 +1600,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
           downstreamPath,
           clientContext,
           downstreamApiKeyId,
+          downstreamPolicy,
         });
       }
     },

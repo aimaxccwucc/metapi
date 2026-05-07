@@ -1565,6 +1565,60 @@ describe('TokenRouter selection scoring', () => {
     expect(decision.summary.join(' ')).toContain('本次未选出通道');
   });
 
+  it('selects a half-open probe when every priority layer is only soft-avoided by recent failures', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-soft-recent-failure');
+
+    const sitePrimary = await createSite('soft-retry-primary');
+    const accountPrimary = await createAccount(sitePrimary.id, 'soft-retry-user-primary');
+    const tokenPrimary = await createToken(accountPrimary.id, 'soft-retry-token-primary');
+    const primaryChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountPrimary.id,
+      tokenId: tokenPrimary.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      failCount: 1,
+      consecutiveFailCount: 1,
+      lastFailAt: new Date().toISOString(),
+      cooldownUntil: null,
+    }).returning().get();
+
+    const siteFallback = await createSite('soft-retry-fallback');
+    const accountFallback = await createAccount(siteFallback.id, 'soft-retry-user-fallback');
+    const tokenFallback = await createToken(accountFallback.id, 'soft-retry-token-fallback');
+    const fallbackChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountFallback.id,
+      tokenId: tokenFallback.id,
+      priority: 10,
+      weight: 10,
+      enabled: true,
+      failCount: 1,
+      consecutiveFailCount: 1,
+      lastFailAt: new Date().toISOString(),
+      cooldownUntil: null,
+    }).returning().get();
+    invalidateTokenRouterCache();
+
+    const router = new TokenRouter();
+    const preview = await router.previewSelectedChannel('gpt-soft-recent-failure');
+    const decision = await router.explainSelection('gpt-soft-recent-failure');
+
+    expect([primaryChannel.id, fallbackChannel.id]).toContain(preview?.channel.id);
+    expect([primaryChannel.id, fallbackChannel.id]).toContain(decision.selectedChannelId);
+    expect(decision.summary.join(' ')).toContain('最近失败半开探测');
+    expect(decision.summary.join(' ')).not.toContain('本次未选出通道');
+  });
+
   it('temporarily avoids channels that were just selected by another request', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,

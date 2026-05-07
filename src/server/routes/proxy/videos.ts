@@ -97,6 +97,7 @@ async function executeVideoCreateRequest(params: {
           downstreamPath,
           clientContext,
           downstreamApiKeyId,
+          downstreamPolicy,
         });
       }
     },
