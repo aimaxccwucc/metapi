@@ -124,7 +124,8 @@ type SiteRuntimeHealthState = {
 };
 
 const MIN_EFFECTIVE_UNIT_COST = 1e-6;
-const ROUND_ROBIN_FAILURE_THRESHOLD = 3;
+// 优化：允许更多失败再触发冷却（原3改为5）
+const ROUND_ROBIN_FAILURE_THRESHOLD = 5;
 const MAX_ROUTE_REGEX_BODY_LENGTH = 256;
 const SITE_RUNTIME_HEALTH_DECAY_HALF_LIFE_MS = 10 * 60 * 1000;
 const SITE_RUNTIME_MIN_MULTIPLIER = 0.08;
@@ -3162,6 +3163,15 @@ export function isChannelRecentlyFailed(
   nowMs = Date.now(),
   avoidSec = resolveRecentFailureAvoidWindowSec(channel),
 ): boolean {
+  // 优化：如果冷却时间已过期，认为不是"最近失败"，让渠道重新参与轮询
+  if (channel.cooldownUntil) {
+    const cooldownTs = Date.parse(channel.cooldownUntil);
+    if (!Number.isNaN(cooldownTs) && nowMs >= cooldownTs) {
+      // 冷却已到期，不再视为最近失败
+      return false;
+    }
+  }
+
   if (avoidSec <= 0) return false;
   if ((channel.failCount ?? 0) <= 0) return false;
   if (!channel.lastFailAt) return false;
@@ -3635,27 +3645,84 @@ function buildCandidateSelectionPools(
     pushPool(`${scopePrefix}_other`, remaining);
   };
 
-  if (sitePartition.preferred.length > 0) {
-    if (preferCodexClaudePool) {
-      const runtimePreferredSitePartition = partitionModelPreferredSiteCandidates(
-        sitePartition.preferred,
-        modelName,
-        nowMs,
-      );
-      const anchorCandidates = runtimePreferredSitePartition.source !== 'none'
-        ? runtimePreferredSitePartition.preferred
-        : sitePartition.anchor;
-      const fallbackCandidates = runtimePreferredSitePartition.source !== 'none'
-        ? subtractCandidatesByChannelId(sitePartition.preferred, runtimePreferredSitePartition.preferred)
-        : subtractCandidatesByChannelId(sitePartition.preferred, sitePartition.anchor);
-      pushScopedPools('anchor_site', anchorCandidates);
-      pushScopedPools('fallback_site', fallbackCandidates);
+  // 优化：渠道级分池 + 健康权重降级
+  // 核心原则：稳定优先，差的降级但有机会恢复
+  // 分池逻辑：
+  // - proven_stable: 有成功记录 && 成功率>=40% && 最近成功比失败更近 && 不在冷却中 → 最高优先级
+  // - proven_moderate: 有成功记录 && 成功率<40%或最近失败更近 → 中高优先级（降级但仍可用）
+  // - neutral: 从未使用 || 很久没用 → 中等优先级（低概率试探）
+  // - avoided: 冷却中 || 连续失败>=3 → 最低优先级
+  const nowIso = new Date(nowMs).toISOString();
+  const provenStable: RouteChannelCandidate[] = [];
+  const provenModerate: RouteChannelCandidate[] = [];
+  const channelNeutral: RouteChannelCandidate[] = [];
+  const channelAvoided: RouteChannelCandidate[] = [];
+
+  for (const candidate of candidates) {
+    const ch = candidate.channel;
+    const successMs = getChannelPersistedSuccessAtMs(ch);
+    const failMs = parseIsoTimeMs(ch.lastFailAt);
+    const inCooldown = !!ch.cooldownUntil && ch.cooldownUntil > nowIso;
+    const successCount = ch.successCount ?? 0;
+    const failCount = ch.failCount ?? 0;
+    const totalCount = successCount + failCount;
+    const successRatio = totalCount > 0 ? successCount / totalCount : 0;
+    const consecutiveFailCount = ch.consecutiveFailCount ?? 0;
+
+    if (inCooldown || consecutiveFailCount >= 3) {
+      // 冷却中或连续失败>=3次 → 最低优先级
+      channelAvoided.push(candidate);
+    } else if (successMs != null && successMs > (failMs ?? 0) && successRatio >= 0.4) {
+      // 有成功记录、最近成功更近、成功率>=40% → 最高优先级
+      provenStable.push(candidate);
+    } else if (successCount > 0) {
+      // 有成功记录但成功率低或最近失败更近 → 降级
+      provenModerate.push(candidate);
+    } else if (successMs == null && failMs == null) {
+      // 从未使用 → 低概率试探
+      channelNeutral.push(candidate);
+    } else if (failMs != null && (nowMs - failMs) > 30 * 60 * 1000) {
+      // 很久以前失败（>30分钟）→ 给机会重试
+      channelNeutral.push(candidate);
     } else {
-      pushScopedPools('anchor_site', sitePartition.anchor);
-      pushScopedPools('fallback_site', subtractCandidatesByChannelId(sitePartition.preferred, sitePartition.anchor));
+      // 最近失败、无成功记录 → 低优先级
+      channelAvoided.push(candidate);
     }
   }
-  pushScopedPools('other_site', sitePartition.avoided);
+
+  // 对 codex/claude 模型，保持原有的 runtime model 优先逻辑
+  if (preferCodexClaudePool && provenStable.length > 0) {
+    const runtimePreferredSitePartition = partitionModelPreferredSiteCandidates(
+      provenStable,
+      modelName,
+      nowMs,
+    );
+    const anchorCandidates = runtimePreferredSitePartition.source !== 'none'
+      ? runtimePreferredSitePartition.preferred
+      : provenStable;
+    const fallbackCandidates = runtimePreferredSitePartition.source !== 'none'
+      ? subtractCandidatesByChannelId(provenStable, runtimePreferredSitePartition.preferred)
+      : [];
+    pushScopedPools('anchor_site', anchorCandidates);
+    if (fallbackCandidates.length > 0) {
+      pushScopedPools('fallback_site', fallbackCandidates);
+    }
+  } else if (provenStable.length > 0) {
+    // 稳定渠道 → 最高优先级
+    pushScopedPools('anchor_site', provenStable);
+  }
+
+  // 降级但仍可用的渠道 → 次优先级
+  pushScopedPools('fallback_site', provenModerate);
+
+  // 未使用渠道 → 中低优先级（试探性使用，不会挤占稳定渠道）
+  pushScopedPools('other_site', channelNeutral);
+
+  // 失败/冷却渠道 → 最低优先级
+  // avoided 只在前面所有池都空时才被尝试
+  if (channelAvoided.length > 0 && provenStable.length === 0 && provenModerate.length === 0 && channelNeutral.length === 0) {
+    pushScopedPools('other_site', channelAvoided);
+  }
 
   return {
     pools,
@@ -6573,25 +6640,47 @@ export class TokenRouter {
     candidates: RouteChannelCandidate[],
     runtimeModelName?: string | ((candidate: RouteChannelCandidate) => string),
   ): RouteChannelCandidate[] {
-    const resolveModelName = typeof runtimeModelName === 'function'
-      ? runtimeModelName
-      : (() => runtimeModelName || '');
+    // 优化：稳定优先轮询策略
+    // 排序规则（权重从高到低）：
+    // 1. 冷却中的排最后（优先级最低）
+    // 2. 按健康分级：成功次数越多、成功率越高的排越前面
+    // 3. 同级内按 lastSelectedAt 升序轮询
+    // 4. channelId升序（tiebreak）
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+
+    const getChannelTier = (candidate: RouteChannelCandidate): number => {
+      const ch = candidate.channel;
+      // 冷却中 → 最低级
+      if (ch.cooldownUntil && ch.cooldownUntil > nowIso) return 4;
+      const successCount = ch.successCount ?? 0;
+      const failCount = ch.failCount ?? 0;
+      const totalCount = successCount + failCount;
+      const successRatio = totalCount > 0 ? successCount / totalCount : 0;
+      if (successCount >= 5 && successRatio >= 0.6) return 0;  // 高稳定
+      if (successCount >= 2 && successRatio >= 0.4) return 1;  // 中稳定
+      if (successCount > 0) return 2;  // 有成功但不稳定
+      return 3;  // 从未成功（含从未使用）
+    };
+
     return [...candidates].sort((left, right) => {
-      const leftHealth = getSiteRuntimeHealthDetails(left.site.id, resolveModelName(left), Date.now()).combinedMultiplier;
-      const rightHealth = getSiteRuntimeHealthDetails(right.site.id, resolveModelName(right), Date.now()).combinedMultiplier;
-      const healthDiff = rightHealth - leftHealth;
-      if (Math.abs(healthDiff) > 0.05) {
-        return healthDiff > 0 ? 1 : -1;
-      }
+      // 1. 按健康分级
+      const leftTier = getChannelTier(left);
+      const rightTier = getChannelTier(right);
+      if (leftTier !== rightTier) return leftTier - rightTier;
+
+      // 2. 同级内按 lastSelectedAt 升序（最久没被选中的排前面）
       const selectionOrder = compareNullableTimeAsc(
         left.channel.lastSelectedAt || left.channel.lastUsedAt,
         right.channel.lastSelectedAt || right.channel.lastUsedAt,
       );
       if (selectionOrder !== 0) return selectionOrder;
 
+      // 3. lastUsedAt 升序
       const usedOrder = compareNullableTimeAsc(left.channel.lastUsedAt, right.channel.lastUsedAt);
       if (usedOrder !== 0) return usedOrder;
 
+      // 4. channelId 升序（tiebreak）
       return (left.channel.id ?? 0) - (right.channel.id ?? 0);
     });
   }

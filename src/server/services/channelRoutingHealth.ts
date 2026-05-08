@@ -22,9 +22,10 @@ export type ChannelHealthScore = {
 };
 
 const RECENT_FAILURE_WINDOW_MS = 10 * 60 * 1000;
-const WEIGHTED_BASE_COOLDOWN_MS = [15_000, 15_000, 30_000, 45_000, 75_000, 120_000, 180_000, 300_000];
-const MAX_WEIGHTED_COOLDOWN_MS = 6 * 60 * 60 * 1000;
-const ROUND_ROBIN_COOLDOWN_MS = [10 * 60 * 1000, 60 * 60 * 1000, 24 * 60 * 60 * 1000];
+// 优化：缩短冷却时间，让渠道更快恢复参与轮询
+const WEIGHTED_BASE_COOLDOWN_MS = [10_000, 10_000, 15_000, 20_000, 30_000, 45_000, 60_000, 120_000];
+const MAX_WEIGHTED_COOLDOWN_MS = 30 * 60 * 1000; // 30分钟（原6小时）
+const ROUND_ROBIN_COOLDOWN_MS = [30_000, 120_000, 600_000]; // 30s, 2min, 10min（原10min/1h/24h）
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
