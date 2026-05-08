@@ -6921,10 +6921,37 @@ export class TokenRouter {
       return contribution;
     });
 
-    const totalContribution = contributions.reduce((a, b) => a + b, 0);
+    // ===== 渠道级分池权重（Tier 0-4）+ 10%探测机制 =====
+    // 与 round_robin 策略的 buildCandidateSelectionPools 同级逻辑，对 weighted/stable_first 也生效
+    const nowIso = new Date(nowMs).toISOString();
+    const shouldProbe = Math.random() < 0.1;  // 10%概率进入探测模式
+    const tierWeights = candidates.map((candidate) => {
+      const ch = candidate.channel;
+      // Tier 4: 冷却中 → 完全跳过
+      if (ch.cooldownUntil && ch.cooldownUntil > nowIso) return 0;
+      const successCount = ch.successCount ?? 0;
+      const failCount = ch.failCount ?? 0;
+      const totalCount = successCount + failCount;
+      const successRatio = totalCount > 0 ? successCount / totalCount : 0;
+      // Tier 0: 高稳定 (成功>=3 且 成功率>=50%)
+      if (successCount >= 3 && successRatio >= 0.5) {
+        return shouldProbe ? 0.6 : 1.0;  // 探测模式下降低高稳定渠道权重，给其他渠道更多机会
+      }
+      // Tier 1: 中稳定 (成功>=1 且 成功率>=30%)
+      if (successCount >= 1 && successRatio >= 0.3) return 0.6;
+      // Tier 2: 有成功但不稳定
+      if (successCount > 0) return 0.3;
+      // Tier 3: 从未成功 → 低权重但保留探测能力
+      return 0.05;
+    });
+
+    // 将 tier 权重乘到 contribution 上
+    const tieredContributions = contributions.map((contribution, i) => contribution * (tierWeights[i] ?? 0.05));
+
+    const totalContribution = tieredContributions.reduce((a, b) => a + b, 0);
     const rankedIndices = candidates.map((_, index) => index)
       .sort((leftIndex, rightIndex) => {
-        const contributionDiff = contributions[rightIndex] - contributions[leftIndex];
+        const contributionDiff = tieredContributions[rightIndex] - tieredContributions[leftIndex];
         if (Math.abs(contributionDiff) > 1e-9) {
           return contributionDiff > 0 ? 1 : -1;
         }
@@ -6935,7 +6962,13 @@ export class TokenRouter {
       rankByIndex.set(candidateIndex, rank + 1);
     });
     const details = candidates.map((candidate, i) => {
-      const probability = totalContribution > 0 ? contributions[i] / totalContribution : 0;
+      const probability = totalContribution > 0 ? tieredContributions[i] / totalContribution : 0;
+      const tierWeight = tierWeights[i] ?? 0.05;
+      const tierLabel = tierWeight === 0 ? 'Tier4:冷却中'
+        : tierWeight >= 1.0 ? (shouldProbe ? 'Tier0:探测降权' : 'Tier0:高稳定')
+        : tierWeight >= 0.6 ? 'Tier1:中稳定'
+        : tierWeight >= 0.3 ? 'Tier2:不稳定'
+        : 'Tier3:未验证';
       const weight = candidate.channel.weight ?? 10;
       const cost = effectiveCosts[i];
       const costSourceText = cost?.source === 'observed'
@@ -6979,12 +7012,13 @@ export class TokenRouter {
       const reasonPrefix = selectionMode === 'stable_first'
         ? `稳定优先（综合评分第 ${rankByIndex.get(i) ?? 1} / ${candidates.length}`
         : '按权重随机';
+      const tierSuffix = `，渠道健康=${tierLabel}x${tierWeight}`;
       return {
         candidate,
         probability,
         reason: selectionMode === 'stable_first'
-          ? `${reasonPrefix}，W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，模型熔断=${modelCircuitText}，通道健康=${channelHealth.summary}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），账号EMA=${(accountState?.successEma ?? 0.5).toFixed(2)}x${accountSuccessMultiplier.toFixed(2)}，账号延迟=${accountState?.latencyEmaMs == null ? '—' : `${Math.round(accountState.latencyEmaMs)}ms`}x${accountLatencyMultiplier.toFixed(2)}，账号并发=${accountInflightCount}/${accountConcurrencyBudget}，粘性=${stickyLabel}x${accountStickyMultiplier.toFixed(2)}，同站点通道=${siteChannels}，评分占比≈${(probability * 100).toFixed(1)}%）`
-          : `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，模型熔断=${modelCircuitText}，通道健康=${channelHealth.summary}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），账号EMA=${(accountState?.successEma ?? 0.5).toFixed(2)}x${accountSuccessMultiplier.toFixed(2)}，账号延迟=${accountState?.latencyEmaMs == null ? '—' : `${Math.round(accountState.latencyEmaMs)}ms`}x${accountLatencyMultiplier.toFixed(2)}，账号并发=${accountInflightCount}/${accountConcurrencyBudget}，粘性=${stickyLabel}x${accountStickyMultiplier.toFixed(2)}，同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`,
+          ? `${reasonPrefix}，W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，模型熔断=${modelCircuitText}${tierSuffix}，通道健康=${channelHealth.summary}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），账号EMA=${(accountState?.successEma ?? 0.5).toFixed(2)}x${accountSuccessMultiplier.toFixed(2)}，账号延迟=${accountState?.latencyEmaMs == null ? '—' : `${Math.round(accountState.latencyEmaMs)}ms`}x${accountLatencyMultiplier.toFixed(2)}，账号并发=${accountInflightCount}/${accountConcurrencyBudget}，粘性=${stickyLabel}x${accountStickyMultiplier.toFixed(2)}，同站点通道=${siteChannels}，评分占比≈${(probability * 100).toFixed(1)}%）`
+          : `按权重随机（W=${weight}，成本=${costSourceText}:${(cost?.unitCost || 1).toFixed(6)}，站点权重=${siteGlobalWeight.toFixed(2)}x下游倍率=${normalizedDownstreamSiteMultiplier.toFixed(2)}=${combinedSiteWeight.toFixed(2)}，运行时健康=${runtimeHealthText}，模型熔断=${modelCircuitText}${tierSuffix}，通道健康=${channelHealth.summary}，历史健康=${siteHistoricalMultiplier.toFixed(2)}（成功率=${historicalSuccessRateText}，均延迟=${historicalLatencyText}，样本=${siteHistoricalHealth?.totalCalls ?? 0}），账号EMA=${(accountState?.successEma ?? 0.5).toFixed(2)}x${accountSuccessMultiplier.toFixed(2)}，账号延迟=${accountState?.latencyEmaMs == null ? '—' : `${Math.round(accountState.latencyEmaMs)}ms`}x${accountLatencyMultiplier.toFixed(2)}，账号并发=${accountInflightCount}/${accountConcurrencyBudget}，粘性=${stickyLabel}x${accountStickyMultiplier.toFixed(2)}，同站点通道=${siteChannels}，概率≈${(probability * 100).toFixed(1)}%）`,
       };
     });
 
@@ -6993,7 +7027,7 @@ export class TokenRouter {
       let rand = Math.random() * totalContribution;
       selected = candidates[candidates.length - 1];
       for (let i = 0; i < candidates.length; i++) {
-        rand -= contributions[i];
+        rand -= tieredContributions[i];
         if (rand <= 0) {
           selected = candidates[i];
           break;

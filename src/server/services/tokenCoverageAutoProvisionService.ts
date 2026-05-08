@@ -415,6 +415,20 @@ async function listProvisionCandidateTargets(scope: TokenCoverageProvisionScope)
       : [];
     const sourceRouteMap = new Map<number, TokenRouteRow>(sourceRoutes.map((route: TokenRouteRow) => [route.id, route]));
 
+    // 预查询：找出哪些源路由有渠道（避免为空路由创建空路由）
+    const sourceRouteIdsWithChannels = new Set<number>();
+    if (sourceRouteIds.length > 0) {
+      const channelsWithRoutes = await db.select({
+        routeId: schema.routeChannels.routeId,
+      })
+        .from(schema.routeChannels)
+        .where(inArray(schema.routeChannels.routeId, sourceRouteIds))
+        .all();
+      for (const row of channelsWithRoutes as Array<{ routeId: number }>) {
+        sourceRouteIdsWithChannels.add(row.routeId);
+      }
+    }
+
     for (const routeId of routeIds) {
       const route = routeMap.get(routeId);
       if (!route || !route.enabled) continue;
@@ -423,6 +437,8 @@ async function listProvisionCandidateTargets(scope: TokenCoverageProvisionScope)
         for (const link of links) {
           const sourceRoute = sourceRouteMap.get(link.sourceRouteId);
           if (!sourceRoute || !isExactModelPattern(sourceRoute.modelPattern)) continue;
+          // 如果源路由没有渠道，跳过创建（避免生成空路由）
+          if (!sourceRouteIdsWithChannels.has(sourceRoute.id)) continue;
           const modelName = normalizeText(sourceRoute.modelPattern);
           for (const row of availableRows) {
             if (row.modelName !== modelName && !isModelAliasEquivalent(row.modelName, modelName)) continue;
