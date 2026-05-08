@@ -298,8 +298,24 @@ function ensureFunctionCallItem(
 ): { index: number; item: AggregateOutputItem; created: boolean } {
   const callId = asTrimmedString(callIdRaw);
   const name = asTrimmedString(nameRaw);
-  const existingIndex = callId ? state.functionIndexById[callId] : undefined;
-  const index = existingIndex ?? resolveOutputIndex(state, indexHint, callId);
+  let existingIndex = callId ? state.functionIndexById[callId] : undefined;
+  // When callId is empty (subsequent deltas without id), find the last in-progress function_call
+  if (existingIndex === undefined && !callId && indexHint !== undefined) {
+    for (let i = state.outputItems.length - 1; i >= 0; i--) {
+      const item = state.outputItems[i];
+      if (isRecord(item) && asTrimmedString(item.type) === 'function_call'
+        && asTrimmedString(item.status) === 'in_progress') {
+        existingIndex = i;
+        break;
+      }
+    }
+  }
+  let index = existingIndex ?? resolveOutputIndex(state, indexHint, callId);
+  // If the target index is occupied by a non-function item, use next available index
+  const existing = state.outputItems[index];
+  if (existing && typeof existing.type === 'string' && existing.type !== 'function_call') {
+    index = state.outputItems.length;
+  }
   const created = !state.outputItems[index];
   const item = ensureOutputItem(state, index, () => ({
     id: ensureOutputItemId(callId, 'fc', index),
@@ -325,10 +341,26 @@ function ensureCustomToolItem(
   const itemId = asTrimmedString(itemIdRaw);
   const callId = asTrimmedString(callIdRaw);
   const name = asTrimmedString(nameRaw);
-  const existingIndex = (callId && state.customToolIndexById[callId] !== undefined)
+  let existingIndex = (callId && state.customToolIndexById[callId] !== undefined)
     ? state.customToolIndexById[callId]
     : (itemId && state.customToolIndexById[itemId] !== undefined ? state.customToolIndexById[itemId] : undefined);
-  const index = existingIndex ?? resolveOutputIndex(state, indexHint, itemId, callId);
+  // When ids are empty, find the last in-progress custom_tool_call
+  if (existingIndex === undefined && !callId && !itemId && indexHint !== undefined) {
+    for (let i = state.outputItems.length - 1; i >= 0; i--) {
+      const item = state.outputItems[i];
+      if (isRecord(item) && asTrimmedString(item.type) === 'custom_tool_call'
+        && asTrimmedString(item.status) === 'in_progress') {
+        existingIndex = i;
+        break;
+      }
+    }
+  }
+  let index = existingIndex ?? resolveOutputIndex(state, indexHint, itemId, callId);
+  // If the target index is occupied by a non-custom-tool item, use next available index
+  const existing = state.outputItems[index];
+  if (existing && typeof existing.type === 'string' && existing.type !== 'custom_tool_call') {
+    index = state.outputItems.length;
+  }
   const created = !state.outputItems[index];
   const item = ensureOutputItem(state, index, () => ({
     id: ensureOutputItemId(itemId, 'ct', index),
