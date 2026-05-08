@@ -1,5 +1,5 @@
 ﻿import { createHash } from 'node:crypto';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { minimatch } from 'minimatch';
 import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { upsertSetting } from '../db/upsertSetting.js';
@@ -41,6 +41,7 @@ import { invalidateModelsMarketplaceCache } from './modelsMarketplaceCache.js';
 import {
   clearRoutingGovernanceState,
   listActiveRoutingGovernanceStates,
+  purgeStaleGovernanceStates,
   upsertRoutingGovernanceState,
   type CandidateGovernanceBlock,
   type RoutingGovernanceReasonCode,
@@ -133,7 +134,8 @@ const SITE_RUNTIME_LATENCY_BASELINE_MS = 2_500;
 const SITE_RUNTIME_LATENCY_WINDOW_MS = 30_000;
 const SITE_RUNTIME_MAX_LATENCY_PENALTY = 0.35;
 const SITE_RUNTIME_LATENCY_EMA_ALPHA = 0.3;
-const SITE_RUNTIME_BREAKER_STREAK_THRESHOLD = 3;
+const SITE_RUNTIME_BREAKER_STREAK_THRESHOLD = 5;
+const SITE_RUNTIME_BREAKER_STREAK_WINDOW_MS = 3 * 60 * 1000;
 const SITE_RUNTIME_BREAKER_LEVELS_MS = [0, 60_000, 5 * 60_000, 30 * 60 * 1000] as const;
 const SITE_TRANSIENT_STREAK_WINDOW_MS = 5 * 60 * 1000;
 const SITE_HISTORICAL_HEALTH_MIN_MULTIPLIER = 0.45;
@@ -1560,7 +1562,7 @@ function applyRuntimeHealthFailure(state: SiteRuntimeHealthState, context: SiteR
     const lastTransientFailureAtMs = state.lastTransientFailureAtMs;
     const shouldContinueStreak = (
       typeof lastTransientFailureAtMs === 'number'
-      && (nowMs - lastTransientFailureAtMs) <= SITE_TRANSIENT_STREAK_WINDOW_MS
+      && (nowMs - lastTransientFailureAtMs) <= SITE_RUNTIME_BREAKER_STREAK_WINDOW_MS
     );
     state.transientFailureStreak = shouldContinueStreak
       ? state.transientFailureStreak + 1
@@ -3668,6 +3670,12 @@ function buildCandidateSelectionPools(
     const totalCount = successCount + failCount;
     const successRatio = totalCount > 0 ? successCount / totalCount : 0;
     const consecutiveFailCount = ch.consecutiveFailCount ?? 0;
+
+    // Tier 5: 死渠道 (从未成功 且 失败>=5次) → 几乎不选，直接放入避免池
+    if (!inCooldown && successCount === 0 && failCount >= 5) {
+      channelAvoided.push(candidate);
+      continue;
+    }
 
     if (inCooldown || consecutiveFailCount >= 3) {
       // 冷却中或连续失败>=3次 → 最低优先级
@@ -6662,6 +6670,8 @@ export class TokenRouter {
       if (successCount >= 3 && successRatio >= 0.5) return 0;  // 高稳定（原: >=5且>=60%）
       if (successCount >= 1 && successRatio >= 0.3) return 1;  // 中稳定（原: >=2且>=40%）
       if (successCount > 0) return 2;  // 有成功但不稳定
+      // Tier 5: 死渠道 (从未成功 且 失败>=5次) → 最低级
+      if (failCount >= 5) return 5;
       return 3;  // 从未成功（含从未使用）
     };
 
@@ -6941,6 +6951,8 @@ export class TokenRouter {
       if (successCount >= 1 && successRatio >= 0.3) return 0.6;
       // Tier 2: 有成功但不稳定
       if (successCount > 0) return 0.3;
+      // Tier 5: 死渠道 (从未成功 且 失败>=5次) → 几乎不选
+      if (failCount >= 5) return 0.01;
       // Tier 3: 从未成功 → 低权重但保留探测能力
       return 0.05;
     });
@@ -7040,3 +7052,104 @@ export class TokenRouter {
 }
 
 export const tokenRouter = new TokenRouter();
+
+// ===== 后台预热探针：定期探测未使用渠道的可用性 =====
+const WARMUP_PROBE_INTERVAL_MS = 5 * 60 * 1000; // 每5分钟执行一次
+const WARMUP_PROBE_BATCH_SIZE = 5; // 每次随机探测5个渠道
+
+async function runWarmupProbe(): Promise<void> {
+  try {
+    // 查询从未成功且已启用的渠道
+    const unusedChannels = await db.select({
+      id: schema.routeChannels.id,
+      routeId: schema.routeChannels.routeId,
+      accountId: schema.routeChannels.accountId,
+      tokenId: schema.routeChannels.tokenId,
+      sourceModel: schema.routeChannels.sourceModel,
+    })
+      .from(schema.routeChannels)
+      .where(and(
+        eq(schema.routeChannels.successCount, 0),
+        eq(schema.routeChannels.enabled, true),
+      ))
+      .all();
+
+    if (unusedChannels.length <= 0) return;
+
+    // 随机打乱并取前N个
+    const shuffled = unusedChannels.sort(() => Math.random() - 0.5).slice(0, WARMUP_PROBE_BATCH_SIZE);
+
+    for (const channel of shuffled) {
+      try {
+        // 查找关联的路由以获取模型名称
+        const route = await db.select({ modelPattern: schema.tokenRoutes.modelPattern })
+          .from(schema.tokenRoutes)
+          .where(eq(schema.tokenRoutes.id, channel.routeId))
+          .get();
+
+        const probeModelName = normalizeModelAlias(
+          channel.sourceModel || route?.modelPattern || ''
+        );
+        if (!probeModelName) continue;
+
+        const result = await probeMarketplaceModelAvailability({
+          modelName: probeModelName,
+          accountId: channel.accountId,
+          preferredTokenId: channel.tokenId,
+          skipAutoCreate: true,
+          forceRealtimeProbeOnListMiss: true,
+          allowListHitSuccess: false,
+          probePrompt: config.autoProbePrompt,
+          probeMaxOutputTokens: config.autoProbeMaxOutputTokens,
+        });
+
+        if (result.success && result.available) {
+          // 探针成功 → 记录渠道成功
+          const nowIso = new Date().toISOString();
+          await db.update(schema.routeChannels).set({
+            successCount: sql`${schema.routeChannels.successCount} + 1`,
+            lastUsedAt: nowIso,
+            lastFailAt: null,
+            consecutiveFailCount: 0,
+            cooldownUntil: null,
+            cooldownLevel: 0,
+          }).where(eq(schema.routeChannels.id, channel.id)).run();
+          patchCachedChannel(channel.id, (ch) => {
+            ch.successCount = (ch.successCount ?? 0) + 1;
+            ch.lastUsedAt = nowIso;
+            ch.lastFailAt = null;
+            ch.consecutiveFailCount = 0;
+            ch.cooldownUntil = null;
+            ch.cooldownLevel = 0;
+          });
+        } else {
+          // 探针失败 → 记录失败
+          const nowIso = new Date().toISOString();
+          await db.update(schema.routeChannels).set({
+            failCount: sql`${schema.routeChannels.failCount} + 1`,
+            lastFailAt: nowIso,
+          }).where(eq(schema.routeChannels.id, channel.id)).run();
+          patchCachedChannel(channel.id, (ch) => {
+            ch.failCount = (ch.failCount ?? 0) + 1;
+            ch.lastFailAt = nowIso;
+          });
+        }
+      } catch {
+        // 单个渠道探针失败不影响其他渠道
+      }
+    }
+  } catch {
+    // 探针任务整体失败不影响主流程
+  }
+}
+
+// 启动后台预热探针定时器
+const warmupProbeTimer = setInterval(() => { void runWarmupProbe(); }, WARMUP_PROBE_INTERVAL_MS);
+warmupProbeTimer.unref?.();
+
+// 后台清理过期治理状态（每小时执行一次）
+const GOVERNANCE_PURGE_INTERVAL_MS = 60 * 60 * 1000;
+const governancePurgeTimer = setInterval(() => {
+  void purgeStaleGovernanceStates(24).catch(() => {});
+}, GOVERNANCE_PURGE_INTERVAL_MS);
+governancePurgeTimer.unref?.();

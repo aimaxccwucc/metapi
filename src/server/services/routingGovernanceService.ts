@@ -480,3 +480,22 @@ export async function findCandidateGovernanceBlock(
     state: hit.state as RoutingGovernanceState,
   };
 }
+
+/**
+ * 清理过期的治理状态记录
+ * 删除超过 maxAgeHours 小时的 suppressed 状态（probeAfter 和 suppressUntil 都已过期的记录）
+ */
+export async function purgeStaleGovernanceStates(maxAgeHours = 24): Promise<number> {
+  const cutoffMs = Date.now() - Math.max(1, Math.trunc(maxAgeHours)) * 60 * 60 * 1000;
+  const cutoffIso = new Date(cutoffMs).toISOString();
+
+  const result = await db.delete(schema.routingGovernanceStates)
+    .where(
+      and(
+        eq(schema.routingGovernanceStates.state, 'suppressed'),
+        lte(schema.routingGovernanceStates.updatedAt, cutoffIso),
+      ),
+    )
+    .run();
+  return Number(result?.changes || 0);
+}
