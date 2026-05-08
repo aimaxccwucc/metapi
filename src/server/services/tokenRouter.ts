@@ -3672,8 +3672,8 @@ function buildCandidateSelectionPools(
     if (inCooldown || consecutiveFailCount >= 3) {
       // 冷却中或连续失败>=3次 → 最低优先级
       channelAvoided.push(candidate);
-    } else if (successMs != null && successMs > (failMs ?? 0) && successRatio >= 0.4) {
-      // 有成功记录、最近成功更近、成功率>=40% → 最高优先级
+    } else if (successMs != null && successMs > (failMs ?? 0) && successRatio >= 0.3 && successCount >= 1) {
+      // 有成功记录、最近成功更近、成功率>=30%且至少1次成功 → 最高优先级
       provenStable.push(candidate);
     } else if (successCount > 0) {
       // 有成功记录但成功率低或最近失败更近 → 降级
@@ -6640,12 +6640,13 @@ export class TokenRouter {
     candidates: RouteChannelCandidate[],
     runtimeModelName?: string | ((candidate: RouteChannelCandidate) => string),
   ): RouteChannelCandidate[] {
-    // 优化：稳定优先轮询策略
+    // 优化：稳定优先轮询 + 探测机制
     // 排序规则（权重从高到低）：
     // 1. 冷却中的排最后（优先级最低）
     // 2. 按健康分级：成功次数越多、成功率越高的排越前面
     // 3. 同级内按 lastSelectedAt 升序轮询
-    // 4. channelId升序（tiebreak）
+    // 4. 探测概率：10%机会跳过Tier0直接尝试Tier1-2渠道（加速发现新渠道）
+    // 5. channelId升序（tiebreak）
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
 
@@ -6657,16 +6658,28 @@ export class TokenRouter {
       const failCount = ch.failCount ?? 0;
       const totalCount = successCount + failCount;
       const successRatio = totalCount > 0 ? successCount / totalCount : 0;
-      if (successCount >= 5 && successRatio >= 0.6) return 0;  // 高稳定
-      if (successCount >= 2 && successRatio >= 0.4) return 1;  // 中稳定
+      // 降低阈值，让更多渠道进入稳定池
+      if (successCount >= 3 && successRatio >= 0.5) return 0;  // 高稳定（原: >=5且>=60%）
+      if (successCount >= 1 && successRatio >= 0.3) return 1;  // 中稳定（原: >=2且>=40%）
       if (successCount > 0) return 2;  // 有成功但不稳定
       return 3;  // 从未成功（含从未使用）
     };
 
+    // 探测机制：10%概率跳过Tier0，尝试较低级渠道
+    // 这样新渠道有机会被发现，同时90%流量仍走最稳定渠道
+    const shouldProbe = Math.random() < 0.1;
+
     return [...candidates].sort((left, right) => {
       // 1. 按健康分级
-      const leftTier = getChannelTier(left);
-      const rightTier = getChannelTier(right);
+      let leftTier = getChannelTier(left);
+      let rightTier = getChannelTier(right);
+
+      // 探测模式：把Tier0降为Tier1，让Tier1-2有机会被选中
+      if (shouldProbe) {
+        if (leftTier === 0) leftTier = 1;
+        if (rightTier === 0) rightTier = 1;
+      }
+
       if (leftTier !== rightTier) return leftTier - rightTier;
 
       // 2. 同级内按 lastSelectedAt 升序（最久没被选中的排前面）
