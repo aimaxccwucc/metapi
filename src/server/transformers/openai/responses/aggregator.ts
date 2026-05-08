@@ -468,14 +468,16 @@ function mergeImageGenerationFields(
 function computeNovelDelta(existingText: string, incomingDelta: string): string {
   if (!incomingDelta) return '';
   if (!existingText) return incomingDelta;
-  if (existingText.endsWith(incomingDelta)) return '';
+  // Exact duplicate: incoming is same as existing full text (cumulative delta)
+  if (incomingDelta === existingText) return '';
+  // Cumulative delta: incoming starts with existing text
   if (incomingDelta.startsWith(existingText)) {
     return incomingDelta.slice(existingText.length);
   }
-  if (existingText.includes(incomingDelta)) return '';
-
-  const maxOverlap = Math.min(existingText.length, incomingDelta.length);
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+  // Only check suffix overlap for substantial chunks to avoid false positives with short common words
+  const minOverlap = 8;
+  const maxOverlap = Math.min(existingText.length, incomingDelta.length, 40);
+  for (let overlap = maxOverlap; overlap >= minOverlap; overlap -= 1) {
     if (existingText.slice(-overlap) === incomingDelta.slice(0, overlap)) {
       return incomingDelta.slice(overlap);
     }
