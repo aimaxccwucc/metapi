@@ -197,13 +197,7 @@ function resolveOutputIndex(
 }
 
 function ensureMessageItem(state: OpenAiResponsesAggregateState, indexHint?: number): { index: number; item: AggregateOutputItem } {
-  let index = state.messageIndex ?? indexHint ?? 0;
-  // If the target index is already occupied by a non-message item (e.g. reasoning),
-  // skip to the next available index so the message gets its own output slot.
-  const existing = state.outputItems[index];
-  if (existing && typeof existing.type === 'string' && existing.type !== 'message') {
-    index = state.outputItems.length;
-  }
+  const index = state.messageIndex ?? indexHint ?? 0;
   const item = ensureOutputItem(state, index, () => ({
     id: ensureOutputItemId('', 'msg', index),
     type: 'message',

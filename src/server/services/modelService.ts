@@ -1494,7 +1494,47 @@ export async function rebuildTokenRoutesFromAvailabilityScoped(scope: RebuildTok
       continue;
     }
 
-    if ((route.routeMode || 'pattern') === 'explicit_group') continue;
+    if ((route.routeMode || 'pattern') === 'explicit_group') {
+      // 同步 explicit_group 路由的渠道（从源路由继承）
+      const sourceLinks = routeGroupSourceRows.filter((link) => link.groupRouteId === route.id);
+      const sourceChannelKeys = new Set<string>();
+      for (const link of sourceLinks) {
+        const sourceChannels = channels.filter((ch) => ch.routeId === link.sourceRouteId);
+        for (const ch of sourceChannels) {
+          sourceChannelKeys.add(`${ch.accountId}::${ch.tokenId ?? 0}::${(ch.sourceModel || '').trim().toLowerCase()}`);
+        }
+      }
+
+      // 删除不在源路由中的渠道
+      for (const channel of routeChannels) {
+        if (channel.manualOverride) continue;
+        const channelKey = `${channel.accountId}::${channel.tokenId ?? 0}::${(channel.sourceModel || '').trim().toLowerCase()}`;
+        if (!sourceChannelKeys.has(channelKey)) {
+          await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
+          removedChannels++;
+        }
+      }
+
+      // 添加源路由中有但群组路由中没有的渠道
+      const existingKeys = new Set(routeChannels.map((ch) => `${ch.accountId}::${ch.tokenId ?? 0}::${(ch.sourceModel || '').trim().toLowerCase()}`));
+      for (const key of sourceChannelKeys) {
+        if (existingKeys.has(key)) continue;
+        const [accountIdStr, tokenIdStr, sourceModel] = key.split('::');
+        await db.insert(schema.routeChannels).values({
+          routeId: route.id,
+          accountId: parseInt(accountIdStr, 10),
+          tokenId: parseInt(tokenIdStr, 10) || null,
+          sourceModel,
+          priority: 0,
+          weight: 10,
+          enabled: true,
+          manualOverride: false,
+        }).run();
+        createdChannels++;
+      }
+
+      continue;
+    }
 
     const modelPattern = (route.modelPattern || '').trim();
     if (!modelPattern) continue;
@@ -1513,7 +1553,28 @@ export async function rebuildTokenRoutesFromAvailabilityScoped(scope: RebuildTok
     removedChannels += syncResult.removedChannels;
   }
 
-  if (createdRoutes > 0 || createdChannels > 0 || removedChannels > 0 || removedRoutes > 0) {
+  // 自动禁用空路由：创建超过1小时仍无渠道的路由自动禁用
+  const EMPTY_ROUTE_GRACE_MS = 60 * 60 * 1000; // 1小时宽限期
+  const nowMs = Date.now();
+  let autoDisabledEmptyRoutes = 0;
+
+  for (const route of routes) {
+    if (!route.enabled) continue;
+    const routeChannels = channels.filter((channel) => channel.routeId === route.id);
+    if (routeChannels.length > 0) continue;
+
+    const createdAtMs = route.createdAt ? new Date(route.createdAt).getTime() : 0;
+    if (createdAtMs > 0 && (nowMs - createdAtMs) > EMPTY_ROUTE_GRACE_MS) {
+      await db.update(schema.tokenRoutes)
+        .set({ enabled: false, updatedAt: new Date().toISOString() })
+        .where(eq(schema.tokenRoutes.id, route.id))
+        .run();
+      autoDisabledEmptyRoutes++;
+      console.log(`[routes] 自动禁用空路由: id=${route.id} pattern="${route.modelPattern}" (创建于 ${route.createdAt}，已超过1小时无渠道)`);
+    }
+  }
+
+  if (createdRoutes > 0 || createdChannels > 0 || removedChannels > 0 || removedRoutes > 0 || autoDisabledEmptyRoutes > 0) {
     await clearAllRouteDecisionSnapshots();
   }
 
@@ -1525,6 +1586,7 @@ export async function rebuildTokenRoutesFromAvailabilityScoped(scope: RebuildTok
     createdChannels,
     removedChannels,
     removedRoutes,
+    autoDisabledEmptyRoutes,
   };
 }
 
