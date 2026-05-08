@@ -697,6 +697,18 @@ function shouldForceOpenAiChatToolObjectRequiredArray(siteUrl: string | null | u
   return hostname === 'duckcoding.com' || hostname.endsWith('.duckcoding.com');
 }
 
+function clampNonStreamingChatMaxTokensForUpstream(body: Record<string, unknown>): Record<string, unknown> {
+  if (body.stream === true) return body;
+  const rawMaxTokens = body.max_tokens;
+  if (typeof rawMaxTokens !== 'number' || !Number.isFinite(rawMaxTokens)) return body;
+  const normalizedMaxTokens = Math.trunc(rawMaxTokens);
+  if (normalizedMaxTokens <= 4096) return body;
+  return {
+    ...body,
+    max_tokens: 4096,
+  };
+}
+
 function sanitizeDirectChatBody(
   body: Record<string, unknown>,
   siteUrl?: string,
@@ -746,7 +758,7 @@ function sanitizeDirectChatBody(
       next.response_format = responseFormat;
     }
   }
-  return next;
+  return clampNonStreamingChatMaxTokensForUpstream(next);
 }
 
 function safeJsonStringify(value: unknown): string {

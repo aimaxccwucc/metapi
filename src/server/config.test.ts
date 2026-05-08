@@ -55,10 +55,10 @@ describe('buildConfig', () => {
     expect(config.claudeClientSecret).toBe('');
     expect(config.geminiCliClientId).toBe('681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com');
     expect(config.geminiCliClientSecret).toBe('');
-    expect(config.upstreamRequestTimeoutMs).toBe(20_000);
-    expect(config.upstreamStreamFirstByteTimeoutMs).toBe(45_000);
-    expect(config.upstreamRequestBudgetMs).toBe(120_000);
-    expect(config.upstreamStreamIdleTimeoutMs).toBe(180_000);
+    expect(config.upstreamRequestTimeoutMs).toBe(90_000);
+    expect(config.upstreamStreamFirstByteTimeoutMs).toBe(135_000);
+    expect(config.upstreamRequestBudgetMs).toBe(360_000);
+    expect(config.upstreamStreamIdleTimeoutMs).toBe(360_000);
     expect(config.downstreamSseKeepAliveMs).toBe(25_000);
     expect(config.onDemandModelRefreshCooldownMs).toBe(15_000);
     expect(config.autoRouteProbeThrottleMs).toBe(1_800_000);

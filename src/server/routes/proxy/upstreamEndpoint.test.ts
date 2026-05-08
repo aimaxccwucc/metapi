@@ -445,6 +445,48 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(order).toEqual(['chat', 'responses']);
   });
 
+  it('clamps non-streaming chat fallback max_tokens to avoid upstream 4096 hard failures', async () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'deepseek-v4-pro',
+      stream: false,
+      tokenValue: baseContext.account.accessToken!,
+      sitePlatform: 'new-api',
+      siteUrl: baseContext.site.url,
+      openaiBody: {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hello' }],
+        max_tokens: 8192,
+      },
+      downstreamFormat: 'responses',
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.max_tokens).toBe(4096);
+    expect(request.body.stream).toBe(false);
+  });
+
+  it('keeps large max_tokens on streaming chat fallback requests', async () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'deepseek-v4-pro',
+      stream: true,
+      tokenValue: baseContext.account.accessToken!,
+      sitePlatform: 'new-api',
+      siteUrl: baseContext.site.url,
+      openaiBody: {
+        model: 'deepseek-v4-pro',
+        messages: [{ role: 'user', content: 'hello' }],
+        max_tokens: 8192,
+      },
+      downstreamFormat: 'responses',
+    });
+
+    expect(request.path).toBe('/v1/chat/completions');
+    expect(request.body.max_tokens).toBe(8192);
+    expect(request.body.stream).toBe(true);
+  });
+
   it('does not block generic /v1/responses endpoints on transient upstream errors', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,

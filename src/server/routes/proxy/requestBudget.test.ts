@@ -44,11 +44,11 @@ describe('requestBudget', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-03-31T09:05:00.000Z'));
     try {
-      const budget = createRequestBudget(60_000);
-      expect(budget.getPerAttemptTimeoutMs()).toBe(20_000);
-      expect(budget.getStreamFirstByteTimeoutMs()).toBe(45_000);
-      expect(budget.getPerAttemptTimeoutMs({ preferFastFail: true })).toBe(20_000);
-      expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true })).toBe(45_000);
+      const budget = createRequestBudget(180_000);
+      expect(budget.getPerAttemptTimeoutMs()).toBe(90_000);
+      expect(budget.getStreamFirstByteTimeoutMs()).toBe(135_000);
+      expect(budget.getPerAttemptTimeoutMs({ preferFastFail: true })).toBe(90_000);
+      expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true })).toBe(135_000);
       expect(budget.getPerAttemptTimeoutMs({ preferFastFail: true, hardCapMs: 4_000 })).toBe(4_000);
       expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true, hardCapMs: 4_000 })).toBe(4_000);
     } finally {
