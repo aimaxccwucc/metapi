@@ -115,6 +115,16 @@ function normalizeModelName(input?: string | null): string {
 type SiteDetailAccountRow = typeof schema.accounts.$inferSelect;
 type SiteDetailTokenRow = typeof schema.accountTokens.$inferSelect;
 type SiteDetailGroupSource = 'pricing' | 'token' | 'default';
+type SiteDetailPricing = {
+  quotaType: number;
+  inputPerMillion?: number;
+  outputPerMillion?: number;
+  cacheReadPerMillion?: number;
+  cacheCreationPerMillion?: number;
+  perCallInput?: number;
+  perCallOutput?: number;
+  perCallTotal?: number;
+} | null;
 
 type SiteSubscriptionAggregate = {
   activeCount: number;
@@ -344,6 +354,10 @@ export async function sitesRoutes(app: FastifyInstance) {
     }
 
     const pricingGroupsByModel = new Map<string, Set<string>>();
+    const groupRatioByGroup = new Map<string, number>();
+    const pricingByModelGroup = new Map<string, Map<string, SiteDetailPricing>>();
+    const defaultGroupRatio = 1;
+    groupRatioByGroup.set('default', defaultGroupRatio);
     try {
       const pricingAccount = accountRows.find((account) => account.accessToken?.trim() || account.apiToken?.trim()) || accountRows[0] || null;
       if (pricingAccount || site.apiKey?.trim()) {
@@ -370,7 +384,12 @@ export async function sitesRoutes(app: FastifyInstance) {
           }),
           new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
         ]);
-        Object.keys(catalog?.groupRatio || {}).forEach((group) => addSiteGroup(group, 'pricing'));
+        Object.entries(catalog?.groupRatio || {}).forEach(([group, ratio]) => {
+          const normalizedGroup = addSiteGroup(group, 'pricing');
+          if (typeof ratio === 'number' && Number.isFinite(ratio)) {
+            groupRatioByGroup.set(normalizedGroup, ratio);
+          }
+        });
         for (const item of catalog?.models || []) {
           const modelName = normalizeModelName(item.modelName);
           if (!modelName) continue;
@@ -380,6 +399,12 @@ export async function sitesRoutes(app: FastifyInstance) {
           }
           if (groups.size === 0) groups.add(addSiteGroup('default', 'default'));
           pricingGroupsByModel.set(modelName, groups);
+          const pricingByGroup = new Map<string, SiteDetailPricing>();
+          Object.entries(item.groupPricing || {}).forEach(([group, pricing]) => {
+            const normalizedGroup = normalizeTokenGroup(group);
+            pricingByGroup.set(normalizedGroup, pricing ? { ...pricing } : null);
+          });
+          pricingByModelGroup.set(modelName, pricingByGroup);
         }
       }
     } catch { }
@@ -390,12 +415,15 @@ export async function sitesRoutes(app: FastifyInstance) {
       tokenIds: Set<number>;
       groups: Map<string, {
         group: string;
+        groupRatio: number | null;
+        pricing: SiteDetailPricing;
         accountIds: Set<number>;
         tokenIds: Set<number>;
       }>;
     }>();
     const groupMap = new Map<string, {
       group: string;
+      groupRatio: number | null;
       modelNames: Set<string>;
       accountIds: Set<number>;
       tokenIds: Set<number>;
@@ -420,6 +448,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       if (!item) {
         item = {
           group,
+          groupRatio: groupRatioByGroup.get(group) ?? null,
           modelNames: new Set<string>(),
           accountIds: new Set<number>(),
           tokenIds: new Set<number>(),
@@ -446,6 +475,11 @@ export async function sitesRoutes(app: FastifyInstance) {
       if (pricingGroups && pricingGroups.size > 0) return Array.from(pricingGroups);
       return knownSiteGroups.length > 0 ? knownSiteGroups : ['default'];
     };
+    const resolveModelGroupPricing = (modelName: string, group: string): SiteDetailPricing => (
+      pricingByModelGroup.get(modelName)?.get(group)
+      || pricingByModelGroup.get(modelName)?.get('default')
+      || null
+    );
 
     for (const modelName of siteModelNames) {
       const modelItem = ensureModel(modelName);
@@ -460,6 +494,8 @@ export async function sitesRoutes(app: FastifyInstance) {
         if (!groupItem) {
           groupItem = {
             group,
+            groupRatio: groupRatioByGroup.get(group) ?? null,
+            pricing: resolveModelGroupPricing(modelName, group),
             accountIds: new Set<number>(),
             tokenIds: new Set<number>(),
           };
@@ -490,6 +526,8 @@ export async function sitesRoutes(app: FastifyInstance) {
         if (!groupItem) {
           groupItem = {
             group,
+            groupRatio: groupRatioByGroup.get(group) ?? null,
+            pricing: resolveModelGroupPricing(modelName, group),
             accountIds: new Set<number>(),
             tokenIds: new Set<number>(),
           };
@@ -552,6 +590,8 @@ export async function sitesRoutes(app: FastifyInstance) {
         groups: Array.from(item.groups.values())
           .map((group) => ({
             group: group.group,
+            groupRatio: group.groupRatio,
+            pricing: group.pricing,
             accountCount: group.accountIds.size,
             tokenCount: group.tokenIds.size,
             tokens: Array.from(group.tokenIds)
@@ -583,6 +623,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     const groups = Array.from(groupMap.values())
       .map((item) => ({
         group: item.group,
+        groupRatio: item.groupRatio,
         modelCount: item.modelNames.size,
         accountCount: item.accountIds.size,
         tokenCount: item.tokenIds.size,

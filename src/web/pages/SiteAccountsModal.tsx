@@ -72,12 +72,25 @@ type SiteDetailToken = {
   models: string[];
 };
 
+type SiteDetailPricing = {
+  quotaType: number;
+  inputPerMillion?: number;
+  outputPerMillion?: number;
+  cacheReadPerMillion?: number;
+  cacheCreationPerMillion?: number;
+  perCallInput?: number;
+  perCallOutput?: number;
+  perCallTotal?: number;
+} | null;
+
 type SiteDetailModel = {
   name: string;
   accountCount: number;
   tokenCount: number;
   groups: Array<{
     group: string;
+    groupRatio?: number | null;
+    pricing?: SiteDetailPricing;
     accountCount: number;
     tokenCount: number;
     tokens: Array<{
@@ -93,6 +106,7 @@ type SiteDetailModel = {
 
 type SiteDetailGroup = {
   group: string;
+  groupRatio?: number | null;
   modelCount: number;
   accountCount: number;
   tokenCount: number;
@@ -136,6 +150,37 @@ function createEmptyKeyEditor(accountId = ''): KeyEditorState {
 
 function formatUsd(value?: number | null): string {
   return `$${(value || 0).toFixed(2)}`;
+}
+
+function formatCompactPrice(value?: number | null): string {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
+  if (Math.abs(num) >= 100) return num.toFixed(2);
+  if (Math.abs(num) >= 1) return num.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+  return num.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function formatGroupRatio(value?: number | null): string {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '倍率未获取';
+  return `倍率 x${formatCompactPrice(num)}`;
+}
+
+function formatModelPricing(pricing?: SiteDetailPricing): string {
+  if (!pricing) return '价格未获取';
+  if (pricing.quotaType === 1) {
+    const total = pricing.perCallTotal ?? ((pricing.perCallInput ?? 0) + (pricing.perCallOutput ?? 0));
+    return `调用 $${formatCompactPrice(total)} / 次`;
+  }
+  return `输入 $${formatCompactPrice(pricing.inputPerMillion)} / 输出 $${formatCompactPrice(pricing.outputPerMillion)} / 1M`;
+}
+
+function formatModelPricingDetail(pricing?: SiteDetailPricing): string {
+  if (!pricing || pricing.quotaType === 1) return '';
+  const parts: string[] = [];
+  if (pricing.cacheReadPerMillion != null) parts.push(`缓存读 $${formatCompactPrice(pricing.cacheReadPerMillion)} / 1M`);
+  if (pricing.cacheCreationPerMillion != null) parts.push(`缓存写 $${formatCompactPrice(pricing.cacheCreationPerMillion)} / 1M`);
+  return parts.join(' · ');
 }
 
 export default function SiteAccountsModal({ open, onClose, siteId, siteName, onSiteBalanceChange }: SiteAccountsModalProps) {
@@ -881,6 +926,7 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
                     >
                       <span>{group.group}</span>
                       <span className="badge badge-muted" style={{ fontSize: 10 }}>{group.modelCount}</span>
+                      <span className="badge badge-info" style={{ fontSize: 10 }}>{formatGroupRatio(group.groupRatio)}</span>
                     </button>
                   );
                 })}
@@ -891,7 +937,7 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
                     <div>
                       <span className="badge badge-success">{selectedModelGroup.group}</span>
                       <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
-                        {selectedModelGroup.modelCount} 模型 / {selectedModelGroup.accountCount} 账号 / {selectedModelGroup.tokenCount} Key
+                        {selectedModelGroup.modelCount} 模型 · {formatGroupRatio(selectedModelGroup.groupRatio)}
                       </span>
                     </div>
                   </div>
@@ -905,23 +951,11 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
                           <div key={`${selectedModelGroup.group}-${model.name}`} style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 10, display: 'grid', gap: 8 }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                               <code style={{ fontSize: 12, wordBreak: 'break-all' }}>{model.name}</code>
-                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                <span className="badge badge-info" style={{ fontSize: 11 }}>{group.accountCount} 账号</span>
-                                <span className="badge badge-muted" style={{ fontSize: 11 }}>{group.tokenCount} Key</span>
-                              </div>
+                              <span className="badge badge-info" style={{ fontSize: 11 }}>{formatModelPricing(group.pricing)}</span>
                             </div>
-                            {group.tokens.length > 0 ? (
-                              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                                {group.tokens.slice(0, 12).map((token) => (
-                                  <span key={token.id} className={`badge ${token.enabled ? 'badge-muted' : 'badge-error'}`} style={{ fontSize: 10 }}>
-                                    {token.accountName} / {token.name}{token.isDefault ? ' · 默认' : ''}
-                                  </span>
-                                ))}
-                                {group.tokens.length > 12 ? <span className="badge badge-muted" style={{ fontSize: 10 }}>+{group.tokens.length - 12}</span> : null}
-                              </div>
-                            ) : (
-                              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>账号模型覆盖，无 Key 绑定</div>
-                            )}
+                            {formatModelPricingDetail(group.pricing) ? (
+                              <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{formatModelPricingDetail(group.pricing)}</div>
+                            ) : null}
                           </div>
                         );
                       })}

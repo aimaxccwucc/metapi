@@ -119,6 +119,14 @@ describe('SiteAccountsModal site detail tabs', () => {
           groups: [
             {
               group: 'vip',
+              groupRatio: 2,
+              pricing: {
+                quotaType: 0,
+                inputPerMillion: 8,
+                outputPerMillion: 12,
+                cacheReadPerMillion: 2,
+                cacheCreationPerMillion: 4,
+              },
               accountCount: 1,
               tokenCount: 1,
               tokens: [
@@ -134,6 +142,12 @@ describe('SiteAccountsModal site detail tabs', () => {
           groups: [
             {
               group: 'default',
+              groupRatio: 1,
+              pricing: {
+                quotaType: 0,
+                inputPerMillion: 2,
+                outputPerMillion: 3,
+              },
               accountCount: 1,
               tokenCount: 1,
               tokens: [
@@ -149,6 +163,8 @@ describe('SiteAccountsModal site detail tabs', () => {
           groups: [
             {
               group: 'default',
+              groupRatio: 1,
+              pricing: null,
               accountCount: 1,
               tokenCount: 0,
               tokens: [],
@@ -159,6 +175,7 @@ describe('SiteAccountsModal site detail tabs', () => {
       groups: [
         {
           group: 'default',
+          groupRatio: 1,
           modelCount: 2,
           accountCount: 1,
           tokenCount: 1,
@@ -166,6 +183,7 @@ describe('SiteAccountsModal site detail tabs', () => {
         },
         {
           group: 'vip',
+          groupRatio: 2,
           modelCount: 1,
           accountCount: 1,
           tokenCount: 1,
@@ -203,9 +221,11 @@ describe('SiteAccountsModal site detail tabs', () => {
       let rendered = JSON.stringify(root.toJSON());
       expect(rendered).toContain('按分组查看模型');
       expect(rendered).toContain('default');
+      expect(rendered).toContain('倍率 x1');
       expect(rendered).toContain('gpt-4o');
+      expect(rendered).toContain('输入 $2 / 输出 $3 / 1M');
       expect(rendered).toContain('claude-3-5-sonnet');
-      expect(rendered).toContain('账号模型覆盖，无 Key 绑定');
+      expect(rendered).toContain('价格未获取');
       expect(rendered).toContain('vip');
 
       const vipGroupButton = root.root.findAll((node) => node.type === 'button')
@@ -219,7 +239,9 @@ describe('SiteAccountsModal site detail tabs', () => {
 
       rendered = JSON.stringify(root.toJSON());
       expect(rendered).toContain('gpt-4o-mini');
-      expect(rendered).toContain('vip-key');
+      expect(rendered).toContain('倍率 x2');
+      expect(rendered).toContain('输入 $8 / 输出 $12 / 1M');
+      expect(rendered).toContain('缓存读 $2 / 1M');
 
       const keyTab = root.root.findAll((node) => node.type === 'button')
         .find((node) => collectText(node).includes('Key 管理'));

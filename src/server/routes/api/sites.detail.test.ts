@@ -3,8 +3,34 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer, type Server } from 'node:http';
 
 type DbModule = typeof import('../../db/index.js');
+
+async function startPricingServer(payload: unknown): Promise<{ url: string; close: () => Promise<void> }> {
+  const server: Server = createServer((request, response) => {
+    if (request.url === '/api/pricing') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(payload));
+      return;
+    }
+    response.writeHead(404, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: 'not found' }));
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to start pricing server');
+
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    }),
+  };
+}
 
 describe('sites detail API', () => {
   let app: FastifyInstance;
@@ -164,5 +190,76 @@ describe('sites detail API', () => {
         tokens: [],
       }),
     ]);
+  });
+
+  it('includes group ratios and model pricing in site detail', async () => {
+    const pricingServer = await startPricingServer({
+      data: [
+        {
+          model_name: 'gpt-priced',
+          quota_type: 0,
+          model_ratio: 1.5,
+          completion_ratio: 2,
+          cache_ratio: 0.25,
+          cache_creation_ratio: 1.2,
+          enable_groups: ['vip'],
+        },
+      ],
+      group_ratio: {
+        default: 1,
+        vip: 2,
+      },
+    });
+
+    try {
+      const site = await db.insert(schema.sites).values({
+        name: 'priced-site',
+        url: pricingServer.url,
+        platform: 'new-api',
+      }).returning().get();
+
+      const account = await db.insert(schema.accounts).values({
+        siteId: site.id,
+        username: 'priced-account',
+        accessToken: 'session-token',
+        apiToken: null,
+        status: 'active',
+      }).returning().get();
+
+      await db.insert(schema.modelAvailability).values({
+        accountId: account.id,
+        modelName: 'gpt-priced',
+        available: true,
+      }).run();
+
+      const resp = await app.inject({
+        method: 'GET',
+        url: `/api/sites/${site.id}/detail`,
+      });
+
+      expect(resp.statusCode).toBe(200);
+      const body = resp.json();
+      const vipGroup = body.groups.find((item: any) => item.group === 'vip');
+      expect(vipGroup).toMatchObject({
+        group: 'vip',
+        groupRatio: 2,
+        models: ['gpt-priced'],
+      });
+      const model = body.models.find((item: any) => item.name === 'gpt-priced');
+      const group = model.groups.find((item: any) => item.group === 'vip');
+      expect(group).toMatchObject({
+        group: 'vip',
+        groupRatio: 2,
+        pricing: {
+          quotaType: 0,
+          inputPerMillion: 6,
+          outputPerMillion: 12,
+          cacheReadPerMillion: 1.5,
+          cacheCreationPerMillion: 7.2,
+        },
+      });
+    } finally {
+      await pricingServer.close();
+    }
   });
 });
