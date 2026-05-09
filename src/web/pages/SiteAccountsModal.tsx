@@ -774,11 +774,6 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
       toast.error('请选择账号');
       return;
     }
-    if (keyEditor.mode === 'create' && !keyEditor.token.trim()) {
-      toast.error('Key 不能为空');
-      return;
-    }
-
     setSavingKey(true);
     try {
       const payload = {
@@ -792,7 +787,7 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
       };
       if (keyEditor.mode === 'create') {
         await api.addAccountToken(payload);
-        toast.success('Key 已创建');
+        toast.success(keyEditor.token.trim() ? 'Key 已创建' : 'Key 已自动生成');
       } else if (keyEditor.tokenId) {
         const { accountId: _accountId, ...updates } = payload;
         await api.updateAccountToken(keyEditor.tokenId, updates);
@@ -1603,16 +1598,13 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
               </div>
               <div>
                 <label className="form-label">分组</label>
-                <input
-                  list={`site-key-groups-${siteId || 'new'}`}
+                <select
                   value={keyEditor.group}
                   onChange={(event) => setKeyEditor((state) => state ? { ...state, group: event.target.value } : state)}
-                  placeholder="default"
-                  style={inputStyle}
-                />
-                <datalist id={`site-key-groups-${siteId || 'new'}`}>
-                  {groupOptions.map((group) => <option key={group} value={group} />)}
-                </datalist>
+                  style={{ ...inputStyle, appearance: 'auto' as any }}
+                >
+                  {groupOptions.map((group) => <option key={group} value={group}>{group}</option>)}
+                </select>
               </div>
               <div>
                 <label className="form-label">状态</label>
@@ -1637,23 +1629,28 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
               </div>
             </ResponsiveFormGrid>
             <div>
-              <label className="form-label">Key</label>
+              <label className="form-label">{keyEditor.mode === 'edit' ? 'Key' : '手动 Key（可选）'}</label>
               <textarea
                 value={keyEditor.token}
                 onChange={(event) => setKeyEditor((state) => state ? { ...state, token: event.target.value } : state)}
-                placeholder={keyEditor.mode === 'edit' ? '留空则不修改明文 Key' : '粘贴完整 Key'}
+                placeholder={keyEditor.mode === 'edit' ? '留空则不修改明文 Key' : '留空则由站点自动生成 Key；只有导入已有 Key 时才需要粘贴'}
                 style={{ ...inputStyle, minHeight: 88, fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' as const }}
               />
+              {keyEditor.mode === 'create' ? (
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6 }}>
+                  默认会调用站点创建接口自动生成 Key；手动粘贴只用于导入已有 Key 或补全脱敏 Key。
+                </div>
+              ) : null}
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
               <button type="button" onClick={() => setKeyEditor(null)} className="btn btn-ghost">取消</button>
               <button
                 type="button"
                 onClick={() => { void saveKeyEditor(); }}
-                disabled={savingKey || (keyEditor.mode === 'create' && (keyAccountOptions.length === 0 || !keyEditor.token.trim()))}
+                disabled={savingKey || (keyEditor.mode === 'create' && keyAccountOptions.length === 0)}
                 className="btn btn-primary"
               >
-                {savingKey ? <><span className="spinner spinner-sm" />保存中...</> : '保存 Key'}
+                {savingKey ? <><span className="spinner spinner-sm" />保存中...</> : (keyEditor.mode === 'create' ? '生成 Key' : '保存 Key')}
               </button>
             </div>
           </div>

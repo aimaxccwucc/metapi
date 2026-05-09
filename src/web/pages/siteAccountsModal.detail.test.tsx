@@ -195,6 +195,10 @@ describe('SiteAccountsModal site detail tabs', () => {
       success: true,
       token: 'sk-real-value',
     });
+    apiMock.addAccountToken.mockResolvedValue({
+      success: true,
+      token: { id: 24 },
+    });
   });
 
   afterEach(() => {
@@ -267,6 +271,63 @@ describe('SiteAccountsModal site detail tabs', () => {
 
       expect(apiMock.getAccountTokenValue).toHaveBeenCalledWith(22);
       expect(globalThis.navigator.clipboard.writeText).toHaveBeenCalledWith('sk-real-value');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('creates keys through upstream generation by default', async () => {
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = buildRoot();
+      });
+      await flushMicrotasks();
+
+      const keyTab = root.root.findAll((node) => node.type === 'button')
+        .find((node) => collectText(node).includes('Key 管理'));
+      expect(keyTab).toBeTruthy();
+
+      await act(async () => {
+        keyTab!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const createButton = root.root.findAll((node) => node.type === 'button')
+        .find((node) => collectText(node).includes('新增 Key'));
+      expect(createButton).toBeTruthy();
+
+      await act(async () => {
+        createButton!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const rendered = JSON.stringify(root.toJSON());
+      expect(rendered).toContain('手动 Key（可选）');
+      expect(rendered).toContain('留空则由站点自动生成 Key');
+
+      const groupSelect = root.root.findAll((node) => node.type === 'select')
+        .find((node) => node.props.value === 'default');
+      expect(groupSelect).toBeTruthy();
+
+      const generateButton = root.root.findAll((node) => node.type === 'button')
+        .find((node) => collectText(node).includes('生成 Key'));
+      expect(generateButton).toBeTruthy();
+      expect(generateButton!.props.disabled).toBe(false);
+
+      await act(async () => {
+        generateButton!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.addAccountToken).toHaveBeenCalledWith(expect.objectContaining({
+        accountId: 1,
+        group: 'default',
+        enabled: true,
+        isDefault: false,
+      }));
+      const payload = apiMock.addAccountToken.mock.calls[0][0];
+      expect(payload.token).toBeUndefined();
     } finally {
       root?.unmount();
     }
