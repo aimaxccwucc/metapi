@@ -1328,6 +1328,7 @@ export const api = {
   },
   // Sites
   getSites: () => request('/api/sites'),
+  getSiteDetail: (siteId: number) => request(`/api/sites/${siteId}/detail`),
   addSite: (data: any) => request('/api/sites', { method: 'POST', body: JSON.stringify(data) }),
   updateSite: (id: number, data: any) => request(`/api/sites/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteSite: (id: number) => request(`/api/sites/${id}`, { method: 'DELETE' }),

@@ -1,4 +1,4 @@
-import React, { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api.js';
 import CenteredModal from '../components/CenteredModal.js';
 import ResponsiveFormGrid from '../components/ResponsiveFormGrid.js';
@@ -16,6 +16,7 @@ import {
   createLoginForm,
   createRebindForm,
   createTokenForm,
+  copyText,
   extractManagedSub2ApiAuth,
   extractPlatformUserId,
   resolveAccountAutoCheckin,
@@ -29,6 +30,7 @@ import { getInitialVisibleCount } from './helpers/progressiveRender.js';
 const ACCOUNT_MODEL_MODAL_RENDER_CHUNK = 80;
 
 type AddMode = 'token' | 'login';
+type SiteManagerTab = 'accounts' | 'models' | 'keys';
 
 type ModelModalState = {
   open: boolean;
@@ -55,6 +57,83 @@ type SiteAccountsModalProps = {
   onSiteBalanceChange: () => void;
 };
 
+type SiteDetailToken = {
+  id: number;
+  accountId: number;
+  accountName: string;
+  name: string;
+  group: string;
+  enabled: boolean;
+  isDefault: boolean;
+  source?: string | null;
+  valueStatus?: string;
+  tokenMasked?: string;
+  modelCount: number;
+  models: string[];
+};
+
+type SiteDetailModel = {
+  name: string;
+  accountCount: number;
+  tokenCount: number;
+  groups: Array<{
+    group: string;
+    accountCount: number;
+    tokenCount: number;
+    tokens: Array<{
+      id: number;
+      name: string;
+      accountId: number;
+      accountName: string;
+      enabled: boolean;
+      isDefault: boolean;
+    }>;
+  }>;
+};
+
+type SiteDetailGroup = {
+  group: string;
+  modelCount: number;
+  accountCount: number;
+  tokenCount: number;
+  models: string[];
+};
+
+type SiteDetail = {
+  summary: {
+    accountCount: number;
+    tokenCount: number;
+    modelCount: number;
+    groupCount: number;
+  };
+  tokens: SiteDetailToken[];
+  models: SiteDetailModel[];
+  groups: SiteDetailGroup[];
+};
+
+type KeyEditorState = {
+  mode: 'create' | 'edit';
+  tokenId?: number;
+  accountId: string;
+  name: string;
+  group: string;
+  token: string;
+  enabled: boolean;
+  isDefault: boolean;
+};
+
+function createEmptyKeyEditor(accountId = ''): KeyEditorState {
+  return {
+    mode: 'create',
+    accountId,
+    name: '',
+    group: 'default',
+    token: '',
+    enabled: true,
+    isDefault: false,
+  };
+}
+
 function formatUsd(value?: number | null): string {
   return `$${(value || 0).toFixed(2)}`;
 }
@@ -66,6 +145,11 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
   // ── Data ──
   const [accounts, setAccounts] = useState<any[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [activeTab, setActiveTab] = useState<SiteManagerTab>('accounts');
+  const [siteDetail, setSiteDetail] = useState<SiteDetail | null>(null);
+  const [siteDetailLoading, setSiteDetailLoading] = useState(false);
+  const [siteDetailSearch, setSiteDetailSearch] = useState('');
+  const deferredSiteDetailSearch = useDeferredValue(siteDetailSearch.trim().toLowerCase());
 
   // ── Add ──
   const [showAdd, setShowAdd] = useState(false);
@@ -102,6 +186,8 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
 
   // ── Action loading ──
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
+  const [keyEditor, setKeyEditor] = useState<KeyEditorState | null>(null);
+  const [savingKey, setSavingKey] = useState(false);
 
   // ── Progressive render ──
   const [visibleAccountCount, setVisibleAccountCount] = useState(60);
@@ -119,6 +205,19 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
     }
   }, [toast]);
 
+  const loadSiteDetail = useCallback(async () => {
+    if (!siteId) return;
+    setSiteDetailLoading(true);
+    try {
+      const detail = await api.getSiteDetail(siteId) as SiteDetail;
+      setSiteDetail(detail);
+    } catch (e: any) {
+      toast.error(e?.message || '加载站点详情失败');
+    } finally {
+      setSiteDetailLoading(false);
+    }
+  }, [siteId, toast]);
+
   useEffect(() => {
     if (open && siteId !== null) {
       void load();
@@ -133,8 +232,19 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
       setModelModal(emptyModelModal);
       setDeleteConfirm(null);
       setVisibleAccountCount(60);
+      setActiveTab('accounts');
+      setSiteDetail(null);
+      setSiteDetailSearch('');
+      setKeyEditor(null);
     }
   }, [open, siteId, load]);
+
+  useEffect(() => {
+    if (!open || !siteId) return;
+    if (activeTab === 'models' || activeTab === 'keys') {
+      void loadSiteDetail();
+    }
+  }, [activeTab, loadSiteDetail, open, siteId]);
 
   const siteAccounts = useMemo(() => {
     if (!siteId) return [];
@@ -155,8 +265,11 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
 
   const refreshAll = useCallback(() => {
     void load();
+    if (activeTab === 'models' || activeTab === 'keys') {
+      void loadSiteDetail();
+    }
     onSiteBalanceChange();
-  }, [load, onSiteBalanceChange]);
+  }, [activeTab, load, loadSiteDetail, onSiteBalanceChange]);
 
   // ── withLoading helper ──
   const withLoading = useCallback(async (key: string, fn: () => Promise<any>, successMsg?: string) => {
@@ -500,11 +613,434 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
 
   const canAddVerifiedConnection = verifyResult?.success;
 
+  const groupOptions = useMemo(() => {
+    const values = new Set<string>(['default']);
+    siteDetail?.groups.forEach((group) => {
+      if (group.group) values.add(group.group);
+    });
+    siteDetail?.tokens.forEach((token) => {
+      if (token.group) values.add(token.group);
+    });
+    return Array.from(values).sort((a, b) => a.localeCompare(b));
+  }, [siteDetail]);
+
+  const keyAccountOptions = useMemo(() => siteAccounts
+    .filter((account) => resolveAccountCredentialMode(account) !== 'apikey')
+    .map((account) => ({
+    value: String(account.id),
+    label: resolveAccountDisplayName(account),
+  })), [siteAccounts]);
+
+  const filteredSiteModels = useMemo(() => {
+    const rows = siteDetail?.models || [];
+    if (!deferredSiteDetailSearch) return rows;
+    return rows.filter((model) => {
+      const haystack = [
+        model.name,
+        ...model.groups.map((group) => group.group),
+        ...model.groups.flatMap((group) => group.tokens.map((token) => `${token.name} ${token.accountName}`)),
+      ].join(' ').toLowerCase();
+      return haystack.includes(deferredSiteDetailSearch);
+    });
+  }, [deferredSiteDetailSearch, siteDetail]);
+
+  const filteredSiteGroups = useMemo(() => {
+    const rows = siteDetail?.groups || [];
+    if (!deferredSiteDetailSearch) return rows;
+    return rows.filter((group) => {
+      const haystack = [group.group, ...group.models].join(' ').toLowerCase();
+      return haystack.includes(deferredSiteDetailSearch);
+    });
+  }, [deferredSiteDetailSearch, siteDetail]);
+
+  const filteredSiteTokens = useMemo(() => {
+    const rows = siteDetail?.tokens || [];
+    if (!deferredSiteDetailSearch) return rows;
+    return rows.filter((token) => {
+      const haystack = [
+        token.name,
+        token.group,
+        token.accountName,
+        token.tokenMasked || '',
+        ...token.models,
+      ].join(' ').toLowerCase();
+      return haystack.includes(deferredSiteDetailSearch);
+    });
+  }, [deferredSiteDetailSearch, siteDetail]);
+
+  const openCreateKeyEditor = useCallback(() => {
+    const firstAccountId = keyAccountOptions[0]?.value || '';
+    setKeyEditor(createEmptyKeyEditor(firstAccountId));
+  }, [keyAccountOptions]);
+
+  const openEditKeyEditor = useCallback((token: SiteDetailToken) => {
+    setKeyEditor({
+      mode: 'edit',
+      tokenId: token.id,
+      accountId: String(token.accountId),
+      name: token.name,
+      group: token.group || 'default',
+      token: '',
+      enabled: token.enabled,
+      isDefault: token.isDefault,
+    });
+  }, []);
+
+  const saveKeyEditor = useCallback(async () => {
+    if (!keyEditor) return;
+    const accountId = Number.parseInt(keyEditor.accountId, 10);
+    if (!Number.isFinite(accountId) || accountId <= 0) {
+      toast.error('请选择账号');
+      return;
+    }
+    if (keyEditor.mode === 'create' && !keyEditor.token.trim()) {
+      toast.error('Key 不能为空');
+      return;
+    }
+
+    setSavingKey(true);
+    try {
+      const payload = {
+        accountId,
+        name: keyEditor.name.trim() || undefined,
+        group: keyEditor.group.trim() || 'default',
+        token: keyEditor.token.trim() || undefined,
+        enabled: keyEditor.enabled,
+        isDefault: keyEditor.isDefault,
+        source: 'manual',
+      };
+      if (keyEditor.mode === 'create') {
+        await api.addAccountToken(payload);
+        toast.success('Key 已创建');
+      } else if (keyEditor.tokenId) {
+        const { accountId: _accountId, ...updates } = payload;
+        await api.updateAccountToken(keyEditor.tokenId, updates);
+        toast.success('Key 已更新');
+      }
+      setKeyEditor(null);
+      refreshAll();
+    } catch (e: any) {
+      toast.error(e?.message || '保存 Key 失败');
+    } finally {
+      setSavingKey(false);
+    }
+  }, [keyEditor, refreshAll, toast]);
+
+  const copyKey = useCallback(async (token: SiteDetailToken) => {
+    await withLoading(`key-copy-${token.id}`, async () => {
+      const res = await api.getAccountTokenValue(token.id) as { token?: string };
+      const value = String(res?.token || '').trim();
+      if (!value) throw new Error('Key 为空');
+      await copyText(value);
+    }, 'Key 已复制');
+  }, [withLoading]);
+
+  const deleteKey = useCallback(async (token: SiteDetailToken) => {
+    await withLoading(`key-delete-${token.id}`, () => api.deleteAccountToken(token.id), 'Key 已删除');
+  }, [withLoading]);
+
+  const toggleKeyEnabled = useCallback(async (token: SiteDetailToken) => {
+    await withLoading(
+      `key-toggle-${token.id}`,
+      () => api.updateAccountToken(token.id, { enabled: !token.enabled }),
+      token.enabled ? 'Key 已停用' : 'Key 已启用',
+    );
+  }, [withLoading]);
+
+  const setDefaultKey = useCallback(async (token: SiteDetailToken) => {
+    await withLoading(`key-default-${token.id}`, () => api.setDefaultAccountToken(token.id), '默认 Key 已更新');
+  }, [withLoading]);
+
+  const syncKeysForAccount = useCallback(async (accountId: number) => {
+    await withLoading(`key-sync-${accountId}`, () => api.syncAccountTokens(accountId), 'Key 已同步');
+  }, [withLoading]);
+
+  const confirmAndDeleteKey = useCallback((token: SiteDetailToken) => {
+    const confirmed = typeof window === 'undefined'
+      ? true
+      : window.confirm(`删除 Key ${token.name}？`);
+    if (confirmed) void deleteKey(token);
+  }, [deleteKey]);
+
   // ── Shared styles ──
   const inputStyle: React.CSSProperties = {
     width: '100%', padding: '10px 14px', border: '1px solid var(--color-border)',
     borderRadius: 'var(--radius-sm)', fontSize: 13, outline: 'none',
     background: 'var(--color-bg)', color: 'var(--color-text-primary)',
+  };
+
+  const renderSiteDetailToolbar = () => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+      <input
+        value={siteDetailSearch}
+        onChange={(event) => setSiteDetailSearch(event.target.value)}
+        placeholder={activeTab === 'models' ? '搜索模型、分组、Key' : '搜索 Key、账号、分组、模型'}
+        style={{ ...inputStyle, flex: '1 1 240px', minWidth: 180 }}
+      />
+      <button
+        type="button"
+        className="btn btn-ghost"
+        style={{ border: '1px solid var(--color-border)', padding: '8px 12px' }}
+        disabled={siteDetailLoading}
+        onClick={() => { void loadSiteDetail(); }}
+      >
+        {siteDetailLoading ? <><span className="spinner spinner-sm" />刷新中...</> : '刷新详情'}
+      </button>
+    </div>
+  );
+
+  const renderSiteDetailSummary = () => {
+    const summary = siteDetail?.summary;
+    if (!summary) return null;
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8, marginBottom: 12 }}>
+        {[
+          ['账号', summary.accountCount],
+          ['Key', summary.tokenCount],
+          ['模型', summary.modelCount],
+          ['分组', summary.groupCount],
+        ].map(([label, value]) => (
+          <div key={label} className="card" style={{ padding: 10 }}>
+            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{label}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const renderModelsTab = () => {
+    if (siteDetailLoading && !siteDetail) {
+      return <div style={{ textAlign: 'center', padding: 40 }}><span className="spinner" /></div>;
+    }
+    return (
+      <div>
+        {renderSiteDetailToolbar()}
+        {renderSiteDetailSummary()}
+        <div style={{ display: 'grid', gap: 12 }}>
+          <div className="card" style={{ padding: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+              <div style={{ fontWeight: 700 }}>模型到分组与 Key</div>
+              <span className="badge badge-muted" style={{ fontSize: 11 }}>{filteredSiteModels.length} 个模型</span>
+            </div>
+            {filteredSiteModels.length === 0 ? (
+              <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>暂无模型覆盖数据。</div>
+            ) : (
+              <div style={{ display: 'grid', gap: 8 }}>
+                {filteredSiteModels.slice(0, 80).map((model) => (
+                  <div key={model.name} style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 10, display: 'grid', gap: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                      <code style={{ fontSize: 12, wordBreak: 'break-all' }}>{model.name}</code>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <span className="badge badge-info" style={{ fontSize: 11 }}>{model.groups.length} 分组</span>
+                        <span className="badge badge-muted" style={{ fontSize: 11 }}>{model.tokenCount} Key</span>
+                      </div>
+                    </div>
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      {model.groups.map((group) => (
+                        <div key={`${model.name}-${group.group}`} style={{ display: 'grid', gap: 4 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            <span className="badge badge-success" style={{ fontSize: 11 }}>{group.group}</span>
+                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{group.accountCount} 账号 / {group.tokenCount} Key</span>
+                          </div>
+                          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                            {group.tokens.slice(0, 10).map((token) => (
+                              <span key={token.id} className={`badge ${token.enabled ? 'badge-muted' : 'badge-error'}`} style={{ fontSize: 10 }}>
+                                {token.accountName} / {token.name}{token.isDefault ? ' · 默认' : ''}
+                              </span>
+                            ))}
+                            {group.tokens.length > 10 ? <span className="badge badge-muted" style={{ fontSize: 10 }}>+{group.tokens.length - 10}</span> : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="card" style={{ padding: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+              <div style={{ fontWeight: 700 }}>分组到模型</div>
+              <span className="badge badge-muted" style={{ fontSize: 11 }}>{filteredSiteGroups.length} 个分组</span>
+            </div>
+            <div style={{ display: 'grid', gap: 8 }}>
+              {filteredSiteGroups.map((group) => (
+                <div key={group.group} style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 10 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+                    <span className="badge badge-success">{group.group}</span>
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{group.modelCount} 模型 / {group.tokenCount} Key</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                    {group.models.slice(0, 30).map((model) => (
+                      <code key={model} style={{ fontSize: 11, padding: '2px 6px', border: '1px solid var(--color-border-light)', borderRadius: 6 }}>{model}</code>
+                    ))}
+                    {group.models.length > 30 ? <span className="badge badge-muted" style={{ fontSize: 11 }}>+{group.models.length - 30}</span> : null}
+                  </div>
+                </div>
+              ))}
+              {filteredSiteGroups.length === 0 ? (
+                <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>暂无分组覆盖数据。</div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderKeysTab = () => {
+    if (siteDetailLoading && !siteDetail) {
+      return <div style={{ textAlign: 'center', padding: 40 }}><span className="spinner" /></div>;
+    }
+    return (
+      <div>
+        {renderSiteDetailToolbar()}
+        {renderSiteDetailSummary()}
+        {filteredSiteTokens.length === 0 ? (
+          <div className="empty-state" style={{ padding: 32 }}>
+            <div className="empty-state-title">暂无 Key</div>
+            <div className="empty-state-desc">可以点击“新增 Key”，或先同步账号 Key。</div>
+          </div>
+        ) : isMobile ? (
+          <div className="mobile-card-list">
+            {filteredSiteTokens.map((token) => (
+              <MobileCard
+                key={token.id}
+                title={`${token.accountName} / ${token.name}`}
+                subtitle={`${token.group} · ${token.tokenMasked || '****'}`}
+                footerActions={
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                    <button className="btn btn-ghost" style={{ fontSize: 11, padding: '4px 8px' }} onClick={() => { void copyKey(token); }}>复制</button>
+                    <button className="btn btn-ghost" style={{ fontSize: 11, padding: '4px 8px' }} onClick={() => openEditKeyEditor(token)}>编辑</button>
+                    <button className="btn btn-ghost" style={{ fontSize: 11, padding: '4px 8px' }} onClick={() => { void toggleKeyEnabled(token); }}>{token.enabled ? '停用' : '启用'}</button>
+                    <button className="btn btn-ghost" style={{ fontSize: 11, padding: '4px 8px', color: 'var(--color-danger)' }} onClick={() => confirmAndDeleteKey(token)}>删除</button>
+                  </div>
+                }
+              >
+                <MobileField label="状态" value={`${token.enabled ? '启用' : '停用'}${token.isDefault ? ' / 默认' : ''}`} />
+                <MobileField label="覆盖模型" value={`${token.modelCount}`} />
+              </MobileCard>
+            ))}
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table className="data-table" style={{ width: '100%' }}>
+              <thead>
+                <tr>
+                  <th>Key</th>
+                  <th>账号</th>
+                  <th>分组</th>
+                  <th>状态</th>
+                  <th>模型</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredSiteTokens.map((token) => (
+                  <tr key={token.id}>
+                    <td>
+                      <div style={{ fontWeight: 600 }}>{token.name}</div>
+                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text-muted)' }}>{token.tokenMasked || '****'}</div>
+                    </td>
+                    <td>{token.accountName}</td>
+                    <td><span className="badge badge-success" style={{ fontSize: 11 }}>{token.group}</span></td>
+                    <td>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        <span className={`badge ${token.enabled ? 'badge-info' : 'badge-error'}`} style={{ fontSize: 11 }}>{token.enabled ? '启用' : '停用'}</span>
+                        {token.isDefault ? <span className="badge badge-warning" style={{ fontSize: 11 }}>默认</span> : null}
+                        {token.valueStatus === 'masked_pending' ? <span className="badge badge-error" style={{ fontSize: 11 }}>待补全</span> : null}
+                      </div>
+                    </td>
+                    <td>
+                      <div style={{ fontSize: 12 }}>{token.modelCount} 个</div>
+                      <div style={{ color: 'var(--color-text-muted)', fontSize: 11, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {token.models.slice(0, 4).join(' / ') || '未记录'}
+                      </div>
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        <button className="btn btn-link btn-link-primary" disabled={!!actionLoading[`key-copy-${token.id}`]} onClick={() => { void copyKey(token); }}>复制</button>
+                        <button className="btn btn-link btn-link-primary" onClick={() => openEditKeyEditor(token)}>编辑</button>
+                        <button className="btn btn-link btn-link-primary" disabled={!!actionLoading[`key-toggle-${token.id}`]} onClick={() => { void toggleKeyEnabled(token); }}>{token.enabled ? '停用' : '启用'}</button>
+                        {!token.isDefault ? (
+                          <button className="btn btn-link btn-link-primary" disabled={!!actionLoading[`key-default-${token.id}`]} onClick={() => { void setDefaultKey(token); }}>设默认</button>
+                        ) : null}
+                        <button className="btn btn-link btn-link-primary" disabled={!!actionLoading[`key-sync-${token.accountId}`]} onClick={() => { void syncKeysForAccount(token.accountId); }}>同步</button>
+                        <button className="btn btn-link btn-link-danger" disabled={!!actionLoading[`key-delete-${token.id}`]} onClick={() => confirmAndDeleteKey(token)}>删除</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderAccountsTab = () => {
+    if (!loaded) {
+      return (
+        <div style={{ textAlign: 'center', padding: 40 }}>
+          <span className="spinner" />
+        </div>
+      );
+    }
+    if (siteAccounts.length === 0 && !showAdd) {
+      return (
+        <div className="empty-state" style={{ padding: 40 }}>
+          <div className="empty-state-title">暂无账号</div>
+          <div className="empty-state-desc">点击"+ 添加账号"开始使用。</div>
+        </div>
+      );
+    }
+    if (isMobile) {
+      return (
+        <div className="mobile-card-list">
+          {renderedAccounts.map(renderAccountCard)}
+          {hasMoreAccounts && (
+            <div style={{ textAlign: 'center', padding: '12px 0' }}>
+              <button onClick={() => setVisibleAccountCount(c => c + 30)} className="btn btn-ghost">
+                加载更多（{siteAccounts.length - visibleAccountCount} 条）
+              </button>
+            </div>
+          )}
+        </div>
+      );
+    }
+    return (
+      <div style={{ overflowX: 'auto' }}>
+        <table className="data-table" style={{ width: '100%' }}>
+          <thead>
+            <tr>
+              <th>连接名称</th>
+              <th>运行健康</th>
+              <th>余额</th>
+              <th>签到</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {renderedAccounts.map(renderAccountRow)}
+          </tbody>
+        </table>
+        {hasMoreAccounts && (
+          <div style={{ textAlign: 'center', padding: '12px 0' }}>
+            <button onClick={() => setVisibleAccountCount(c => c + 30)} className="btn btn-ghost">
+              加载更多（{siteAccounts.length - visibleAccountCount} 条）
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderActiveTab = () => {
+    if (activeTab === 'models') return renderModelsTab();
+    if (activeTab === 'keys') return renderKeysTab();
+    return renderAccountsTab();
   };
 
   // ── Render: account row (desktop) ──
@@ -630,69 +1166,53 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
         title={
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', paddingRight: 32 }}>
             <span style={{ fontSize: 14, fontWeight: 600 }}>{siteName} — 账号管理</span>
-            <button
-              onClick={() => {
-                setShowAdd(true);
-                setAddMode('token');
-                setVerifyResult(null);
-                setTokenForm(prev => ({ ...prev, siteId: siteId! }));
-                setLoginForm(prev => ({ ...prev, siteId: siteId! }));
-              }}
-              className="btn btn-success"
-              style={{ fontSize: 12, padding: '4px 12px' }}
-            >
-              + 添加账号
-            </button>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              {activeTab === 'keys' ? (
+                <button
+                  type="button"
+                  onClick={openCreateKeyEditor}
+                  className="btn btn-primary"
+                  style={{ fontSize: 12, padding: '4px 12px' }}
+                >
+                  + 新增 Key
+                </button>
+              ) : null}
+              <button
+                onClick={() => {
+                  setShowAdd(true);
+                  setAddMode('token');
+                  setVerifyResult(null);
+                  setTokenForm(prev => ({ ...prev, siteId: siteId! }));
+                  setLoginForm(prev => ({ ...prev, siteId: siteId! }));
+                }}
+                className="btn btn-success"
+                style={{ fontSize: 12, padding: '4px 12px' }}
+              >
+                + 添加账号
+              </button>
+            </div>
           </div>
         }
         maxWidth={1100}
         bodyStyle={{ maxHeight: '80vh', overflow: 'auto' }}
       >
-        {!loaded ? (
-          <div style={{ textAlign: 'center', padding: 40 }}>
-            <span className="spinner" />
-          </div>
-        ) : siteAccounts.length === 0 && !showAdd ? (
-          <div className="empty-state" style={{ padding: 40 }}>
-            <div className="empty-state-title">暂无账号</div>
-            <div className="empty-state-desc">点击"+ 添加账号"开始使用。</div>
-          </div>
-        ) : isMobile ? (
-          <div className="mobile-card-list">
-            {renderedAccounts.map(renderAccountCard)}
-            {hasMoreAccounts && (
-              <div style={{ textAlign: 'center', padding: '12px 0' }}>
-                <button onClick={() => setVisibleAccountCount(c => c + 30)} className="btn btn-ghost">
-                  加载更多（{siteAccounts.length - visibleAccountCount} 条）
-                </button>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table className="data-table" style={{ width: '100%' }}>
-              <thead>
-                <tr>
-                  <th>连接名称</th>
-                  <th>运行健康</th>
-                  <th>余额</th>
-                  <th>签到</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {renderedAccounts.map(renderAccountRow)}
-              </tbody>
-            </table>
-            {hasMoreAccounts && (
-              <div style={{ textAlign: 'center', padding: '12px 0' }}>
-                <button onClick={() => setVisibleAccountCount(c => c + 30)} className="btn btn-ghost">
-                  加载更多（{siteAccounts.length - visibleAccountCount} 条）
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+        <div className="tabs" style={{ marginBottom: 14 }}>
+          {[
+            ['accounts', `账号（${siteAccounts.length}）`],
+            ['models', '模型分组'],
+            ['keys', 'Key 管理'],
+          ].map(([tab, label]) => (
+            <button
+              key={tab}
+              type="button"
+              className={`tab ${activeTab === tab ? 'active' : ''}`}
+              onClick={() => setActiveTab(tab as SiteManagerTab)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {renderActiveTab()}
       </CenteredModal>
 
       {/* ── Add Account Modal ── */}
@@ -957,6 +1477,103 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
             </div>
           </>
         )}
+      </CenteredModal>
+
+      {/* ── Key Editor Modal ── */}
+      <CenteredModal
+        open={keyEditor !== null}
+        onClose={() => setKeyEditor(null)}
+        title={keyEditor?.mode === 'edit' ? '编辑 Key' : '新增 Key'}
+        maxWidth={620}
+      >
+        {keyEditor ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {keyEditor.mode === 'create' && keyAccountOptions.length === 0 ? (
+              <div className="alert alert-warning">
+                <div className="alert-title">当前站点没有可创建 Key 的 Session 账号</div>
+              </div>
+            ) : null}
+            <ResponsiveFormGrid>
+              <div>
+                <label className="form-label">账号</label>
+                <select
+                  value={keyEditor.accountId}
+                  disabled={keyEditor.mode === 'edit'}
+                  onChange={(event) => setKeyEditor((state) => state ? { ...state, accountId: event.target.value } : state)}
+                  style={{ ...inputStyle, appearance: 'auto' as any }}
+                >
+                  <option value="">请选择账号</option>
+                  {keyAccountOptions.map((account) => (
+                    <option key={account.value} value={account.value}>{account.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="form-label">名称</label>
+                <input
+                  value={keyEditor.name}
+                  onChange={(event) => setKeyEditor((state) => state ? { ...state, name: event.target.value } : state)}
+                  placeholder="default / route-a"
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label className="form-label">分组</label>
+                <input
+                  list={`site-key-groups-${siteId || 'new'}`}
+                  value={keyEditor.group}
+                  onChange={(event) => setKeyEditor((state) => state ? { ...state, group: event.target.value } : state)}
+                  placeholder="default"
+                  style={inputStyle}
+                />
+                <datalist id={`site-key-groups-${siteId || 'new'}`}>
+                  {groupOptions.map((group) => <option key={group} value={group} />)}
+                </datalist>
+              </div>
+              <div>
+                <label className="form-label">状态</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, minHeight: 38, flexWrap: 'wrap' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                    <input
+                      type="checkbox"
+                      checked={keyEditor.enabled}
+                      onChange={(event) => setKeyEditor((state) => state ? { ...state, enabled: event.target.checked } : state)}
+                    />
+                    启用
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                    <input
+                      type="checkbox"
+                      checked={keyEditor.isDefault}
+                      onChange={(event) => setKeyEditor((state) => state ? { ...state, isDefault: event.target.checked } : state)}
+                    />
+                    默认
+                  </label>
+                </div>
+              </div>
+            </ResponsiveFormGrid>
+            <div>
+              <label className="form-label">Key</label>
+              <textarea
+                value={keyEditor.token}
+                onChange={(event) => setKeyEditor((state) => state ? { ...state, token: event.target.value } : state)}
+                placeholder={keyEditor.mode === 'edit' ? '留空则不修改明文 Key' : '粘贴完整 Key'}
+                style={{ ...inputStyle, minHeight: 88, fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' as const }}
+              />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" onClick={() => setKeyEditor(null)} className="btn btn-ghost">取消</button>
+              <button
+                type="button"
+                onClick={() => { void saveKeyEditor(); }}
+                disabled={savingKey || (keyEditor.mode === 'create' && (keyAccountOptions.length === 0 || !keyEditor.token.trim()))}
+                className="btn btn-primary"
+              >
+                {savingKey ? <><span className="spinner spinner-sm" />保存中...</> : '保存 Key'}
+              </button>
+            </div>
+          </div>
+        ) : null}
       </CenteredModal>
 
       {/* ── Delete Confirm ── */}

@@ -9,6 +9,7 @@ import { invalidateModelTokenCandidatesCache } from '../../services/modelTokenCa
 import { invalidateModelsMarketplaceCache } from '../../services/modelsMarketplaceCache.js';
 import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
 import { getSub2ApiSubscriptionFromExtraConfig } from '../../services/accountExtraConfig.js';
+import { maskToken, resolveAccountTokenValueStatus } from '../../services/accountTokenService.js';
 import {
   deleteSiteProtocolConfig,
   flushSiteProtocolConfigPersistence,
@@ -100,6 +101,18 @@ function normalizeSiteUrl(input: string): string {
     return trimmed.replace(/\/+$/, '');
   }
 }
+
+function normalizeTokenGroup(input?: string | null): string {
+  const trimmed = String(input || '').trim();
+  return trimmed || 'default';
+}
+
+function normalizeModelName(input?: string | null): string {
+  return String(input || '').trim();
+}
+
+type SiteDetailAccountRow = typeof schema.accounts.$inferSelect;
+type SiteDetailTokenRow = typeof schema.accountTokens.$inferSelect;
 
 type SiteSubscriptionAggregate = {
   activeCount: number;
@@ -252,6 +265,266 @@ export async function sitesRoutes(app: FastifyInstance) {
         updatedAtMs: 0,
       }, site.platform),
     }));
+  });
+
+  app.get<{ Params: { id: string } }>('/api/sites/:id/detail', async (request, reply) => {
+    const siteId = Number.parseInt(request.params.id, 10);
+    if (!Number.isFinite(siteId) || siteId <= 0) {
+      return reply.code(400).send({ error: 'Invalid site id' });
+    }
+
+    const site = await db.select().from(schema.sites).where(eq(schema.sites.id, siteId)).get();
+    if (!site) {
+      return reply.code(404).send({ error: 'Site not found' });
+    }
+
+    const accountRows = await db.select().from(schema.accounts)
+      .where(eq(schema.accounts.siteId, siteId))
+      .all();
+    const accountIds = accountRows.map((account) => account.id);
+
+    const tokenRows = accountIds.length > 0
+      ? await db.select().from(schema.accountTokens)
+        .where(inArray(schema.accountTokens.accountId, accountIds))
+        .all()
+      : [];
+    const tokenIds = tokenRows.map((token) => token.id);
+
+    const accountModelRows = accountIds.length > 0
+      ? await db.select().from(schema.modelAvailability)
+        .where(inArray(schema.modelAvailability.accountId, accountIds))
+        .all()
+      : [];
+    const tokenModelRows = tokenIds.length > 0
+      ? await db.select().from(schema.tokenModelAvailability)
+        .where(inArray(schema.tokenModelAvailability.tokenId, tokenIds))
+        .all()
+      : [];
+
+    const accountById = new Map<number, SiteDetailAccountRow>(
+      accountRows.map((account) => [account.id, account as SiteDetailAccountRow]),
+    );
+    const tokenById = new Map<number, SiteDetailTokenRow>(
+      tokenRows.map((token) => [token.id, token as SiteDetailTokenRow]),
+    );
+    const modelsByAccountId = new Map<number, Set<string>>();
+    const modelsByTokenId = new Map<number, Set<string>>();
+
+    for (const row of accountModelRows) {
+      if (row.available === false) continue;
+      const modelName = normalizeModelName(row.modelName);
+      if (!modelName) continue;
+      const bucket = modelsByAccountId.get(row.accountId) || new Set<string>();
+      bucket.add(modelName);
+      modelsByAccountId.set(row.accountId, bucket);
+    }
+
+    for (const row of tokenModelRows) {
+      if (row.available === false) continue;
+      const modelName = normalizeModelName(row.modelName);
+      if (!modelName) continue;
+      const bucket = modelsByTokenId.get(row.tokenId) || new Set<string>();
+      bucket.add(modelName);
+      modelsByTokenId.set(row.tokenId, bucket);
+    }
+
+    const modelMap = new Map<string, {
+      modelName: string;
+      accountIds: Set<number>;
+      tokenIds: Set<number>;
+      groups: Map<string, {
+        group: string;
+        accountIds: Set<number>;
+        tokenIds: Set<number>;
+      }>;
+    }>();
+    const groupMap = new Map<string, {
+      group: string;
+      modelNames: Set<string>;
+      accountIds: Set<number>;
+      tokenIds: Set<number>;
+    }>();
+
+    const ensureModel = (modelName: string) => {
+      let item = modelMap.get(modelName);
+      if (!item) {
+        item = {
+          modelName,
+          accountIds: new Set<number>(),
+          tokenIds: new Set<number>(),
+          groups: new Map(),
+        };
+        modelMap.set(modelName, item);
+      }
+      return item;
+    };
+
+    const ensureGroup = (group: string) => {
+      let item = groupMap.get(group);
+      if (!item) {
+        item = {
+          group,
+          modelNames: new Set<string>(),
+          accountIds: new Set<number>(),
+          tokenIds: new Set<number>(),
+        };
+        groupMap.set(group, item);
+      }
+      return item;
+    };
+
+    for (const account of accountRows) {
+      const accountModels = modelsByAccountId.get(account.id) || new Set<string>();
+      for (const modelName of accountModels) {
+        const modelItem = ensureModel(modelName);
+        modelItem.accountIds.add(account.id);
+        let groupItem = modelItem.groups.get('default');
+        if (!groupItem) {
+          groupItem = {
+            group: 'default',
+            accountIds: new Set<number>(),
+            tokenIds: new Set<number>(),
+          };
+          modelItem.groups.set('default', groupItem);
+        }
+        groupItem.accountIds.add(account.id);
+
+        const siteGroup = ensureGroup('default');
+        siteGroup.modelNames.add(modelName);
+        siteGroup.accountIds.add(account.id);
+      }
+      for (const token of tokenRows.filter((item) => item.accountId === account.id)) {
+        const tokenModels = modelsByTokenId.get(token.id);
+        const effectiveModels = tokenModels && tokenModels.size > 0 ? tokenModels : accountModels;
+        const group = normalizeTokenGroup(token.tokenGroup);
+        for (const modelName of effectiveModels) {
+          const modelItem = ensureModel(modelName);
+          modelItem.accountIds.add(account.id);
+          modelItem.tokenIds.add(token.id);
+          let groupItem = modelItem.groups.get(group);
+          if (!groupItem) {
+            groupItem = {
+              group,
+              accountIds: new Set<number>(),
+              tokenIds: new Set<number>(),
+            };
+            modelItem.groups.set(group, groupItem);
+          }
+          groupItem.accountIds.add(account.id);
+          groupItem.tokenIds.add(token.id);
+
+          const siteGroup = ensureGroup(group);
+          siteGroup.modelNames.add(modelName);
+          siteGroup.accountIds.add(account.id);
+          siteGroup.tokenIds.add(token.id);
+        }
+      }
+    }
+
+    const accounts = accountRows
+      .map((account) => ({
+        id: account.id,
+        username: account.username,
+        status: account.status,
+        balance: account.balance,
+        credentialMode: account.accessToken?.trim() ? 'session' : 'apikey',
+        tokenCount: tokenRows.filter((token) => token.accountId === account.id).length,
+        modelCount: modelsByAccountId.get(account.id)?.size || 0,
+      }))
+      .sort((left, right) => String(left.username || left.id).localeCompare(String(right.username || right.id)));
+
+    const tokens = tokenRows
+      .map((token) => {
+        const account = accountById.get(token.accountId);
+        const modelSet = modelsByTokenId.get(token.id) || modelsByAccountId.get(token.accountId) || new Set<string>();
+        return {
+          id: token.id,
+          accountId: token.accountId,
+          accountName: account?.username || `ID:${token.accountId}`,
+          name: token.name,
+          group: normalizeTokenGroup(token.tokenGroup),
+          enabled: token.enabled !== false,
+          isDefault: token.isDefault === true,
+          source: token.source,
+          valueStatus: resolveAccountTokenValueStatus(token),
+          tokenMasked: maskToken(token.token, site.platform),
+          modelCount: modelSet.size,
+          models: Array.from(modelSet).sort((left, right) => left.localeCompare(right)).slice(0, 40),
+          createdAt: token.createdAt,
+          updatedAt: token.updatedAt,
+        };
+      })
+      .sort((left, right) => {
+        const groupCompare = left.group.localeCompare(right.group);
+        if (groupCompare !== 0) return groupCompare;
+        return left.name.localeCompare(right.name);
+      });
+
+    const models = Array.from(modelMap.values())
+      .map((item) => ({
+        name: item.modelName,
+        accountCount: item.accountIds.size,
+        tokenCount: item.tokenIds.size,
+        groups: Array.from(item.groups.values())
+          .map((group) => ({
+            group: group.group,
+            accountCount: group.accountIds.size,
+            tokenCount: group.tokenIds.size,
+            tokens: Array.from(group.tokenIds)
+              .map((tokenId) => {
+                const token = tokenById.get(tokenId);
+                const account = token ? accountById.get(token.accountId) : null;
+                return token ? {
+                  id: token.id,
+                  name: token.name,
+                  accountId: token.accountId,
+                  accountName: account?.username || `ID:${token.accountId}`,
+                  enabled: token.enabled !== false,
+                  isDefault: token.isDefault === true,
+                } : null;
+              })
+              .filter((token): token is {
+                id: number;
+                name: string;
+                accountId: number;
+                accountName: string;
+                enabled: boolean;
+                isDefault: boolean;
+              } => token !== null),
+          }))
+          .sort((left, right) => left.group.localeCompare(right.group)),
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    const groups = Array.from(groupMap.values())
+      .map((item) => ({
+        group: item.group,
+        modelCount: item.modelNames.size,
+        accountCount: item.accountIds.size,
+        tokenCount: item.tokenIds.size,
+        models: Array.from(item.modelNames).sort((left, right) => left.localeCompare(right)).slice(0, 80),
+      }))
+      .sort((left, right) => left.group.localeCompare(right.group));
+
+    return {
+      site: {
+        id: site.id,
+        name: site.name,
+        url: site.url,
+        platform: site.platform,
+        status: site.status,
+      },
+      summary: {
+        accountCount: accounts.length,
+        tokenCount: tokens.length,
+        modelCount: models.length,
+        groupCount: groups.length,
+      },
+      accounts,
+      tokens,
+      models,
+      groups,
+    };
   });
 
   // Add a site
