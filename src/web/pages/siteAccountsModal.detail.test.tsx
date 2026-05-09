@@ -79,9 +79,9 @@ describe('SiteAccountsModal site detail tabs', () => {
     apiMock.getSiteDetail.mockResolvedValue({
       summary: {
         accountCount: 1,
-        tokenCount: 1,
-        modelCount: 1,
-        groupCount: 1,
+        tokenCount: 2,
+        modelCount: 3,
+        groupCount: 2,
       },
       tokens: [
         {
@@ -96,6 +96,19 @@ describe('SiteAccountsModal site detail tabs', () => {
           tokenMasked: 'sk-vip****',
           modelCount: 1,
           models: ['gpt-4o-mini'],
+        },
+        {
+          id: 23,
+          accountId: 1,
+          accountName: 'session-user',
+          name: 'default-key',
+          group: 'default',
+          enabled: true,
+          isDefault: false,
+          valueStatus: 'ready',
+          tokenMasked: 'sk-default****',
+          modelCount: 1,
+          models: ['gpt-4o'],
         },
       ],
       models: [
@@ -114,8 +127,43 @@ describe('SiteAccountsModal site detail tabs', () => {
             },
           ],
         },
+        {
+          name: 'gpt-4o',
+          accountCount: 1,
+          tokenCount: 1,
+          groups: [
+            {
+              group: 'default',
+              accountCount: 1,
+              tokenCount: 1,
+              tokens: [
+                { id: 23, name: 'default-key', accountId: 1, accountName: 'session-user', enabled: true, isDefault: false },
+              ],
+            },
+          ],
+        },
+        {
+          name: 'claude-3-5-sonnet',
+          accountCount: 1,
+          tokenCount: 0,
+          groups: [
+            {
+              group: 'default',
+              accountCount: 1,
+              tokenCount: 0,
+              tokens: [],
+            },
+          ],
+        },
       ],
       groups: [
+        {
+          group: 'default',
+          modelCount: 2,
+          accountCount: 1,
+          tokenCount: 1,
+          models: ['claude-3-5-sonnet', 'gpt-4o'],
+        },
         {
           group: 'vip',
           modelCount: 1,
@@ -153,9 +201,25 @@ describe('SiteAccountsModal site detail tabs', () => {
       await flushMicrotasks();
 
       let rendered = JSON.stringify(root.toJSON());
-      expect(rendered).toContain('模型到分组与 Key');
-      expect(rendered).toContain('gpt-4o-mini');
+      expect(rendered).toContain('按分组查看模型');
+      expect(rendered).toContain('default');
+      expect(rendered).toContain('gpt-4o');
+      expect(rendered).toContain('claude-3-5-sonnet');
+      expect(rendered).toContain('账号模型覆盖，无 Key 绑定');
       expect(rendered).toContain('vip');
+
+      const vipGroupButton = root.root.findAll((node) => node.type === 'button')
+        .find((node) => collectText(node).includes('vip'));
+      expect(vipGroupButton).toBeTruthy();
+
+      await act(async () => {
+        vipGroupButton!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      rendered = JSON.stringify(root.toJSON());
+      expect(rendered).toContain('gpt-4o-mini');
+      expect(rendered).toContain('vip-key');
 
       const keyTab = root.root.findAll((node) => node.type === 'button')
         .find((node) => collectText(node).includes('Key 管理'));

@@ -10,6 +10,7 @@ import { invalidateModelsMarketplaceCache } from '../../services/modelsMarketpla
 import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
 import { getSub2ApiSubscriptionFromExtraConfig } from '../../services/accountExtraConfig.js';
 import { maskToken, resolveAccountTokenValueStatus } from '../../services/accountTokenService.js';
+import { fetchModelPricingCatalog } from '../../services/modelPricingService.js';
 import {
   deleteSiteProtocolConfig,
   flushSiteProtocolConfigPersistence,
@@ -113,6 +114,7 @@ function normalizeModelName(input?: string | null): string {
 
 type SiteDetailAccountRow = typeof schema.accounts.$inferSelect;
 type SiteDetailTokenRow = typeof schema.accountTokens.$inferSelect;
+type SiteDetailGroupSource = 'pricing' | 'token' | 'default';
 
 type SiteSubscriptionAggregate = {
   activeCount: number;
@@ -328,6 +330,60 @@ export async function sitesRoutes(app: FastifyInstance) {
       modelsByTokenId.set(row.tokenId, bucket);
     }
 
+    const siteGroupSources = new Map<string, Set<SiteDetailGroupSource>>();
+    const addSiteGroup = (groupInput?: string | null, source: SiteDetailGroupSource = 'default') => {
+      const group = normalizeTokenGroup(groupInput);
+      const sources = siteGroupSources.get(group) || new Set<SiteDetailGroupSource>();
+      sources.add(source);
+      siteGroupSources.set(group, sources);
+      return group;
+    };
+    addSiteGroup('default', 'default');
+    for (const token of tokenRows) {
+      addSiteGroup(token.tokenGroup, 'token');
+    }
+
+    const pricingGroupsByModel = new Map<string, Set<string>>();
+    try {
+      const pricingAccount = accountRows.find((account) => account.accessToken?.trim() || account.apiToken?.trim()) || accountRows[0] || null;
+      if (pricingAccount || site.apiKey?.trim()) {
+        const catalog = await Promise.race([
+          fetchModelPricingCatalog({
+            site: {
+              id: site.id,
+              url: site.url,
+              platform: site.platform,
+              apiKey: site.apiKey,
+            },
+            account: pricingAccount
+              ? {
+                id: pricingAccount.id,
+                accessToken: pricingAccount.accessToken,
+                apiToken: pricingAccount.apiToken,
+              }
+              : {
+                id: 0,
+                accessToken: null,
+                apiToken: site.apiKey,
+              },
+            modelName: '',
+          }),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+        ]);
+        Object.keys(catalog?.groupRatio || {}).forEach((group) => addSiteGroup(group, 'pricing'));
+        for (const item of catalog?.models || []) {
+          const modelName = normalizeModelName(item.modelName);
+          if (!modelName) continue;
+          const groups = new Set<string>();
+          for (const group of item.enableGroups || []) {
+            groups.add(addSiteGroup(group, 'pricing'));
+          }
+          if (groups.size === 0) groups.add(addSiteGroup('default', 'default'));
+          pricingGroupsByModel.set(modelName, groups);
+        }
+      }
+    } catch { }
+
     const modelMap = new Map<string, {
       modelName: string;
       accountIds: Set<number>;
@@ -373,51 +429,79 @@ export async function sitesRoutes(app: FastifyInstance) {
       return item;
     };
 
-    for (const account of accountRows) {
-      const accountModels = modelsByAccountId.get(account.id) || new Set<string>();
-      for (const modelName of accountModels) {
-        const modelItem = ensureModel(modelName);
-        modelItem.accountIds.add(account.id);
-        let groupItem = modelItem.groups.get('default');
+    const siteModelNames = new Set<string>();
+    for (const modelSet of modelsByAccountId.values()) {
+      for (const modelName of modelSet) siteModelNames.add(modelName);
+    }
+    for (const modelSet of modelsByTokenId.values()) {
+      for (const modelName of modelSet) siteModelNames.add(modelName);
+    }
+    for (const modelName of pricingGroupsByModel.keys()) {
+      siteModelNames.add(modelName);
+    }
+
+    const knownSiteGroups = Array.from(siteGroupSources.keys()).sort((left, right) => left.localeCompare(right));
+    const resolveGroupsForModel = (modelName: string) => {
+      const pricingGroups = pricingGroupsByModel.get(modelName);
+      if (pricingGroups && pricingGroups.size > 0) return Array.from(pricingGroups);
+      return knownSiteGroups.length > 0 ? knownSiteGroups : ['default'];
+    };
+
+    for (const modelName of siteModelNames) {
+      const modelItem = ensureModel(modelName);
+      for (const account of accountRows) {
+        if (modelsByAccountId.get(account.id)?.has(modelName)) {
+          modelItem.accountIds.add(account.id);
+        }
+      }
+
+      for (const group of resolveGroupsForModel(modelName)) {
+        let groupItem = modelItem.groups.get(group);
         if (!groupItem) {
           groupItem = {
-            group: 'default',
+            group,
             accountIds: new Set<number>(),
             tokenIds: new Set<number>(),
           };
-          modelItem.groups.set('default', groupItem);
+          modelItem.groups.set(group, groupItem);
         }
-        groupItem.accountIds.add(account.id);
 
-        const siteGroup = ensureGroup('default');
-        siteGroup.modelNames.add(modelName);
-        siteGroup.accountIds.add(account.id);
-      }
-      for (const token of tokenRows.filter((item) => item.accountId === account.id)) {
-        const tokenModels = modelsByTokenId.get(token.id);
-        const effectiveModels = tokenModels && tokenModels.size > 0 ? tokenModels : accountModels;
-        const group = normalizeTokenGroup(token.tokenGroup);
-        for (const modelName of effectiveModels) {
-          const modelItem = ensureModel(modelName);
-          modelItem.accountIds.add(account.id);
-          modelItem.tokenIds.add(token.id);
-          let groupItem = modelItem.groups.get(group);
-          if (!groupItem) {
-            groupItem = {
-              group,
-              accountIds: new Set<number>(),
-              tokenIds: new Set<number>(),
-            };
-            modelItem.groups.set(group, groupItem);
+        for (const account of accountRows) {
+          if (modelsByAccountId.get(account.id)?.has(modelName)) {
+            groupItem.accountIds.add(account.id);
           }
-          groupItem.accountIds.add(account.id);
-          groupItem.tokenIds.add(token.id);
-
-          const siteGroup = ensureGroup(group);
-          siteGroup.modelNames.add(modelName);
-          siteGroup.accountIds.add(account.id);
-          siteGroup.tokenIds.add(token.id);
         }
+
+        const siteGroup = ensureGroup(group);
+        siteGroup.modelNames.add(modelName);
+        for (const accountId of groupItem.accountIds) {
+          siteGroup.accountIds.add(accountId);
+        }
+      }
+    }
+
+    for (const token of tokenRows) {
+      const tokenModels = modelsByTokenId.get(token.id) || modelsByAccountId.get(token.accountId) || new Set<string>();
+      const group = normalizeTokenGroup(token.tokenGroup);
+      for (const modelName of tokenModels) {
+        const modelItem = ensureModel(modelName);
+        modelItem.tokenIds.add(token.id);
+        let groupItem = modelItem.groups.get(group);
+        if (!groupItem) {
+          groupItem = {
+            group,
+            accountIds: new Set<number>(),
+            tokenIds: new Set<number>(),
+          };
+          modelItem.groups.set(group, groupItem);
+        }
+        groupItem.accountIds.add(token.accountId);
+        groupItem.tokenIds.add(token.id);
+
+        const siteGroup = ensureGroup(group);
+        siteGroup.modelNames.add(modelName);
+        siteGroup.accountIds.add(token.accountId);
+        siteGroup.tokenIds.add(token.id);
       }
     }
 

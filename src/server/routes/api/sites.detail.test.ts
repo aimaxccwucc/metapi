@@ -108,10 +108,61 @@ describe('sites detail API', () => {
 
     const vipGroup = body.groups.find((item: any) => item.group === 'vip');
     expect(vipGroup).toBeTruthy();
-    expect(vipGroup.models).toEqual(['gpt-4o-mini']);
+    expect(vipGroup.models).toEqual(['gpt-4o', 'gpt-4o-mini']);
 
     const defaultGroup = body.groups.find((item: any) => item.group === 'default');
     expect(defaultGroup).toBeTruthy();
-    expect(defaultGroup.models).toEqual(['gpt-4o']);
+    expect(defaultGroup.models).toEqual(['gpt-4o', 'gpt-4o-mini']);
+  });
+
+  it('keeps site models visible even when no account tokens exist', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'no-token-site',
+      url: 'https://no-token.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'model-only-account',
+      accessToken: 'session-token',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values([
+      { accountId: account.id, modelName: 'gpt-4o', available: true },
+      { accountId: account.id, modelName: 'claude-3-5-sonnet', available: true },
+    ]).run();
+
+    const resp = await app.inject({
+      method: 'GET',
+      url: `/api/sites/${site.id}/detail`,
+    });
+
+    expect(resp.statusCode).toBe(200);
+    const body = resp.json();
+    expect(body.summary).toMatchObject({
+      accountCount: 1,
+      tokenCount: 0,
+      modelCount: 2,
+      groupCount: 1,
+    });
+    expect(body.tokens).toEqual([]);
+    expect(body.groups).toEqual([
+      expect.objectContaining({
+        group: 'default',
+        modelCount: 2,
+        tokenCount: 0,
+        models: ['claude-3-5-sonnet', 'gpt-4o'],
+      }),
+    ]);
+    expect(body.models.find((item: any) => item.name === 'gpt-4o').groups).toEqual([
+      expect.objectContaining({
+        group: 'default',
+        tokenCount: 0,
+        tokens: [],
+      }),
+    ]);
   });
 });

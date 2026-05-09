@@ -149,6 +149,7 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
   const [siteDetail, setSiteDetail] = useState<SiteDetail | null>(null);
   const [siteDetailLoading, setSiteDetailLoading] = useState(false);
   const [siteDetailSearch, setSiteDetailSearch] = useState('');
+  const [activeModelGroup, setActiveModelGroup] = useState<string | null>(null);
   const deferredSiteDetailSearch = useDeferredValue(siteDetailSearch.trim().toLowerCase());
 
   // ── Add ──
@@ -235,6 +236,7 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
       setActiveTab('accounts');
       setSiteDetail(null);
       setSiteDetailSearch('');
+      setActiveModelGroup(null);
       setKeyEditor(null);
     }
   }, [open, siteId, load]);
@@ -653,6 +655,40 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
     });
   }, [deferredSiteDetailSearch, siteDetail]);
 
+  const selectedModelGroup = useMemo(() => {
+    const rows = filteredSiteGroups;
+    if (rows.length === 0) return null;
+    if (activeModelGroup) {
+      const matched = rows.find((group) => group.group === activeModelGroup);
+      if (matched) return matched;
+    }
+    return rows[0];
+  }, [activeModelGroup, filteredSiteGroups]);
+
+  useEffect(() => {
+    if (activeTab !== 'models') return;
+    if (filteredSiteGroups.length === 0) {
+      if (activeModelGroup !== null) setActiveModelGroup(null);
+      return;
+    }
+    const nextGroup = selectedModelGroup?.group || filteredSiteGroups[0]?.group || null;
+    if (nextGroup && nextGroup !== activeModelGroup) {
+      setActiveModelGroup(nextGroup);
+    }
+  }, [activeModelGroup, activeTab, filteredSiteGroups, selectedModelGroup]);
+
+  const selectedGroupModels = useMemo(() => {
+    if (!selectedModelGroup) return [];
+    const names = new Set(selectedModelGroup.models);
+    return filteredSiteModels
+      .filter((model) => names.has(model.name))
+      .map((model) => ({
+        ...model,
+        groups: model.groups.filter((group) => group.group === selectedModelGroup.group),
+      }))
+      .filter((model) => model.groups.length > 0);
+  }, [filteredSiteModels, selectedModelGroup]);
+
   const filteredSiteTokens = useMemo(() => {
     const rows = siteDetail?.tokens || [];
     if (!deferredSiteDetailSearch) return rows;
@@ -817,73 +853,87 @@ export default function SiteAccountsModal({ open, onClose, siteId, siteName, onS
       <div>
         {renderSiteDetailToolbar()}
         {renderSiteDetailSummary()}
-        <div style={{ display: 'grid', gap: 12 }}>
-          <div className="card" style={{ padding: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
-              <div style={{ fontWeight: 700 }}>模型到分组与 Key</div>
-              <span className="badge badge-muted" style={{ fontSize: 11 }}>{filteredSiteModels.length} 个模型</span>
-            </div>
-            {filteredSiteModels.length === 0 ? (
-              <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>暂无模型覆盖数据。</div>
-            ) : (
-              <div style={{ display: 'grid', gap: 8 }}>
-                {filteredSiteModels.slice(0, 80).map((model) => (
-                  <div key={model.name} style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 10, display: 'grid', gap: 8 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                      <code style={{ fontSize: 12, wordBreak: 'break-all' }}>{model.name}</code>
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        <span className="badge badge-info" style={{ fontSize: 11 }}>{model.groups.length} 分组</span>
-                        <span className="badge badge-muted" style={{ fontSize: 11 }}>{model.tokenCount} Key</span>
-                      </div>
-                    </div>
-                    <div style={{ display: 'grid', gap: 6 }}>
-                      {model.groups.map((group) => (
-                        <div key={`${model.name}-${group.group}`} style={{ display: 'grid', gap: 4 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                            <span className="badge badge-success" style={{ fontSize: 11 }}>{group.group}</span>
-                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{group.accountCount} 账号 / {group.tokenCount} Key</span>
-                          </div>
-                          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                            {group.tokens.slice(0, 10).map((token) => (
-                              <span key={token.id} className={`badge ${token.enabled ? 'badge-muted' : 'badge-error'}`} style={{ fontSize: 10 }}>
-                                {token.accountName} / {token.name}{token.isDefault ? ' · 默认' : ''}
-                              </span>
-                            ))}
-                            {group.tokens.length > 10 ? <span className="badge badge-muted" style={{ fontSize: 10 }}>+{group.tokens.length - 10}</span> : null}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
+        <div className="card" style={{ padding: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+            <div style={{ fontWeight: 700 }}>按分组查看模型</div>
+            <span className="badge badge-muted" style={{ fontSize: 11 }}>{filteredSiteGroups.length} 个分组</span>
+          </div>
+          {filteredSiteGroups.length === 0 ? (
+            <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>暂无分组覆盖数据。</div>
+          ) : (
+            <>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+                {filteredSiteGroups.map((group) => {
+                  const active = selectedModelGroup?.group === group.group;
+                  return (
+                    <button
+                      key={group.group}
+                      type="button"
+                      className={`btn ${active ? 'btn-primary' : 'btn-ghost'}`}
+                      style={{
+                        padding: '7px 10px',
+                        border: active ? undefined : '1px solid var(--color-border)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                      }}
+                      onClick={() => setActiveModelGroup(group.group)}
+                    >
+                      <span>{group.group}</span>
+                      <span className="badge badge-muted" style={{ fontSize: 10 }}>{group.modelCount}</span>
+                    </button>
+                  );
+                })}
               </div>
-            )}
-          </div>
-          <div className="card" style={{ padding: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
-              <div style={{ fontWeight: 700 }}>分组到模型</div>
-              <span className="badge badge-muted" style={{ fontSize: 11 }}>{filteredSiteGroups.length} 个分组</span>
-            </div>
-            <div style={{ display: 'grid', gap: 8 }}>
-              {filteredSiteGroups.map((group) => (
-                <div key={group.group} style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 10 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
-                    <span className="badge badge-success">{group.group}</span>
-                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{group.modelCount} 模型 / {group.tokenCount} Key</span>
+              {selectedModelGroup ? (
+                <div style={{ display: 'grid', gap: 10 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                    <div>
+                      <span className="badge badge-success">{selectedModelGroup.group}</span>
+                      <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        {selectedModelGroup.modelCount} 模型 / {selectedModelGroup.accountCount} 账号 / {selectedModelGroup.tokenCount} Key
+                      </span>
+                    </div>
                   </div>
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    {group.models.slice(0, 30).map((model) => (
-                      <code key={model} style={{ fontSize: 11, padding: '2px 6px', border: '1px solid var(--color-border-light)', borderRadius: 6 }}>{model}</code>
-                    ))}
-                    {group.models.length > 30 ? <span className="badge badge-muted" style={{ fontSize: 11 }}>+{group.models.length - 30}</span> : null}
-                  </div>
+                  {selectedGroupModels.length === 0 ? (
+                    <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>当前分组没有匹配的模型。</div>
+                  ) : (
+                    <div style={{ display: 'grid', gap: 8 }}>
+                      {selectedGroupModels.slice(0, 100).map((model) => {
+                        const group = model.groups[0];
+                        return (
+                          <div key={`${selectedModelGroup.group}-${model.name}`} style={{ border: '1px solid var(--color-border-light)', borderRadius: 8, padding: 10, display: 'grid', gap: 8 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                              <code style={{ fontSize: 12, wordBreak: 'break-all' }}>{model.name}</code>
+                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                <span className="badge badge-info" style={{ fontSize: 11 }}>{group.accountCount} 账号</span>
+                                <span className="badge badge-muted" style={{ fontSize: 11 }}>{group.tokenCount} Key</span>
+                              </div>
+                            </div>
+                            {group.tokens.length > 0 ? (
+                              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                                {group.tokens.slice(0, 12).map((token) => (
+                                  <span key={token.id} className={`badge ${token.enabled ? 'badge-muted' : 'badge-error'}`} style={{ fontSize: 10 }}>
+                                    {token.accountName} / {token.name}{token.isDefault ? ' · 默认' : ''}
+                                  </span>
+                                ))}
+                                {group.tokens.length > 12 ? <span className="badge badge-muted" style={{ fontSize: 10 }}>+{group.tokens.length - 12}</span> : null}
+                              </div>
+                            ) : (
+                              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>账号模型覆盖，无 Key 绑定</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {selectedGroupModels.length > 100 ? (
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>仅显示前 100 个匹配模型。</div>
+                      ) : null}
+                    </div>
+                  )}
                 </div>
-              ))}
-              {filteredSiteGroups.length === 0 ? (
-                <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>暂无分组覆盖数据。</div>
               ) : null}
-            </div>
-          </div>
+            </>
+          )}
         </div>
       </div>
     );
