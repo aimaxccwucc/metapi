@@ -780,6 +780,64 @@ describe('Models marketplace text', () => {
       const text = collectText(root!.root);
       expect(text).toContain('未确认');
       expect(text).toContain('chat:200 empty content');
+      expect(text).toContain('复制 Key');
+    } finally {
+      await unmountRoot(root);
+    }
+  });
+
+  it('keeps copy key action available after failed marketplace probes', async () => {
+    apiMock.testMarketplaceModelAvailability.mockRejectedValue(new Error('probe request failed'));
+
+    let root: ReturnType<typeof create> | null = null;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/models']}>
+            <ToastProvider>
+              <Models />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const cards = root!.root.findAll((node) => (
+        node.type === 'div'
+        && typeof node.props.className === 'string'
+        && node.props.className.includes('model-card')
+        && typeof node.props.onClick === 'function'
+      ));
+      await act(async () => {
+        cards[0]!.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const checkButton = root!.root.find((node) => (
+        node.type === 'button'
+        && collectText(node) === '检测'
+      ));
+      await act(async () => {
+        await checkButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root!.root);
+      expect(text).toContain('失败');
+      expect(text).toContain('复制 Key');
+
+      const copyButton = root!.root.find((node) => (
+        node.type === 'button'
+        && collectText(node).includes('复制 Key')
+      ));
+      await act(async () => {
+        await copyButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.getAccountTokenValue).toHaveBeenCalledWith(1);
+      expect(globalThis.navigator.clipboard.writeText).toHaveBeenCalledWith('sk-autocreated-demo');
     } finally {
       await unmountRoot(root);
     }

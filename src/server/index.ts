@@ -453,6 +453,9 @@ if (existsSync(webDir)) {
   });
   // SPA fallback
   app.setNotFoundHandler(async (request, reply) => {
+    if (request.url.startsWith('/assets/')) {
+      return reply.code(404).send({ error: 'Asset not found' });
+    }
     if (!request.url.startsWith('/api/') && !request.url.startsWith('/v1/')) {
       return reply.sendFile('index.html');
     }

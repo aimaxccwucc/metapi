@@ -107,15 +107,19 @@ function setupRuntime() {
   });
 
   vi.stubGlobal('localStorage', createLocalStorage());
+  const location = {
+    href: 'https://metapi.test/',
+    pathname: '/',
+    reload: vi.fn(),
+    assign: vi.fn(),
+  };
   vi.stubGlobal('window', {
     innerWidth: 1280,
     matchMedia,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
-    location: {
-      reload: vi.fn(),
-      assign: vi.fn(),
-    },
+    localStorage,
+    location,
   });
   vi.stubGlobal('document', {
     body: { style: {} },
@@ -126,6 +130,7 @@ function setupRuntime() {
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   });
+  return { location };
 }
 
 function collectText(node: any): string {
@@ -175,6 +180,33 @@ describe('App route error boundary', () => {
       expect(text).toContain('dashboard render exploded');
       expect(text).toContain('重试当前页');
       expect(text).toContain('返回仪表盘');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('reloads once when a route chunk cannot be dynamically imported', async () => {
+    vi.doMock('./pages/Dashboard.js', () => ({
+      default: () => {
+        throw new Error('Failed to fetch dynamically imported module: https://metapi.test/assets/Dashboard-old.js');
+      },
+    }));
+    vi.resetModules();
+    const { default: ReloadingApp } = await import('./App.js');
+    const runtime = setupRuntime();
+
+    let root: ReturnType<typeof create> | null = null;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/']}>
+            <ReloadingApp />
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      expect(runtime.location.reload).toHaveBeenCalledTimes(1);
     } finally {
       root?.unmount();
     }

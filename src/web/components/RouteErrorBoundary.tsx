@@ -10,6 +10,13 @@ type RouteErrorBoundaryState = {
   error: Error | null;
 };
 
+const ROUTE_CHUNK_RELOAD_STORAGE_KEY = 'metapi.routeChunk.reloadTarget';
+
+function isDynamicImportFailure(error: Error): boolean {
+  const message = error.message || '';
+  return /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module/i.test(message);
+}
+
 class RouteErrorBoundaryImpl extends React.Component<RouteErrorBoundaryProps, RouteErrorBoundaryState> {
   state: RouteErrorBoundaryState = {
     error: null,
@@ -21,6 +28,18 @@ class RouteErrorBoundaryImpl extends React.Component<RouteErrorBoundaryProps, Ro
 
   componentDidCatch(error: Error, info: React.ErrorInfo): void {
     console.error('[web] route render failed:', error, info);
+    if (!isDynamicImportFailure(error)) return;
+    if (typeof window === 'undefined' || typeof window.location?.reload !== 'function') return;
+
+    const reloadTarget = window.location.href;
+    try {
+      if (window.localStorage?.getItem(ROUTE_CHUNK_RELOAD_STORAGE_KEY) === reloadTarget) return;
+      window.localStorage?.setItem(ROUTE_CHUNK_RELOAD_STORAGE_KEY, reloadTarget);
+    } catch {
+      // Reload is still the best recovery if storage is unavailable.
+    }
+
+    window.location.reload();
   }
 
   componentDidUpdate(prevProps: RouteErrorBoundaryProps): void {

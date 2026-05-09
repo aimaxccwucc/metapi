@@ -1,4 +1,4 @@
-const CACHE_NAME = 'metapi-shell-v1';
+const CACHE_NAME = 'metapi-shell-v2';
 const APP_SHELL = [
   '/',
   '/manifest.webmanifest',
@@ -6,6 +6,7 @@ const APP_SHELL = [
   '/favicon.png',
   '/favicon-64.png',
 ];
+const APP_SHELL_PATHS = new Set(APP_SHELL);
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -39,6 +40,14 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(event.request).catch(() => caches.match('/')),
     );
+    return;
+  }
+
+  if (requestUrl.pathname.startsWith('/assets/') || requestUrl.pathname === '/sw.js') {
+    return;
+  }
+
+  if (!APP_SHELL_PATHS.has(requestUrl.pathname)) {
     return;
   }
 

@@ -887,7 +887,7 @@ export default function Models() {
                 {expandedDetail ? tr('收起详情') : tr('查看详情')}
               </button>
             ) : null}
-            {check.status === 'available' && check.resolvedTokenId ? (
+            {check.resolvedTokenId ? (
               <button
                 className="btn btn-ghost"
                 style={actionButtonStyle}
@@ -1053,6 +1053,7 @@ export default function Models() {
         [key]: {
           status: 'error',
           message,
+          resolvedTokenId: account.tokens[0]?.id ?? null,
         },
       }));
       toast.error(message);
