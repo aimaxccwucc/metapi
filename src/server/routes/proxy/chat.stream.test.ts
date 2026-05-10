@@ -149,6 +149,7 @@ describe('chat proxy stream behavior', () => {
     };
     config.proxyEmptyContentFailEnabled = false;
     config.proxyErrorKeywords = [];
+    config.disableCrossProtocolFallback = false;
     isTokenExpiredErrorMock.mockReturnValue(false);
     shouldRetryProxyRequestMock.mockReturnValue(false);
     shouldAvoidSiteForRequestMock.mockReturnValue(false);
@@ -2984,6 +2985,90 @@ describe('chat proxy stream behavior', () => {
     expect(firstUrl).toContain('/v1/responses');
     expect(secondUrl).toContain('/v1/chat/completions');
     expect(response.json().output_text).toContain('ok via chinese endpoint fallback');
+  });
+
+  it('persists prompt-or-messages request-shape failures and skips /v1/responses on the next request', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'kimi-k2.5',
+    });
+
+    const shapeMismatchError = {
+      error: {
+        message: 'Error from provider: Input required: specify "prompt" or "messages"',
+        type: 'invalid_request_error',
+      },
+    };
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify(shapeMismatchError), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl_kimi_shape_fallback_1',
+        object: 'chat.completion',
+        model: 'kimi-k2.5',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok via chat after shape mismatch' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl_kimi_shape_fallback_2',
+        object: 'chat.completion',
+        model: 'kimi-k2.5',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok direct chat from remembered endpoint' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'kimi-k2.5',
+        input: 'hello',
+      },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(firstResponse.json().output_text).toContain('ok via chat after shape mismatch');
+
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'kimi-k2.5',
+        input: 'hello again',
+      },
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(secondResponse.json().output_text).toContain('ok direct chat from remembered endpoint');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
+    const [thirdUrl] = fetchMock.mock.calls[2] as [string, any];
+    expect(firstUrl).toContain('/v1/responses');
+    expect(secondUrl).toContain('/v1/chat/completions');
+    expect(thirdUrl).toContain('/v1/chat/completions');
   });
 
   it('does not fall through to /v1/messages after a redirect-driven 405 failure on generic /v1/responses traffic', async () => {

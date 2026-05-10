@@ -117,6 +117,16 @@ function hasChineseEndpointCompatibilitySignal(text: string): boolean {
   );
 }
 
+function hasRequestShapeMismatchSignal(text: string): boolean {
+  return (
+    /input\s+required\s*:\s*specify\s+["']?prompt["']?\s+or\s+["']?messages["']?/i.test(text)
+    || /(?:specify|provide|include)\s+(?:a\s+)?["']?prompt["']?\s+or\s+["']?messages["']?/i.test(text)
+    || /(?:prompt|messages)\s+(?:is|are)\s+required/i.test(text)
+    || /(?:prompt|messages).*(?:required|missing)/i.test(text)
+    || /(?:required|missing).*(?:prompt|messages)/i.test(text)
+  );
+}
+
 export function hasExplicitEndpointCompatibilitySignal(upstreamErrorText?: string | null): boolean {
   const text = (upstreamErrorText || '').toLowerCase();
   if (!text) return false;
@@ -136,6 +146,7 @@ export function hasExplicitEndpointCompatibilitySignal(upstreamErrorText?: strin
     || value.includes('unrecognized request url')
     || value.includes('no route matched')
     || value.includes('unsupported legacy protocol')
+    || hasRequestShapeMismatchSignal(value)
     || hasChineseEndpointCompatibilitySignal(value)
     || hasEndpointNotFoundContext(value)
     || hasExplicitEndpointSuggestion(value)

@@ -513,6 +513,33 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(order).toEqual(['responses', 'chat']);
   });
 
+  it('blocks responses endpoint after upstream reports prompt-or-messages request-shape mismatch', async () => {
+    recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      sitePlatform: 'new-api',
+      accountId: baseContext.account.id,
+      accountAccessToken: baseContext.account.accessToken,
+      accountApiToken: baseContext.account.apiToken,
+      siteApiKey: baseContext.site.apiKey,
+      endpoint: 'responses',
+      downstreamFormat: 'responses',
+      modelName: 'kimi-k2.5',
+      status: 400,
+      errorText: '{"error":{"message":"Error from provider: Input required: specify \\"prompt\\" or \\"messages\\"","type":"invalid_request_error"}}',
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'kimi-k2.5',
+      'responses',
+    );
+
+    expect(order).toEqual(['chat']);
+  });
+
   it('does not persist generic /v1/responses runtime memory from redirect-to-messages failures', async () => {
     recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
@@ -864,6 +891,8 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(isEndpointDowngradeError(405, '{"error":{"message":"Method Not Allowed"}}')).toBe(true);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"unsupported endpoint","type":"invalid_request_error"}}')).toBe(true);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"该平台不支持该类型的端点调用","type":"invalid_request_error"}}')).toBe(true);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"Error from provider: Input required: specify \\"prompt\\" or \\"messages\\"","type":"invalid_request_error"}}')).toBe(true);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"messages is required","type":"upstream_error"}}')).toBe(true);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"","type":"upstream_error"}}')).toBe(false);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"openai_error","type":"bad_response_status_code"}}')).toBe(false);
     expect(isEndpointDowngradeError(415, '{"error":{"message":"Unsupported Media Type: Only \\"application/json\\" is allowed"}}')).toBe(true);
