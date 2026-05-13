@@ -150,6 +150,59 @@ describe('PUT /api/routes/:id route rebuild', () => {
     expect(rebuiltAuto?.weight).toBe(10);
   });
 
+  it('preserves route source-model targets when rebuilding automatic channels', async () => {
+    const existingSource = await seedAccountWithToken('glm-5.1');
+    const newSource = await seedAccountWithToken('glm-5.1');
+    const unrelated = await seedAccountWithToken('qwen3.6-plus');
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'qwen3.6-max-preview',
+      enabled: true,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: existingSource.account.id,
+      tokenId: existingSource.token.id,
+      sourceModel: 'glm-5.1',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).run();
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: `/api/routes/${route.id}`,
+      payload: {
+        modelPattern: 'qwen3.6-max-preview-v2',
+        routingStrategy: 'weighted',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const routeChannels = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.routeId, route.id))
+      .all();
+
+    expect(routeChannels).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        accountId: existingSource.account.id,
+        tokenId: existingSource.token.id,
+        sourceModel: 'glm-5.1',
+        manualOverride: false,
+      }),
+      expect.objectContaining({
+        accountId: newSource.account.id,
+        tokenId: newSource.token.id,
+        sourceModel: 'glm-5.1',
+        manualOverride: false,
+      }),
+    ]));
+    expect(routeChannels.some((channel) => channel.accountId === unrelated.account.id)).toBe(false);
+  });
+
   it('creates explicit-group routes with sourceRouteIds and aggregates source channels', async () => {
     const sourceA = await seedAccountWithToken('claude-opus-4-5');
     const sourceB = await seedAccountWithToken('claude-sonnet-4-5');

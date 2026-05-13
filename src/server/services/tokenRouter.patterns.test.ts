@@ -258,25 +258,28 @@ describe('TokenRouter patterns and model mapping', () => {
     expect(decision.summary).toContain('实际转发模型：glm-5.1');
   });
 
-  it('still filters automatically discovered heterogeneous source models on exact routes', async () => {
+  it('routes configured source models on exact routes without requiring model-name equivalence', async () => {
     const auto = await createRouteWithSingleChannel(
-      'gpt-5.5',
+      'qwen3.6-max-preview',
       undefined,
       {
-        sourceModel: 'glm-5.1',
+        sourceModel: 'aa-or-bbb-upstream-model',
         manualOverride: false,
       },
     );
     const router = new TokenRouter();
 
-    const decision = await router.explainSelectionForRoute(auto.route.id, 'gpt-5.5');
-    const selected = await router.previewSelectedChannel('gpt-5.5');
+    const decision = await router.explainSelectionForRoute(auto.route.id, 'qwen3.6-max-preview');
+    const selected = await router.previewSelectedChannel('qwen3.6-max-preview');
     const candidate = decision.candidates.find((item) => item.channelId === auto.channel.id);
 
-    expect(selected).toBeNull();
-    expect(decision.selectedChannelId).toBeUndefined();
-    expect(candidate?.eligible).toBe(false);
-    expect(candidate?.reason || '').toContain('来源模型不匹配=glm-5.1');
+    expect(selected).toBeTruthy();
+    expect(selected?.channel.id).toBe(auto.channel.id);
+    expect(selected?.actualModel).toBe('aa-or-bbb-upstream-model');
+    expect(decision.selectedChannelId).toBe(auto.channel.id);
+    expect(decision.actualModel).toBe('aa-or-bbb-upstream-model');
+    expect(candidate?.eligible).toBe(true);
+    expect(candidate?.reason || '').not.toContain('来源模型不匹配');
   });
 
   it('prefers an explicit-group exposed model over a legacy exact pattern route', async () => {

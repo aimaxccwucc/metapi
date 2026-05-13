@@ -126,4 +126,20 @@ describe('openAiResponsesTransformer.inbound', () => {
       },
     });
   });
+
+  it('downgrades responses 400 unsupported-model errors to chat fallback', () => {
+    expect(openAiResponsesTransformer.compatibility.shouldDowngradeResponsesToChat(
+      '/v1/responses',
+      400,
+      JSON.stringify({ error: { message: "Unsupported model: 'qwen3.6-max-preview'." } }),
+    )).toBe(true);
+  });
+
+  it('does not downgrade auth failures from responses to chat fallback', () => {
+    expect(openAiResponsesTransformer.compatibility.shouldDowngradeResponsesToChat(
+      '/v1/responses',
+      400,
+      JSON.stringify({ error: { message: 'Invalid API key' } }),
+    )).toBe(false);
+  });
 });

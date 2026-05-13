@@ -323,6 +323,35 @@ function isModelAliasEquivalent(left: string, right: string): boolean {
   return !!a && !!b && a === b;
 }
 
+function matchesExactRouteSourceModel(modelName: string, modelPattern: string): boolean {
+  const source = modelName.trim();
+  const pattern = modelPattern.trim();
+  if (!source || !pattern) return false;
+  if (isExactModelPattern(pattern)) return source === pattern;
+  return matchesModelPattern(source, pattern);
+}
+
+function normalizeModelTargets(modelNames: string[]): string[] {
+  const seen = new Set<string>();
+  const targets: string[] = [];
+  for (const raw of modelNames) {
+    const modelName = (raw || '').trim();
+    if (!modelName) continue;
+    const key = modelName.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    targets.push(modelName);
+  }
+  return targets;
+}
+
+function matchesRouteAutomationTarget(modelName: string, modelPattern: string, explicitTargets: string[]): boolean {
+  const source = modelName.trim();
+  if (!source) return false;
+  if (explicitTargets.some((target) => source === target)) return true;
+  return matchesExactRouteSourceModel(source, modelPattern);
+}
+
 function resolveTokenGroupLabel(tokenGroup: string | null, tokenName: string | null): string | null {
   const explicit = (tokenGroup || '').trim();
   if (explicit) return explicit;
@@ -373,7 +402,7 @@ function selectPreferredTokenGroupForModel(
   return preferred?.group || normalizedGroups[0] || 'default';
 }
 
-async function ensurePreferredTokenCoverageForPattern(modelPattern: string): Promise<void> {
+async function ensurePreferredTokenCoverageForPattern(modelPattern: string, explicitTargets: string[] = []): Promise<void> {
   const startedAt = Date.now();
   const rows = await db.select({
     modelName: schema.modelAvailability.modelName,
@@ -413,7 +442,7 @@ async function ensurePreferredTokenCoverageForPattern(modelPattern: string): Pro
   const accountContexts = new Map<number, AccountModelContext>();
   for (const row of rows) {
     const modelName = (row.modelName || '').trim();
-    if (!modelName || !matchesModelPattern(modelName, modelPattern)) continue;
+    if (!modelName || !matchesRouteAutomationTarget(modelName, modelPattern, explicitTargets)) continue;
     if ((row.accountStatus || 'active') !== 'active' || (row.siteStatus || 'active') !== 'active') continue;
     if (!(row.accessToken || '').trim()) continue;
     if (!requiresManagedAccountTokens({
@@ -608,7 +637,7 @@ async function checkTokenBelongsToAccount(tokenId: number, accountId: number): P
   return isUsableAccountToken(row ?? null);
 }
 
-async function getPatternTokenCandidates(modelPattern: string): Promise<Array<{ tokenId: number; accountId: number; sourceModel: string }>> {
+async function getPatternTokenCandidates(modelPattern: string, explicitTargets: string[] = []): Promise<Array<{ tokenId: number; accountId: number; sourceModel: string }>> {
   const rows = await db.select().from(schema.tokenModelAvailability)
     .innerJoin(schema.accountTokens, eq(schema.tokenModelAvailability.tokenId, schema.accountTokens.id))
     .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
@@ -629,7 +658,7 @@ async function getPatternTokenCandidates(modelPattern: string): Promise<Array<{ 
     if (!isUsableAccountToken(row.account_tokens)) continue;
     const modelName = row.token_model_availability.modelName?.trim();
     if (!modelName) continue;
-    if (!matchesModelPattern(modelName, modelPattern)) continue;
+    if (!matchesRouteAutomationTarget(modelName, modelPattern, explicitTargets)) continue;
     result.push({
       tokenId: row.account_tokens.id,
       accountId: row.accounts.id,
@@ -640,7 +669,7 @@ async function getPatternTokenCandidates(modelPattern: string): Promise<Array<{ 
   return result;
 }
 
-async function getPatternDirectAccountCandidates(modelPattern: string): Promise<Array<{ tokenId: null; accountId: number; sourceModel: string }>> {
+async function getPatternDirectAccountCandidates(modelPattern: string, explicitTargets: string[] = []): Promise<Array<{ tokenId: null; accountId: number; sourceModel: string }>> {
   const rows = await db.select({
     modelName: schema.modelAvailability.modelName,
     accountId: schema.accounts.id,
@@ -670,7 +699,7 @@ async function getPatternDirectAccountCandidates(modelPattern: string): Promise<
     })) continue;
     const modelName = row.modelName?.trim();
     if (!modelName) continue;
-    if (!matchesModelPattern(modelName, modelPattern)) continue;
+    if (!matchesRouteAutomationTarget(modelName, modelPattern, explicitTargets)) continue;
     result.push({
       tokenId: null,
       accountId: row.accountId,
@@ -681,7 +710,7 @@ async function getPatternDirectAccountCandidates(modelPattern: string): Promise<
   return result;
 }
 
-async function getMatchedExactRouteChannelCandidates(modelPattern: string): Promise<Array<{
+async function getMatchedExactRouteChannelCandidates(modelPattern: string, explicitTargets: string[] = []): Promise<Array<{
   tokenId: number | null;
   accountId: number;
   sourceModel: string;
@@ -690,10 +719,17 @@ async function getMatchedExactRouteChannelCandidates(modelPattern: string): Prom
   enabled: boolean;
   manualOverride: boolean;
 }>> {
+  const targetSet = new Set(normalizeModelTargets([
+    ...(isExactModelPattern(modelPattern) ? [modelPattern] : []),
+    ...explicitTargets,
+  ]));
   const matchedRoutes: TokenRouteTableRow[] = (await db.select().from(schema.tokenRoutes)
     .where(eq(schema.tokenRoutes.enabled, true))
     .all())
-    .filter((route: TokenRouteTableRow) => isExactModelPattern(route.modelPattern) && matchesModelPattern(route.modelPattern, modelPattern));
+    .filter((route: TokenRouteTableRow) => (
+      isExactModelPattern(route.modelPattern)
+      && targetSet.has((route.modelPattern || '').trim())
+    ));
 
   if (matchedRoutes.length === 0) return [];
   const routeMap = new Map<number, typeof matchedRoutes[number]>();
@@ -724,11 +760,28 @@ async function getMatchedExactRouteChannelCandidates(modelPattern: string): Prom
   return mappedCandidates.filter((candidate) => candidate.sourceModel.length > 0);
 }
 
-async function populateRouteChannelsByModelPattern(routeId: number, modelPattern: string): Promise<number> {
+async function loadRouteAutomationTargets(routeId: number, modelPattern: string): Promise<string[]> {
+  const channels: RouteChannelTableRow[] = await db.select().from(schema.routeChannels)
+    .where(eq(schema.routeChannels.routeId, routeId))
+    .all();
+  return normalizeModelTargets([
+    ...(isExactModelPattern(modelPattern) ? [modelPattern] : []),
+    ...channels.map((channel) => channel.sourceModel || ''),
+  ]);
+}
+
+async function populateRouteChannelsByModelPattern(
+  routeId: number,
+  modelPattern: string,
+  targetOverride?: string[],
+): Promise<number> {
+  const explicitTargets = targetOverride
+    ? normalizeModelTargets(targetOverride)
+    : await loadRouteAutomationTargets(routeId, modelPattern);
   await runWithSoftTimeout(
     autoProvisionTokenCoverage({
       routeIds: [routeId],
-      modelNames: isExactModelPattern(modelPattern) ? [modelPattern] : undefined,
+      modelNames: explicitTargets.length > 0 ? explicitTargets : undefined,
     }, {
       provisionMode: 'shared_group',
       refreshRouteChannels: false,
@@ -737,8 +790,8 @@ async function populateRouteChannelsByModelPattern(routeId: number, modelPattern
     }),
     ROUTE_AUTOCREATE_SOFT_TIMEOUT_MS,
   );
-  const routeCandidates = await getMatchedExactRouteChannelCandidates(modelPattern);
-  const availabilityCandidates = (await getPatternTokenCandidates(modelPattern)).map((candidate) => ({
+  const routeCandidates = await getMatchedExactRouteChannelCandidates(modelPattern, explicitTargets);
+  const availabilityCandidates = (await getPatternTokenCandidates(modelPattern, explicitTargets)).map((candidate) => ({
     tokenId: candidate.tokenId,
     accountId: candidate.accountId,
     sourceModel: candidate.sourceModel,
@@ -747,7 +800,7 @@ async function populateRouteChannelsByModelPattern(routeId: number, modelPattern
     enabled: true,
     manualOverride: false,
   }));
-  const directAccountCandidates = (await getPatternDirectAccountCandidates(modelPattern)).map((candidate) => ({
+  const directAccountCandidates = (await getPatternDirectAccountCandidates(modelPattern, explicitTargets)).map((candidate) => ({
     tokenId: candidate.tokenId,
     accountId: candidate.accountId,
     sourceModel: candidate.sourceModel,
@@ -805,6 +858,7 @@ async function rebuildAutomaticRouteChannelsByModelPattern(routeId: number, mode
   removedChannels: number;
   createdChannels: number;
 }> {
+  const automationTargets = await loadRouteAutomationTargets(routeId, modelPattern);
   const removableChannels = await db.select().from(schema.routeChannels)
     .where(
       and(
@@ -818,7 +872,7 @@ async function rebuildAutomaticRouteChannelsByModelPattern(routeId: number, mode
     await db.delete(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).run();
   }
 
-  const createdChannels = await populateRouteChannelsByModelPattern(routeId, modelPattern);
+  const createdChannels = await populateRouteChannelsByModelPattern(routeId, modelPattern, automationTargets);
   return {
     removedChannels: removableChannels.length,
     createdChannels,

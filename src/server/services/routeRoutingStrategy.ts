@@ -4,6 +4,7 @@ export const DEFAULT_ROUTE_ROUTING_STRATEGY: RouteRoutingStrategy = 'stable_firs
 
 export function normalizeRouteRoutingStrategy(value: unknown): RouteRoutingStrategy {
   const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'weighted') return 'weighted';
   if (normalized === 'round_robin') return 'round_robin';
   if (normalized === 'stable_first') return 'stable_first';
   return DEFAULT_ROUTE_ROUTING_STRATEGY;

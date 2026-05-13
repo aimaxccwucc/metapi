@@ -125,8 +125,7 @@ type SiteRuntimeHealthState = {
 };
 
 const MIN_EFFECTIVE_UNIT_COST = 1e-6;
-// 优化：允许更多失败再触发冷却（原3改为5）
-const ROUND_ROBIN_FAILURE_THRESHOLD = 5;
+const ROUND_ROBIN_FAILURE_THRESHOLD = 3;
 const MAX_ROUTE_REGEX_BODY_LENGTH = 256;
 const SITE_RUNTIME_HEALTH_DECAY_HALF_LIFE_MS = 10 * 60 * 1000;
 const SITE_RUNTIME_MIN_MULTIPLIER = 0.08;
@@ -134,7 +133,7 @@ const SITE_RUNTIME_LATENCY_BASELINE_MS = 2_500;
 const SITE_RUNTIME_LATENCY_WINDOW_MS = 30_000;
 const SITE_RUNTIME_MAX_LATENCY_PENALTY = 0.35;
 const SITE_RUNTIME_LATENCY_EMA_ALPHA = 0.3;
-const SITE_RUNTIME_BREAKER_STREAK_THRESHOLD = 5;
+const SITE_RUNTIME_BREAKER_STREAK_THRESHOLD = 3;
 const SITE_RUNTIME_BREAKER_STREAK_WINDOW_MS = 3 * 60 * 1000;
 const SITE_RUNTIME_BREAKER_LEVELS_MS = [0, 60_000, 5 * 60_000, 30 * 60 * 1000] as const;
 const SITE_TRANSIENT_STREAK_WINDOW_MS = 5 * 60 * 1000;
@@ -295,7 +294,7 @@ export type SiteRuntimeHealthSnapshotEntry = {
   recoveryProbeReady: boolean;
 };
 
-type WeightedSelectionMode = 'weighted' | 'stable_first';
+type WeightedSelectionMode = 'weighted' | 'weighted_preview' | 'stable_first';
 type ChannelSelectionLease = {
   expiresAtMs: number;
 };
@@ -3529,6 +3528,7 @@ function partitionPreferredSuccessfulSiteCandidates<
 type CandidateSelectionPool = {
   candidates: RouteChannelCandidate[];
   scope:
+    | 'weighted_all'
     | 'anchor_site_recent_channel'
     | 'anchor_site_success_channel'
     | 'anchor_site_success_account'
@@ -3548,6 +3548,11 @@ function describeCandidatePoolScope(scope: CandidateSelectionPool['scope']): {
   summaryLabel: string;
 } {
   switch (scope) {
+    case 'weighted_all':
+      return {
+        avoidedReason: '当前按同优先级全部可用候选进行权重计算',
+        summaryLabel: '同优先级权重池',
+      };
     case 'anchor_site_recent_channel':
       return {
         avoidedReason: '当前优先复用最近成功的站点与账号通道；仅当该通道不可用时才会切同站其他账号或其他站点',
@@ -4568,12 +4573,10 @@ function normalizeChannelSourceModel(channelSourceModel: string | null | undefin
 
 function shouldUseChannelSourceModelForCandidate(
   candidate: RouteChannelCandidate,
-  requestedByDisplayName: boolean,
+  _requestedByDisplayName: boolean,
 ): boolean {
   const sourceModel = normalizeChannelSourceModel(candidate.channel.sourceModel);
-  if (!sourceModel) return false;
-  if (requestedByDisplayName) return true;
-  return candidate.channel.manualOverride === true;
+  return !!sourceModel && candidate.channel.sourceModelDerived !== true;
 }
 
 function resolveRuntimeModelForCandidate(
@@ -4594,17 +4597,21 @@ function resolveActualModelForSelectedChannel(
   channel: Pick<ChannelRow, 'sourceModel' | 'manualOverride'>,
 ): string {
   const sourceModel = normalizeChannelSourceModel(channel.sourceModel);
-  if (sourceModel && (channel.manualOverride === true || isRouteDisplayNameMatch(requestedModel, route.displayName))) {
-    return sourceModel;
-  }
-  if (sourceModel && isModelAliasEquivalent(sourceModel, mappedModel)) {
-    return sourceModel;
-  }
+  if (sourceModel) return sourceModel;
   return mappedModel;
 }
 
 function resolveRouteStrategy(route: RouteRow): RouteRoutingStrategy {
   return normalizeRouteRoutingStrategy(route.routingStrategy);
+}
+
+function shouldUseFullWeightedCandidatePool(routeStrategy: RouteRoutingStrategy): boolean {
+  if (routeStrategy !== 'weighted') return false;
+  const weights = config.routingWeights;
+  return (weights.costWeight ?? 0) > 0
+    || (weights.balanceWeight ?? 0) > 0
+    || (weights.usageWeight ?? 0) > 0
+    || (weights.valueScoreFactor ?? 0) > 0;
 }
 
 function parseIsoTimeMs(value?: string | null): number | null {
@@ -5106,13 +5113,17 @@ export class TokenRouter {
         ? isChannelRecentlyFailed(row.channel, nowMs)
         : false;
       const modelCapabilityVerified = hasVerifiedModelCapability(row, requestedModel, nowMs);
-      const eligible = reasonParts.length === 0 || runtimeCircuit.isHalfOpen;
+      const modelCircuitProbeReady = modelCircuitStatus?.isHalfOpen === true;
+      const eligible = reasonParts.length === 0 || runtimeCircuit.isHalfOpen || modelCircuitProbeReady;
       let reason = eligible ? '可用' : reasonParts.join('、');
       if (eligible && governanceBlock?.state === 'probing') {
         reason = formatGovernanceReason(governanceBlock);
       }
       if (eligible && runtimeCircuit.isHalfOpen) {
         reason = `${reason}（${runtimeCircuit.reason}）`;
+      }
+      if (eligible && modelCircuitProbeReady) {
+        reason = `${reason}（${modelCircuitStatus?.reason || '模型熔断半开，允许一次探测'}）`;
       }
       if (eligible && row.channel.sourceModelDerived && !modelCapabilityVerified) {
         reason = `${reason}（模型能力未验证，当前按低权重试探）`;
@@ -5544,7 +5555,12 @@ export class TokenRouter {
           target.reason = '当前优先复用最近成功的来源模型分支；仅当该分支不可用时才会尝试其他来源模型';
         }
       }
-      const selectionPools = buildCandidateSelectionPools(effectiveCandidateLayer, mappedModel, nowMs);
+      const selectionPools = shouldUseFullWeightedCandidatePool(routeStrategy)
+        ? {
+          pools: [{ scope: 'weighted_all' as const, candidates: effectiveCandidateLayer }],
+          sitePartition: partitionPreferredSuccessfulSiteCandidates(effectiveCandidateLayer, mappedModel, nowMs),
+        }
+        : buildCandidateSelectionPools(effectiveCandidateLayer, mappedModel, nowMs);
       let selectedPool: CandidateSelectionPool | null = null;
       for (const pool of selectionPools.pools) {
         if (pool.candidates.length === 0) continue;
@@ -5570,7 +5586,7 @@ export class TokenRouter {
         (useChannelSourceModelForCost || sourceModelRuntimeRouting) ? runtimeModelResolver : mappedModel,
         downstreamPolicy,
         nowMs,
-        routeStrategy === 'stable_first' ? 'stable_first' : 'weighted',
+        routeStrategy === 'stable_first' ? 'stable_first' : 'weighted_preview',
       );
       for (const detail of weighted.details) {
         const target = candidateMap.get(detail.candidate.channel.id);
@@ -5649,7 +5665,12 @@ export class TokenRouter {
       const fallbackCandidates = leasePartition.preferred.length > 0
         ? leasePartition.preferred
         : accountLeasePartition.preferred;
-      const selectionPools = buildCandidateSelectionPools(fallbackCandidates, mappedModel, nowMs);
+      const selectionPools = shouldUseFullWeightedCandidatePool(routeStrategy)
+        ? {
+          pools: [{ scope: 'weighted_all' as const, candidates: fallbackCandidates }],
+          sitePartition: partitionPreferredSuccessfulSiteCandidates(fallbackCandidates, mappedModel, nowMs),
+        }
+        : buildCandidateSelectionPools(fallbackCandidates, mappedModel, nowMs);
       const selectedPool = selectionPools.pools.find((pool) => pool.candidates.length > 0) ?? null;
       if (selectedPool) {
         const weighted = this.calculateWeightedSelection(
@@ -5657,7 +5678,7 @@ export class TokenRouter {
           (useChannelSourceModelForCost || sourceModelRuntimeRouting) ? runtimeModelResolver : mappedModel,
           downstreamPolicy,
           nowMs,
-          routeStrategy === 'stable_first' ? 'stable_first' : 'weighted',
+          routeStrategy === 'stable_first' ? 'stable_first' : 'weighted_preview',
         );
         for (const detail of weighted.details) {
           const target = candidateMap.get(detail.candidate.channel.id);
@@ -5801,15 +5822,6 @@ export class TokenRouter {
 
     await restorePersistedModelAvailabilityForChannel(ch, account.id, modelName);
     const normalizedSuccessfulModel = normalizeModelAlias(modelName || '');
-    if (normalizedSuccessfulModel && (!normalizeChannelSourceModel(ch.sourceModel) || ch.sourceModelDerived)) {
-      await db.update(schema.routeChannels).set({
-        sourceModel: normalizedSuccessfulModel,
-      }).where(eq(schema.routeChannels.id, channelId)).run();
-      patchCachedChannel(channelId, (channel) => {
-        channel.sourceModel = normalizedSuccessfulModel;
-        (channel as typeof channel & { sourceModelDerived?: boolean }).sourceModelDerived = false;
-      });
-    }
     if (typeof ch.tokenId === 'number' && ch.tokenId > 0) {
       await clearRoutingGovernanceState('token', ch.tokenId, null);
       if (normalizeModelAlias(modelName || '')) {
@@ -6283,7 +6295,12 @@ export class TokenRouter {
       const effectiveCandidateLayer = runtimeModelPartition && runtimeModelPartition.source !== 'none'
         ? runtimeModelPartition.preferred
         : candidateLayer;
-      const selectionPools = buildCandidateSelectionPools(effectiveCandidateLayer, mappedModel, nowMs);
+      const selectionPools = shouldUseFullWeightedCandidatePool(routeStrategy)
+        ? {
+          pools: [{ scope: 'weighted_all' as const, candidates: effectiveCandidateLayer }],
+          sitePartition: partitionPreferredSuccessfulSiteCandidates(effectiveCandidateLayer, mappedModel, nowMs),
+        }
+        : buildCandidateSelectionPools(effectiveCandidateLayer, mappedModel, nowMs);
       let selectedPool: CandidateSelectionPool | null = null;
       for (const pool of selectionPools.pools) {
         if (pool.candidates.length === 0) continue;
@@ -6550,12 +6567,6 @@ export class TokenRouter {
     const nowIso = options.nowIso ?? new Date().toISOString();
     const nowMs = options.nowMs ?? Date.now();
 
-    const manualSourceModelOverride = candidate.channel.manualOverride === true
-      && !!normalizeChannelSourceModel(candidate.channel.sourceModel);
-    if (!bypassSourceModelCheck && !manualSourceModelOverride && !channelSupportsRequestedModel(candidate.channel.sourceModel, options.requestedModel)) {
-      reasonParts.push(`来源模型不匹配=${candidate.channel.sourceModel || ''}`);
-    }
-
     if (isCandidatePersistentlyUnavailableForModel(
       candidate,
       options.runtimeModelName,
@@ -6662,33 +6673,16 @@ export class TokenRouter {
       const ch = candidate.channel;
       // 冷却中 → 最低级
       if (ch.cooldownUntil && ch.cooldownUntil > nowIso) return 4;
-      const successCount = ch.successCount ?? 0;
       const failCount = ch.failCount ?? 0;
-      const totalCount = successCount + failCount;
-      const successRatio = totalCount > 0 ? successCount / totalCount : 0;
-      // 降低阈值，让更多渠道进入稳定池
-      if (successCount >= 3 && successRatio >= 0.5) return 0;  // 高稳定（原: >=5且>=60%）
-      if (successCount >= 1 && successRatio >= 0.3) return 1;  // 中稳定（原: >=2且>=40%）
-      if (successCount > 0) return 2;  // 有成功但不稳定
       // Tier 5: 死渠道 (从未成功 且 失败>=5次) → 最低级
       if (failCount >= 5) return 5;
-      return 3;  // 从未成功（含从未使用）
+      return 0;
     };
-
-    // 探测机制：10%概率跳过Tier0，尝试较低级渠道
-    // 这样新渠道有机会被发现，同时90%流量仍走最稳定渠道
-    const shouldProbe = Math.random() < 0.1;
 
     return [...candidates].sort((left, right) => {
       // 1. 按健康分级
-      let leftTier = getChannelTier(left);
-      let rightTier = getChannelTier(right);
-
-      // 探测模式：把Tier0降为Tier1，让Tier1-2有机会被选中
-      if (shouldProbe) {
-        if (leftTier === 0) leftTier = 1;
-        if (rightTier === 0) rightTier = 1;
-      }
+      const leftTier = getChannelTier(left);
+      const rightTier = getChannelTier(right);
 
       if (leftTier !== rightTier) return leftTier - rightTier;
 

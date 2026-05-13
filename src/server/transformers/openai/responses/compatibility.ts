@@ -342,6 +342,7 @@ export function shouldDowngradeResponsesToChat(
     || code === 'upstream_error'
     || message === 'upstream_error'
     || message === 'upstream request failed'
+    || /unsupported\s+model|model\s+not\s+supported|does\s+not\s+support(?:\s+the)?\s+model|model[_\s-]?not[_\s-]?found|unknown\s+model|invalid\s+model/i.test(upstreamErrorText)
     || rawCompact.includes('unsupported legacy protocol')
   );
 }

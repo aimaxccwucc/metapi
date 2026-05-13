@@ -13,6 +13,7 @@ import {
   normalizeResponsesInputForCompatibility,
   normalizeResponsesMessageContent,
   normalizeResponsesMessageItem,
+  shouldDowngradeResponsesToChat,
   shouldDowngradeResponsesChatToMessages as shouldDowngradeChatToMessages,
   shouldRetryResponsesCompatibility as shouldRetry,
 } from './compatibility.js';
@@ -53,6 +54,7 @@ export const openAiResponsesTransformer = {
     buildRetryBodies,
     buildRetryHeaders,
     shouldRetry,
+    shouldDowngradeResponsesToChat,
     shouldDowngradeChatToMessages,
   },
   aggregator: {
