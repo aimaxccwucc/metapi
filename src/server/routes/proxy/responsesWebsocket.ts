@@ -11,7 +11,7 @@ import {
   type DownstreamTokenAuthSuccess,
 } from '../../services/downstreamApiKeyService.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
-import { insertProxyLog } from '../../services/proxyLogStore.js';
+import { insertProxyLogBestEffort, resolveProxyLogRouteContext } from '../../services/proxyLogStore.js';
 import { mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
@@ -447,8 +447,8 @@ async function writeResponsesWebsocketProxyLog(input: {
       errorMessage: input.errorMessage,
     });
 
-    await insertProxyLog({
-      routeId: input.selected.channel.routeId,
+    insertProxyLogBestEffort({
+      ...resolveProxyLogRouteContext(input.selected),
       channelId: input.selected.channel.id,
       accountId: input.selected.account.id,
       downstreamApiKeyId: input.downstreamApiKeyId,

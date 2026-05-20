@@ -3,7 +3,7 @@ import { fetch } from 'undici';
 import { config } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutesOnDemand } from '../../services/modelService.js';
-import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
+import { reportProxyAllFailedBestEffort, reportTokenExpiredBestEffort } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
@@ -17,9 +17,9 @@ import { getProxyAuthContext } from '../../middleware/auth.js';
 import { buildUpstreamUrl } from './upstreamUrl.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from './downstreamClientContext.js';
 import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
-import { insertProxyLog } from '../../services/proxyLogStore.js';
+import { insertProxyLogBestEffort, resolveProxyLogRouteContext } from '../../services/proxyLogStore.js';
 import { markTokenModelUnavailable } from '../../services/mediaRoutingSupport.js';
-import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
+import { createRequestBudget, shouldPreferFastFailForSelected, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
 import { DefaultProxyConductor } from '../../proxy-core/conductor/DefaultProxyConductor.js';
 import { recordProxyDebugTrace } from './proxyDebugTrace.js';
 
@@ -81,7 +81,7 @@ async function executeImageProxyRequest(params: {
     },
     onNoChannel: async ({ attempts }) => {
       reportedNoChannel = true;
-      await reportProxyAllFailed({
+      reportProxyAllFailedBestEffort({
         model: requestedModel,
         reason: 'No available channels after retries',
       });
@@ -133,7 +133,7 @@ async function executeImageProxyRequest(params: {
       try {
         const upstream = await fetch(targetUrl, {
           ...requestInit,
-          signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true })),
+          signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) })),
         });
         const text = await upstream.text();
         if (!upstream.ok) {
@@ -173,7 +173,7 @@ async function executeImageProxyRequest(params: {
             clientContext,
           );
           if (isTokenExpiredError({ status: upstream.status, message: text })) {
-            await reportTokenExpired({
+            reportTokenExpiredBestEffort({
               accountId: selected.account.id,
               username: selected.account.username,
               siteName: selected.site.name,
@@ -301,7 +301,7 @@ async function executeImageProxyRequest(params: {
     : (execution.rawErrorText || 'upstream request failed');
 
   if (!reportedNoChannel) {
-    await reportProxyAllFailed({
+    reportProxyAllFailedBestEffort({
       model: requestedModel,
       reason: finalStatus === 504 ? requestBudget.buildTimeoutMessage() : finalMessage,
     });
@@ -443,8 +443,8 @@ async function logProxy(
       downstreamPath,
       errorMessage,
     });
-    await insertProxyLog({
-      routeId: selected.channel.routeId,
+    insertProxyLogBestEffort({
+      ...resolveProxyLogRouteContext(selected),
       channelId: selected.channel.id,
       accountId: selected.account.id,
       downstreamApiKeyId,

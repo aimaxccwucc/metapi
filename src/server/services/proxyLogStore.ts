@@ -5,10 +5,13 @@ import {
   hasProxyLogCacheColumns,
   hasProxyLogClientColumns,
   hasProxyLogDownstreamApiKeyIdColumn,
+  hasProxyLogRouteContextColumns,
 } from '../db/index.js';
 
 export type ProxyLogInsertInput = {
   routeId?: number | null;
+  entryRouteId?: number | null;
+  sourceRouteId?: number | null;
   channelId?: number | null;
   accountId?: number | null;
   downstreamApiKeyId?: number | null;
@@ -33,6 +36,34 @@ export type ProxyLogInsertInput = {
   createdAt?: string | null;
 };
 
+type ProxyLogSelectedRouteContext = {
+  entryRouteId?: number | null;
+  sourceRouteId?: number | null;
+  channel?: { routeId?: number | null } | null;
+} | null | undefined;
+
+export function resolveProxyLogRouteContext(selected: ProxyLogSelectedRouteContext): {
+  routeId: number | null;
+  entryRouteId: number | null;
+  sourceRouteId: number | null;
+} {
+  const channelRouteId = typeof selected?.channel?.routeId === 'number'
+    ? selected.channel.routeId
+    : null;
+  const sourceRouteId = typeof selected?.sourceRouteId === 'number'
+    ? selected.sourceRouteId
+    : channelRouteId;
+  const entryRouteId = typeof selected?.entryRouteId === 'number'
+    ? selected.entryRouteId
+    : sourceRouteId;
+
+  return {
+    routeId: sourceRouteId,
+    entryRouteId,
+    sourceRouteId,
+  };
+}
+
 function buildProxyLogCoreSelectFields() {
   return {
     id: schema.proxyLogs.id,
@@ -52,6 +83,13 @@ function buildProxyLogCoreSelectFields() {
     errorMessage: schema.proxyLogs.errorMessage,
     retryCount: schema.proxyLogs.retryCount,
     createdAt: schema.proxyLogs.createdAt,
+  };
+}
+
+function buildProxyLogRouteContextSelectFields() {
+  return {
+    entryRouteId: schema.proxyLogs.entryRouteId,
+    sourceRouteId: schema.proxyLogs.sourceRouteId,
   };
 }
 
@@ -75,9 +113,11 @@ function buildProxyLogSelectFields(options?: {
   includeBillingDetails?: boolean;
   includeClientFields?: boolean;
   includeCacheFields?: boolean;
+  includeRouteContextFields?: boolean;
 }) {
   return {
     ...buildProxyLogCoreSelectFields(),
+    ...(options?.includeRouteContextFields ? buildProxyLogRouteContextSelectFields() : {}),
     ...(options?.includeCacheFields ? buildProxyLogCacheSelectFields() : {}),
     ...(options?.includeClientFields ? buildProxyLogClientSelectFields() : {}),
     ...(options?.includeBillingDetails ? { billingDetails: schema.proxyLogs.billingDetails } : {}),
@@ -87,6 +127,7 @@ function buildProxyLogSelectFields(options?: {
 export async function getProxyLogBaseSelectFields() {
   return buildProxyLogSelectFields({
     includeCacheFields: await hasProxyLogCacheColumns(),
+    includeRouteContextFields: await hasProxyLogRouteContextColumns(),
   });
 }
 
@@ -96,6 +137,7 @@ export type ResolvedProxyLogSelectFields = {
   includeBillingDetails: boolean;
   includeClientFields: boolean;
   includeCacheFields: boolean;
+  includeRouteContextFields: boolean;
   fields: ProxyLogSelectFields;
 };
 
@@ -108,15 +150,18 @@ export async function resolveProxyLogSelectFields(options?: {
   const includeClientFields = options?.includeClientFields !== false
     && await hasProxyLogClientColumns();
   const includeCacheFields = await hasProxyLogCacheColumns();
+  const includeRouteContextFields = await hasProxyLogRouteContextColumns();
 
   return {
     includeBillingDetails,
     includeClientFields,
     includeCacheFields,
+    includeRouteContextFields,
     fields: buildProxyLogSelectFields({
       includeBillingDetails,
       includeClientFields,
       includeCacheFields,
+      includeRouteContextFields,
     }),
   };
 }
@@ -136,10 +181,12 @@ export async function withProxyLogSelectFields<T>(
           includeBillingDetails: false,
           includeClientFields: selection.includeClientFields,
           includeCacheFields: selection.includeCacheFields,
+          includeRouteContextFields: selection.includeRouteContextFields,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: false,
             includeClientFields: selection.includeClientFields,
             includeCacheFields: selection.includeCacheFields,
+            includeRouteContextFields: selection.includeRouteContextFields,
           }),
         };
         continue;
@@ -150,10 +197,12 @@ export async function withProxyLogSelectFields<T>(
           includeBillingDetails: selection.includeBillingDetails,
           includeClientFields: false,
           includeCacheFields: selection.includeCacheFields,
+          includeRouteContextFields: selection.includeRouteContextFields,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: selection.includeBillingDetails,
             includeClientFields: false,
             includeCacheFields: selection.includeCacheFields,
+            includeRouteContextFields: selection.includeRouteContextFields,
           }),
         };
         continue;
@@ -164,10 +213,28 @@ export async function withProxyLogSelectFields<T>(
           includeBillingDetails: selection.includeBillingDetails,
           includeClientFields: selection.includeClientFields,
           includeCacheFields: false,
+          includeRouteContextFields: selection.includeRouteContextFields,
           fields: buildProxyLogSelectFields({
             includeBillingDetails: selection.includeBillingDetails,
             includeClientFields: selection.includeClientFields,
             includeCacheFields: false,
+            includeRouteContextFields: selection.includeRouteContextFields,
+          }),
+        };
+        continue;
+      }
+
+      if (selection.includeRouteContextFields && isMissingProxyLogRouteContextColumnsError(error)) {
+        selection = {
+          includeBillingDetails: selection.includeBillingDetails,
+          includeClientFields: selection.includeClientFields,
+          includeCacheFields: selection.includeCacheFields,
+          includeRouteContextFields: false,
+          fields: buildProxyLogSelectFields({
+            includeBillingDetails: selection.includeBillingDetails,
+            includeClientFields: selection.includeClientFields,
+            includeCacheFields: selection.includeCacheFields,
+            includeRouteContextFields: false,
           }),
         };
         continue;
@@ -263,6 +330,19 @@ export function isMissingProxyLogCacheColumnsError(error: unknown): boolean {
     );
 }
 
+export function isMissingProxyLogRouteContextColumnsError(error: unknown): boolean {
+  const lowered = normalizeProxyLogStoreErrorMessage(error);
+  const hasRouteContextColumnReference = ['entry_route_id', 'source_route_id'].some((columnName) => lowered.includes(columnName));
+
+  return hasRouteContextColumnReference
+    && (
+      lowered.includes('does not exist')
+      || lowered.includes('unknown column')
+      || lowered.includes('no such column')
+      || lowered.includes('has no column named')
+    );
+}
+
 export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> {
   const baseValues = {
     routeId: input.routeId ?? null,
@@ -297,15 +377,24 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
   const includeClientFields = requestedClientFields
     && await hasProxyLogClientColumns();
   const includeCacheFields = await hasProxyLogCacheColumns();
+  const includeRouteContextFields = await hasProxyLogRouteContextColumns();
 
   let allowBillingDetails = includeBillingDetails;
   let allowDownstreamApiKeyId = includeDownstreamApiKeyId;
   let allowClientFields = includeClientFields;
   let allowCacheFields = includeCacheFields;
+  let allowRouteContextFields = includeRouteContextFields;
 
   while (true) {
+    const routeContextId = input.routeId ?? null;
     const values = {
       ...baseValues,
+      ...(allowRouteContextFields
+        ? {
+          entryRouteId: input.entryRouteId ?? routeContextId,
+          sourceRouteId: input.sourceRouteId ?? routeContextId,
+        }
+        : {}),
       ...(allowBillingDetails ? { billingDetails: serializedBillingDetails } : {}),
       ...(allowDownstreamApiKeyId ? { downstreamApiKeyId: input.downstreamApiKeyId } : {}),
       ...(allowClientFields
@@ -348,7 +437,18 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
         continue;
       }
 
+      if (allowRouteContextFields && isMissingProxyLogRouteContextColumnsError(error)) {
+        allowRouteContextFields = false;
+        continue;
+      }
+
       throw error;
     }
   }
+}
+
+export function insertProxyLogBestEffort(input: ProxyLogInsertInput, label = 'proxy log'): void {
+  void insertProxyLog(input).catch((error) => {
+    console.warn(`[${label}] failed to write proxy log`, error);
+  });
 }

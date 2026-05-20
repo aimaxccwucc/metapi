@@ -3,7 +3,7 @@ import { fetch } from 'undici';
 import { config } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutesOnDemand } from '../../services/modelService.js';
-import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
+import { reportProxyAllFailed, reportTokenExpiredBestEffort } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
@@ -19,8 +19,8 @@ import { getProxyAuthContext } from '../../middleware/auth.js';
 import { buildUpstreamUrl } from './upstreamUrl.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from './downstreamClientContext.js';
 import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
-import { insertProxyLog } from '../../services/proxyLogStore.js';
-import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
+import { insertProxyLogBestEffort, resolveProxyLogRouteContext } from '../../services/proxyLogStore.js';
+import { createRequestBudget, shouldPreferFastFailForSelected, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
 import { wrapReaderWithIdleTimeout } from './streamTimeout.js';
 import { recordProxyDebugTrace } from './proxyDebugTrace.js';
 import {
@@ -36,6 +36,31 @@ import {
 import { DefaultProxyConductor } from '../../proxy-core/conductor/DefaultProxyConductor.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
+const NO_CHANNEL_REFRESH_FAST_WAIT_MS = 1_500;
+
+async function refreshRouteSelectionWithFastWait(): Promise<void> {
+  const refresh = Promise.resolve(refreshModelsAndRebuildRoutesOnDemand()).catch((error) => {
+    console.warn('[completions] on-demand route refresh failed:', error);
+    return null;
+  });
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      refresh,
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), NO_CHANNEL_REFRESH_FAST_WAIT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function reportProxyAllFailedBestEffort(model: string, reason: string): void {
+  Promise.resolve(reportProxyAllFailed({ model, reason })).catch((error) => {
+    console.warn('[completions] report proxy all failed failed:', error);
+  });
+}
 
 export async function completionsProxyRoute(app: FastifyInstance) {
   app.post('/v1/completions', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -132,15 +157,12 @@ export async function completionsProxyRoute(app: FastifyInstance) {
       downstreamPolicy,
       maxAttempts: MAX_RETRIES + 1,
       refreshSelection: async () => {
-        await refreshModelsAndRebuildRoutesOnDemand();
+        await refreshRouteSelectionWithFastWait();
         return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
       },
       onNoChannel: async ({ attempts }) => {
         reportedNoChannel = true;
-        await reportProxyAllFailed({
-          model: requestedModel,
-          reason: 'No available channels after retries',
-        });
+        reportProxyAllFailedBestEffort(requestedModel, 'No available channels after retries');
         if (attempts === 0) {
           await logProxyNoChannelFailure({
             modelRequested: requestedModel,
@@ -197,8 +219,8 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             body: JSON.stringify(forwardBody),
             signal: AbortSignal.timeout(
               isStream
-                ? requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: true })
-                : requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                ? requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) })
+                : requestBudget.getPerAttemptTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) }),
             ),
           }, getProxyUrlFromExtraConfig((selected.account as { extraConfig?: string | null | undefined }).extraConfig)));
 
@@ -240,7 +262,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             );
 
             if (isTokenExpiredError({ status: upstream.status, message: errText })) {
-              await reportTokenExpired({
+              reportTokenExpiredBestEffort({
                 accountId: (selected.account as { id: number }).id,
                 username: (selected.account as { username: string }).username,
                 siteName: (selected.site as { name: string }).name,
@@ -449,31 +471,6 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             };
           }
 
-          const resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
-            site: selected.site,
-            account: selected.account,
-            tokenValue: selected.tokenValue,
-            tokenName: selected.tokenName,
-            modelName: selected.actualModel || requestedModel,
-            requestStartedAtMs: startTime,
-            requestEndedAtMs: startTime + latency,
-            localLatencyMs: latency,
-            usage: {
-              promptTokens: parsedUsage.promptTokens,
-              completionTokens: parsedUsage.completionTokens,
-              totalTokens: parsedUsage.totalTokens,
-            },
-          });
-          const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
-            site: selected.site,
-            account: selected.account,
-            modelName: selected.actualModel || requestedModel,
-            parsedUsage,
-            resolvedUsage,
-          });
-
-          await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
-          recordDownstreamCostUsage(request, estimatedCost);
           recordProxyDebugTrace({
             clientContext,
             kind: 'proxy_success',
@@ -485,31 +482,75 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             retryCount,
             endpointPath: '/v1/completions',
           });
-          logProxy(
-            selected,
-            requestedModel,
-            'success',
-            200,
-            latency,
-            null,
-            retryCount,
-            downstreamApiKeyId,
-            resolvedUsage.promptTokens,
-            resolvedUsage.completionTokens,
-            resolvedUsage.totalTokens,
-            estimatedCost,
-            billingDetails,
-            clientContext,
-            downstreamPath,
-            !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
-          );
+          void (async () => {
+            let resolvedUsage: Awaited<ReturnType<typeof resolveProxyUsageWithSelfLogFallback>> = {
+              promptTokens: parsedUsage.promptTokens,
+              completionTokens: parsedUsage.completionTokens,
+              totalTokens: parsedUsage.totalTokens,
+              recoveredFromSelfLog: false,
+              estimatedCostFromQuota: 0,
+              selfLogBillingMeta: null,
+            };
+            let estimatedCost = 0;
+            let billingDetails: unknown = null;
+            try {
+              resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+                site: selected.site,
+                account: selected.account,
+                tokenValue: selected.tokenValue,
+                tokenName: selected.tokenName,
+                modelName: selected.actualModel || requestedModel,
+                requestStartedAtMs: startTime,
+                requestEndedAtMs: startTime + latency,
+                localLatencyMs: latency,
+                usage: {
+                  promptTokens: parsedUsage.promptTokens,
+                  completionTokens: parsedUsage.completionTokens,
+                  totalTokens: parsedUsage.totalTokens,
+                },
+              });
+              const billing = await resolveProxyLogBilling({
+                site: selected.site,
+                account: selected.account,
+                modelName: selected.actualModel || requestedModel,
+                parsedUsage,
+                resolvedUsage,
+              });
+              estimatedCost = billing.estimatedCost;
+              billingDetails = billing.billingDetails;
+            } catch (error) {
+              console.error('[completions] async success bookkeeping failed:', error);
+            }
+            await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, selected.actualModel);
+            recordDownstreamCostUsage(request, estimatedCost);
+            logProxy(
+              selected,
+              requestedModel,
+              'success',
+              200,
+              latency,
+              null,
+              retryCount,
+              downstreamApiKeyId,
+              resolvedUsage.promptTokens,
+              resolvedUsage.completionTokens,
+              resolvedUsage.totalTokens,
+              estimatedCost,
+              billingDetails,
+              clientContext,
+              downstreamPath,
+              !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
+            );
+          })().catch((error) => {
+            console.error('[completions] async success bookkeeping failed:', error);
+          });
           if (responseCacheKey && inflightReservation) {
             const cachedResponse = {
               body: JSON.stringify(data),
               isStream: false,
-              promptTokens: resolvedUsage.promptTokens,
-              completionTokens: resolvedUsage.completionTokens,
-              estimatedCost,
+              promptTokens: parsedUsage.promptTokens,
+              completionTokens: parsedUsage.completionTokens,
+              estimatedCost: 0,
             };
             writeResponseCache(responseCacheKey, requestedModel, cachedResponse)
               .then(() => inflightReservation?.resolve({ response: cachedResponse, cacheStatus: 'hit' }))
@@ -520,7 +561,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             ok: true,
             response: upstream,
             latencyMs: latency,
-            cost: estimatedCost,
+            cost: 0,
           };
         } catch (err: any) {
           const errorMessage = err?.message || 'network failure';
@@ -595,10 +636,10 @@ export async function completionsProxyRoute(app: FastifyInstance) {
     const retryCount = Math.max(0, execution.attempts - 1);
 
     if (!reportedNoChannel) {
-      await reportProxyAllFailed({
-        model: requestedModel,
-        reason: finalStatus === 504 ? requestBudget.buildTimeoutMessage() : finalMessage,
-      });
+      reportProxyAllFailedBestEffort(
+        requestedModel,
+        finalStatus === 504 ? requestBudget.buildTimeoutMessage() : finalMessage,
+      );
     }
 
     let staleFallback: Awaited<ReturnType<typeof lookupStaleResponseCache>> = null;
@@ -657,8 +698,8 @@ async function logProxy(
       downstreamPath,
       errorMessage,
     });
-    await insertProxyLog({
-      routeId: selected.channel.routeId,
+    insertProxyLogBestEffort({
+      ...resolveProxyLogRouteContext(selected),
       channelId: selected.channel.id,
       accountId: selected.account.id,
       downstreamApiKeyId,

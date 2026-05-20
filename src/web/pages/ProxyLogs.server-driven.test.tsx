@@ -147,6 +147,10 @@ describe('ProxyLogs server-driven page', () => {
       accountBalanceEstimated: 11.11,
       siteName: 'main-site',
       siteUrl: 'https://main-site.example.com',
+      routeId: 25009,
+      entryRouteId: 25011,
+      sourceRouteId: 25009,
+      channelId: 127191,
       clientFamily: 'codex',
       clientAppId: 'cherry_studio',
       clientAppName: 'Cherry Studio',
@@ -578,6 +582,7 @@ describe('ProxyLogs server-driven page', () => {
 
       expect(apiMock.getProxyLogDetail).toHaveBeenCalledTimes(1);
       expect(apiMock.getProxyLogDetail).toHaveBeenCalledWith(101);
+      expect(collectText(root!.root)).toContain('路由链路：入口 #25011 / 来源 #25009 / 通道 #127191');
     } finally {
       root?.unmount();
     }

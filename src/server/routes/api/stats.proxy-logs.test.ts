@@ -264,6 +264,10 @@ describe('stats proxy logs routes', () => {
     }).returning().get();
 
     const inserted = await db.insert(schema.proxyLogs).values({
+      routeId: 25009,
+      entryRouteId: 25011,
+      sourceRouteId: 25009,
+      channelId: 127191,
       accountId: account.id,
       downstreamApiKeyId: downstreamKey.id,
       modelRequested: 'gpt-5',
@@ -306,6 +310,10 @@ describe('stats proxy logs routes', () => {
       clientAppName: string | null;
       clientConfidence: string | null;
       billingDetails: Record<string, unknown> | null;
+      routeId: number | null;
+      entryRouteId: number | null;
+      sourceRouteId: number | null;
+      channelId: number | null;
     };
 
     expect(body.id).toBe(logId);
@@ -316,6 +324,10 @@ describe('stats proxy logs routes', () => {
     expect(body.downstreamKeyName).toBe('detail-key');
     expect(body.downstreamKeyGroupName).toBe('测试项目');
     expect(body.downstreamKeyTags).toEqual(['回归', '日志']);
+    expect(body.routeId).toBe(25009);
+    expect(body.entryRouteId).toBe(25011);
+    expect(body.sourceRouteId).toBe(25009);
+    expect(body.channelId).toBe(127191);
     expect(body.clientFamily).toBe('codex');
     expect(body.clientAppId).toBe('cherry_studio');
     expect(body.clientAppName).toBe('Cherry Studio');

@@ -5,6 +5,7 @@ import {
   parseRetryAfterMs,
   resetRetryBackoffMetrics,
   resolveRetryBackoffMs,
+  shouldPreferFastFailForSelected,
   shouldRetryWithinBudget,
   waitForRetryWithinBudget,
 } from './requestBudget.js';
@@ -47,13 +48,21 @@ describe('requestBudget', () => {
       const budget = createRequestBudget(180_000);
       expect(budget.getPerAttemptTimeoutMs()).toBe(90_000);
       expect(budget.getStreamFirstByteTimeoutMs()).toBe(135_000);
-      expect(budget.getPerAttemptTimeoutMs({ preferFastFail: true })).toBe(90_000);
+      expect(budget.getPerAttemptTimeoutMs({ preferFastFail: true })).toBe(12_000);
       expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true })).toBe(135_000);
       expect(budget.getPerAttemptTimeoutMs({ preferFastFail: true, hardCapMs: 4_000 })).toBe(4_000);
       expect(budget.getStreamFirstByteTimeoutMs({ preferFastFail: true, hardCapMs: 4_000 })).toBe(4_000);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('uses fast-fail only when another selected-channel candidate exists', () => {
+    expect(shouldPreferFastFailForSelected({ availableChannelCount: 2 })).toBe(true);
+    expect(shouldPreferFastFailForSelected({ availableChannelCount: 1 })).toBe(false);
+    expect(shouldPreferFastFailForSelected({ availableChannelCount: 0 })).toBe(false);
+    expect(shouldPreferFastFailForSelected({ availableChannelCount: null })).toBe(true);
+    expect(shouldPreferFastFailForSelected(null)).toBe(true);
   });
 
   it('allows retries only when retry budget and retry count both permit', () => {

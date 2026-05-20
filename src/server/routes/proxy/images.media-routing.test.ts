@@ -48,6 +48,8 @@ vi.mock('../../services/modelService.js', () => ({
 vi.mock('../../services/alertService.js', () => ({
   reportProxyAllFailed: (...args: unknown[]) => reportProxyAllFailedMock(...args),
   reportTokenExpired: (...args: unknown[]) => reportTokenExpiredMock(...args),
+  reportProxyAllFailedBestEffort: (...args: unknown[]) => reportProxyAllFailedMock(...args),
+  reportTokenExpiredBestEffort: (...args: unknown[]) => reportTokenExpiredMock(...args),
 }));
 
 vi.mock('../../services/alertRules.js', () => ({

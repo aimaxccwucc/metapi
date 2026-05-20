@@ -276,6 +276,8 @@ export const routeChannels = sqliteTable('route_channels', {
 export const proxyLogs = sqliteTable('proxy_logs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   routeId: integer('route_id'),
+  entryRouteId: integer('entry_route_id'),
+  sourceRouteId: integer('source_route_id'),
   channelId: integer('channel_id'),
   accountId: integer('account_id'),
   downstreamApiKeyId: integer('downstream_api_key_id'),
@@ -306,6 +308,8 @@ export const proxyLogs = sqliteTable('proxy_logs', {
   downstreamKeyCreatedIdx: index('proxy_logs_downstream_api_key_created_at_idx').on(table.downstreamApiKeyId, table.createdAt),
   clientAppCreatedIdx: index('proxy_logs_client_app_id_created_at_idx').on(table.clientAppId, table.createdAt),
   clientFamilyCreatedIdx: index('proxy_logs_client_family_created_at_idx').on(table.clientFamily, table.createdAt),
+  entryRouteIdIdx: index('proxy_logs_entry_route_id_idx').on(table.entryRouteId),
+  sourceRouteIdIdx: index('proxy_logs_source_route_id_idx').on(table.sourceRouteId),
   channelIdIdx: index('proxy_logs_channel_id_idx').on(table.channelId),
   modelRequestedCreatedIdx: index('proxy_logs_model_requested_created_at_idx').on(table.modelRequested, table.createdAt),
 }));

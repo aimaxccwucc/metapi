@@ -43,6 +43,10 @@ const LEGACY_COMPAT_TABLES = new Set([
   'downstream_api_keys',
   'site_disabled_models',
   'token_coverage_autoprovision_states',
+  'checkin_states',
+  'site_profiles',
+  'site_protocol_profiles',
+  'model_capability_profiles',
 ]);
 
 const LEGACY_COMPAT_COLUMNS = new Set([
@@ -85,6 +89,8 @@ const LEGACY_COMPAT_COLUMNS = new Set([
   'proxy_logs.client_app_name',
   'proxy_logs.client_confidence',
   'proxy_logs.downstream_api_key_id',
+  'proxy_logs.entry_route_id',
+  'proxy_logs.source_route_id',
 ]);
 
 const LEGACY_COMPAT_INDEXES = new Set([
@@ -102,12 +108,27 @@ const LEGACY_COMPAT_INDEXES = new Set([
   'proxy_logs_client_app_id_created_at_idx',
   'proxy_logs_client_family_created_at_idx',
   'proxy_logs_downstream_api_key_created_at_idx',
+  'proxy_logs_entry_route_id_idx',
+  'proxy_logs_source_route_id_idx',
   'sites_health_status_idx',
   'route_group_sources_group_source_unique',
   'route_group_sources_source_route_id_idx',
   'token_coverage_autoprovision_states_account_model_group_unique',
   'token_coverage_autoprovision_states_status_cooldown_idx',
   'token_coverage_autoprovision_states_site_account_idx',
+  'checkin_states_account_unique',
+  'checkin_states_site_status_idx',
+  'checkin_states_status_retry_idx',
+  'checkin_states_manual_idx',
+  'site_profiles_site_unique',
+  'site_profiles_operational_score_idx',
+  'site_profiles_platform_idx',
+  'site_protocol_profiles_site_unique',
+  'site_protocol_profiles_preferred_idx',
+  'site_protocol_profiles_cooldown_idx',
+  'model_capability_profiles_model_unique',
+  'model_capability_profiles_tools_idx',
+  'model_capability_profiles_vision_idx',
   ...SHARED_INDEX_COMPATIBILITY_SPECS.map((spec) => spec.indexName),
 ]);
 

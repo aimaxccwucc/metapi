@@ -54,6 +54,7 @@ import {
   ensureProxyLogCacheColumns,
   ensureProxyLogClientColumns,
   ensureProxyLogDownstreamApiKeyIdColumn,
+  ensureProxyLogRouteContextColumns,
   ensureProxyLogBillingDetailsColumn,
   ensureOperationalOptimizationCompatibilityTables,
   ensureResponseCacheTable,
@@ -361,6 +362,7 @@ try {
   await ensureTokenCoverageAutoprovisionCompatibilityColumns();
   await ensureProxyLogCacheColumns();
   await ensureProxyLogClientColumns();
+  await ensureProxyLogRouteContextColumns();
   await ensureProxyLogDownstreamApiKeyIdColumn();
   await ensureOperationalOptimizationCompatibilityTables();
   if (config.responseCacheEnabled) {

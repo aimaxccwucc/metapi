@@ -504,6 +504,7 @@ describe('rebuildTokenRoutesFromAvailability', () => {
 
     const sourceRoute = await db.insert(schema.tokenRoutes).values({
       modelPattern: 'claude-sonnet-4-5',
+      probePolicy: 'manual',
       enabled: true,
     }).returning().get();
 

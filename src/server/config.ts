@@ -136,6 +136,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     proxyDebugTraceMaxEntries: Math.max(10, Math.min(MAX_PROXY_DEBUG_TRACE_ENTRIES, Math.trunc(parseNumber(env.PROXY_DEBUG_TRACE_MAX_ENTRIES, 300)))),
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
     upstreamRequestTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_REQUEST_TIMEOUT_MS, 90_000))),
+    upstreamFastFailTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_FAST_FAIL_TIMEOUT_MS, 12_000))),
     upstreamStreamFirstByteTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_STREAM_FIRST_BYTE_TIMEOUT_MS, 135_000))),
     upstreamRequestBudgetMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_REQUEST_BUDGET_MS, 360_000))),
     upstreamStreamIdleTimeoutMs: Math.max(1_000, Math.trunc(parseNumber(env.UPSTREAM_STREAM_IDLE_TIMEOUT_MS, 360_000))),

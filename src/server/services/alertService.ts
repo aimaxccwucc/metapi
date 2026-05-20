@@ -70,3 +70,15 @@ export async function reportProxyAllFailed(params: { model: string; reason: stri
     console.warn('[alertService] route auto-probe failed:', err instanceof Error ? err.message : String(err));
   });
 }
+
+export function reportTokenExpiredBestEffort(params: Parameters<typeof reportTokenExpired>[0]): void {
+  void reportTokenExpired(params).catch((error) => {
+    console.warn('[alertService] report token expired failed:', error);
+  });
+}
+
+export function reportProxyAllFailedBestEffort(params: Parameters<typeof reportProxyAllFailed>[0]): void {
+  void reportProxyAllFailed(params).catch((error) => {
+    console.warn('[alertService] report proxy all failed failed:', error);
+  });
+}

@@ -3,7 +3,7 @@ import { fetch } from 'undici';
 import { config } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutesOnDemand } from '../../services/modelService.js';
-import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
+import { reportProxyAllFailedBestEffort, reportTokenExpiredBestEffort } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
@@ -18,8 +18,8 @@ import { getProxyAuthContext } from '../../middleware/auth.js';
 import { buildUpstreamUrl } from './upstreamUrl.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from './downstreamClientContext.js';
 import { logProxyNoChannelFailure } from './proxyNoChannelLog.js';
-import { insertProxyLog } from '../../services/proxyLogStore.js';
-import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
+import { insertProxyLogBestEffort, resolveProxyLogRouteContext } from '../../services/proxyLogStore.js';
+import { createRequestBudget, shouldPreferFastFailForSelected, shouldRetryWithinBudget, waitForRetryWithinBudget } from './requestBudget.js';
 import { DefaultProxyConductor } from '../../proxy-core/conductor/DefaultProxyConductor.js';
 import { recordProxyDebugTrace } from './proxyDebugTrace.js';
 
@@ -64,7 +64,7 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
       },
       onNoChannel: async ({ attempts }) => {
         reportedNoChannel = true;
-        await reportProxyAllFailed({
+        reportProxyAllFailedBestEffort({
           model: requestedModel,
           reason: 'No available channels after retries',
         });
@@ -121,7 +121,7 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
               'Authorization': `Bearer ${selected.tokenValue}`,
             },
             body: JSON.stringify(forwardBody),
-            signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true })),
+            signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) })),
           }, getProxyUrlFromExtraConfig(selected.account.extraConfig)));
 
           const text = await upstream.text();
@@ -164,7 +164,7 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
             );
 
             if (isTokenExpiredError({ status: upstream.status, message: text })) {
-              await reportTokenExpired({
+              reportTokenExpiredBestEffort({
                 accountId: selected.account.id,
                 username: selected.account.username,
                 siteName: selected.site.name,
@@ -316,7 +316,7 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
       : (execution.rawErrorText || 'upstream request failed');
 
     if (!reportedNoChannel) {
-      await reportProxyAllFailed({
+      reportProxyAllFailedBestEffort({
         model: requestedModel,
         reason: finalStatus === 504 ? requestBudget.buildTimeoutMessage() : finalMessage,
       });
@@ -359,8 +359,8 @@ async function logProxy(
       downstreamPath,
       errorMessage,
     });
-    await insertProxyLog({
-      routeId: selected.channel.routeId,
+    insertProxyLogBestEffort({
+      ...resolveProxyLogRouteContext(selected),
       channelId: selected.channel.id,
       accountId: selected.account.id,
       downstreamApiKeyId,

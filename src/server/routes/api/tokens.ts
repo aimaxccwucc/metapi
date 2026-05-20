@@ -160,6 +160,17 @@ function normalizeRouteProbePolicy(value: unknown): RouteProbePolicy {
   return value === 'manual' ? 'manual' : 'system';
 }
 
+function normalizeEnabledInput(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  }
+  return Boolean(value);
+}
+
 function isRoutingGovernanceSubjectType(value: string): value is RoutingGovernanceSubjectType {
   return ROUTING_GOVERNANCE_SUBJECT_TYPES.has(value as RoutingGovernanceSubjectType);
 }
@@ -1174,6 +1185,48 @@ async function fetchChannelsForRoutes(routeIds: number[]): Promise<Map<number, R
     }
     return filtered;
   });
+}
+
+async function verifyRouteHasLiveChannelBeforeEnable(route: RouteRow): Promise<{
+  ok: boolean;
+  total: number;
+  availableCount: number;
+  message: string;
+}> {
+  const channelsByRoute = await fetchChannelsForRouteRows([route]);
+  const enabledChannels = (channelsByRoute.get(route.id) || [])
+    .filter((channel) => channel.enabled !== false);
+  if (enabledChannels.length === 0) {
+    return {
+      ok: false,
+      total: 0,
+      availableCount: 0,
+      message: '启用失败：路由下没有启用通道，不能进入生产选路',
+    };
+  }
+
+  const result = await probeRouteChannelsForRoute(route, enabledChannels, {
+    limit: 200,
+    autoGovernance: true,
+    earlyStopOnAvailable: true,
+    probePrompt: 'Say OK.',
+    probeMaxOutputTokens: 8,
+  });
+  if (result.availableCount <= 0) {
+    return {
+      ok: false,
+      total: result.total,
+      availableCount: result.availableCount,
+      message: `启用失败：真实探测 ${result.total} 个通道，0 个成功，已阻止该路由进入生产选路`,
+    };
+  }
+
+  return {
+    ok: true,
+    total: result.total,
+    availableCount: result.availableCount,
+    message: `真实探测通过：${result.availableCount}/${result.total} 个通道可用`,
+  };
 }
 
 async function buildRouteChannelSummaryMapLight(routes: RouteRow[]): Promise<Map<number, RouteChannelSummary>> {
@@ -2502,6 +2555,9 @@ export async function tokensRoutes(app: FastifyInstance) {
     let nextModelPattern = existingRoute.modelPattern;
     let nextDisplayName = existingRoute.displayName ?? '';
     let nextSourceRouteIds = existingRoute.sourceRouteIds;
+    const nextEnabled = body.enabled !== undefined
+      ? normalizeEnabledInput(body.enabled)
+      : !!existingRoute.enabled;
 
     if (body.displayName !== undefined) {
       nextDisplayName = String(body.displayName || '').trim();
@@ -2527,10 +2583,46 @@ export async function tokensRoutes(app: FastifyInstance) {
     }
     if (body.modelMapping !== undefined) updates.modelMapping = body.modelMapping;
     if (body.routingStrategy !== undefined) updates.routingStrategy = normalizeRouteRoutingStrategy(body.routingStrategy);
-    if (body.enabled !== undefined) updates.enabled = body.enabled;
+    if (body.enabled !== undefined) updates.enabled = nextEnabled;
     if (body.routeMode !== undefined) updates.routeMode = routeMode;
     if (body.probePolicy !== undefined) updates.probePolicy = probePolicy;
     updates.updatedAt = new Date().toISOString();
+
+    const modelPatternChanged = nextModelPattern !== existingRoute.modelPattern;
+    const shouldProbeBeforeEnable = body.enabled !== undefined && nextEnabled;
+    let rebuiltPatternChannelsBeforeUpdate = false;
+    if (shouldProbeBeforeEnable) {
+      if (routeMode === 'explicit_group' && body.sourceRouteIds !== undefined) {
+        for (const sourceRouteId of nextSourceRouteIds) {
+          const sourceRoute = await getRouteWithSources(sourceRouteId);
+          if (!sourceRoute) continue;
+          await populateRouteChannelsByModelPattern(sourceRoute.id, sourceRoute.modelPattern);
+        }
+      }
+      if (routeMode === 'pattern' && modelPatternChanged) {
+        await rebuildAutomaticRouteChannelsByModelPattern(id, nextModelPattern);
+        rebuiltPatternChannelsBeforeUpdate = true;
+      }
+      const routeForProbe: RouteRow = {
+        ...existingRoute,
+        routeMode,
+        probePolicy,
+        modelPattern: nextModelPattern,
+        displayName: nextDisplayName || null,
+        enabled: true,
+        sourceRouteIds: nextSourceRouteIds,
+      };
+      const verification = await verifyRouteHasLiveChannelBeforeEnable(routeForProbe);
+      if (!verification.ok) {
+        return reply.code(409).send({
+          success: false,
+          message: verification.message,
+          routeId: id,
+          probedChannels: verification.total,
+          availableChannels: verification.availableCount,
+        });
+      }
+    }
 
     await db.update(schema.tokenRoutes).set(updates).where(eq(schema.tokenRoutes.id, id)).run();
     if (routeMode === 'explicit_group' && body.sourceRouteIds !== undefined) {
@@ -2541,13 +2633,12 @@ export async function tokensRoutes(app: FastifyInstance) {
         await populateRouteChannelsByModelPattern(sourceRoute.id, sourceRoute.modelPattern);
       }
     }
-    const modelPatternChanged = nextModelPattern !== existingRoute.modelPattern;
     const routeBehaviorChanged = modelPatternChanged
       || (routeMode === 'explicit_group' && body.sourceRouteIds !== undefined)
       || body.modelMapping !== undefined
       || body.routingStrategy !== undefined
       || body.enabled !== undefined;
-    if (routeMode === 'pattern' && modelPatternChanged) {
+    if (routeMode === 'pattern' && modelPatternChanged && !rebuiltPatternChannelsBeforeUpdate) {
       await rebuildAutomaticRouteChannelsByModelPattern(id, nextModelPattern);
     }
     if (routeBehaviorChanged) {

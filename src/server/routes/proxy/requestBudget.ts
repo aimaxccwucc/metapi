@@ -10,6 +10,13 @@ export type RequestBudget = {
   getStreamFirstByteTimeoutMs: (options?: { preferFastFail?: boolean; hardCapMs?: number }) => number;
 };
 
+export function shouldPreferFastFailForSelected(selected?: { availableChannelCount?: number | null } | null): boolean {
+  if (typeof selected?.availableChannelCount === 'number' && Number.isFinite(selected.availableChannelCount)) {
+    return selected.availableChannelCount > 1;
+  }
+  return true;
+}
+
 type RetryBackoffInput = {
   retryCount: number;
   maxRetries: number;
@@ -130,7 +137,7 @@ export function createRequestBudget(totalBudgetMs = config.upstreamRequestBudget
     getPerAttemptTimeoutMs: (options) => {
       const fastFailCap = Number.isFinite(options?.hardCapMs as number)
         ? Math.max(1_000, Math.trunc(options?.hardCapMs as number))
-        : config.upstreamRequestTimeoutMs;
+        : Math.min(config.upstreamFastFailTimeoutMs, config.upstreamRequestTimeoutMs);
       const hardCap = options?.preferFastFail ? fastFailCap : config.upstreamRequestTimeoutMs;
       return resolveCappedTimeout(hardCap);
     },

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { eq } from 'drizzle-orm';
 
 const getModelsMock = vi.fn();
 const withSiteProxyRequestInitMock = vi.fn();
@@ -778,7 +779,7 @@ describe('GET /api/routes/diagnostics', () => {
       enabled: true,
     }).returning().get();
 
-    await db.insert(schema.routeChannels).values({
+    const channel = await db.insert(schema.routeChannels).values({
       routeId: route.id,
       accountId: account.id,
       tokenId: token.id,
@@ -786,7 +787,7 @@ describe('GET /api/routes/diagnostics', () => {
       priority: 0,
       weight: 10,
       enabled: true,
-    }).run();
+    }).returning().get();
 
     getModelsMock.mockResolvedValue(['gpt-4.1']);
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
@@ -825,10 +826,13 @@ describe('GET /api/routes/diagnostics', () => {
     expect(body.items[0]).toMatchObject({
       available: false,
       inconclusive: true,
-      governanceAction: 'suppressed',
-      governanceReasonCode: 'invalid_channel',
+      governanceAction: 'none',
+      governanceReasonCode: null,
     });
     expect(body.items[0]?.reason || '').toContain('empty content');
+
+    const governance = await db.select().from(schema.routingGovernanceStates).all();
+    expect(governance).toHaveLength(0);
   });
 
   it('uses local proxy canary semantics for route probe when channel is known', async () => {
@@ -926,6 +930,12 @@ describe('GET /api/routes/diagnostics', () => {
       probeEndpoint: 'proxy-chat',
       probeClassification: 'supported',
     });
+
+    const storedChannel = await db.select().from(schema.routeChannels)
+      .where(eq(schema.routeChannels.id, channel.id))
+      .get();
+    expect(storedChannel?.successCount).toBe(1);
+    expect(storedChannel?.lastUsedAt).toBeTruthy();
   });
 
   it('clears matching governance entries when a probed route channel becomes available again', async () => {

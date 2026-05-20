@@ -78,7 +78,6 @@ function mapProbeClassificationToGovernanceReason(
 ): RoutingGovernanceReasonCode | null {
   if (classification === 'model_unavailable') return 'model_unsupported';
   if (classification === 'credential') return 'auth';
-  if (classification === 'inconclusive') return 'invalid_channel';
   return null;
 }
 
@@ -181,6 +180,11 @@ async function applyRouteProbeGovernance(input: {
   const canClearGovernance = input.result.available && input.result.detectionMethod === 'realtime_probe';
   if (canClearGovernance) {
     let cleared = 0;
+    cleared += await clearRoutingGovernanceStates({
+      subjectType: 'channel',
+      subjectId: input.channel.id,
+      reasonCodes: ['invalid_channel', 'manual_recheck_needed'],
+    });
     if (typeof input.channel.tokenId === 'number' && input.channel.tokenId > 0) {
       cleared += await clearRoutingGovernanceStates({
         subjectType: 'token',
@@ -205,6 +209,12 @@ async function applyRouteProbeGovernance(input: {
       modelName: input.probeModel,
       reasonCodes: ['model_unsupported'],
     });
+    await tokenRouter.recordSuccess(
+      input.channel.id,
+      Math.max(0, Math.trunc(input.result.latencyMs ?? 0)),
+      0,
+      input.probeModel,
+    );
     return {
       ...input.result,
       governanceAction: cleared > 0 ? 'cleared' : 'none',
@@ -235,6 +245,32 @@ async function applyRouteProbeGovernance(input: {
   const suppressUntil = governanceReasonCode === 'model_unsupported'
     ? nowPlusMs(12 * 60 * 60 * 1000)
     : nowPlusMs(30 * 60 * 1000);
+
+  if (governanceReasonCode === 'invalid_channel') {
+    await upsertRoutingGovernanceState({
+      subjectType: 'channel',
+      subjectId: input.channel.id,
+      modelName: null,
+      state: 'suppressed',
+      reasonCode: governanceReasonCode,
+      reasonDetail,
+      probeModelName: input.probeModel,
+      suppressUntil,
+      probeAfter: suppressUntil,
+      lastProbeAt: new Date().toISOString(),
+      lastProbeStatus: input.result.available ? 'available' : 'unavailable',
+      lastProbeMessage: input.result.reason,
+      lastSuccessAt: input.result.available ? new Date().toISOString() : null,
+      lastFailureAt: input.result.available ? null : new Date().toISOString(),
+      failureCountDelta: input.result.available ? 0 : 1,
+      successCountDelta: input.result.available ? 1 : 0,
+    });
+    return {
+      ...input.result,
+      governanceAction: 'suppressed',
+      governanceReasonCode,
+    };
+  }
 
   if (typeof input.channel.tokenId === 'number' && input.channel.tokenId > 0) {
     await upsertRoutingGovernanceState({

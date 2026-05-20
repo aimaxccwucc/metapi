@@ -1,9 +1,11 @@
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
-import { insertProxyLog } from '../../services/proxyLogStore.js';
+import { insertProxyLogBestEffort } from '../../services/proxyLogStore.js';
 import { tokenRouter, type RouteDecisionCandidate } from '../../services/tokenRouter.js';
 import type { DownstreamRoutingPolicy } from '../../services/downstreamPolicyTypes.js';
 import type { DownstreamClientContext } from './downstreamClientContext.js';
 import { composeProxyLogMessage } from './logPathMeta.js';
+
+const NO_CHANNEL_DIAGNOSTIC_TIMEOUT_MS = 200;
 
 function summarizeNoChannelDecision(candidates: RouteDecisionCandidate[]): string | null {
   if (candidates.length === 0) return null;
@@ -61,7 +63,24 @@ async function buildNoChannelDiagnostic(
   }
 }
 
-export async function logProxyNoChannelFailure(input: {
+async function buildNoChannelDiagnosticFastWait(
+  modelRequested: string,
+  downstreamPolicy?: DownstreamRoutingPolicy | null,
+): Promise<string | null> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      buildNoChannelDiagnostic(modelRequested, downstreamPolicy),
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), NO_CHANNEL_DIAGNOSTIC_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+export function logProxyNoChannelFailure(input: {
   modelRequested: string;
   httpStatus: number;
   errorMessage: string;
@@ -71,13 +90,13 @@ export async function logProxyNoChannelFailure(input: {
   clientContext?: DownstreamClientContext | null;
   downstreamApiKeyId?: number | null;
   downstreamPolicy?: DownstreamRoutingPolicy | null;
-}): Promise<void> {
-  try {
-    const diagnostic = await buildNoChannelDiagnostic(input.modelRequested, input.downstreamPolicy);
+}): void {
+  void (async () => {
+    const diagnostic = await buildNoChannelDiagnosticFastWait(input.modelRequested, input.downstreamPolicy);
     const errorMessage = diagnostic
       ? `${input.errorMessage}；${diagnostic}`
       : input.errorMessage;
-    await insertProxyLog({
+    insertProxyLogBestEffort({
       routeId: null,
       channelId: null,
       accountId: null,
@@ -108,7 +127,7 @@ export async function logProxyNoChannelFailure(input: {
       retryCount: input.retryCount,
       createdAt: formatUtcSqlDateTime(new Date()),
     });
-  } catch (error) {
+  })().catch((error) => {
     console.warn('[proxy] failed to write no-channel proxy log', error);
-  }
+  });
 }

@@ -57,6 +57,7 @@ let proxyLogBillingDetailsColumnAvailable: boolean | null = null;
 let proxyLogDownstreamApiKeyIdColumnAvailable: boolean | null = null;
 let proxyLogClientColumnsAvailable: boolean | null = null;
 let proxyLogCacheColumnsAvailable: boolean | null = null;
+let proxyLogRouteContextColumnsAvailable: boolean | null = null;
 let responseCacheTableAvailable: boolean | null = null;
 
 function resolveSqlitePath(): string {
@@ -728,6 +729,34 @@ function ensureProxyLogCacheSchema() {
   proxyLogCacheColumnsAvailable = true;
 }
 
+function ensureProxyLogRouteContextSchema() {
+  if (!tableExists('proxy_logs')) {
+    return;
+  }
+
+  if (!tableColumnExists('proxy_logs', 'entry_route_id')) {
+    execSqliteLegacyCompat('ALTER TABLE proxy_logs ADD COLUMN entry_route_id integer;');
+  }
+  if (!tableColumnExists('proxy_logs', 'source_route_id')) {
+    execSqliteLegacyCompat('ALTER TABLE proxy_logs ADD COLUMN source_route_id integer;');
+  }
+
+  if (!tableIndexExists('proxy_logs_entry_route_id_idx')) {
+    execSqliteLegacyCompat(`
+      CREATE INDEX IF NOT EXISTS proxy_logs_entry_route_id_idx
+      ON proxy_logs(entry_route_id);
+    `);
+  }
+  if (!tableIndexExists('proxy_logs_source_route_id_idx')) {
+    execSqliteLegacyCompat(`
+      CREATE INDEX IF NOT EXISTS proxy_logs_source_route_id_idx
+      ON proxy_logs(source_route_id);
+    `);
+  }
+
+  proxyLogRouteContextColumnsAvailable = true;
+}
+
 function normalizeSchemaErrorMessage(error: unknown): string {
   if (typeof error === 'object' && error && 'message' in error) {
     return String((error as { message?: unknown }).message || '');
@@ -974,6 +1003,41 @@ export async function hasProxyLogCacheColumns(): Promise<boolean> {
   return proxyLogCacheColumnsAvailable;
 }
 
+export async function hasProxyLogRouteContextColumns(): Promise<boolean> {
+  const requiredColumns = ['entry_route_id', 'source_route_id'];
+  if (proxyLogRouteContextColumnsAvailable !== null) {
+    return proxyLogRouteContextColumnsAvailable;
+  }
+
+  if (runtimeDbDialect === 'sqlite') {
+    proxyLogRouteContextColumnsAvailable = tableExists('proxy_logs')
+      && requiredColumns.every((columnName) => tableColumnExists('proxy_logs', columnName));
+    return proxyLogRouteContextColumnsAvailable;
+  }
+
+  if (runtimeDbDialect === 'mysql') {
+    if (!mysqlPool) return false;
+    const [rows] = await mysqlPool.query(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name IN (?, ?)',
+      ['proxy_logs', ...requiredColumns],
+    ) as [Array<{ column_name?: string }>, unknown];
+    const available = normalizeInformationSchemaColumnNames(rows);
+    proxyLogRouteContextColumnsAvailable = requiredColumns.every((columnName) => available.has(columnName));
+    return proxyLogRouteContextColumnsAvailable;
+  }
+
+  if (!pgPool) return false;
+  const result = await pgPool.query(
+    'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = ANY($2::text[])',
+    ['proxy_logs', requiredColumns],
+  );
+  const available = new Set(
+    result.rows.map((row) => String((row as { column_name?: string }).column_name || '').trim().toLowerCase()).filter(Boolean),
+  );
+  proxyLogRouteContextColumnsAvailable = requiredColumns.every((columnName) => available.has(columnName));
+  return proxyLogRouteContextColumnsAvailable;
+}
+
 export async function hasResponseCacheTable(): Promise<boolean> {
   const requiredColumns = [
     'cache_key',
@@ -1072,6 +1136,114 @@ export async function ensureProxyLogCacheColumns(): Promise<boolean> {
     }
     proxyLogCacheColumnsAvailable = false;
     console.warn('[db] failed to ensure proxy_logs cache columns', error);
+    return false;
+  }
+}
+
+export async function ensureProxyLogRouteContextColumns(): Promise<boolean> {
+  const requiredColumns = [
+    { name: 'entry_route_id', sqliteType: 'integer', mysqlType: 'INT NULL', postgresType: 'INTEGER' },
+    { name: 'source_route_id', sqliteType: 'integer', mysqlType: 'INT NULL', postgresType: 'INTEGER' },
+  ];
+  const requiredIndexes = [
+    {
+      name: 'proxy_logs_entry_route_id_idx',
+      sqliteSql: 'CREATE INDEX IF NOT EXISTS proxy_logs_entry_route_id_idx ON proxy_logs(entry_route_id);',
+      mysqlSql: 'CREATE INDEX `proxy_logs_entry_route_id_idx` ON `proxy_logs` (`entry_route_id`)',
+      postgresSql: 'CREATE INDEX "proxy_logs_entry_route_id_idx" ON "proxy_logs" ("entry_route_id")',
+    },
+    {
+      name: 'proxy_logs_source_route_id_idx',
+      sqliteSql: 'CREATE INDEX IF NOT EXISTS proxy_logs_source_route_id_idx ON proxy_logs(source_route_id);',
+      mysqlSql: 'CREATE INDEX `proxy_logs_source_route_id_idx` ON `proxy_logs` (`source_route_id`)',
+      postgresSql: 'CREATE INDEX "proxy_logs_source_route_id_idx" ON "proxy_logs" ("source_route_id")',
+    },
+  ];
+
+  if (runtimeDbDialect === 'sqlite') {
+    ensureProxyLogRouteContextSchema();
+    proxyLogRouteContextColumnsAvailable = tableExists('proxy_logs')
+      && requiredColumns.every((column) => tableColumnExists('proxy_logs', column.name));
+    return proxyLogRouteContextColumnsAvailable;
+  }
+
+  if (await hasProxyLogRouteContextColumns()) {
+    for (const requiredIndex of requiredIndexes) {
+      const indexExists = runtimeDbDialect === 'mysql'
+        ? await hasMysqlIndex(requiredIndex.name)
+        : await hasPostgresIndex(requiredIndex.name);
+      if (indexExists) continue;
+      try {
+        if (runtimeDbDialect === 'mysql') {
+          if (!mysqlPool) return false;
+          await executeLegacyCompat(
+            (statement) => mysqlPool!.query(statement).then(() => undefined),
+            requiredIndex.mysqlSql,
+          );
+        } else {
+          if (!pgPool) return false;
+          await executeLegacyCompat(
+            (statement) => pgPool!.query(statement).then(() => undefined),
+            requiredIndex.postgresSql,
+          );
+        }
+      } catch (error) {
+        if (!isDuplicateIndexError(error)) {
+          console.warn(`[db] failed to ensure ${requiredIndex.name}`, error);
+        }
+      }
+    }
+    return true;
+  }
+
+  try {
+    if (runtimeDbDialect === 'mysql') {
+      if (!mysqlPool) return false;
+      for (const column of requiredColumns) {
+        const [rows] = await mysqlPool.query('SHOW COLUMNS FROM `proxy_logs` LIKE ?', [column.name]);
+        if (Array.isArray(rows) && rows.length > 0) continue;
+        await executeLegacyCompat(
+          (statement) => mysqlPool!.query(statement).then(() => undefined),
+          `ALTER TABLE \`proxy_logs\` ADD COLUMN \`${column.name}\` ${column.mysqlType}`,
+        );
+      }
+      for (const requiredIndex of requiredIndexes) {
+        if (await hasMysqlIndex(requiredIndex.name)) continue;
+        await executeLegacyCompat(
+          (statement) => mysqlPool!.query(statement).then(() => undefined),
+          requiredIndex.mysqlSql,
+        );
+      }
+    } else {
+      if (!pgPool) return false;
+      for (const column of requiredColumns) {
+        const result = await pgPool.query(
+          'SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2 LIMIT 1',
+          ['proxy_logs', column.name],
+        );
+        if (Number(result.rowCount || 0) > 0) continue;
+        await executeLegacyCompat(
+          (statement) => pgPool!.query(statement).then(() => undefined),
+          `ALTER TABLE "proxy_logs" ADD COLUMN "${column.name}" ${column.postgresType}`,
+        );
+      }
+      for (const requiredIndex of requiredIndexes) {
+        if (await hasPostgresIndex(requiredIndex.name)) continue;
+        await executeLegacyCompat(
+          (statement) => pgPool!.query(statement).then(() => undefined),
+          requiredIndex.postgresSql,
+        );
+      }
+    }
+    proxyLogRouteContextColumnsAvailable = true;
+    return true;
+  } catch (error) {
+    if (isDuplicateColumnError(error) || isDuplicateIndexError(error)) {
+      proxyLogRouteContextColumnsAvailable = await hasProxyLogRouteContextColumns();
+      return proxyLogRouteContextColumnsAvailable;
+    }
+    proxyLogRouteContextColumnsAvailable = false;
+    console.warn('[db] failed to ensure proxy_logs route context columns', error);
     return false;
   }
 }
@@ -1191,6 +1363,7 @@ function resetSchemaCapabilityCache() {
   proxyLogDownstreamApiKeyIdColumnAvailable = null;
   proxyLogClientColumnsAvailable = null;
   proxyLogCacheColumnsAvailable = null;
+  proxyLogRouteContextColumnsAvailable = null;
   responseCacheTableAvailable = null;
 }
 
@@ -1454,6 +1627,7 @@ function initSqliteDb() {
   ensureProxyLogBillingDetailsSchema();
   ensureProxyLogCacheSchema();
   ensureProxyLogClientSchema();
+  ensureProxyLogRouteContextSchema();
   ensureProxyVideoTaskSchema();
   ensureProxyFileSchema();
   ensureOperationalOptimizationSqliteSchemaSync({

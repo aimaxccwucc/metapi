@@ -1,9 +1,19 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
+
+const fetchMock = vi.fn();
+
+vi.mock('undici', async () => {
+  const actual = await vi.importActual<typeof import('undici')>('undici');
+  return {
+    ...actual,
+    fetch: (...args: unknown[]) => fetchMock(...args),
+  };
+});
 
 type DbModule = typeof import('../../db/index.js');
 
@@ -74,6 +84,7 @@ describe('PUT /api/routes/:id route rebuild', () => {
     await db.delete(schema.accountTokens).run();
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
+    fetchMock.mockReset();
     seedId = 0;
   });
 
@@ -509,6 +520,65 @@ describe('PUT /api/routes/:id route rebuild', () => {
       sourceModel: 'glm-5.1',
       manualOverride: true,
     });
+  });
+
+  it('requires a live probe before re-enabling a disabled route', async () => {
+    const candidate = await seedAccountWithToken('kimi-k2.6');
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'kimi-k2.6',
+      enabled: false,
+    }).returning().get();
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: candidate.account.id,
+      tokenId: candidate.token.id,
+      sourceModel: 'kimi-k2.6',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).run();
+
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({
+      id: 'empty',
+      object: 'chat.completion',
+      choices: [{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+
+    const rejected = await app.inject({
+      method: 'PUT',
+      url: `/api/routes/${route.id}`,
+      payload: { enabled: true },
+    });
+
+    expect(rejected.statusCode).toBe(409);
+    expect(rejected.json()).toMatchObject({
+      success: false,
+      routeId: route.id,
+      availableChannels: 0,
+    });
+    const stillDisabled = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).get();
+    expect(stillDisabled?.enabled).toBe(false);
+
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({
+      id: 'ok',
+      object: 'chat.completion',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+
+    const accepted = await app.inject({
+      method: 'PUT',
+      url: `/api/routes/${route.id}`,
+      payload: { enabled: true },
+    });
+
+    expect(accepted.statusCode).toBe(200);
+    const enabledRoute = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).get();
+    expect(enabledRoute?.enabled).toBe(true);
   });
 
   it('creates account-direct automatic channels for exact routes backed by apikey model availability', async () => {

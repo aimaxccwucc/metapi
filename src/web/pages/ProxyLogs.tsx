@@ -30,6 +30,10 @@ type ProxyLogRenderItem = ProxyLogListItem & {
   siteName?: string | null;
   siteUrl?: string | null;
   errorMessage?: string | null;
+  routeId?: number | null;
+  entryRouteId?: number | null;
+  sourceRouteId?: number | null;
+  channelId?: number | null;
 };
 
 type ProxyLogDetailState = {
@@ -132,6 +136,13 @@ function resolveProxyLogUpstreamPathLabel(log: ProxyLogRenderItem, upstreamPath?
   if (upstreamPath) return upstreamPath;
   if (isNoChannelProxyLog(log)) return '未请求上游';
   return null;
+}
+
+function formatProxyLogRouteContext(log: ProxyLogRenderItem): string | null {
+  const formatId = (value?: number | null) => (typeof value === 'number' && Number.isFinite(value) ? `#${value}` : '未记录');
+  const hasRouteContext = log.entryRouteId != null || log.sourceRouteId != null || log.channelId != null || log.routeId != null;
+  if (!hasRouteContext) return null;
+  return `路由链路：入口 ${formatId(log.entryRouteId ?? log.routeId ?? null)} / 来源 ${formatId(log.sourceRouteId ?? log.routeId ?? null)} / 通道 ${formatId(log.channelId ?? null)}`;
 }
 
 function isNonGenerationSuccess(log: ProxyLogRenderItem) {
@@ -1093,6 +1104,7 @@ export default function ProxyLogs() {
               const billingDetailSummary = detail ? formatBillingDetailSummary(detailLog) : null;
               const billingProcessLines = detail ? buildBillingProcessLines(detailLog) : [];
               const downstreamKeySummary = renderDownstreamKeySummary(detailLog);
+              const routeContextSummary = detail ? formatProxyLogRouteContext(detailLog) : null;
               const isExpanded = expanded === log.id;
               const clientDisplay = resolveProxyLogClientDisplay(detailLog);
               const siteLabel = resolveProxyLogSiteLabel(detailLog);
@@ -1168,6 +1180,7 @@ export default function ProxyLogs() {
                       {billingDetailSummary && <div style={{ color: 'var(--color-text-muted)' }}>{billingDetailSummary}</div>}
                       <MobileField label="客户端详情" value={renderProxyLogClientCell(detailLog, { includeGeneric: true })} />
                       {downstreamKeySummary && <div style={{ color: 'var(--color-text-muted)' }}>{downstreamKeySummary}</div>}
+                      {routeContextSummary && <div style={{ color: 'var(--color-text-muted)' }}>{routeContextSummary}</div>}
                       {billingProcessLines.length > 0 && (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                           {billingProcessLines.map((line, index) => (
@@ -1212,6 +1225,7 @@ export default function ProxyLogs() {
                 const billingDetailSummary = detail ? formatBillingDetailSummary(detailLog) : null;
                 const billingProcessLines = detail ? buildBillingProcessLines(detailLog) : [];
                 const downstreamKeySummary = renderDownstreamKeySummary(detailLog);
+                const routeContextSummary = detail ? formatProxyLogRouteContext(detailLog) : null;
                 const siteLabel = resolveProxyLogSiteLabel(detailLog);
 
                 return (
@@ -1348,6 +1362,9 @@ export default function ProxyLogs() {
                                     </div>
                                     {downstreamKeySummary && (
                                       <div style={{ color: 'var(--color-text-muted)' }}>{downstreamKeySummary}</div>
+                                    )}
+                                    {routeContextSummary && (
+                                      <div style={{ color: 'var(--color-text-muted)' }}>{routeContextSummary}</div>
                                     )}
                                   </div>
                                 </div>

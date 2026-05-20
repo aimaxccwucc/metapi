@@ -23,6 +23,7 @@ import { invalidateModelTokenCandidatesCache } from './modelTokenCandidatesCache
 import { invalidateModelsMarketplaceCache } from './modelsMarketplaceCache.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { clearAllRouteDecisionSnapshots } from './routeDecisionSnapshotStore.js';
+import { probeRouteChannelsForRoute } from './routeProbeService.js';
 import { withAccountProxyOverride, withExplicitProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
 import { getCodexOauthInfoFromExtraConfig, isCodexPlatform } from './oauth/codexAccount.js';
 import { buildOauthInfo, getOauthInfoFromExtraConfig } from './oauth/oauthAccount.js';
@@ -524,6 +525,59 @@ function buildRouteChannelKey(channel: Pick<typeof schema.routeChannels.$inferSe
   return `${channel.accountId}:${channel.tokenId ?? 'account'}:${(channel.sourceModel || '').trim().toLowerCase()}`;
 }
 
+async function verifyNewRouteChannelBeforeEnable(
+  route: typeof schema.tokenRoutes.$inferSelect,
+  channel: typeof schema.routeChannels.$inferSelect,
+): Promise<typeof schema.routeChannels.$inferSelect | null> {
+  const row = await db.select({
+    channel: schema.routeChannels,
+    account: schema.accounts,
+    site: schema.sites,
+    token: schema.accountTokens,
+  })
+    .from(schema.routeChannels)
+    .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .leftJoin(schema.accountTokens, eq(schema.routeChannels.tokenId, schema.accountTokens.id))
+    .where(eq(schema.routeChannels.id, channel.id))
+    .get();
+  if (!row) return null;
+
+  const result = await probeRouteChannelsForRoute(
+    {
+      id: route.id,
+      modelPattern: route.modelPattern,
+      probePolicy: route.probePolicy,
+    },
+    [{
+      id: row.channel.id,
+      accountId: row.account.id,
+      tokenId: row.token?.id ?? row.channel.tokenId ?? null,
+      enabled: row.channel.enabled,
+      sourceModel: row.channel.sourceModel ?? null,
+      account: row.account,
+      site: row.site,
+      token: row.token ? { id: row.token.id, name: row.token.name } : null,
+    }],
+    {
+      limit: 1,
+      autoGovernance: true,
+      earlyStopOnAvailable: false,
+      dedupeBySite: false,
+      probePrompt: config.autoProbePrompt,
+      probeMaxOutputTokens: config.autoProbeMaxOutputTokens,
+    },
+  );
+
+  if (result.availableCount <= 0) return row.channel;
+
+  await db.update(schema.routeChannels)
+    .set({ enabled: true })
+    .where(eq(schema.routeChannels.id, channel.id))
+    .run();
+  return await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, channel.id)).get() ?? null;
+}
+
 function hasCustomRouteDisplayName(route: Pick<typeof schema.tokenRoutes.$inferSelect, 'modelPattern' | 'displayName'>): boolean {
   const displayName = (route.displayName || '').trim();
   const modelPattern = (route.modelPattern || '').trim();
@@ -592,6 +646,7 @@ async function syncRouteChannelsToCandidates(input: {
     const candidateKey = buildRouteSyncCandidateKey(candidate);
     const exists = routeChannels.some((channel) => buildRouteChannelKey(channel) === candidateKey);
     if (exists) continue;
+    const requiresProbeBeforeEnable = (input.route.probePolicy || 'system') !== 'manual';
 
     const inserted = await db.insert(schema.routeChannels).values({
       routeId: input.route.id,
@@ -600,15 +655,22 @@ async function syncRouteChannelsToCandidates(input: {
       sourceModel: candidate.sourceModel,
       priority: 0,
       weight: 10,
-      enabled: true,
+      enabled: !requiresProbeBeforeEnable,
       manualOverride: false,
     }).run();
     const insertedId = Number(inserted.lastInsertRowid || 0);
     if (insertedId <= 0) continue;
     const created = await db.select().from(schema.routeChannels).where(eq(schema.routeChannels.id, insertedId)).get();
     if (!created) continue;
-    input.channels.push(created);
-    createdChannels++;
+    if (!requiresProbeBeforeEnable) {
+      input.channels.push(created);
+      createdChannels++;
+      continue;
+    }
+
+    const verified = await verifyNewRouteChannelBeforeEnable(input.route, created);
+    input.channels.push(verified ?? created);
+    if (verified?.enabled === true) createdChannels++;
   }
 
   for (const channel of routeChannels) {

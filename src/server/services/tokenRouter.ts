@@ -68,6 +68,9 @@ interface SelectedChannel {
   account: typeof schema.accounts.$inferSelect;
   site: typeof schema.sites.$inferSelect;
   token: typeof schema.accountTokens.$inferSelect | null;
+  entryRouteId: number;
+  sourceRouteId: number | null;
+  availableChannelCount: number;
   tokenValue: string;
   tokenName: string;
   actualModel: string;
@@ -606,7 +609,7 @@ async function loadGovernanceSnapshotForCandidates(
   const states = await listActiveRoutingGovernanceStates({
     subjectTypes: Array.from(subjectTypeSet),
     states: ['suppressed', 'probing'],
-    limit: 500,
+    limit: 2_000,
   });
 
   for (const state of states) {
@@ -614,7 +617,11 @@ async function loadGovernanceSnapshotForCandidates(
     const subjectIds = subjectIdByType.get(subjectType);
     if (!subjectIds || !subjectIds.has(state.subjectId)) continue;
     const normalizedModelName = normalizeModelAlias(state.modelName || '');
-    if ((state.reasonCode === 'model_unsupported' || state.reasonCode === 'invalid_channel') && !normalizedModelName) {
+    if (
+      (state.reasonCode === 'model_unsupported' || state.reasonCode === 'invalid_channel')
+      && !normalizedModelName
+      && !(state.subjectType === 'channel' && state.reasonCode === 'invalid_channel')
+    ) {
       continue;
     }
     if (normalizedModelName && !modelNames.has(normalizedModelName)) {
@@ -4219,6 +4226,20 @@ type CostSignal = {
   source: 'observed' | 'configured' | 'catalog' | 'fallback';
 };
 
+function canProbeOverrideEligibility(
+  reasonParts: string[],
+  governanceBlock?: CandidateGovernanceBlock | null,
+): boolean {
+  if (
+    governanceBlock?.subjectType === 'channel'
+    && governanceBlock.reasonCode === 'invalid_channel'
+    && governanceBlock.state === 'suppressed'
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function isRegexModelPattern(pattern: string): boolean {
   return pattern.trim().toLowerCase().startsWith('re:');
 }
@@ -4779,6 +4800,16 @@ function shouldSoftParkUnknownCapabilityCandidate(
   return failCount >= 2 || consecutiveFailCount >= 2;
 }
 
+function isForcedChannelProbeForCandidate(
+  candidate: RouteChannelCandidate,
+  downstreamPolicy?: DownstreamRoutingPolicy,
+): boolean {
+  const forcedChannelId = downstreamPolicy?.forcedChannelId;
+  return typeof forcedChannelId === 'number'
+    && forcedChannelId > 0
+    && forcedChannelId === candidate.channel.id;
+}
+
 export class TokenRouter {
   private readonly channelMatchCache = new Map<string, { match: RouteMatch; downstreamPolicy: DownstreamRoutingPolicy }>();
   private static readonly CHANNEL_MATCH_CACHE_SIZE = 8;
@@ -5038,13 +5069,7 @@ export class TokenRouter {
       persistedUnavailableModels = await loadPersistedUnavailableModelsForCandidates(match.channels);
       unavailableModelsCacheData = { data: persistedUnavailableModels, expireAtMs: cachedNowMs + CANDIDATE_FILTER_CACHE_TTL_MS };
     }
-    let governanceSnapshot: GovernanceSnapshot;
-    if (governanceSnapshotCacheData && cachedNowMs < governanceSnapshotCacheData.expireAtMs) {
-      governanceSnapshot = governanceSnapshotCacheData.data;
-    } else {
-      governanceSnapshot = await loadGovernanceSnapshotForCandidates(match.channels);
-      governanceSnapshotCacheData = { data: governanceSnapshot, expireAtMs: cachedNowMs + CANDIDATE_FILTER_CACHE_TTL_MS };
-    }
+    const governanceSnapshot = await loadGovernanceSnapshotForCandidates(match.channels);
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
@@ -5114,7 +5139,8 @@ export class TokenRouter {
         : false;
       const modelCapabilityVerified = hasVerifiedModelCapability(row, requestedModel, nowMs);
       const modelCircuitProbeReady = modelCircuitStatus?.isHalfOpen === true;
-      const eligible = reasonParts.length === 0 || runtimeCircuit.isHalfOpen || modelCircuitProbeReady;
+      const canProbeOverride = canProbeOverrideEligibility(reasonParts, governanceBlock);
+      const eligible = reasonParts.length === 0 || (canProbeOverride && (runtimeCircuit.isHalfOpen || modelCircuitProbeReady));
       let reason = eligible ? '可用' : reasonParts.join('、');
       if (eligible && governanceBlock?.state === 'probing') {
         reason = formatGovernanceReason(governanceBlock);
@@ -6157,13 +6183,7 @@ export class TokenRouter {
       persistedUnavailableModels = await loadPersistedUnavailableModelsForCandidates(match.channels);
       unavailableModelsCacheData = { data: persistedUnavailableModels, expireAtMs: cachedNowMs + CANDIDATE_FILTER_CACHE_TTL_MS };
     }
-    let governanceSnapshot: GovernanceSnapshot;
-    if (governanceSnapshotCacheData && cachedNowMs < governanceSnapshotCacheData.expireAtMs) {
-      governanceSnapshot = governanceSnapshotCacheData.data;
-    } else {
-      governanceSnapshot = await loadGovernanceSnapshotForCandidates(match.channels);
-      governanceSnapshotCacheData = { data: governanceSnapshot, expireAtMs: cachedNowMs + CANDIDATE_FILTER_CACHE_TTL_MS };
-    }
+    const governanceSnapshot = await loadGovernanceSnapshotForCandidates(match.channels);
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
@@ -6197,6 +6217,24 @@ export class TokenRouter {
       .filter((entry) => entry.reasons.length === 0)
       .map((entry) => entry.candidate);
     if (available.length === 0) return null;
+
+    const forcedChannelId = downstreamPolicy.forcedChannelId;
+    if (typeof forcedChannelId === 'number' && forcedChannelId > 0) {
+      const forced = available.find((candidate) => candidate.channel.id === forcedChannelId);
+      if (!forced) return null;
+      const tokenValue = this.resolveChannelTokenValue(forced);
+      if (!tokenValue) return null;
+      const actualModel = resolveActualModelForSelectedChannel(requestedModel, match.route, mappedModel, forced.channel);
+      return {
+        ...forced,
+        entryRouteId: match.route.id,
+        sourceRouteId: forced.channel.routeId ?? null,
+        availableChannelCount: 1,
+        tokenValue,
+        tokenName: forced.token?.name || 'default',
+        actualModel,
+      };
+    }
 
     if (routeStrategy === 'round_robin') {
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(available, runtimeModelResolver, nowMs);
@@ -6247,6 +6285,9 @@ export class TokenRouter {
 
       return {
         ...selected,
+        entryRouteId: match.route.id,
+        sourceRouteId: selected.channel.routeId ?? null,
+        availableChannelCount: available.length,
         tokenValue,
         tokenName: selected.token?.name || 'default',
         actualModel,
@@ -6352,6 +6393,9 @@ export class TokenRouter {
 
       return {
         ...selected,
+        entryRouteId: match.route.id,
+        sourceRouteId: selected.channel.routeId ?? null,
+        availableChannelCount: available.length,
         tokenValue,
         tokenName: selected.token?.name || 'default',
         actualModel,
@@ -6416,6 +6460,9 @@ export class TokenRouter {
 
           return {
             ...selected,
+            entryRouteId: match.route.id,
+            sourceRouteId: selected.channel.routeId ?? null,
+            availableChannelCount: available.length,
             tokenValue,
             tokenName: selected.token?.name || 'default',
             actualModel,
@@ -6581,7 +6628,9 @@ export class TokenRouter {
       candidate,
       options.runtimeModelName,
     );
-    if (governanceBlock && governanceBlock.state === 'suppressed') {
+    const forcedChannelProbe = isForcedChannelProbeForCandidate(candidate, options.downstreamPolicy);
+
+    if (!forcedChannelProbe && governanceBlock && governanceBlock.state === 'suppressed') {
       reasonParts.push(formatGovernanceReason(governanceBlock));
     }
 
@@ -6630,11 +6679,11 @@ export class TokenRouter {
       reasonParts.push('令牌不可用');
     }
 
-    if (candidate.channel.cooldownUntil && candidate.channel.cooldownUntil > nowIso) {
+    if (!forcedChannelProbe && candidate.channel.cooldownUntil && candidate.channel.cooldownUntil > nowIso) {
       reasonParts.push('冷却中');
     }
 
-    if (shouldSoftParkUnknownCapabilityCandidate(
+    if (!forcedChannelProbe && shouldSoftParkUnknownCapabilityCandidate(
       candidate,
       options.requestedModel,
       options.governanceBlock,
@@ -6648,7 +6697,7 @@ export class TokenRouter {
       options.runtimeModelName,
       nowMs,
     );
-    if (modelCircuitStatus?.isOpen) {
+    if (!forcedChannelProbe && modelCircuitStatus?.isOpen) {
       reasonParts.push('模型熔断中');
     }
 

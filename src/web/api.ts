@@ -1150,6 +1150,8 @@ export type ProxyLogListItem = {
 
 export type ProxyLogDetail = ProxyLogListItem & {
   routeId?: number | null;
+  entryRouteId?: number | null;
+  sourceRouteId?: number | null;
   channelId?: number | null;
   httpStatus?: number | null;
   billingDetails?: ProxyLogBillingDetails;

@@ -27,7 +27,7 @@ import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { composeProxyLogMessage } from '../../routes/proxy/logPathMeta.js';
 import { resolveProxyLogBilling } from '../../routes/proxy/proxyBilling.js';
 import type { DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
-import { insertProxyLog } from '../../services/proxyLogStore.js';
+import { insertProxyLogBestEffort, resolveProxyLogRouteContext } from '../../services/proxyLogStore.js';
 import { dispatchRuntimeRequest } from '../../routes/proxy/runtimeExecutor.js';
 import type { BuiltEndpointRequest } from '../../routes/proxy/endpointFlow.js';
 import { buildUpstreamUrl } from '../../routes/proxy/upstreamUrl.js';
@@ -42,6 +42,8 @@ type SurfaceWarningScope = 'chat' | 'responses';
 
 type SurfaceSelectedChannel = {
   channel: { routeId: number | null; id: number };
+  entryRouteId?: number | null;
+  sourceRouteId?: number | null;
   account: { id: number; username?: string | null };
   site: { name?: string | null };
   actualModel?: string | null;
@@ -236,8 +238,8 @@ export async function writeSurfaceProxyLog(input: {
       upstreamPath: input.upstreamPath || null,
       errorMessage: input.errorMessage,
     });
-    await insertProxyLog({
-      routeId: input.selected.channel.routeId,
+    insertProxyLogBestEffort({
+      ...resolveProxyLogRouteContext(input.selected),
       channelId: input.selected.channel.id,
       accountId: input.selected.account.id,
       downstreamApiKeyId: input.downstreamApiKeyId ?? null,

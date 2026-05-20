@@ -88,6 +88,7 @@ vi.mock('../../db/index.js', () => ({
   hasProxyLogCacheColumns: async () => false,
   hasProxyLogClientColumns: async () => false,
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
+  hasProxyLogRouteContextColumns: async () => false,
   schema: {
     proxyLogs: {},
     modelAvailability: {

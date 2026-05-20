@@ -2,7 +2,7 @@ import { TextDecoder } from 'node:util';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { refreshModelsAndRebuildRoutesOnDemand } from '../../services/modelService.js';
-import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
+import { reportProxyAllFailed, reportTokenExpiredBestEffort } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
 import { shouldAvoidSiteForRequest, shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
@@ -54,12 +54,12 @@ import {
   unwrapGeminiCliPayload,
 } from '../../routes/proxy/geminiCliCompat.js';
 import { dispatchRuntimeRequest } from '../../routes/proxy/runtimeExecutor.js';
-import { createRequestBudget, shouldRetryWithinBudget, waitForRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
+import { createRequestBudget, shouldPreferFastFailForSelected, shouldRetryWithinBudget, waitForRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
 import { wrapReaderWithIdleTimeout } from '../../routes/proxy/streamTimeout.js';
 import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/conversationFileCapabilities.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
 import { recordProxyDebugTrace } from '../../routes/proxy/proxyDebugTrace.js';
-import { insertProxyLog } from '../../services/proxyLogStore.js';
+import { insertProxyLogBestEffort, resolveProxyLogRouteContext } from '../../services/proxyLogStore.js';
 import {
   buildCacheKey,
   buildRouteScope,
@@ -75,6 +75,31 @@ import { readRuntimeResponseText } from '../executors/types.js';
 import { isTrustedTesterRequest } from '../channelSelection.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
+const NO_CHANNEL_REFRESH_FAST_WAIT_MS = 1_500;
+
+async function refreshRouteSelectionWithFastWait(): Promise<void> {
+  const refresh = Promise.resolve(refreshModelsAndRebuildRoutesOnDemand()).catch((error) => {
+    console.warn('[chat] on-demand route refresh failed:', error);
+    return null;
+  });
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      refresh,
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), NO_CHANNEL_REFRESH_FAST_WAIT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function reportProxyAllFailedBestEffort(model: string, reason: string): void {
+  Promise.resolve(reportProxyAllFailed({ model, reason })).catch((error) => {
+    console.warn('[chat] report proxy all failed failed:', error);
+  });
+}
 
 function stripUpstreamFailurePrefix(rawErrorText?: string): string | undefined {
   if (typeof rawErrorText !== 'string') return undefined;
@@ -345,15 +370,12 @@ export async function handleChatSurfaceRequest(
     downstreamPolicy,
     maxAttempts: MAX_RETRIES + 1,
     refreshSelection: async () => {
-      await refreshModelsAndRebuildRoutesOnDemand();
+      await refreshRouteSelectionWithFastWait();
       return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
     },
     onNoChannel: async ({ attempts }) => {
       reportedNoChannel = true;
-      await reportProxyAllFailed({
-        model: requestedModel,
-        reason: 'No available channels after retries',
-      });
+      reportProxyAllFailedBestEffort(requestedModel, 'No available channels after retries');
       if (attempts === 0) {
         await logProxyNoChannelFailure({
           modelRequested: requestedModel,
@@ -500,13 +522,13 @@ export async function handleChatSurfaceRequest(
                   ...(compatibilityRequest.runtime.stream
                 ? {
                       firstByteTimeoutMs: requestBudget.getStreamFirstByteTimeoutMs({
-                        preferFastFail: true,
+                        preferFastFail: shouldPreferFastFailForSelected(selected),
                         ...(codexStandaloneToolContinuation ? { hardCapMs: 4_000 } : {}),
                       }),
                     }
                     : {
                       timeoutMs: requestBudget.getPerAttemptTimeoutMs({
-                        preferFastFail: true,
+                        preferFastFail: shouldPreferFastFailForSelected(selected),
                         ...(codexStandaloneToolContinuation ? { hardCapMs: 4_000 } : {}),
                       }),
                     }),
@@ -652,7 +674,7 @@ export async function handleChatSurfaceRequest(
           });
 
           if (isTokenExpiredError({ status, message: errText })) {
-            await reportTokenExpired({
+            reportTokenExpiredBestEffort({
               accountId: selected.account.id,
               username: selected.account.username,
               siteName: selected.site.name,
@@ -1147,40 +1169,6 @@ export async function handleChatSurfaceRequest(
           };
         }
 
-        let resolvedUsage: Awaited<ReturnType<typeof resolveProxyUsageWithSelfLogFallback>> = {
-          promptTokens: parsedUsage.promptTokens,
-          completionTokens: parsedUsage.completionTokens,
-          totalTokens: parsedUsage.totalTokens,
-          recoveredFromSelfLog: false,
-          estimatedCostFromQuota: 0,
-          selfLogBillingMeta: null,
-        };
-        try {
-          resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
-            site: selected.site,
-            account: selected.account,
-            tokenValue: selected.tokenValue || '',
-            tokenName: selected.tokenName,
-            modelName,
-            requestStartedAtMs: startTime,
-            requestEndedAtMs: startTime + latency,
-            localLatencyMs: latency,
-            usage: {
-              promptTokens: parsedUsage.promptTokens,
-              completionTokens: parsedUsage.completionTokens,
-              totalTokens: parsedUsage.totalTokens,
-            },
-          });
-          parsedUsage = mergeProxyUsage(parsedUsage, {
-            ...parsedUsage,
-            promptTokens: resolvedUsage.promptTokens,
-            completionTokens: resolvedUsage.completionTokens,
-            totalTokens: resolvedUsage.totalTokens,
-          });
-        } catch (error) {
-          console.error('[chat] pre-response usage fallback failed:', error);
-        }
-
         const normalizedFinal = downstreamTransformer.transformFinalResponse(upstreamData, modelName, rawText);
         const downstreamResponse = downstreamTransformer.serializeFinalResponse(normalizedFinal, parsedUsage);
         const downstreamFailure = detectProxyFailure({
@@ -1239,17 +1227,6 @@ export async function handleChatSurfaceRequest(
             rawErrorText: failureMessage,
           };
         }
-        const { estimatedCost, billingDetails } = await resolveProxyLogBilling({
-          site: selected.site,
-          account: selected.account,
-          modelName,
-          parsedUsage,
-          resolvedUsage,
-        });
-
-        if (!isTesterProbe) {
-          await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
-        }
         recordProxyDebugTrace({
           clientContext,
           kind: 'proxy_success',
@@ -1261,34 +1238,79 @@ export async function handleChatSurfaceRequest(
           status: 200,
           retryCount,
         });
-        recordDownstreamCostUsage(request, estimatedCost);
-        logProxy(
-          selected,
-          requestedModel,
-          'success',
-          200,
-          latency,
-          null,
-          retryCount,
-          downstreamPath,
-          resolvedUsage.promptTokens,
-          resolvedUsage.completionTokens,
-          resolvedUsage.totalTokens,
-          estimatedCost,
-          billingDetails,
-          successfulUpstreamPath,
-          clientContext,
-          downstreamApiKeyId,
-          !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
-        );
+        void (async () => {
+          let resolvedUsage: Awaited<ReturnType<typeof resolveProxyUsageWithSelfLogFallback>> = {
+            promptTokens: parsedUsage.promptTokens,
+            completionTokens: parsedUsage.completionTokens,
+            totalTokens: parsedUsage.totalTokens,
+            recoveredFromSelfLog: false,
+            estimatedCostFromQuota: 0,
+            selfLogBillingMeta: null,
+          };
+          let estimatedCost = 0;
+          let billingDetails: unknown = null;
+          try {
+            resolvedUsage = await resolveProxyUsageWithSelfLogFallback({
+              site: selected.site,
+              account: selected.account,
+              tokenValue: selected.tokenValue || '',
+              tokenName: selected.tokenName,
+              modelName,
+              requestStartedAtMs: startTime,
+              requestEndedAtMs: startTime + latency,
+              localLatencyMs: latency,
+              usage: {
+                promptTokens: parsedUsage.promptTokens,
+                completionTokens: parsedUsage.completionTokens,
+                totalTokens: parsedUsage.totalTokens,
+              },
+            });
+            const billing = await resolveProxyLogBilling({
+              site: selected.site,
+              account: selected.account,
+              modelName,
+              parsedUsage,
+              resolvedUsage,
+            });
+            estimatedCost = billing.estimatedCost;
+            billingDetails = billing.billingDetails;
+          } catch (error) {
+            console.error('[chat] async success bookkeeping failed:', error);
+          }
+          if (!isTesterProbe) {
+            await tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, modelName);
+          }
+          recordDownstreamCostUsage(request, estimatedCost);
+          logProxy(
+            selected,
+            requestedModel,
+            'success',
+            200,
+            latency,
+            null,
+            retryCount,
+            downstreamPath,
+            resolvedUsage.promptTokens,
+            resolvedUsage.completionTokens,
+            resolvedUsage.totalTokens,
+            estimatedCost,
+            billingDetails,
+            successfulUpstreamPath,
+            clientContext,
+            downstreamApiKeyId,
+            !isStream && responseCacheKey ? { cacheStatus: 'miss', cacheSavedCost: 0 } : null,
+          );
+        })().catch((error) => {
+          console.error('[chat] async success bookkeeping failed:', error);
+        });
 
         if (responseCacheKey && !isStream && inflightReservation) {
           const cachedResponse = {
             body: JSON.stringify(downstreamResponse),
             isStream: false,
-            promptTokens: resolvedUsage.promptTokens,
-            completionTokens: resolvedUsage.completionTokens,
-            estimatedCost,
+            promptTokens: parsedUsage.promptTokens,
+            completionTokens: parsedUsage.completionTokens,
+            estimatedCost: 0,
           };
           writeResponseCache(responseCacheKey, requestedModel, cachedResponse)
             .then(() => inflightReservation?.resolve({ response: cachedResponse, cacheStatus: 'hit' }))
@@ -1300,7 +1322,7 @@ export async function handleChatSurfaceRequest(
           ok: true,
           response: upstream,
           latencyMs: latency,
-          cost: estimatedCost,
+          cost: 0,
         };
       } catch (err: any) {
         const errorMessage = err?.message || 'network failure';
@@ -1374,10 +1396,10 @@ export async function handleChatSurfaceRequest(
   const retryCount = Math.max(0, execution.attempts - 1);
 
   if (!reportedNoChannel) {
-    await reportProxyAllFailed({
-      model: requestedModel,
-      reason: finalStatus === 504 ? requestBudget.buildTimeoutMessage() : finalMessage,
-    });
+    reportProxyAllFailedBestEffort(
+      requestedModel,
+      finalStatus === 504 ? requestBudget.buildTimeoutMessage() : finalMessage,
+    );
   }
 
   let staleFallback: Awaited<ReturnType<typeof lookupStaleResponseCache>> = null;
@@ -1582,15 +1604,12 @@ export async function handleClaudeCountTokensSurfaceRequest(
     downstreamPolicy,
     maxAttempts: MAX_RETRIES + 1,
     refreshSelection: async () => {
-      await refreshModelsAndRebuildRoutesOnDemand();
+      await refreshRouteSelectionWithFastWait();
       return await tokenRouter.selectChannel(requestedModel, downstreamPolicy);
     },
     onNoChannel: async ({ attempts }) => {
       reportedNoChannel = true;
-      await reportProxyAllFailed({
-        model: requestedModel,
-        reason: 'No available channels after retries',
-      });
+      reportProxyAllFailedBestEffort(requestedModel, 'No available channels after retries');
       if (attempts === 0) {
         await logProxyNoChannelFailure({
           modelRequested: requestedModel,
@@ -1729,7 +1748,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
             downstreamApiKeyId,
           );
           if (isTokenExpiredError({ status: upstream.status, message: errorText })) {
-            await reportTokenExpired({
+            reportTokenExpiredBestEffort({
               accountId: selected.account.id,
               username: selected.account.username,
               siteName: selected.site.name,
@@ -1862,10 +1881,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
   const retryCount = Math.max(0, execution.attempts - 1);
 
   if (!reportedNoChannel) {
-    await reportProxyAllFailed({
-      model: requestedModel,
-      reason: finalMessage,
-    });
+    reportProxyAllFailedBestEffort(requestedModel, finalMessage);
   }
 
   let staleFallback: Awaited<ReturnType<typeof lookupStaleResponseCache>> = null;
@@ -1951,8 +1967,8 @@ async function logProxy(
       upstreamPath,
       errorMessage,
     });
-    await insertProxyLog({
-      routeId: selected.channel.routeId,
+    insertProxyLogBestEffort({
+      ...resolveProxyLogRouteContext(selected),
       channelId: selected.channel.id,
       accountId: selected.account.id,
       downstreamApiKeyId,

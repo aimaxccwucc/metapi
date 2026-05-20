@@ -255,7 +255,7 @@ export async function clearRoutingGovernanceStatesBySubject(
 }
 
 export async function listActiveRoutingGovernanceStates(query: ActiveGovernanceQuery = {}): Promise<RoutingGovernanceEntry[]> {
-  const limit = Math.max(1, Math.min(500, Math.trunc(query.limit ?? 200)));
+  const limit = Math.max(1, Math.min(2_000, Math.trunc(query.limit ?? 200)));
 
   const conditions: SQL<unknown>[] = [];
   if (Array.isArray(query.subjectTypes) && query.subjectTypes.length > 0) {

@@ -6,6 +6,9 @@ export type SelectedChannelLike = {
   tokenName?: string;
   tokenValue?: string;
   actualModel?: string;
+  entryRouteId?: number | null;
+  sourceRouteId?: number | null;
+  availableChannelCount?: number | null;
 };
 
 export type AttemptSuccess = {

@@ -38,6 +38,8 @@ vi.mock('../../services/modelService.js', () => ({
 vi.mock('../../services/alertService.js', () => ({
   reportProxyAllFailed: (...args: unknown[]) => reportProxyAllFailedMock(...args),
   reportTokenExpired: (...args: unknown[]) => reportTokenExpiredMock(...args),
+  reportProxyAllFailedBestEffort: (...args: unknown[]) => reportProxyAllFailedMock(...args),
+  reportTokenExpiredBestEffort: (...args: unknown[]) => reportTokenExpiredMock(...args),
 }));
 
 vi.mock('../../services/alertRules.js', () => ({
@@ -59,6 +61,12 @@ vi.mock('./proxyBilling.js', () => ({
 
 vi.mock('../../services/proxyLogStore.js', () => ({
   insertProxyLog: (...args: unknown[]) => insertProxyLogMock(...args),
+  insertProxyLogBestEffort: (...args: unknown[]) => insertProxyLogMock(...args),
+  resolveProxyLogRouteContext: (selected: any) => ({
+    routeId: selected?.channel?.routeId ?? null,
+    entryRouteId: selected?.entryRouteId ?? selected?.channel?.routeId ?? null,
+    sourceRouteId: selected?.sourceRouteId ?? selected?.channel?.routeId ?? null,
+  }),
 }));
 
 describe('/v1/embeddings route', () => {

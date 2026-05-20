@@ -37,10 +37,10 @@ import { dispatchRuntimeRequest } from '../../routes/proxy/runtimeExecutor.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
 import { logProxyNoChannelFailure } from '../../routes/proxy/proxyNoChannelLog.js';
 import { recordProxyDebugTrace } from '../../routes/proxy/proxyDebugTrace.js';
-import { insertProxyLog } from '../../services/proxyLogStore.js';
+import { insertProxyLogBestEffort, resolveProxyLogRouteContext } from '../../services/proxyLogStore.js';
 import { summarizeConversationFileInputsInOpenAiBody } from '../capabilities/conversationFileCapabilities.js';
 import { readRuntimeResponseText } from '../executors/types.js';
-import { createRequestBudget, waitForRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
+import { createRequestBudget, shouldPreferFastFailForSelected, waitForRetryWithinBudget } from '../../routes/proxy/requestBudget.js';
 import { wrapReaderWithIdleTimeout } from '../../routes/proxy/streamTimeout.js';
 
 const MAX_RETRIES = config.proxyMaxRetries;
@@ -253,8 +253,8 @@ async function logProxy(
       upstreamPath,
       errorMessage,
     });
-    await insertProxyLog({
-      routeId: selected.channel.routeId,
+    insertProxyLogBestEffort({
+      ...resolveProxyLogRouteContext(selected),
       channelId: selected.channel.id,
       accountId: selected.account.id,
       modelRequested,
@@ -333,7 +333,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           geminiGenerateContentTransformer.resolveModelsUrl(selected.site.url, apiVersion, selected.tokenValue),
           {
             method: 'GET',
-            signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true })),
+            signal: AbortSignal.timeout(requestBudget.getPerAttemptTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) })),
           },
         );
         const text = await readRuntimeResponseText(upstream);
@@ -601,10 +601,10 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                       : (isStreamAction ? 'streamGenerateContent' : 'generateContent'),
                     ...(isStreamAction
                       ? {
-                        firstByteTimeoutMs: requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: true }),
+                        firstByteTimeoutMs: requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) }),
                       }
                       : {
-                        timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                        timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) }),
                       }),
                   },
                 },
@@ -620,8 +620,8 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 body: JSON.stringify(requestBody),
                 signal: AbortSignal.timeout(
                   isStreamAction
-                    ? requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: true })
-                    : requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                    ? requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) })
+                    : requestBudget.getPerAttemptTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) }),
                 ),
               });
           };
@@ -992,10 +992,10 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                   ...compatibilityRequest.runtime,
                   ...(compatibilityRequest.runtime.stream
                     ? {
-                      firstByteTimeoutMs: requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: true }),
+                      firstByteTimeoutMs: requestBudget.getStreamFirstByteTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) }),
                     }
                     : {
-                      timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: true }),
+                      timeoutMs: requestBudget.getPerAttemptTimeoutMs({ preferFastFail: shouldPreferFastFailForSelected(selected) }),
                     }),
                 }
                 : undefined,

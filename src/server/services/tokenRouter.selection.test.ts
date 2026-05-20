@@ -2661,6 +2661,49 @@ describe('TokenRouter selection scoring', () => {
     expect(candidate?.governanceAction ?? null).toBeNull();
   });
 
+  it('lets fixed-channel probes bypass temporary suppression while regular routing still avoids it', async () => {
+    const route = await createRoute('qwen-probe-forced-channel', { routingStrategy: 'stable_first' });
+
+    const site = await createSite('forced-probe-site');
+    const account = await createAccount(site.id, 'forced-probe-user');
+    const token = await createToken(account.id, 'forced-probe-token');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      sourceModel: 'qwen-probe-forced-channel',
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      cooldownUntil: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    }).returning().get();
+
+    await db.insert(schema.routingGovernanceStates).values({
+      subjectType: 'channel',
+      subjectId: channel.id,
+      modelName: '',
+      state: 'suppressed',
+      reasonCode: 'invalid_channel',
+      reasonDetail: 'manual probe suppression should not block a forced canary',
+      suppressUntil: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      probeAfter: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    }).run();
+    invalidateTokenRouterCache();
+
+    const router = new TokenRouter();
+    const regular = await router.previewSelectedChannel('qwen-probe-forced-channel');
+    const forced = await router.previewSelectedChannel('qwen-probe-forced-channel', {
+      supportedModels: [],
+      allowedRouteIds: [],
+      siteWeightMultipliers: {},
+      forcedChannelId: channel.id,
+    });
+
+    expect(regular).toBeNull();
+    expect(forced?.channel.id).toBe(channel.id);
+    expect(forced?.actualModel).toBe('qwen-probe-forced-channel');
+  });
+
   it('treats request-scoped site exclusion as temporary and does not turn it into a persistent site ban', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
@@ -2670,7 +2713,7 @@ describe('TokenRouter selection scoring', () => {
       usageWeight: 0,
     };
 
-    const route = await createRoute('gpt-request-site-exclude');
+    const route = await createRoute('gpt-request-site-exclude', { routingStrategy: 'stable_first' });
     const otherRoute = await createRoute('claude-request-site-exclude');
 
     const primarySite = await createSite('request-site-primary');

@@ -5,6 +5,7 @@ const {
   hasProxyLogCacheColumnsMock,
   hasProxyLogClientColumnsMock,
   hasProxyLogDownstreamApiKeyIdColumnMock,
+  hasProxyLogRouteContextColumnsMock,
   dbInsertMock,
   dbInsertValuesMock,
   dbInsertRunMock,
@@ -14,12 +15,15 @@ const {
   hasProxyLogCacheColumnsMock: vi.fn(),
   hasProxyLogClientColumnsMock: vi.fn(),
   hasProxyLogDownstreamApiKeyIdColumnMock: vi.fn(),
+  hasProxyLogRouteContextColumnsMock: vi.fn(),
   dbInsertMock: vi.fn(),
   dbInsertValuesMock: vi.fn(),
   dbInsertRunMock: vi.fn(),
   proxyLogsSchema: {
     id: 'id',
     routeId: 'route_id',
+    entryRouteId: 'entry_route_id',
+    sourceRouteId: 'source_route_id',
     channelId: 'channel_id',
     accountId: 'account_id',
     modelRequested: 'model_requested',
@@ -55,6 +59,7 @@ vi.mock('../db/index.js', () => ({
   hasProxyLogCacheColumns: (...args: unknown[]) => hasProxyLogCacheColumnsMock(...args),
   hasProxyLogClientColumns: (...args: unknown[]) => hasProxyLogClientColumnsMock(...args),
   hasProxyLogDownstreamApiKeyIdColumn: (...args: unknown[]) => hasProxyLogDownstreamApiKeyIdColumnMock(...args),
+  hasProxyLogRouteContextColumns: (...args: unknown[]) => hasProxyLogRouteContextColumnsMock(...args),
 }));
 
 import { insertProxyLog, withProxyLogSelectFields } from './proxyLogStore.js';
@@ -65,6 +70,7 @@ describe('proxyLogStore', () => {
     hasProxyLogCacheColumnsMock.mockReset();
     hasProxyLogClientColumnsMock.mockReset();
     hasProxyLogDownstreamApiKeyIdColumnMock.mockReset();
+    hasProxyLogRouteContextColumnsMock.mockReset();
     dbInsertMock.mockReset();
     dbInsertValuesMock.mockReset();
     dbInsertRunMock.mockReset();
@@ -72,6 +78,7 @@ describe('proxyLogStore', () => {
     hasProxyLogCacheColumnsMock.mockResolvedValue(false);
     hasProxyLogClientColumnsMock.mockResolvedValue(false);
     hasProxyLogDownstreamApiKeyIdColumnMock.mockResolvedValue(false);
+    hasProxyLogRouteContextColumnsMock.mockResolvedValue(false);
 
     dbInsertMock.mockReturnValue({
       values: (...args: unknown[]) => dbInsertValuesMock(...args),
@@ -111,6 +118,23 @@ describe('proxyLogStore', () => {
     expect(runner.mock.calls[1][0].includeCacheFields).toBe(false);
     expect(runner.mock.calls[1][0].fields.cacheStatus).toBeUndefined();
     expect(runner.mock.calls[1][0].fields.cacheSavedCost).toBeUndefined();
+  });
+
+  it('selects route context fields when supported and retries without them when missing', async () => {
+    hasProxyLogRouteContextColumnsMock.mockResolvedValue(true);
+    const runner = vi.fn()
+      .mockRejectedValueOnce(new Error('column proxy_logs.entry_route_id does not exist'))
+      .mockResolvedValueOnce([{ id: 1 }]);
+
+    await expect(withProxyLogSelectFields(runner)).resolves.toEqual([{ id: 1 }]);
+
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(runner.mock.calls[0][0].includeRouteContextFields).toBe(true);
+    expect(runner.mock.calls[0][0].fields.entryRouteId).toBe('entry_route_id');
+    expect(runner.mock.calls[0][0].fields.sourceRouteId).toBe('source_route_id');
+    expect(runner.mock.calls[1][0].includeRouteContextFields).toBe(false);
+    expect(runner.mock.calls[1][0].fields.entryRouteId).toBeUndefined();
+    expect(runner.mock.calls[1][0].fields.sourceRouteId).toBeUndefined();
   });
 
   it('retries proxy log inserts without billing details when the column is missing', async () => {
@@ -258,5 +282,62 @@ describe('proxyLogStore', () => {
     });
     expect(dbInsertValuesMock.mock.calls[1][0].cacheStatus).toBeUndefined();
     expect(dbInsertValuesMock.mock.calls[1][0].cacheSavedCost).toBeUndefined();
+  });
+
+  it('writes route context fields when the schema supports them', async () => {
+    hasProxyLogRouteContextColumnsMock.mockResolvedValue(true);
+
+    await insertProxyLog({
+      routeId: 25009,
+      entryRouteId: 25011,
+      sourceRouteId: 25009,
+      modelRequested: 'qwen3.6-max-preview',
+    });
+
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(1);
+    expect(dbInsertValuesMock.mock.calls[0][0]).toMatchObject({
+      routeId: 25009,
+      entryRouteId: 25011,
+      sourceRouteId: 25009,
+      modelRequested: 'qwen3.6-max-preview',
+    });
+  });
+
+  it('falls back route context fields to route id for legacy callers', async () => {
+    hasProxyLogRouteContextColumnsMock.mockResolvedValue(true);
+
+    await insertProxyLog({
+      routeId: 22,
+      modelRequested: 'gpt-5',
+    });
+
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(1);
+    expect(dbInsertValuesMock.mock.calls[0][0]).toMatchObject({
+      routeId: 22,
+      entryRouteId: 22,
+      sourceRouteId: 22,
+    });
+  });
+
+  it('retries proxy log inserts without route context fields when those columns are missing', async () => {
+    hasProxyLogRouteContextColumnsMock.mockResolvedValue(true);
+    dbInsertRunMock
+      .mockRejectedValueOnce(new Error('column proxy_logs.source_route_id does not exist'))
+      .mockResolvedValueOnce(undefined);
+
+    await insertProxyLog({
+      routeId: 25009,
+      entryRouteId: 25011,
+      sourceRouteId: 25009,
+      modelRequested: 'qwen3.6-max-preview',
+    });
+
+    expect(dbInsertValuesMock).toHaveBeenCalledTimes(2);
+    expect(dbInsertValuesMock.mock.calls[0][0]).toMatchObject({
+      entryRouteId: 25011,
+      sourceRouteId: 25009,
+    });
+    expect(dbInsertValuesMock.mock.calls[1][0].entryRouteId).toBeUndefined();
+    expect(dbInsertValuesMock.mock.calls[1][0].sourceRouteId).toBeUndefined();
   });
 });
