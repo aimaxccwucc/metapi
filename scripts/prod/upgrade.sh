@@ -11,8 +11,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEPLOY_DIR="${DEPLOY_DIR:-/home/tanmw/metapi-deploy}"
 SERVICE_NAME="${SERVICE_NAME:-metapi}"
 CONTAINER_NAME="${CONTAINER_NAME:-metapi}"
-HOST_URL="${HOST_URL:-http://127.0.0.1:4000/accounts}"
-PUBLIC_URL="${PUBLIC_URL:-https://metapi.808039.xyz/accounts}"
+HOST_URL="${HOST_URL:-http://127.0.0.1:4000/v1/models}"
+PUBLIC_URL="${PUBLIC_URL:-https://metapi.808039.xyz/v1/models}"
 HOST_WARMUP_SECONDS="${HOST_WARMUP_SECONDS:-8}"
 HOST_CHECK_RETRIES="${HOST_CHECK_RETRIES:-15}"
 HOST_CHECK_INTERVAL="${HOST_CHECK_INTERVAL:-2}"
@@ -140,7 +140,7 @@ health_check() {
   local url="$1"
   local name="$2"
   echo "[check] $name: $url"
-  if curl --noproxy "$HEALTH_CURL_NO_PROXY" -fsS -I --connect-timeout 5 --max-time 20 "$url" | sed -n '1,6p'; then
+  if curl --noproxy "$HEALTH_CURL_NO_PROXY" -sS --connect-timeout 5 --max-time 20 "$url" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -148,7 +148,7 @@ health_check() {
   # for hostnames, but avoid forcing IPv4 on IPv6 literals like http://[::1]/.
   if [[ "$url" != http://[* && "$url" != https://[* ]]; then
     echo "[check] $name retry with IPv4"
-    curl --noproxy "$HEALTH_CURL_NO_PROXY" -4 -fsS -I --connect-timeout 5 --max-time 20 "$url" | sed -n '1,6p'
+    curl --noproxy "$HEALTH_CURL_NO_PROXY" -4 -sS --connect-timeout 5 --max-time 20 "$url" >/dev/null 2>&1
     return 0
   fi
 
